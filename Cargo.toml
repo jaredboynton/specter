@@ -28,7 +28,7 @@ http-body-util = "0.1"
 tower = "0.5"
 
 # HTTP/3 + QUIC (includes BoringSSL internally)
-quiche = "0.24"
+quiche = { version = "0.24", default-features = false, features = ["boringssl-boring-crate"] }
 
 # Async runtime
 tokio = { version = "1", features = ["net", "time", "sync", "rt-multi-thread", "macros", "fs", "io-util"] }

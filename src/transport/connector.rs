@@ -14,6 +14,17 @@ use std::io;
 use crate::fingerprint::tls::TlsFingerprint;
 use crate::error::Error;
 
+// FFI bindings for BoringSSL extension control
+use boring_sys::SSL_CTX;
+use std::os::raw::c_int;
+
+extern "C" {
+    /// Enable GREASE (Generate Random Extensions And Sustain Extensibility)
+    pub fn SSL_CTX_set_grease_enabled(ctx: *mut SSL_CTX, enabled: c_int) -> c_int;
+    /// Enable extension order permutation (Chrome 110+ behavior)
+    pub fn SSL_CTX_set_permute_extensions(ctx: *mut SSL_CTX, enabled: c_int) -> c_int;
+}
+
 /// BoringSSL-based TLS connector for hyper.
 #[derive(Clone)]
 pub struct BoringConnector {
@@ -55,6 +66,15 @@ impl BoringConnector {
                 let sigalgs_str = fp.sigalgs.join(":");
                 builder.set_sigalgs_list(&sigalgs_str)
                     .map_err(|e| Error::Tls(format!("Failed to set signature algorithms: {}", e)))?;
+            }
+            
+            // Enable GREASE and extension permutation for Chrome-like behavior
+            if fp.grease {
+                unsafe {
+                    let ctx = builder.as_ptr() as *mut SSL_CTX;
+                    SSL_CTX_set_grease_enabled(ctx, 1);
+                    SSL_CTX_set_permute_extensions(ctx, 1);
+                }
             }
             
             // Set min/max TLS version

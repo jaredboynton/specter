@@ -44,11 +44,43 @@ impl H3Client {
 
     /// Configure quiche QUIC connection settings.
     fn configure_quic(&self) -> Result<quiche::Config> {
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)
-            .map_err(|e| Error::Quic(format!("Failed to create quiche config: {}", e)))?;
+        let mut config = if let Some(ref fp) = self.tls_fingerprint {
+            // Use BoringSSL context builder for TLS fingerprinting
+            use boring::ssl::{SslMethod, SslContextBuilder};
+            
+            let mut ssl_ctx_builder = SslContextBuilder::new(SslMethod::tls_client())
+                .map_err(|e| Error::Tls(format!("Failed to create SSL context: {}", e)))?;
+            
+            // Apply cipher suites
+            if !fp.cipher_list.is_empty() {
+                let cipher_str = fp.cipher_list.join(":");
+                ssl_ctx_builder.set_cipher_list(&cipher_str)
+                    .map_err(|e| Error::Tls(format!("Failed to set cipher list: {}", e)))?;
+            }
+            
+            // Apply curves/groups
+            if !fp.curves.is_empty() {
+                let curves_str = fp.curves.join(":");
+                ssl_ctx_builder.set_curves_list(&curves_str)
+                    .map_err(|e| Error::Tls(format!("Failed to set curves: {}", e)))?;
+            }
+            
+            // Apply signature algorithms
+            if !fp.sigalgs.is_empty() {
+                let sigalgs_str = fp.sigalgs.join(":");
+                ssl_ctx_builder.set_sigalgs_list(&sigalgs_str)
+                    .map_err(|e| Error::Tls(format!("Failed to set signature algorithms: {}", e)))?;
+            }
+            
+            // Create config with custom SSL context
+            quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, ssl_ctx_builder)
+                .map_err(|e| Error::Quic(format!("Failed to create quiche config with TLS fingerprint: {}", e)))?
+        } else {
+            quiche::Config::new(quiche::PROTOCOL_VERSION)
+                .map_err(|e| Error::Quic(format!("Failed to create quiche config: {}", e)))?
+        };
 
         // Set application protocol to HTTP/3
-        // APPLICATION_PROTOCOL is &[&[u8]], so we pass it directly
         config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
             .map_err(|e| Error::Quic(format!("Failed to set ALPN: {}", e)))?;
 
@@ -61,16 +93,6 @@ impl H3Client {
         config.set_initial_max_stream_data_bidi_remote(1_000_000);
         config.set_initial_max_streams_bidi(100);
         config.set_disable_active_migration(true);
-
-        // Note: TLS fingerprint configuration for quiche is complex as quiche uses BoringSSL
-        // internally. The TLS fingerprint would need to be applied at the BoringSSL level
-        // which quiche doesn't expose directly. For now, we accept the fingerprint but
-        // note that full fingerprint control requires quiche API changes.
-        if self.tls_fingerprint.is_some() {
-            // TLS fingerprint is stored but quiche doesn't expose BoringSSL configuration
-            // This would require custom quiche build or API extensions
-            tracing::warn!("TLS fingerprint specified but quiche doesn't expose BoringSSL config");
-        }
 
         Ok(config)
     }
