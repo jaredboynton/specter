@@ -10,9 +10,6 @@ categories = ["network-programming", "web-programming::http-client"]
 authors = ["Jared Boynton"]
 readme = "README.md"
 
-# Empty workspace declaration keeps this crate standalone (it's a git submodule)
-[workspace]
-
 [dependencies]
 # TLS with BoringSSL
 boring = "4"
