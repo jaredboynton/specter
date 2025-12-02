@@ -102,6 +102,12 @@ impl From<u16> for SettingsId {
     }
 }
 
+impl From<SettingsId> for u16 {
+    fn from(id: SettingsId) -> Self {
+        id as u16
+    }
+}
+
 /// HTTP/2 error codes per RFC 9113 Section 7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]

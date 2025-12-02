@@ -72,9 +72,7 @@ impl AltSvcCache {
         let cache = self.entries.read().await;
         cache.get(origin)
             .and_then(|entries| {
-                entries.iter()
-                    .filter(|e| e.is_h3() && !e.is_expired())
-                    .next()
+                entries.iter().find(|e| e.is_h3() && !e.is_expired())
                     .cloned()
             })
     }
@@ -207,8 +205,7 @@ fn parse_quoted_value(value: &str) -> Option<(Option<String>, u16)> {
     let unquoted = unquoted.trim();
     
     // Check if it starts with ':' (same-origin case)
-    if unquoted.starts_with(':') {
-        let port_str = &unquoted[1..];
+    if let Some(port_str) = unquoted.strip_prefix(':') {
         if let Ok(port) = port_str.parse::<u16>() {
             return Some((None, port));
         }

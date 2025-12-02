@@ -133,12 +133,12 @@ where
         // CRITICAL: Chrome sends ALL 6 settings. Do NOT remove any.
         let mut settings_frame = SettingsFrame::new();
         settings_frame
-            .set(SettingsId::HeaderTableSize as u16, settings.header_table_size)
-            .set(SettingsId::EnablePush as u16, if settings.enable_push { 1 } else { 0 })
-            .set(SettingsId::MaxConcurrentStreams as u16, settings.max_concurrent_streams)
-            .set(SettingsId::InitialWindowSize as u16, settings.initial_window_size)
-            .set(SettingsId::MaxFrameSize as u16, settings.max_frame_size)
-            .set(SettingsId::MaxHeaderListSize as u16, settings.max_header_list_size);
+            .set(SettingsId::HeaderTableSize, settings.header_table_size)
+            .set(SettingsId::EnablePush, if settings.enable_push { 1 } else { 0 })
+            .set(SettingsId::MaxConcurrentStreams, settings.max_concurrent_streams)
+            .set(SettingsId::InitialWindowSize, settings.initial_window_size)
+            .set(SettingsId::MaxFrameSize, settings.max_frame_size)
+            .set(SettingsId::MaxHeaderListSize, settings.max_header_list_size);
 
         // Add GREASE setting (Chrome often sends 0x0a0a, 0x1a1a, etc.)
         // This helps look like a real browser and not a naive bot.
@@ -225,13 +225,12 @@ where
                 0x4 => { // InitialWindowSize
                     // RFC 9113 Section 6.5.2: INITIAL_WINDOW_SIZE must be <= 2^31-1
                     // RFC 9113 Section 6.9.2: When INITIAL_WINDOW_SIZE changes, adjust all stream windows
-                    let old_size = self.peer_settings.initial_window_size as i32;
-                    let new_size = *value as i32;
-                    
-                    // Validate new window size (must be <= 2^31-1)
-                    if new_size < 0 || new_size > i32::MAX {
+                    // Validate new window size (must be <= 2^31-1) before casting
+                    if *value > i32::MAX as u32 {
                         continue; // Invalid setting, ignore per RFC 9113 Section 6.5.2
                     }
+                    let old_size = self.peer_settings.initial_window_size as i32;
+                    let new_size = *value as i32;
                     
                     let delta = new_size - old_size;
                     
@@ -241,7 +240,7 @@ where
                     for stream in self.streams.values_mut() {
                         // RFC 9113 Section 6.9.2: Window can go negative, but must not exceed 2^31-1
                         let new_window = stream.send_window.saturating_add(delta);
-                        stream.send_window = new_window.min(i32::MAX);
+                        stream.send_window = new_window;
                     }
                 }
                 0x5 => { // MaxFrameSize
@@ -340,7 +339,7 @@ where
             // Split across HEADERS + CONTINUATION frames
             let chunks: Vec<Bytes> = header_block
                 .chunks(max_frame_size)
-                .map(|chunk| Bytes::copy_from_slice(chunk))
+                .map(Bytes::copy_from_slice)
                 .collect();
 
             // First: HEADERS without END_HEADERS
@@ -492,7 +491,7 @@ where
             // Split across HEADERS + CONTINUATION frames
             let chunks: Vec<Bytes> = header_block
                 .chunks(max_frame_size)
-                .map(|chunk| Bytes::copy_from_slice(chunk))
+                .map(Bytes::copy_from_slice)
                 .collect();
 
             // First: HEADERS without END_HEADERS
@@ -937,7 +936,7 @@ where
                     // RFC 9113 Section 6.5: A SETTINGS frame MUST NOT contain multiple values for the same setting
                     let mut seen_settings = std::collections::HashSet::new();
                     for (id, _) in &settings.settings {
-                        let id_u16 = *id as u16;
+                        let id_u16 = *id;
                         if !seen_settings.insert(id_u16) {
                             return Err(Error::HttpProtocol(
                                 format!("PROTOCOL_ERROR: Duplicate setting ID {} in SETTINGS frame", id_u16)
@@ -1010,7 +1009,7 @@ where
 
         // Send connection-level WINDOW_UPDATE when window gets low
         if self.conn_recv_window < WINDOW_UPDATE_THRESHOLD {
-            let increment = DEFAULT_INITIAL_WINDOW_SIZE as u32;
+            let increment = DEFAULT_INITIAL_WINDOW_SIZE;
             self.send_window_update(0, increment).await?;
             self.conn_recv_window += increment as i32;
         }
@@ -1026,7 +1025,7 @@ where
             })
             .unwrap_or(false);
         if needs_stream_update {
-            let increment = DEFAULT_INITIAL_WINDOW_SIZE as u32;
+            let increment = DEFAULT_INITIAL_WINDOW_SIZE;
             if let Some(stream) = self.streams.get(&stream_id) {
                 // Use stream.id for window update
                 self.send_window_update(stream.id, increment).await?;
@@ -1289,7 +1288,7 @@ where
                         // RFC 9113 Section 6.5: A SETTINGS frame MUST NOT contain multiple values for the same setting
                         let mut seen_settings = std::collections::HashSet::new();
                         for (id, _) in &settings.settings {
-                            let id_u16 = *id as u16;
+                            let id_u16 = *id;
                             if !seen_settings.insert(id_u16) {
                                 return Err(Error::HttpProtocol(
                                     format!("PROTOCOL_ERROR: Duplicate setting ID {} in SETTINGS frame", id_u16)

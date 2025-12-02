@@ -39,12 +39,13 @@ bytes = "1"
 thiserror = "2"
 tracing = "0.1"
 url = "2"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 dashmap = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 getrandom = "0.2"
+psl = "2"
 
 [dev-dependencies]
 tokio-test = "0.4"

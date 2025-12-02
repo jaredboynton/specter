@@ -12,8 +12,21 @@ use url::Url;
 
 use crate::error::{Error, Result};
 
+/// SameSite attribute for cookies (RFC 6265bis).
+///
+/// Controls whether cookies are sent with cross-site requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SameSite {
+    /// Cookie sent only for same-site requests.
+    Strict,
+    /// Cookie sent for same-site requests and top-level navigation.
+    Lax,
+    /// Cookie sent for all requests (requires Secure attribute).
+    None,
+}
+
 /// RFC 6265 compliant cookie representation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Cookie {
     pub name: String,
     pub value: String,
@@ -21,11 +34,14 @@ pub struct Cookie {
     pub path: String,
     pub secure: bool,
     pub http_only: bool,
-    pub same_site: Option<String>,
+    pub same_site: Option<SameSite>,
     pub expires: Option<DateTime<Utc>>,
     pub max_age: Option<i64>,
+    pub host_only: bool,
     pub source_url: Option<String>,
     pub raw_header: Option<String>,
+    /// Creation time for sorting per RFC 6265 Section 5.4
+    pub creation_time: DateTime<Utc>,
 }
 
 impl Cookie {
@@ -40,9 +56,47 @@ impl Cookie {
             same_site: None,
             expires: None,
             max_age: None,
+            host_only: true,
             source_url: None,
             raw_header: None,
+            creation_time: Utc::now(),
         }
+    }
+
+    /// Builder-style method to set the path.
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = path.into();
+        self
+    }
+
+    /// Builder-style method to set the secure flag.
+    pub fn with_secure(mut self, secure: bool) -> Self {
+        self.secure = secure;
+        self
+    }
+
+    /// Builder-style method to set the http_only flag.
+    pub fn with_http_only(mut self, http_only: bool) -> Self {
+        self.http_only = http_only;
+        self
+    }
+
+    /// Builder-style method to set the same_site attribute.
+    pub fn with_same_site(mut self, same_site: SameSite) -> Self {
+        self.same_site = Some(same_site);
+        self
+    }
+
+    /// Builder-style method to set the expires time.
+    pub fn with_expires(mut self, expires: DateTime<Utc>) -> Self {
+        self.expires = Some(expires);
+        self
+    }
+
+    /// Builder-style method to set the host_only flag.
+    pub fn with_host_only(mut self, host_only: bool) -> Self {
+        self.host_only = host_only;
+        self
     }
 
     pub fn from_set_cookie_header(header: &str, request_url: &str) -> Result<Self> {
@@ -68,6 +122,9 @@ impl Cookie {
         cookie.raw_header = Some(header.to_string());
         cookie.source_url = Some(request_url.to_string());
 
+        // Track whether Domain attribute was present (RFC 6265 host-only-flag)
+        let mut domain_attr_present = false;
+
         for attr in parts.iter().skip(1) {
             let attr_lower = attr.to_lowercase();
             if attr_lower == "secure" {
@@ -76,15 +133,46 @@ impl Cookie {
                 cookie.http_only = true;
             } else if let Some((key, val)) = attr.split_once('=') {
                 match key.trim().to_lowercase().as_str() {
-                    "domain" => cookie.domain = normalize_domain(val.trim()),
+                    "domain" => {
+                        cookie.domain = normalize_domain(val.trim());
+                        domain_attr_present = true;
+                    }
                     "path" => cookie.path = val.trim().to_string(),
                     "expires" => cookie.expires = parse_cookie_date(val.trim()),
                     "max-age" => cookie.max_age = val.trim().parse().ok(),
-                    "samesite" => cookie.same_site = Some(val.trim().to_string()),
+                    "samesite" => {
+                        let ss_str = val.trim();
+                        cookie.same_site = match ss_str.to_lowercase().as_str() {
+                            "strict" => Some(SameSite::Strict),
+                            "lax" => Some(SameSite::Lax),
+                            "none" => Some(SameSite::None),
+                            _ => None,
+                        };
+                    }
                     _ => {}
                 }
             }
         }
+
+        // RFC 6265 Section 5.3: host-only-flag is false if Domain attribute present, true otherwise
+        cookie.host_only = !domain_attr_present;
+
+        // RFC 6265 Section 5.3: Max-Age takes precedence over Expires
+        // Convert Max-Age to expires immediately
+        if let Some(max_age) = cookie.max_age {
+            if max_age > 0 {
+                cookie.expires = Some(Utc::now() + chrono::Duration::seconds(max_age));
+            } else {
+                // Max-Age=0 means delete cookie
+                cookie.expires = Some(Utc::now() - chrono::Duration::seconds(1));
+            }
+        }
+
+        // RFC 6265 Section 5.3: Reject cookies for public suffixes
+        if is_public_suffix(&cookie.domain) {
+            return Err(Error::CookieParse(format!("Cannot set cookie for public suffix: {}", cookie.domain)));
+        }
+
         Ok(cookie)
     }
 
@@ -92,22 +180,95 @@ impl Cookie {
         let parsed = match Url::parse(url) { Ok(u) => u, Err(_) => return false };
         let request_domain = match parsed.host_str() { Some(h) => h.to_lowercase(), None => return false };
 
-        if self.secure && parsed.scheme() != "https" { return false; }
-        if let Some(expires) = self.expires { if expires < Utc::now() { return false; } }
-
-        let cookie_domain = self.domain.to_lowercase();
-        if request_domain != cookie_domain && !request_domain.ends_with(&format!(".{}", cookie_domain)) {
+        // Check secure flag (HTTPS-only cookies)
+        if self.secure && parsed.scheme() != "https" {
             return false;
         }
 
+        // Check expiration
+        if let Some(expires) = self.expires {
+            if expires < Utc::now() {
+                return false;
+            }
+        }
+
+        // RFC 6265 domain matching with host_only flag
+        if !self.domain_matches(&request_domain) {
+            return false;
+        }
+
+        // RFC 6265 path matching
         let request_path = parsed.path();
-        request_path == self.path || request_path.starts_with(&format!("{}/", self.path.trim_end_matches('/')))
+        if !self.path_matches(request_path) {
+            return false;
+        }
+
+        true
+    }
+
+    /// RFC 6265 Section 5.1.3: Domain Matching
+    /// Returns true if request_domain matches this cookie's domain.
+    pub fn domain_matches(&self, request_domain: &str) -> bool {
+        let cookie_domain = self.domain.to_lowercase();
+        let request_domain_lower = request_domain.to_lowercase();
+
+        // Host-only cookie: must match exactly
+        if self.host_only {
+            return request_domain_lower == cookie_domain;
+        }
+
+        // Domain cookie: exact match
+        if request_domain_lower == cookie_domain {
+            return true;
+        }
+
+        // Domain cookie: subdomain match
+        // Example: request_domain = "app.slack.com", cookie_domain = "slack.com"
+        // We check if request_domain ends with ".slack.com"
+        if request_domain_lower.len() > cookie_domain.len() {
+            let expected_suffix = format!(".{}", cookie_domain);
+            if request_domain_lower.ends_with(&expected_suffix) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// RFC 6265 Section 5.1.4: Path Matching
+    /// Returns true if request_path matches this cookie's path.
+    pub fn path_matches(&self, request_path: &str) -> bool {
+        let cookie_path = &self.path;
+
+        // Exact match
+        if request_path == cookie_path {
+            return true;
+        }
+
+        // Cookie path must be a prefix of request path
+        if !request_path.starts_with(cookie_path) {
+            return false;
+        }
+
+        // If cookie path ends with '/', it's a valid prefix
+        if cookie_path.ends_with('/') {
+            return true;
+        }
+
+        // If cookie path doesn't end with '/', the next character in request path
+        // must be '/' to avoid matching "/apiv2" with cookie path "/api"
+        if let Some(next_char) = request_path.chars().nth(cookie_path.len()) {
+            return next_char == '/';
+        }
+
+        false
     }
 
     pub fn to_netscape_line(&self) -> String {
+        // Netscape format: include_subdomains is TRUE for domain cookies (host_only=false)
         format!("{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.domain,
-            if self.domain.starts_with('.') { "TRUE" } else { "FALSE" },
+            if self.host_only { "FALSE" } else { "TRUE" },
             self.path,
             if self.secure { "TRUE" } else { "FALSE" },
             self.expires.map(|dt| dt.timestamp().to_string()).unwrap_or_else(|| "0".to_string()),
@@ -121,6 +282,9 @@ impl Cookie {
         if parts.len() < 7 {
             return Err(Error::CookieParse(format!("Invalid Netscape format: expected 7 fields, got {}", parts.len())));
         }
+        // Netscape format field 1 (index 1) is include_subdomains flag
+        // TRUE means domain cookie (host_only=false), FALSE means host-only (host_only=true)
+        let include_subdomains = parts[1].eq_ignore_ascii_case("true");
         Ok(Cookie {
             name: parts[5].to_string(),
             value: parts[6].to_string(),
@@ -131,8 +295,10 @@ impl Cookie {
             same_site: None,
             expires: parts[4].parse::<i64>().ok().filter(|&ts| ts > 0).and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
             max_age: None,
+            host_only: !include_subdomains,
             source_url: None,
             raw_header: None,
+            creation_time: Utc::now(),
         })
     }
 
@@ -173,8 +339,15 @@ impl CookieJar {
     }
 
     pub fn build_cookie_header(&self, url: &str) -> Option<String> {
-        let cookies = self.cookies_for_url(url);
+        let mut cookies = self.cookies_for_url(url);
         if cookies.is_empty() { return None; }
+        
+        // RFC 6265 Section 5.4: Sort cookies by longest path first, then by creation time (oldest first)
+        cookies.sort_by(|a, b| {
+            b.path.len().cmp(&a.path.len())
+                .then_with(|| a.creation_time.cmp(&b.creation_time))
+        });
+        
         Some(cookies.iter().map(|c| format!("{}={}", c.name, c.value)).collect::<Vec<_>>().join("; "))
     }
 
@@ -190,14 +363,14 @@ impl CookieJar {
 
     pub async fn save_to_file(&self, path: impl AsRef<Path>) -> Result<()> {
         let mut file = tokio::fs::File::create(path).await
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
         file.write_all(b"# Netscape HTTP Cookie File\n").await
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
         for cookies in self.cookies.values() {
             for cookie in cookies.values() {
                 let line = format!("{}\n", cookie.to_netscape_line());
                 file.write_all(line.as_bytes()).await
-                    .map_err(|e| Error::Io(e))?;
+                    .map_err(Error::Io)?;
             }
         }
         Ok(())
@@ -205,11 +378,11 @@ impl CookieJar {
 
     pub async fn load_from_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
         let file = tokio::fs::File::open(path).await
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
         while reader.read_line(&mut line).await
-            .map_err(|e| Error::Io(e))? > 0 {
+            .map_err(Error::Io)? > 0 {
             let trimmed = line.trim_end();
             if !trimmed.is_empty() && !trimmed.starts_with('#') {
                 if let Ok(cookie) = Cookie::from_netscape_line(trimmed) {
@@ -239,10 +412,40 @@ fn normalize_domain(domain: &str) -> String {
 }
 
 fn parse_cookie_date(date_str: &str) -> Option<DateTime<Utc>> {
-    for fmt in ["%a, %d %b %Y %H:%M:%S GMT", "%a, %d-%b-%y %H:%M:%S GMT", "%Y-%m-%dT%H:%M:%SZ"] {
+    // RFC 6265 Section 5.1.1: Cookie date formats
+    // Try RFC 1123, RFC 850, ANSI C asctime(), and common variations
+    const FORMATS: &[&str] = &[
+        "%a, %d %b %Y %H:%M:%S GMT",      // RFC 1123 (e.g., "Mon, 01 Jan 2024 12:00:00 GMT")
+        "%A, %d-%b-%y %H:%M:%S GMT",      // RFC 850 (e.g., "Monday, 01-Jan-24 12:00:00 GMT")
+        "%a %b %e %H:%M:%S %Y",           // ANSI C asctime() (e.g., "Mon Jan  1 12:00:00 2024")
+        "%a, %d-%b-%Y %H:%M:%S GMT",      // RFC 1036 variation
+        "%d %b %Y %H:%M:%S GMT",          // No weekday prefix
+        "%a, %d %b %Y %H:%M:%S %z",       // With timezone offset
+        "%Y-%m-%dT%H:%M:%SZ",             // ISO 8601 UTC
+        "%Y-%m-%dT%H:%M:%S%.fZ",          // ISO 8601 with fractional seconds
+    ];
+    
+    for fmt in FORMATS {
         if let Ok(dt) = chrono::DateTime::parse_from_str(date_str, fmt) {
             return Some(dt.with_timezone(&Utc));
         }
     }
+    
+    // Fallback: try parsing as Unix timestamp
     date_str.parse::<i64>().ok().and_then(|ts| Utc.timestamp_opt(ts, 0).single())
+}
+
+/// Check if a domain is a public suffix per RFC 6265 Section 5.3.
+/// Prevents setting cookies on TLDs like ".com" or ".co.uk".
+fn is_public_suffix(domain: &str) -> bool {
+    // Remove leading dot if present
+    let domain_clean = domain.strip_prefix('.').unwrap_or(domain);
+    
+    // Use psl to check if this is a public suffix
+    psl::suffix(domain_clean.as_bytes())
+        .map(|suffix| {
+            // Check if the entire domain is the public suffix
+            suffix.is_known() && suffix.as_bytes() == domain_clean.as_bytes()
+        })
+        .unwrap_or(false)
 }

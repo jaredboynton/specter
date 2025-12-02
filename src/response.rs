@@ -57,29 +57,47 @@ impl Response {
     pub fn content_encoding(&self) -> Option<&str> { self.get_header("Content-Encoding") }
 
     /// Decode body based on Content-Encoding (gzip, deflate, br, zstd).
+    /// Supports chained encodings (e.g., "gzip, deflate") by applying decodings in reverse order.
     pub fn decoded_body(&self) -> Result<Bytes> {
-        match self.content_encoding().map(|s| s.to_lowercase()).as_deref() {
-            Some("gzip") | Some("x-gzip") => decode_gzip(&self.body),
-            Some("deflate") => decode_deflate(&self.body),
-            Some("br") => decode_brotli(&self.body),
-            Some("zstd") => decode_zstd(&self.body),
-            _ => {
-                // Check magic bytes when Content-Encoding is missing
-                if self.body.len() >= 4 {
-                    // zstd magic: 0x28 0xB5 0x2F 0xFD
-                    if self.body[0] == 0x28 && self.body[1] == 0xB5 && self.body[2] == 0x2F && self.body[3] == 0xFD {
-                        return decode_zstd(&self.body);
+        let encodings: Vec<&str> = self.content_encoding()
+            .map(|s| s.split(',').map(str::trim).collect())
+            .unwrap_or_default();
+        
+        // If Content-Encoding header is present, process encodings in reverse order
+        // (last encoding applied first during decode)
+        if !encodings.is_empty() {
+            let mut data = self.body.clone();
+            for encoding in encodings.iter().rev() {
+                data = match encoding.to_lowercase().as_str() {
+                    "gzip" | "x-gzip" => decode_gzip(&data)?,
+                    "deflate" => decode_deflate(&data)?,
+                    "br" => decode_brotli(&data)?,
+                    "zstd" => decode_zstd(&data)?,
+                    "identity" => data,
+                    _ => {
+                        // Unknown encoding, pass through
+                        data
                     }
-                }
-                if self.body.len() >= 2 {
-                    // gzip magic: 0x1f 0x8b
-                    if self.body[0] == 0x1f && self.body[1] == 0x8b {
-                        return decode_gzip(&self.body);
-                    }
-                }
-                Ok(self.body.clone())
+                };
+            }
+            return Ok(data);
+        }
+        
+        // No Content-Encoding header: check magic bytes
+        if self.body.len() >= 4 {
+            // zstd magic: 0x28 0xB5 0x2F 0xFD
+            if self.body[0] == 0x28 && self.body[1] == 0xB5 && self.body[2] == 0x2F && self.body[3] == 0xFD {
+                return decode_zstd(&self.body);
             }
         }
+        if self.body.len() >= 2 {
+            // gzip magic: 0x1f 0x8b
+            if self.body[0] == 0x1f && self.body[1] == 0x8b {
+                return decode_gzip(&self.body);
+            }
+        }
+        
+        Ok(self.body.clone())
     }
 
     pub fn text(&self) -> Result<String> {

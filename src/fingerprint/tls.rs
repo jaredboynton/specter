@@ -9,7 +9,7 @@
 //! Current implementation: Chrome 142 (Dec 2025)
 
 /// Chrome 142 cipher suites in exact order.
-pub const CHROME_142_CIPHER_SUITES: &[&'static str] = &[
+pub const CHROME_142_CIPHER_SUITES: &[&str] = &[
     "TLS_AES_128_GCM_SHA256",
     "TLS_AES_256_GCM_SHA384",
     "TLS_CHACHA20_POLY1305_SHA256",
@@ -28,7 +28,7 @@ pub const CHROME_142_CIPHER_SUITES: &[&'static str] = &[
 ];
 
 /// Chrome 142 signature algorithms.
-pub const CHROME_142_SIGNATURE_ALGORITHMS: &[&'static str] = &[
+pub const CHROME_142_SIGNATURE_ALGORITHMS: &[&str] = &[
     "ecdsa_secp256r1_sha256",
     "rsa_pss_rsae_sha256",
     "rsa_pkcs1_sha256",
@@ -40,7 +40,7 @@ pub const CHROME_142_SIGNATURE_ALGORITHMS: &[&'static str] = &[
 ];
 
 /// Chrome 142 supported curves.
-pub const CHROME_142_CURVES: &[&'static str] = &["x25519", "P-256", "P-384"];
+pub const CHROME_142_CURVES: &[&str] = &["x25519", "P-256", "P-384"];
 
 /// Chrome 142 extension IDs in exact order.
 pub const CHROME_142_EXTENSION_IDS: &[u16] =

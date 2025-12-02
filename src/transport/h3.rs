@@ -23,6 +23,12 @@ pub struct H3Client {
     max_udp_payload_size: usize,
 }
 
+impl Default for H3Client {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl H3Client {
     /// Create a new H3Client with default settings.
     pub fn new() -> Self {
@@ -131,7 +137,7 @@ impl H3Client {
             .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
 
         let socket = UdpSocket::bind(local_addr).await
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
 
         // Generate connection ID
         let scid_bytes = generate_cid()?;
@@ -144,7 +150,7 @@ impl H3Client {
         let mut conn = quiche::connect(
             Some(&host),
             &scid,
-            socket.local_addr().map_err(|e| Error::Io(e))?,
+            socket.local_addr().map_err(Error::Io)?,
             peer_addr,
             &mut config,
         )
@@ -261,11 +267,8 @@ impl H3Client {
             }
 
             // 1. RECEIVE: Get all available packets from network
-            loop {
-                match timeout(Duration::from_millis(1), recv_ingress(&socket, &mut conn)).await {
-                    Ok(Ok(_)) => {} // Keep receiving
-                    _ => break,     // No more packets or timeout
-                }
+            while let Ok(Ok(_)) = timeout(Duration::from_millis(1), recv_ingress(&socket, &mut conn)).await {
+                // Keep receiving
             }
 
             // 2. POLL: Process received packets as HTTP/3 events
@@ -306,8 +309,8 @@ impl H3Client {
                     Ok((_, quiche::h3::Event::Reset { .. })) => {
                         return Err(Error::HttpProtocol("HTTP/3 stream reset".into()));
                     }
-                    Ok((_, quiche::h3::Event::PriorityUpdate { .. })) => {}
-                    Ok((_, quiche::h3::Event::GoAway { .. })) => {
+                    Ok((_, quiche::h3::Event::PriorityUpdate)) => {}
+                    Ok((_, quiche::h3::Event::GoAway)) => {
                         return Err(Error::HttpProtocol("HTTP/3 GOAWAY received".into()));
                     }
                     Err(quiche::h3::Error::Done) => break,
@@ -386,7 +389,7 @@ async fn flush_egress(
             Ok((len, _info)) => {
                 if len > 0 {
                     socket.send_to(&out[..len], peer).await
-                        .map_err(|e| Error::Io(e))?;
+                        .map_err(Error::Io)?;
                 } else {
                     break;
                 }
@@ -414,7 +417,7 @@ async fn recv_ingress(
             let recv_info = quiche::RecvInfo {
                 from,
                 to: socket.local_addr()
-                    .map_err(|e| Error::Io(e))?,
+                    .map_err(Error::Io)?,
             };
 
             match conn.recv(&mut buf[..len], recv_info) {

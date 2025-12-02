@@ -184,7 +184,7 @@ impl<'a> HpackEncoder<'a> {
         // Split into chunks
         let mut chunks: Vec<Bytes> = encoded
             .chunks(max_frame_size)
-            .map(|chunk| Bytes::copy_from_slice(chunk))
+            .map(Bytes::copy_from_slice)
             .collect();
 
         let first = chunks.remove(0);
