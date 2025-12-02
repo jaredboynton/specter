@@ -6,10 +6,10 @@
 //! signature algorithm, and curve ordering - but extension ordering may not
 //! match real browsers.
 //!
-//! Current implementation: Chrome 131 (outdated - Chrome 142 is current as of Dec 2025)
+//! Current implementation: Chrome 142 (Dec 2025)
 
-/// Chrome 131 cipher suites in exact order.
-pub const CHROME_131_CIPHER_SUITES: &[&'static str] = &[
+/// Chrome 142 cipher suites in exact order.
+pub const CHROME_142_CIPHER_SUITES: &[&'static str] = &[
     "TLS_AES_128_GCM_SHA256",
     "TLS_AES_256_GCM_SHA384",
     "TLS_CHACHA20_POLY1305_SHA256",
@@ -27,8 +27,8 @@ pub const CHROME_131_CIPHER_SUITES: &[&'static str] = &[
     "TLS_RSA_WITH_AES_256_CBC_SHA",
 ];
 
-/// Chrome 131 signature algorithms.
-pub const CHROME_131_SIGNATURE_ALGORITHMS: &[&'static str] = &[
+/// Chrome 142 signature algorithms.
+pub const CHROME_142_SIGNATURE_ALGORITHMS: &[&'static str] = &[
     "ecdsa_secp256r1_sha256",
     "rsa_pss_rsae_sha256",
     "rsa_pkcs1_sha256",
@@ -39,11 +39,11 @@ pub const CHROME_131_SIGNATURE_ALGORITHMS: &[&'static str] = &[
     "rsa_pkcs1_sha512",
 ];
 
-/// Chrome 131 supported curves.
-pub const CHROME_131_CURVES: &[&'static str] = &["x25519", "P-256", "P-384"];
+/// Chrome 142 supported curves.
+pub const CHROME_142_CURVES: &[&'static str] = &["x25519", "P-256", "P-384"];
 
-/// Chrome 131 extension IDs in exact order.
-pub const CHROME_131_EXTENSION_IDS: &[u16] =
+/// Chrome 142 extension IDs in exact order.
+pub const CHROME_142_EXTENSION_IDS: &[u16] =
     &[0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43, 27, 21];
 
 /// TLS fingerprint configuration.
@@ -77,14 +77,14 @@ impl Default for TlsFingerprint {
 }
 
 impl TlsFingerprint {
-    /// Create a TLS fingerprint for Chrome 131.
-    pub fn chrome_131() -> Self {
+    /// Create a TLS fingerprint for Chrome 142.
+    pub fn chrome_142() -> Self {
         Self {
-            cipher_list: CHROME_131_CIPHER_SUITES.to_vec(),
-            sigalgs: CHROME_131_SIGNATURE_ALGORITHMS.to_vec(),
-            curves: CHROME_131_CURVES.to_vec(),
-            extensions: CHROME_131_EXTENSION_IDS.to_vec(),
-            extension_order: CHROME_131_EXTENSION_IDS.to_vec(),
+            cipher_list: CHROME_142_CIPHER_SUITES.to_vec(),
+            sigalgs: CHROME_142_SIGNATURE_ALGORITHMS.to_vec(),
+            curves: CHROME_142_CURVES.to_vec(),
+            extensions: CHROME_142_EXTENSION_IDS.to_vec(),
+            extension_order: CHROME_142_EXTENSION_IDS.to_vec(),
             grease: true,
         }
     }

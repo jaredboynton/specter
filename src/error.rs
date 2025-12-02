@@ -63,6 +63,10 @@ pub enum Error {
     /// QUIC/HTTP3 error.
     #[error("QUIC error: {0}")]
     Quic(String),
+
+    /// HTTP/2 SETTINGS_TIMEOUT error (RFC 9113 Section 7).
+    #[error("SETTINGS_TIMEOUT (0x04): No SETTINGS frame received within {0:?}")]
+    SettingsTimeout(std::time::Duration),
 }
 
 impl Error {

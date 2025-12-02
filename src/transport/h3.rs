@@ -209,9 +209,20 @@ impl H3Client {
             (":path", path.as_bytes()),
         ];
 
-        // Add custom headers (convert to bytes)
+        // Add custom headers (convert to bytes), filtering out:
+        // 1. Pseudo-headers (start with ':') - we already set these above
+        // 2. Connection-specific headers forbidden in HTTP/3 (RFC 9114 Section 4.2)
         let mut custom_headers: Vec<(&str, &[u8])> = headers
             .iter()
+            .filter(|(k, _)| {
+                let name_lower = k.to_lowercase();
+                !k.starts_with(':')
+                    && name_lower != "connection"
+                    && name_lower != "keep-alive"
+                    && name_lower != "proxy-connection"
+                    && name_lower != "transfer-encoding"
+                    && name_lower != "upgrade"
+            })
             .map(|(k, v)| (*k, v.as_bytes()))
             .collect();
         h3_headers.append(&mut custom_headers);

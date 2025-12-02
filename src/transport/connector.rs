@@ -1,14 +1,12 @@
-//! BoringSSL TLS connector for hyper.
+//! BoringSSL TLS connector.
 
 use boring::ssl::{SslConnector, SslMethod, SslVersion};
 use tokio_boring::SslStream;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use hyper::Uri;
-use std::future::Future;
+use http::Uri;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tower::Service;
 use std::io;
 
 use crate::fingerprint::tls::TlsFingerprint;
@@ -98,12 +96,64 @@ impl BoringConnector {
     }
 }
 
+/// Negotiated ALPN protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlpnProtocol {
+    /// HTTP/2 ("h2")
+    H2,
+    /// HTTP/1.1 ("http/1.1")
+    Http1,
+    /// No ALPN negotiated or unknown protocol
+    Unknown,
+}
+
+impl AlpnProtocol {
+    /// Check if HTTP/2 was negotiated.
+    pub fn is_h2(&self) -> bool {
+        matches!(self, Self::H2)
+    }
+
+    /// Check if HTTP/1.1 was negotiated.
+    pub fn is_http1(&self) -> bool {
+        matches!(self, Self::Http1)
+    }
+}
+
 /// Stream that can be either HTTP (plain TCP) or HTTPS (TLS).
 pub enum MaybeHttpsStream {
     /// Plain TCP stream for HTTP.
     Http(TcpStream),
     /// TLS-wrapped stream for HTTPS.
     Https(SslStream<TcpStream>),
+}
+
+impl MaybeHttpsStream {
+    /// Get the negotiated ALPN protocol.
+    ///
+    /// For HTTPS connections, returns the protocol negotiated during TLS handshake.
+    /// For plain HTTP connections, returns `Unknown` (no TLS = no ALPN).
+    ///
+    /// **IMPORTANT**: Always check ALPN before using HTTP/2. If the server negotiated
+    /// HTTP/1.1 (or no ALPN), attempting HTTP/2 will fail immediately.
+    pub fn alpn_protocol(&self) -> AlpnProtocol {
+        match self {
+            MaybeHttpsStream::Http(_) => AlpnProtocol::Unknown,
+            MaybeHttpsStream::Https(stream) => {
+                match stream.ssl().selected_alpn_protocol() {
+                    Some(b"h2") => AlpnProtocol::H2,
+                    Some(b"http/1.1") => AlpnProtocol::Http1,
+                    _ => AlpnProtocol::Unknown,
+                }
+            }
+        }
+    }
+
+    /// Check if HTTP/2 was negotiated via ALPN.
+    ///
+    /// Convenience method for `self.alpn_protocol().is_h2()`.
+    pub fn is_h2(&self) -> bool {
+        self.alpn_protocol().is_h2()
+    }
 }
 
 impl AsyncRead for MaybeHttpsStream {
@@ -146,43 +196,31 @@ impl AsyncWrite for MaybeHttpsStream {
     }
 }
 
-impl Service<Uri> for BoringConnector {
-    type Response = MaybeHttpsStream;
-    type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+impl BoringConnector {
+    /// Connect to a URI, returning either a plain TCP or TLS stream.
+    pub async fn connect(&self, uri: &Uri) -> Result<MaybeHttpsStream, Error> {
+        let host = uri.host().ok_or_else(|| Error::Connection("Missing host".into()))?;
+        let port = uri.port_u16().unwrap_or(
+            if uri.scheme_str() == Some("https") { 443 } else { 80 }
+        );
 
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
+        let addr = format!("{}:{}", host, port);
+        let tcp_stream = TcpStream::connect(&addr).await
+            .map_err(|e| Error::Connection(format!("Failed to connect to {}: {}", addr, e)))?;
 
-    fn call(&mut self, uri: Uri) -> Self::Future {
-        let tls_config = self.tls_config.clone();
-        
-        Box::pin(async move {
-            let host = uri.host().ok_or_else(|| Error::Connection("Missing host".into()))?;
-            let port = uri.port_u16().unwrap_or(
-                if uri.scheme_str() == Some("https") { 443 } else { 80 }
-            );
-            
-            let addr = format!("{}:{}", host, port);
-            let tcp_stream = TcpStream::connect(&addr).await
-                .map_err(|e| Error::Connection(format!("Failed to connect to {}: {}", addr, e)))?;
-            
-            if uri.scheme_str() == Some("https") {
-                let connector = Self { tls_config };
-                let ssl_connector = connector.configure_ssl(host)?;
-                
-                let ssl_config = ssl_connector.configure()
-                    .map_err(|e| Error::Tls(format!("Failed to configure SSL: {}", e)))?;
-                
-                let ssl_stream = tokio_boring::connect(ssl_config, host, tcp_stream).await
-                    .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
-                
-                Ok(MaybeHttpsStream::Https(ssl_stream))
-            } else {
-                Ok(MaybeHttpsStream::Http(tcp_stream))
-            }
-        })
+        if uri.scheme_str() == Some("https") {
+            let ssl_connector = self.configure_ssl(host)?;
+
+            let ssl_config = ssl_connector.configure()
+                .map_err(|e| Error::Tls(format!("Failed to configure SSL: {}", e)))?;
+
+            let ssl_stream = tokio_boring::connect(ssl_config, host, tcp_stream).await
+                .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
+
+            Ok(MaybeHttpsStream::Https(ssl_stream))
+        } else {
+            Ok(MaybeHttpsStream::Http(tcp_stream))
+        }
     }
 }
 

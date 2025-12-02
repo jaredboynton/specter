@@ -19,6 +19,13 @@ impl Response {
         Self { status, headers, body, http_version, effective_url: None }
     }
 
+    /// Set the effective URL (the URL that was actually requested).
+    /// This is used by the redirect engine to track the current URL.
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.effective_url = Some(url.into());
+        self
+    }
+
     pub fn http_version(&self) -> &str { &self.http_version }
     pub fn body(&self) -> &Bytes { &self.body }
     pub fn into_body(self) -> Bytes { self.body }
@@ -49,19 +56,28 @@ impl Response {
     pub fn content_type(&self) -> Option<&str> { self.get_header("Content-Type") }
     pub fn content_encoding(&self) -> Option<&str> { self.get_header("Content-Encoding") }
 
-    /// Decode body based on Content-Encoding (gzip, deflate, br).
+    /// Decode body based on Content-Encoding (gzip, deflate, br, zstd).
     pub fn decoded_body(&self) -> Result<Bytes> {
         match self.content_encoding().map(|s| s.to_lowercase()).as_deref() {
             Some("gzip") | Some("x-gzip") => decode_gzip(&self.body),
             Some("deflate") => decode_deflate(&self.body),
             Some("br") => decode_brotli(&self.body),
+            Some("zstd") => decode_zstd(&self.body),
             _ => {
-                // Check gzip magic bytes
-                if self.body.len() >= 2 && self.body[0] == 0x1f && self.body[1] == 0x8b {
-                    decode_gzip(&self.body)
-                } else {
-                    Ok(self.body.clone())
+                // Check magic bytes when Content-Encoding is missing
+                if self.body.len() >= 4 {
+                    // zstd magic: 0x28 0xB5 0x2F 0xFD
+                    if self.body[0] == 0x28 && self.body[1] == 0xB5 && self.body[2] == 0x2F && self.body[3] == 0xFD {
+                        return decode_zstd(&self.body);
+                    }
                 }
+                if self.body.len() >= 2 {
+                    // gzip magic: 0x1f 0x8b
+                    if self.body[0] == 0x1f && self.body[1] == 0x8b {
+                        return decode_gzip(&self.body);
+                    }
+                }
+                Ok(self.body.clone())
             }
         }
     }
@@ -101,4 +117,10 @@ fn decode_brotli(data: &[u8]) -> Result<Bytes> {
     let mut decoded = Vec::new();
     decoder.read_to_end(&mut decoded).map_err(|e| Error::Decompression(format!("brotli: {}", e)))?;
     Ok(Bytes::from(decoded))
+}
+
+fn decode_zstd(data: &[u8]) -> Result<Bytes> {
+    zstd::stream::decode_all(data)
+        .map(Bytes::from)
+        .map_err(|e| Error::Decompression(format!("zstd: {}", e)))
 }

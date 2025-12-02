@@ -29,8 +29,10 @@ pub use version::HttpVersion;
 pub use fingerprint::FingerprintProfile;
 
 // Transport re-exports
+pub use transport::connector::{AlpnProtocol, BoringConnector, MaybeHttpsStream};
+pub use transport::h1::H1Connection;
 pub use transport::h1_h2::{Client, ClientBuilder, RequestBuilder};
-pub use transport::h2_native::{H2ClientBuilder, H2Connection, H2PooledConnection, PseudoHeaderOrder};
+pub use transport::h2::{H2ClientBuilder, H2Connection, H2PooledConnection, PseudoHeaderOrder};
 pub use transport::h3::H3Client;
 
 // Pool re-exports  

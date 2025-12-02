@@ -16,13 +16,12 @@ boring = "4"
 boring-sys = "4"
 tokio-boring = "4"
 
-# HTTP/1.1 + HTTP/2
-hyper = { version = "1", features = ["client", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["client", "client-legacy", "tokio"] }
-h2 = "0.4"
+# HTTP/1.1 (minimal implementation)
+httparse = "1"
+
+# HTTP/2 (custom implementation for full fingerprint control)
+fluke-hpack = "0.3"
 http = "1"
-http-body-util = "0.1"
-tower = "0.5"
 
 # HTTP/3 + QUIC (includes BoringSSL internally)
 quiche = { version = "0.24", default-features = false, features = ["boringssl-boring-crate"] }
@@ -33,6 +32,7 @@ tokio = { version = "1", features = ["net", "time", "sync", "rt-multi-thread", "
 # Compression
 flate2 = "1"
 brotli = "7"
+zstd = "0.13"
 
 # Utilities
 bytes = "1"
@@ -48,3 +48,5 @@ getrandom = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
