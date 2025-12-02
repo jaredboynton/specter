@@ -1,5 +1,7 @@
 //! Browser fingerprint profiles.
 
+use super::tls::TlsFingerprint;
+
 /// Browser fingerprint profile for impersonation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FingerprintProfile {
@@ -30,6 +32,17 @@ impl FingerprintProfile {
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
             }
             Self::None => "specter/0.1",
+        }
+    }
+
+    /// Get the TLS fingerprint for this profile.
+    pub fn tls_fingerprint(&self) -> TlsFingerprint {
+        match self {
+            FingerprintProfile::Chrome131 => TlsFingerprint::chrome_131(),
+            FingerprintProfile::Chrome130 => TlsFingerprint::default(),
+            FingerprintProfile::Firefox133 => TlsFingerprint::default(),
+            FingerprintProfile::Safari18 => TlsFingerprint::default(),
+            FingerprintProfile::None => TlsFingerprint::default(),
         }
     }
 }
