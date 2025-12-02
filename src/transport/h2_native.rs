@@ -168,6 +168,9 @@ impl H2Connection {
     }
 
     /// Build HTTP request with proper pseudo-header ordering.
+    ///
+    /// Note: h2 crate automatically derives pseudo-headers (:method, :scheme, :authority, :path)
+    /// from the Request's method and URI. We only need to add regular headers.
     fn build_request(
         &self,
         method: Method,
@@ -175,28 +178,13 @@ impl H2Connection {
         headers: Vec<(String, String)>,
         _has_body: bool,
     ) -> Result<Request<()>> {
-        // Extract URI components
-        // Note: scheme and path are part of the URI, authority used for :authority header
-        let _scheme = uri.scheme_str().unwrap_or("https");
-        let authority = uri
-            .authority()
-            .map(|a| a.as_str())
-            .unwrap_or_else(|| uri.host().unwrap_or(""));
-        let _path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-
-        // Build request with pseudo-headers in correct order
-        // Note: http crate handles pseudo-header ordering internally,
-        // but we use the builder pattern for clarity
+        // Build request - h2 derives pseudo-headers from method and URI
         let mut builder = Request::builder()
             .method(method)
             .uri(uri.clone());
 
-        // Add :authority header explicitly (some servers require it)
-        builder = builder.header(":authority", authority);
-
-        // Add custom headers
+        // Add custom headers (skip any pseudo-headers the caller might have included)
         for (name, value) in headers {
-            // Skip pseudo-headers in custom headers
             if !name.starts_with(':') {
                 builder = builder.header(name, value);
             }
