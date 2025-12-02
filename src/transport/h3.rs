@@ -1,13 +1,4 @@
 //! HTTP/3 transport via quiche.
-//!
-//! **STATUS: EXPERIMENTAL - NON-FUNCTIONAL**
-//!
-//! The HTTP/3 implementation has a blocking issue where send_request()
-//! succeeds but no response events are ever received from poll().
-//! QUIC handshake works correctly, but the HTTP/3 layer fails to
-//! exchange application data. Root cause under investigation.
-//!
-//! Use HTTP/2 (h2_native module) for production fingerprinting.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -109,7 +100,9 @@ impl H3Client {
         config.set_initial_max_data(INITIAL_MAX_DATA);
         config.set_initial_max_stream_data_bidi_local(1_000_000);
         config.set_initial_max_stream_data_bidi_remote(1_000_000);
+        config.set_initial_max_stream_data_uni(1_000_000);
         config.set_initial_max_streams_bidi(100);
+        config.set_initial_max_streams_uni(100);
         config.set_disable_active_migration(true);
 
         Ok(config)

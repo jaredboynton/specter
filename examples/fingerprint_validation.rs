@@ -30,11 +30,9 @@ async fn main() -> Result<()> {
     println!("   Target: tls.peet.ws/api/all (HTTP/2)");
     test_h2_fingerprint().await?;
 
-    // Test 3: HTTP/3 Fingerprint (EXPERIMENTAL - Currently non-functional)
-    println!("\n3. Testing HTTP/3 Fingerprint (QUIC/quiche) - EXPERIMENTAL");
+    // Test 3: HTTP/3 Fingerprint
+    println!("\n3. Testing HTTP/3 Fingerprint (QUIC/quiche)");
     println!("   Target: cloudflare.com (HTTP/3)");
-    println!("   NOTE: HTTP/3 implementation is non-functional. QUIC handshake succeeds");
-    println!("   but h3.poll() never returns response events. Use HTTP/2 for production.");
     test_h3_fingerprint().await?;
 
     // Test 4: Full validation against browserleaks
