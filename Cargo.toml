@@ -10,6 +10,7 @@ categories = ["network-programming", "web-programming::http-client"]
 authors = ["Jared Boynton"]
 readme = "README.md"
 
+# Empty workspace declaration keeps this crate standalone (it's a git submodule)
 [workspace]
 
 [dependencies]
@@ -30,7 +31,7 @@ tower = "0.5"
 quiche = "0.24"
 
 # Async runtime
-tokio = { version = "1", features = ["net", "time", "sync", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["net", "time", "sync", "rt-multi-thread", "macros", "fs", "io-util"] }
 
 # Compression
 flate2 = "1"

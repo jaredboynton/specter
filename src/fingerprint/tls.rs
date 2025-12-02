@@ -1,6 +1,4 @@
 //! TLS fingerprint configuration (JA3/JA4).
-//!
-//! To be implemented: cipher suite ordering, extension ordering, GREASE.
 
 /// Chrome 131 cipher suites in exact order.
 pub const CHROME_131_CIPHER_SUITES: &[&'static str] = &[

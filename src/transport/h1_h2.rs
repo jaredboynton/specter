@@ -21,6 +21,7 @@ use crate::version::HttpVersion;
 /// HTTP/1.1 and HTTP/2 client with fingerprinting support.
 pub struct Client {
     connector: BoringConnector,
+    #[allow(dead_code)] // Stored for future fingerprint validation
     fingerprint: FingerprintProfile,
     http2_settings: Http2Settings,
     default_version: HttpVersion,
@@ -52,7 +53,7 @@ impl Client {
     }
 
     /// Create a GET request builder.
-    pub fn get(&self, url: impl Into<String>) -> RequestBuilder {
+    pub fn get(&self, url: impl Into<String>) -> RequestBuilder<'_> {
         RequestBuilder {
             client: self,
             uri: url.into(),
@@ -64,7 +65,7 @@ impl Client {
     }
 
     /// Create a POST request builder.
-    pub fn post(&self, url: impl Into<String>) -> RequestBuilder {
+    pub fn post(&self, url: impl Into<String>) -> RequestBuilder<'_> {
         RequestBuilder {
             client: self,
             uri: url.into(),
@@ -76,7 +77,7 @@ impl Client {
     }
 
     /// Create a custom method request builder.
-    pub fn request(&self, method: Method, url: impl Into<String>) -> RequestBuilder {
+    pub fn request(&self, method: Method, url: impl Into<String>) -> RequestBuilder<'_> {
         RequestBuilder {
             client: self,
             uri: url.into(),

@@ -1,6 +1,6 @@
 //! HTTP/3 transport via quiche.
 
-use std::net::{ToSocketAddrs, SocketAddr};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tokio::net::UdpSocket;
@@ -49,10 +49,11 @@ impl H3Client {
 
         // Set application protocol to HTTP/3
         // APPLICATION_PROTOCOL is &[&[u8]], so we pass it directly
-        config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL);
+        config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+            .map_err(|e| Error::Quic(format!("Failed to set ALPN: {}", e)))?;
 
         // Configure QUIC parameters
-        config.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+        config.set_max_idle_timeout(self.max_idle_timeout);
         config.set_max_recv_udp_payload_size(65535);
         config.set_max_send_udp_payload_size(self.max_udp_payload_size);
         config.set_initial_max_data(INITIAL_MAX_DATA);
@@ -86,8 +87,8 @@ impl H3Client {
         let (host, port, path) = parse_url(url)?;
 
         // Resolve peer address
-        let peer_addr = format!("{}:{}", host, port)
-            .to_socket_addrs()
+        let peer_addr = tokio::net::lookup_host(format!("{}:{}", host, port))
+            .await
             .map_err(|e| Error::Connection(format!("Failed to resolve {}:{}: {}", host, port, e)))?
             .next()
             .ok_or_else(|| Error::Connection(format!("No address found for {}:{}", host, port)))?;

@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use chrono::{DateTime, TimeZone, Utc};
 use url::Url;
@@ -188,26 +188,35 @@ impl CookieJar {
         }
     }
 
-    pub fn save_to_file(&self, path: impl AsRef<Path>) -> Result<()> {
-        let mut file = std::fs::File::create(path)?;
-        writeln!(file, "# Netscape HTTP Cookie File")?;
+    pub async fn save_to_file(&self, path: impl AsRef<Path>) -> Result<()> {
+        let mut file = tokio::fs::File::create(path).await
+            .map_err(|e| Error::Io(e))?;
+        file.write_all(b"# Netscape HTTP Cookie File\n").await
+            .map_err(|e| Error::Io(e))?;
         for cookies in self.cookies.values() {
             for cookie in cookies.values() {
-                writeln!(file, "{}", cookie.to_netscape_line())?;
+                let line = format!("{}\n", cookie.to_netscape_line());
+                file.write_all(line.as_bytes()).await
+                    .map_err(|e| Error::Io(e))?;
             }
         }
         Ok(())
     }
 
-    pub fn load_from_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
-        let file = std::fs::File::open(path)?;
-        for line in BufReader::new(file).lines() {
-            let line = line?;
-            if !line.is_empty() && !line.starts_with('#') {
-                if let Ok(cookie) = Cookie::from_netscape_line(&line) {
+    pub async fn load_from_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let file = tokio::fs::File::open(path).await
+            .map_err(|e| Error::Io(e))?;
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        while reader.read_line(&mut line).await
+            .map_err(|e| Error::Io(e))? > 0 {
+            let trimmed = line.trim_end();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                if let Ok(cookie) = Cookie::from_netscape_line(trimmed) {
                     self.store(cookie);
                 }
             }
+            line.clear();
         }
         Ok(())
     }

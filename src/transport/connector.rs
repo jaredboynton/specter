@@ -31,7 +31,7 @@ impl BoringConnector {
         Self { tls_config: Some(fp) }
     }
     
-    fn configure_ssl(&self, domain: &str) -> Result<SslConnector, Error> {
+    fn configure_ssl(&self, _domain: &str) -> Result<SslConnector, Error> {
         let mut builder = SslConnector::builder(SslMethod::tls_client())
             .map_err(|e| Error::Tls(format!("Failed to create SSL connector: {}", e)))?;
         

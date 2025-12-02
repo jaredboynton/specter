@@ -102,6 +102,7 @@ impl PoolEntry {
 pub struct ConnectionPool {
     entries: Arc<RwLock<HashMap<PoolKey, PoolEntry>>>,
     max_idle_duration: Duration,
+    #[allow(dead_code)] // Reserved for future connection limiting per host
     max_connections_per_host: usize,
     default_max_streams: u32,
 }
