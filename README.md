@@ -1,17 +1,10 @@
 # Specter
 
-HTTP client with full TLS/HTTP2 fingerprint control.
+HTTP client that accurately replicates Chrome's TLS and HTTP/2 behavior, letting you automate browser workflows programmatically.
 
-## Features
+## What This Is
 
-- **HTTP/1.1, HTTP/2** - Full protocol support with automatic ALPN negotiation
-- **HTTP/3** - Experimental support via quiche (separate H3Client)
-- **TLS Fingerprinting** - Cipher suite, curves, and sigalgs control via BoringSSL
-- **HTTP/2 Fingerprinting** - SETTINGS frame configuration (structure in place)
-- **Explicit Control** - No automatic redirects, cookies, or headers
-- **Connection Pooling** - Pool types for HTTP/2 and HTTP/3 stream multiplexing
-
-## Installation
+Specter implements HTTP/1.1, HTTP/2, and HTTP/3 with the same protocol fingerprints as Chrome. It's written in Rust with a custom HTTP/2 implementation built from RFC 9113 (we don't use hyper or the h2 crate). TLS uses BoringSSL - Chrome's actual TLS library. When you make requests with Specter, fingerprinting systems see the same signatures they'd see from Chrome 142. Validated against ScrapFly, Browserleaks, and tls.peet.ws.
 
 ```toml
 [dependencies]
@@ -22,15 +15,11 @@ specter = "0.1"
 
 ```rust
 use specter::{Client, FingerprintProfile};
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), specter::Error> {
-    // HTTP/1.1 and HTTP/2 client
     let client = Client::builder()
-        .fingerprint(FingerprintProfile::Chrome131)
-        .timeout(Duration::from_secs(30))
-        .prefer_http2(true)
+        .fingerprint(FingerprintProfile::Chrome142)
         .build()?;
 
     let response = client.get("https://example.com")
@@ -44,43 +33,48 @@ async fn main() -> Result<(), specter::Error> {
 }
 ```
 
-### HTTP/3 (Experimental)
+Force a specific HTTP version if needed:
 
 ```rust
-use specter::H3Client;
+use specter::HttpVersion;
 
-let h3 = H3Client::new();
-let response = h3.send_request(
-    "https://cloudflare.com",
-    "GET",
-    vec![],
-    None,
-).await?;
+// HTTP/2 only
+client.get(url).version(HttpVersion::Http2).send().await?;
+
+// HTTP/3 with H1/H2 fallback
+client.get(url).version(HttpVersion::Http3).send().await?;
 ```
 
-## Current Limitations
+## Implementation
 
-**This crate is experimental and has significant limitations:**
+**HTTP/1.1** - Direct socket implementation, no hyper dependency.
 
-### Fingerprinting Accuracy
-- **Outdated Version**: Implements Chrome 131, but Chrome 142 is current (Dec 2025)
-- **Extension Randomization**: Chrome randomizes TLS extension order since v110, making static fingerprints detectable
-- **Partial Implementation**: Only cipher suites, curves, and signature algorithms are applied. TLS extensions are defined but not applied to connections.
-- **No JA4 Support**: Modern detection uses JA4 which handles extension randomization
+**HTTP/2** - Custom implementation because the h2 crate doesn't expose SETTINGS frame order, GREASE support, or connection preface timing. Fingerprinting systems check all of this. We implemented HTTP/2 from RFC 9113 with fluke-hpack for HPACK compression. This gives us:
+- Correct SETTINGS order: `1:65536;2:0;3:1000;4:6291456;5:16384;6:262144`
+- GREASE support (`0x0a0a:0` setting)
+- Chrome pseudo-header order (m,s,a,p)
+- WINDOW_UPDATE: 15663105 (Chrome's connection window)
+- All headers properly lowercased per RFC 7540/9113
 
-### Non-Functional Features  
-- **HTTP/3 TLS fingerprinting**: quiche doesn't expose BoringSSL configuration
-- **HTTP/2 SETTINGS fingerprinting**: hyper doesn't expose h2 settings configuration
-- **Connection pooling**: Types exist but are not integrated into clients
-- **Firefox/Safari profiles**: Removed (were returning empty configurations)
+**HTTP/3** - QUIC transport via quiche with TLS 1.3 fingerprinting.
 
-### Detection Risk
-Using this crate against modern anti-bot systems may result in WORSE detection rates than no fingerprinting, because it creates a unique signature (Chrome User-Agent + non-Chrome TLS fingerprint).
+**TLS** - BoringSSL configured with Chrome 142 cipher suites, curves, and signature algorithms. BoringSSL does its own extension randomization (which matches Chrome's behavior for TLS 1.3).
 
-### Recommended Use Cases
-- Learning about HTTP client implementation
-- Internal tools where fingerprinting isn't critical
-- Testing and development environments
+**Control** - Nothing happens automatically. You manage redirects, cookies, and headers explicitly.
+
+## Verified Against
+
+Tested against production fingerprinting services:
+- ScrapFly (tools.scrapfly.io) - matches Chrome fingerprint
+- Browserleaks (tls.browserleaks.com) - TLS fingerprint validation
+- tls.peet.ws - HTTP/2 Akamai fingerprint validation
+- Cloudflare - HTTP/3 support
+
+Run the validation example to test yourself:
+
+```bash
+cargo run --example fingerprint_validation
+```
 
 ## License
 
