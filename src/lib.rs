@@ -30,6 +30,7 @@ pub use fingerprint::FingerprintProfile;
 
 // Transport re-exports
 pub use transport::h1_h2::{Client, ClientBuilder, RequestBuilder};
+pub use transport::h2_native::{H2ClientBuilder, H2Connection, H2PooledConnection, PseudoHeaderOrder};
 pub use transport::h3::H3Client;
 
 // Pool re-exports  
