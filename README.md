@@ -60,10 +60,27 @@ let response = h3.send_request(
 
 ## Current Limitations
 
-- HTTP/3 TLS fingerprinting not yet supported (quiche doesn't expose BoringSSL config)
-- HTTP/2 SETTINGS fingerprinting requires lower-level h2 access
-- Connection pooling types exist but not yet integrated into clients
-- Only Chrome131 has full fingerprint implementation
+**This crate is experimental and has significant limitations:**
+
+### Fingerprinting Accuracy
+- **Outdated Version**: Implements Chrome 131, but Chrome 142 is current (Dec 2025)
+- **Extension Randomization**: Chrome randomizes TLS extension order since v110, making static fingerprints detectable
+- **Partial Implementation**: Only cipher suites, curves, and signature algorithms are applied. TLS extensions are defined but not applied to connections.
+- **No JA4 Support**: Modern detection uses JA4 which handles extension randomization
+
+### Non-Functional Features  
+- **HTTP/3 TLS fingerprinting**: quiche doesn't expose BoringSSL configuration
+- **HTTP/2 SETTINGS fingerprinting**: hyper doesn't expose h2 settings configuration
+- **Connection pooling**: Types exist but are not integrated into clients
+- **Firefox/Safari profiles**: Removed (were returning empty configurations)
+
+### Detection Risk
+Using this crate against modern anti-bot systems may result in WORSE detection rates than no fingerprinting, because it creates a unique signature (Chrome User-Agent + non-Chrome TLS fingerprint).
+
+### Recommended Use Cases
+- Learning about HTTP client implementation
+- Internal tools where fingerprinting isn't critical
+- Testing and development environments
 
 ## License
 

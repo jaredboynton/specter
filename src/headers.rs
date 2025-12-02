@@ -1,4 +1,8 @@
-//! Browser Header Presets - Chrome 131 Emulation
+//! Browser header presets for HTTP requests.
+//!
+//! WARNING: These headers are for Chrome 131 which is outdated.
+//! Chrome 142 is current as of December 2025. The Sec-Ch-Ua values
+//! and User-Agent strings should be updated for production use.
 
 use crate::cookie::CookieJar;
 
