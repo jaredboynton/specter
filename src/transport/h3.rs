@@ -1,4 +1,13 @@
 //! HTTP/3 transport via quiche.
+//!
+//! **STATUS: EXPERIMENTAL - NON-FUNCTIONAL**
+//!
+//! The HTTP/3 implementation has a blocking issue where send_request()
+//! succeeds but no response events are ever received from poll().
+//! QUIC handshake works correctly, but the HTTP/3 layer fails to
+//! exchange application data. Root cause under investigation.
+//!
+//! Use HTTP/2 (h2_native module) for production fingerprinting.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -47,13 +56,22 @@ impl H3Client {
         let mut config = if let Some(ref fp) = self.tls_fingerprint {
             // Use BoringSSL context builder for TLS fingerprinting
             use boring::ssl::{SslMethod, SslContextBuilder};
-            
+
             let mut ssl_ctx_builder = SslContextBuilder::new(SslMethod::tls_client())
                 .map_err(|e| Error::Tls(format!("Failed to create SSL context: {}", e)))?;
-            
-            // Apply cipher suites
-            if !fp.cipher_list.is_empty() {
-                let cipher_str = fp.cipher_list.join(":");
+
+            // NOTE: TLS 1.3 cipher suites (TLS_AES_128_GCM_SHA256 etc.) are NOT configurable
+            // via set_cipher_list() in BoringSSL. QUIC uses TLS 1.3 exclusively, and TLS 1.3
+            // ciphersuites are fixed by the protocol. Skip cipher configuration for HTTP/3.
+            // The cipher_list in TlsFingerprint is intended for TLS 1.2 connections only.
+
+            // Apply TLS 1.2 cipher suites only if they look like TLS 1.2 names (contain ECDHE/RSA/etc)
+            let tls12_ciphers: Vec<&str> = fp.cipher_list.iter()
+                .filter(|c| !c.starts_with("TLS_"))
+                .map(|s| s.as_ref())
+                .collect();
+            if !tls12_ciphers.is_empty() {
+                let cipher_str = tls12_ciphers.join(":");
                 ssl_ctx_builder.set_cipher_list(&cipher_str)
                     .map_err(|e| Error::Tls(format!("Failed to set cipher list: {}", e)))?;
             }
@@ -145,7 +163,11 @@ impl H3Client {
 
         loop {
             if handshake_start.elapsed() > handshake_timeout {
-                return Err(Error::Timeout("QUIC handshake timed out".into()));
+                let stats = conn.stats();
+                return Err(Error::Timeout(format!(
+                    "QUIC handshake timed out: sent={}, recv={}, lost={}, closed={}",
+                    stats.sent, stats.recv, stats.lost, conn.is_closed()
+                )));
             }
 
             // Flush egress packets
@@ -156,14 +178,22 @@ impl H3Client {
                 break;
             }
 
+            // Check if connection was closed (e.g., TLS error)
+            if conn.is_closed() {
+                let peer_err = conn.peer_error();
+                return Err(Error::Quic(format!(
+                    "QUIC connection closed during handshake: {:?}",
+                    peer_err
+                )));
+            }
+
             // Receive ingress packets with timeout
             let recv_timeout = Duration::from_millis(100);
             match timeout(recv_timeout, recv_ingress(&socket, &mut conn)).await {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => return Err(e),
                 Err(_) => {
-                    // Timeout - continue handshake loop
-                    continue;
+                    // Timeout - continue handshake loop (with delay below)
                 }
             }
 
@@ -174,7 +204,7 @@ impl H3Client {
         // Create HTTP/3 connection
         let h3_config = quiche::h3::Config::new()
             .map_err(|e| Error::Quic(format!("Failed to create HTTP/3 config: {}", e)))?;
-        
+
         let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)
             .map_err(|e| Error::Quic(format!("Failed to create HTTP/3 connection: {}", e)))?;
 
@@ -209,6 +239,9 @@ impl H3Client {
                 .map_err(|e| Error::Quic(format!("Failed to send HTTP/3 body: {}", e)))?;
         }
 
+        // Flush the request to the network
+        flush_egress(&mut conn, &socket, peer_addr).await?;
+
         // Poll for response
         let response_timeout = Duration::from_secs(30);
         let response_start = Instant::now();
@@ -223,47 +256,41 @@ impl H3Client {
                 return Err(Error::Timeout("HTTP/3 response timed out".into()));
             }
 
-            // Flush egress packets
-            flush_egress(&mut conn, &socket, peer_addr).await?;
+            // 1. RECEIVE: Get all available packets from network
+            loop {
+                match timeout(Duration::from_millis(1), recv_ingress(&socket, &mut conn)).await {
+                    Ok(Ok(_)) => {} // Keep receiving
+                    _ => break,     // No more packets or timeout
+                }
+            }
 
-            // Poll HTTP/3 events
+            // 2. POLL: Process received packets as HTTP/3 events
             loop {
                 match h3_conn.poll(&mut conn) {
                     Ok((id, quiche::h3::Event::Headers { list, .. })) => {
                         if id == stream_id {
-                            // Parse headers - Header implements the Header trait
                             for header in list {
-                                // Access header name and value via trait methods
                                 let name_bytes = header.name();
                                 let value_bytes = header.value();
                                 let name = String::from_utf8_lossy(name_bytes);
                                 let value = String::from_utf8_lossy(value_bytes);
-                                
-                                // Extract status code from :status pseudo-header
+
                                 if name == ":status" {
                                     status_code = value.parse().ok();
                                 }
-                                
+
                                 response_headers.push(format!("{}: {}", name, value));
                             }
                         }
                     }
                     Ok((id, quiche::h3::Event::Data)) => {
                         if id == stream_id {
-                            // Read response body
                             let mut buf = vec![0u8; 65535];
-                            match h3_conn.recv_body(&mut conn, stream_id, &mut buf) {
-                                Ok(amount) => {
-                                    if amount > 0 {
-                                        response_body.extend_from_slice(&buf[..amount]);
-                                    }
+                            while let Ok(amount) = h3_conn.recv_body(&mut conn, stream_id, &mut buf) {
+                                if amount == 0 {
+                                    break;
                                 }
-                                Err(quiche::h3::Error::Done) => {
-                                    // No more data available
-                                }
-                                Err(e) => {
-                                    return Err(Error::Quic(format!("Failed to read HTTP/3 body: {}", e)));
-                                }
+                                response_body.extend_from_slice(&buf[..amount]);
                             }
                         }
                     }
@@ -275,17 +302,11 @@ impl H3Client {
                     Ok((_, quiche::h3::Event::Reset { .. })) => {
                         return Err(Error::HttpProtocol("HTTP/3 stream reset".into()));
                     }
-                    Ok((_, quiche::h3::Event::PriorityUpdate { .. })) => {
-                        // Ignore priority update events
-                    }
+                    Ok((_, quiche::h3::Event::PriorityUpdate { .. })) => {}
                     Ok((_, quiche::h3::Event::GoAway { .. })) => {
-                        // Server sent GOAWAY, connection closing
                         return Err(Error::HttpProtocol("HTTP/3 GOAWAY received".into()));
                     }
-                    Err(quiche::h3::Error::Done) => {
-                        // No more events
-                        break;
-                    }
+                    Err(quiche::h3::Error::Done) => break,
                     Err(e) => {
                         return Err(Error::Quic(format!("HTTP/3 poll error: {}", e)));
                     }
@@ -297,18 +318,10 @@ impl H3Client {
                 break;
             }
 
-            // Receive ingress packets
-            let recv_timeout = Duration::from_millis(100);
-            match timeout(recv_timeout, recv_ingress(&socket, &mut conn)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => return Err(e),
-                Err(_) => {
-                    // Timeout - continue polling
-                    continue;
-                }
-            }
+            // 3. SEND: Flush any outgoing packets (ACKs, etc)
+            flush_egress(&mut conn, &socket, peer_addr).await?;
 
-            // Small delay to avoid busy loop
+            // Small delay before next iteration
             sleep(Duration::from_millis(10)).await;
         }
 
