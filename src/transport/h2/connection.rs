@@ -147,7 +147,7 @@ where
             .set(SettingsId::MaxHeaderListSize, settings.max_header_list_size);
 
         // Add GREASE setting (Chrome often sends 0x0a0a, 0x1a1a, etc.)
-        // This helps look like a real browser and not a naive bot.
+        // This helps look like a real browser and not a naive automation tool.
         settings_frame.set(0x0a0a_u16, 0);
 
         let settings_bytes = settings_frame.serialize();

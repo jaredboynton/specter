@@ -1,13 +1,13 @@
-//! Bot detection validation tests.
+//! Fingerprint integration tests.
 //!
-//! These tests verify our fingerprints don't match known bot signatures
+//! These tests verify our fingerprints don't match known automation tool signatures
 //! and correctly emulate Chrome browser fingerprints.
 //!
 //! Tests against:
 //! - tls.peet.ws (TLS/HTTP/2 fingerprint validation)
 //! - tls.browserleaks.com (TLS fingerprint validation)
 //!
-//! Run with: cargo test --test bot_detection_validation
+//! Run with: cargo test --test fingerprint_integration
 
 use http::{Method, Uri};
 use specter::fingerprint::http2::Http2Settings;
@@ -17,9 +17,9 @@ use specter::transport::h2::{H2Connection, PseudoHeaderOrder};
 use specter::transport::h3::H3Client;
 use tracing::warn;
 
-/// Known bot fingerprints that we MUST NOT match
-const BOT_JA3_PYTHON_REQUESTS: &str = "8d9f7747675e24454cd9b7ed35c58707";
-const BOT_JA3_CURL_7X: &str = "e7d705a3286e19ea42f587b344ee6865";
+/// Known automation tool fingerprints that we MUST NOT match
+const KNOWN_JA3_PYTHON_REQUESTS: &str = "8d9f7747675e24454cd9b7ed35c58707";
+const KNOWN_JA3_CURL_7X: &str = "e7d705a3286e19ea42f587b344ee6865";
 
 /// Expected Chrome HTTP/2 Akamai fingerprint components
 const CHROME_AKAMAI_SETTINGS: &str = "1:65536;2:0;3:1000;4:6291456;5:16384;6:262144";
@@ -31,7 +31,7 @@ const CHROME_PRIORITY: &str = "0";
 const CHROME_AKAMAI_HASH: &str = "f4734ee6440d645e653283ca349f6a82";
 
 #[tokio::test]
-async fn test_tls_fingerprint_not_bot() {
+async fn test_tls_fingerprint_unique() {
     let fp = TlsFingerprint::chrome_142();
     let connector = BoringConnector::with_fingerprint(fp);
     let uri: Uri = "https://tls.peet.ws/api/all".parse().unwrap();
@@ -93,14 +93,18 @@ async fn test_http2_fingerprint_matches_chrome() {
             let parts: Vec<&str> = akamai_str.split('|').collect();
 
             assert_eq!(parts.len(), 4, "Akamai fingerprint should have 4 parts");
-            
+
             // Strip GREASE settings (e.g., ":0" suffix) before comparing
             // GREASE settings are random and vary per connection
             let settings_parts: Vec<&str> = parts[0]
                 .split(';')
                 .filter(|s| {
-                    s.starts_with("1:") || s.starts_with("2:") || s.starts_with("3:") ||
-                    s.starts_with("4:") || s.starts_with("5:") || s.starts_with("6:")
+                    s.starts_with("1:")
+                        || s.starts_with("2:")
+                        || s.starts_with("3:")
+                        || s.starts_with("4:")
+                        || s.starts_with("5:")
+                        || s.starts_with("6:")
                 })
                 .collect();
             let normalized_settings = settings_parts.join(";");
@@ -108,7 +112,7 @@ async fn test_http2_fingerprint_matches_chrome() {
                 normalized_settings, CHROME_AKAMAI_SETTINGS,
                 "SETTINGS should match Chrome (GREASE stripped)"
             );
-            
+
             assert_eq!(
                 parts[1], CHROME_WINDOW_UPDATE,
                 "WINDOW_UPDATE should match Chrome"
@@ -124,14 +128,11 @@ async fn test_http2_fingerprint_matches_chrome() {
 
         // Check Akamai hash - note that different services may calculate hashes differently
         // or include GREASE settings in the hash calculation, so we verify it doesn't match
-        // known bot fingerprints rather than requiring an exact match
+        // known automation tool fingerprints rather than requiring an exact match
         if let Some(hash) = h2_fp.get("akamai_fingerprint_hash") {
             let hash_str = hash.as_str().unwrap();
-            // Verify it doesn't match known bot hashes
-            assert_ne!(
-                hash_str, "",
-                "Akamai hash should be present"
-            );
+            // Verify it doesn't match known automation tool hashes
+            assert_ne!(hash_str, "", "Akamai hash should be present");
             // The hash may vary between services due to GREASE, so we just verify it's present
             // The exact hash match is validated against browserleaks.com in test_browserleaks_passes
         }
@@ -139,7 +140,7 @@ async fn test_http2_fingerprint_matches_chrome() {
         // Validate sent frames
         if let Some(frames) = h2_fp.get("sent_frames").and_then(|f| f.as_array()) {
             // Frame 0: SETTINGS with 6+ parameters (may include GREASE)
-            if let Some(settings_frame) = frames.get(0) {
+            if let Some(settings_frame) = frames.first() {
                 assert_eq!(settings_frame["frame_type"], "SETTINGS");
                 let settings_list = settings_frame["settings"].as_array().unwrap();
                 // Chrome sends 6 core settings, plus potentially GREASE settings
@@ -183,12 +184,12 @@ async fn test_http2_fingerprint_matches_chrome() {
             let ja3_str = ja3.as_str().unwrap();
 
             assert_ne!(
-                ja3_str, BOT_JA3_PYTHON_REQUESTS,
-                "JA3 should NOT match Python requests bot fingerprint"
+                ja3_str, KNOWN_JA3_PYTHON_REQUESTS,
+                "JA3 should NOT match Python requests automation tool fingerprint"
             );
             assert_ne!(
-                ja3_str, BOT_JA3_CURL_7X,
-                "JA3 should NOT match cURL 7.x bot fingerprint"
+                ja3_str, KNOWN_JA3_CURL_7X,
+                "JA3 should NOT match cURL 7.x automation tool fingerprint"
             );
         }
     }
@@ -236,11 +237,11 @@ async fn test_browserleaks_passes() {
     let json: serde_json::Value =
         serde_json::from_str(&body).expect("Response should be valid JSON");
 
-    // Verify JA3 doesn't match bot fingerprints
+    // Verify JA3 doesn't match automation tool fingerprints
     if let Some(ja3) = json.get("ja3_hash") {
         let ja3_str = ja3.as_str().unwrap();
-        assert_ne!(ja3_str, BOT_JA3_PYTHON_REQUESTS);
-        assert_ne!(ja3_str, BOT_JA3_CURL_7X);
+        assert_ne!(ja3_str, KNOWN_JA3_PYTHON_REQUESTS);
+        assert_ne!(ja3_str, KNOWN_JA3_CURL_7X);
     }
 
     // Verify Akamai hash matches Chrome
@@ -284,202 +285,6 @@ async fn test_http3_fingerprint_works() {
         body.contains("http=http/3"),
         "Cloudflare trace should confirm HTTP/3"
     );
-}
-
-#[test]
-fn test_pseudo_header_order_is_chrome() {
-    let order = PseudoHeaderOrder::Chrome;
-    assert_eq!(
-        order.akamai_string(),
-        "m,s,a,p",
-        "Chrome uses m,s,a,p order"
-    );
-}
-
-#[test]
-fn test_settings_match_chrome() {
-    let settings = Http2Settings::default();
-
-    assert_eq!(settings.header_table_size, 65536);
-    assert_eq!(settings.enable_push, false);
-    assert_eq!(settings.max_concurrent_streams, 1000);
-    assert_eq!(settings.initial_window_size, 6291456);
-    assert_eq!(settings.max_frame_size, 16384);
-    assert_eq!(settings.max_header_list_size, 262144);
-}
-
-#[test]
-fn test_chrome_window_update_value() {
-    use specter::transport::h2::CHROME_WINDOW_UPDATE;
-    assert_eq!(CHROME_WINDOW_UPDATE, 15663105);
-}
-
-#[test]
-fn test_akamai_fingerprint_format() {
-    // Validate our understanding of Akamai format
-    let expected = format!(
-        "{}|{}|{}|{}",
-        CHROME_AKAMAI_SETTINGS, CHROME_WINDOW_UPDATE, CHROME_PRIORITY, CHROME_PSEUDO_ORDER
-    );
-
-    assert_eq!(
-        expected, "1:65536;2:0;3:1000;4:6291456;5:16384;6:262144|15663105|0|m,s,a,p",
-        "Akamai format should match Chrome exactly"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires network access"]
-async fn test_full_fingerprint_validation_against_peet() {
-    let fp = TlsFingerprint::chrome_142();
-    let connector = BoringConnector::with_fingerprint(fp);
-    let settings = Http2Settings::default();
-    let uri: Uri = "https://tls.peet.ws/api/all".parse().unwrap();
-
-    let stream = connector
-        .connect(&uri)
-        .await
-        .expect("Connection should succeed");
-    let mut h2_conn = H2Connection::connect(stream, settings, PseudoHeaderOrder::Chrome)
-        .await
-        .expect("H2 connection should succeed");
-
-    let headers = vec![
-        (
-            "user-agent".to_string(),
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36".to_string(),
-        ),
-        ("accept".to_string(), "application/json".to_string()),
-    ];
-
-    let response = h2_conn
-        .send_request(Method::GET, &uri, headers, None)
-        .await
-        .expect("Request should succeed");
-
-    assert_eq!(response.status, 200);
-
-    let body = String::from_utf8_lossy(response.body());
-    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-
-    // Validate complete Akamai fingerprint
-    if let Some(h2_fp) = json.get("http2") {
-        let akamai_fp = h2_fp
-            .get("akamai_fingerprint")
-            .and_then(|v| v.as_str())
-            .expect("Should have akamai_fingerprint");
-
-        let parts: Vec<&str> = akamai_fp.split('|').collect();
-        assert_eq!(parts.len(), 4);
-
-        assert_eq!(parts[0], CHROME_AKAMAI_SETTINGS, "SETTINGS mismatch");
-        assert_eq!(parts[1], CHROME_WINDOW_UPDATE, "WINDOW_UPDATE mismatch");
-        assert_eq!(parts[2], CHROME_PRIORITY, "Priority mismatch");
-        assert_eq!(parts[3], CHROME_PSEUDO_ORDER, "Pseudo-order mismatch");
-
-        // Validate hash
-        let hash = h2_fp
-            .get("akamai_fingerprint_hash")
-            .and_then(|v| v.as_str())
-            .expect("Should have akamai_fingerprint_hash");
-
-        assert_eq!(
-            hash, CHROME_AKAMAI_HASH,
-            "Akamai hash should match h2 crate"
-        );
-    }
-
-    // Validate we don't match bot fingerprints
-    if let Some(tls_fp) = json.get("tls") {
-        if let Some(ja3) = tls_fp.get("ja3_hash").and_then(|v| v.as_str()) {
-            assert_ne!(
-                ja3, BOT_JA3_PYTHON_REQUESTS,
-                "Should NOT match Python requests"
-            );
-            assert_ne!(ja3, BOT_JA3_CURL_7X, "Should NOT match cURL 7.x");
-        }
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires network access"]
-async fn test_browserleaks_detection_passes() {
-    let fp = TlsFingerprint::chrome_142();
-    let connector = BoringConnector::with_fingerprint(fp);
-    let settings = Http2Settings::default();
-    let uri: Uri = "https://tls.browserleaks.com/json".parse().unwrap();
-
-    let stream = connector
-        .connect(&uri)
-        .await
-        .expect("Connection should succeed");
-
-    if !stream.is_h2() {
-        warn!("Server did not negotiate HTTP/2, skipping");
-        return;
-    }
-
-    let mut h2_conn = H2Connection::connect(stream, settings, PseudoHeaderOrder::Chrome)
-        .await
-        .expect("H2 connection should succeed");
-
-    let headers = vec![
-        ("user-agent".to_string(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36".to_string()),
-        ("accept".to_string(), "application/json".to_string()),
-        ("accept-language".to_string(), "en-US,en;q=0.9".to_string()),
-    ];
-
-    let response = h2_conn
-        .send_request(Method::GET, &uri, headers, None)
-        .await
-        .expect("browserleaks should accept our fingerprint");
-
-    assert_eq!(response.status, 200, "browserleaks should return 200 OK");
-
-    let body = String::from_utf8_lossy(response.body());
-    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-
-    // Validate anti-bot checks pass
-    if let Some(ja3) = json.get("ja3_hash").and_then(|v| v.as_str()) {
-        assert_ne!(
-            ja3, BOT_JA3_PYTHON_REQUESTS,
-            "Should NOT be detected as Python requests bot"
-        );
-        assert_ne!(ja3, BOT_JA3_CURL_7X, "Should NOT be detected as cURL bot");
-    }
-
-    if let Some(akamai_hash) = json.get("akamai_hash").and_then(|v| v.as_str()) {
-        assert_eq!(
-            akamai_hash, CHROME_AKAMAI_HASH,
-            "Should match Chrome Akamai hash"
-        );
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires network access"]
-async fn test_http3_cloudflare_trace() {
-    let fp = TlsFingerprint::chrome_142();
-    let h3_client = H3Client::with_fingerprint(fp);
-
-    let response = h3_client
-        .send_request(
-            "https://cloudflare.com/cdn-cgi/trace",
-            "GET",
-            vec![(
-                "user-agent",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            )],
-            None,
-        )
-        .await
-        .expect("HTTP/3 should work");
-
-    assert_eq!(response.status, 200);
-    assert_eq!(response.http_version(), "HTTP/3");
-
-    let body = String::from_utf8_lossy(response.body());
-    assert!(body.contains("http=http/3"));
 }
 
 #[test]

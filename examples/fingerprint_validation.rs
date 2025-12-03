@@ -8,8 +8,8 @@
 //! - tools.scrapfly.io (JA3/JA3N/Akamai format)
 //!
 //! Reference fingerprints (curl_cffi benchmarks):
-//! - Python requests: 8d9f7747675e24454cd9b7ed35c58707 (detected as bot)
-//! - cURL 7.x: e7d705a3286e19ea42f587b344ee6865 (detected as bot)
+//! - Python requests: 8d9f7747675e24454cd9b7ed35c58707 (detectable)
+//! - cURL 7.x: e7d705a3286e19ea42f587b344ee6865 (detectable)
 //! - curl_cffi Chrome: 579ccef312d18482fc42e2b822ca2430 (passes detection)
 //!
 //! HTTP/2 Akamai format: settings|window_update|priority|pseudo_headers
@@ -25,11 +25,10 @@ use specter::transport::h3::H3Client;
 
 use http::{Method, Uri};
 use tracing::{error, info, warn};
-use tracing_subscriber;
 
-/// Known bot fingerprints to avoid
-const BOT_JA3_PYTHON_REQUESTS: &str = "8d9f7747675e24454cd9b7ed35c58707";
-const BOT_JA3_CURL_7X: &str = "e7d705a3286e19ea42f587b344ee6865";
+/// Known automation tool fingerprints (to avoid matching)
+const KNOWN_JA3_PYTHON_REQUESTS: &str = "8d9f7747675e24454cd9b7ed35c58707";
+const KNOWN_JA3_CURL_7X: &str = "e7d705a3286e19ea42f587b344ee6865";
 
 /// Expected Chrome 142 HTTP/2 Akamai format (core settings, GREASE excluded)
 const EXPECTED_AKAMAI_SETTINGS: &str = "1:65536;2:0;3:1000;4:6291456;5:16384;6:262144";
@@ -100,7 +99,10 @@ async fn test_tls_fingerprint() -> Result<()> {
 
     info!("      Configured TLS Fingerprint:");
     info!("      - Cipher suites: {} configured", fp.cipher_list.len());
-    info!("      - Signature algorithms: {} configured", fp.sigalgs.len());
+    info!(
+        "      - Signature algorithms: {} configured",
+        fp.sigalgs.len()
+    );
     info!("      - Curves: {:?}", fp.curves);
     info!("      - GREASE: {}", fp.grease);
 
@@ -127,7 +129,10 @@ async fn test_tls_fingerprint() -> Result<()> {
                     }
 
                     // Get TLS version
-                    info!("      [PASS] TLS Version: {:?}", ssl_stream.ssl().version_str());
+                    info!(
+                        "      [PASS] TLS Version: {:?}",
+                        ssl_stream.ssl().version_str()
+                    );
                 }
                 MaybeHttpsStream::Http(_) => {
                     warn!("      [WARN] Got plain HTTP instead of HTTPS");
@@ -153,7 +158,10 @@ async fn test_h2_fingerprint() -> Result<()> {
         "      - MAX_CONCURRENT_STREAMS: {}",
         settings.max_concurrent_streams
     );
-    info!("      - INITIAL_WINDOW_SIZE: {}", settings.initial_window_size);
+    info!(
+        "      - INITIAL_WINDOW_SIZE: {}",
+        settings.initial_window_size
+    );
     info!("      - MAX_FRAME_SIZE: {}", settings.max_frame_size);
     info!(
         "      - MAX_HEADER_LIST_SIZE: {}",
@@ -166,7 +174,10 @@ async fn test_h2_fingerprint() -> Result<()> {
         "      - HEADER_TABLE_SIZE: 65536 {}",
         check(settings.header_table_size == 65536)
     );
-    info!("      - ENABLE_PUSH: false {}", check(!settings.enable_push));
+    info!(
+        "      - ENABLE_PUSH: false {}",
+        check(!settings.enable_push)
+    );
     info!(
         "      - MAX_CONCURRENT_STREAMS: 1000 {}",
         check(settings.max_concurrent_streams == 1000)
@@ -186,10 +197,7 @@ async fn test_h2_fingerprint() -> Result<()> {
 
     // Expected Akamai format
     info!("      Expected Akamai HTTP/2 format:");
-    info!(
-        "      - SETTINGS: {} [REFERENCE]",
-        EXPECTED_AKAMAI_SETTINGS
-    );
+    info!("      - SETTINGS: {} [REFERENCE]", EXPECTED_AKAMAI_SETTINGS);
     info!(
         "      - WINDOW_UPDATE: {} [REFERENCE]",
         EXPECTED_WINDOW_UPDATE
@@ -332,7 +340,10 @@ async fn test_h3_fingerprint() -> Result<()> {
             if response.http_version() == "HTTP/3" {
                 info!("      [PASS] Confirmed HTTP/3 connection");
             } else {
-                warn!("      [WARN] Did not use HTTP/3: {}", response.http_version());
+                warn!(
+                    "      [WARN] Did not use HTTP/3: {}",
+                    response.http_version()
+                );
             }
         }
         Err(e) => {
@@ -448,7 +459,11 @@ async fn test_browserleaks() -> Result<()> {
                                 // Check for Chrome-like fingerprint
                                 if let Some(user_agent_match) = json.get("user_agent_match") {
                                     let ua_match = user_agent_match.as_bool().unwrap_or(false);
-                                    info!("      User-Agent Match: {} {}", ua_match, check(ua_match));
+                                    info!(
+                                        "      User-Agent Match: {} {}",
+                                        ua_match,
+                                        check(ua_match)
+                                    );
                                 }
                             } else {
                                 info!(
@@ -578,14 +593,14 @@ async fn test_scrapfly() -> Result<()> {
     Ok(())
 }
 
-/// Validate JA3 fingerprint against known bot signatures
+/// Validate JA3 fingerprint against known automation tools
 fn validate_ja3(ja3: &str) {
-    if ja3 == BOT_JA3_PYTHON_REQUESTS {
-        error!("      [FAIL] Matches Python requests bot fingerprint!");
-    } else if ja3 == BOT_JA3_CURL_7X {
-        error!("      [FAIL] Matches cURL 7.x bot fingerprint!");
+    if ja3 == KNOWN_JA3_PYTHON_REQUESTS {
+        error!("      [FAIL] Matches Python requests fingerprint (detectable)!");
+    } else if ja3 == KNOWN_JA3_CURL_7X {
+        error!("      [FAIL] Matches cURL 7.x fingerprint (detectable)!");
     } else {
-        info!("      [PASS] Does not match known bot fingerprints");
+        info!("      [PASS] Does not match known automation tools");
     }
 }
 
@@ -596,7 +611,7 @@ fn validate_akamai_fingerprint(akamai: &str) {
     let parts: Vec<&str> = akamai.split('|').collect();
     if parts.len() >= 4 {
         info!("      Akamai Validation:");
-        
+
         // Strip GREASE settings (random IDs like :0 or UNKNOWN_SETTING_2570)
         // GREASE IDs are in the range 0x0a0a, 0x1a1a, 0x2a2a, etc. (ending in 0x0a0a pattern)
         // For simplicity, we'll extract known settings and ignore unknown ones
@@ -605,21 +620,27 @@ fn validate_akamai_fingerprint(akamai: &str) {
             .split(';')
             .filter(|s| {
                 // Keep known settings (1-6) and ignore GREASE/unknown
-                s.starts_with("1:") || s.starts_with("2:") || s.starts_with("3:") || 
-                s.starts_with("4:") || s.starts_with("5:") || s.starts_with("6:")
+                s.starts_with("1:")
+                    || s.starts_with("2:")
+                    || s.starts_with("3:")
+                    || s.starts_with("4:")
+                    || s.starts_with("5:")
+                    || s.starts_with("6:")
             })
             .collect();
         let normalized_settings = core_settings.join(";");
-        
-        let has_grease = settings_str.contains(":0") || 
-                        settings_str.split(';').any(|s| {
-                            s.parse::<u16>().map(|id| id >= 0x0a0a && (id & 0x0f0f) == 0x0a0a).unwrap_or(false)
-                        });
-        
+
+        let has_grease = settings_str.contains(":0")
+            || settings_str.split(';').any(|s| {
+                s.parse::<u16>()
+                    .map(|id| id >= 0x0a0a && (id & 0x0f0f) == 0x0a0a)
+                    .unwrap_or(false)
+            });
+
         if has_grease {
             info!("      [INFO] GREASE settings detected (expected for Chrome anti-detection)");
         }
-        
+
         let settings_match = normalized_settings == EXPECTED_AKAMAI_SETTINGS;
         info!(
             "      - SETTINGS: {} {}",
@@ -630,7 +651,7 @@ fn validate_akamai_fingerprint(akamai: &str) {
                 "[INFO] Core settings present, may include additional Chrome settings"
             }
         );
-        
+
         let window_match = parts[1] == EXPECTED_WINDOW_UPDATE;
         info!(
             "      - WINDOW_UPDATE: {} {}",
@@ -641,10 +662,10 @@ fn validate_akamai_fingerprint(akamai: &str) {
                 "[INFO] Value differs (may vary by connection)"
             }
         );
-        
+
         // Priority (parts[2]) varies and is less critical
         info!("      - Priority: {} [INFO] Value may vary", parts[2]);
-        
+
         let pseudo_match = parts[3] == EXPECTED_PSEUDO_ORDER;
         info!(
             "      - Pseudo-header order: {} {}",
@@ -662,9 +683,9 @@ fn validate_akamai_fingerprint(akamai: &str) {
 fn print_fingerprint_summary() {
     info!("      Reference Fingerprints (for comparison):");
     info!("");
-    info!("      Known BOT fingerprints (should NOT match):");
-    info!("      - Python requests: {}", BOT_JA3_PYTHON_REQUESTS);
-    info!("      - cURL 7.x:        {}", BOT_JA3_CURL_7X);
+    info!("      Known automation tool fingerprints (should NOT match):");
+    info!("      - Python requests: {}", KNOWN_JA3_PYTHON_REQUESTS);
+    info!("      - cURL 7.x:        {}", KNOWN_JA3_CURL_7X);
     info!("");
     info!("      Expected HTTP/2 Akamai format (Chrome 142):");
     info!("      - SETTINGS:        {}", EXPECTED_AKAMAI_SETTINGS);
@@ -692,22 +713,25 @@ fn check(condition: bool) -> &'static str {
 fn print_validation_result(results: &[(&str, bool)]) {
     info!("=== Validation Summary ===");
     info!("");
-    
+
     let passed = results.iter().filter(|(_, result)| *result).count();
     let total = results.len();
-    
+
     for (name, result) in results {
         let status = if *result { "[PASS]" } else { "[FAIL]" };
         info!("  {} {}", status, name);
     }
-    
+
     info!("");
     if passed == total {
         info!("[PASS] {}/{} tests passed", passed, total);
-        info!("[INFO] Fingerprint does not match known bot signatures");
-        info!("[INFO] All anti-bot services returned success");
+        info!("[INFO] Fingerprint does not match known automation tools");
+        info!("[INFO] All fingerprint validation services returned success");
     } else {
-        warn!("[WARN] {}/{} tests passed - some validations failed", passed, total);
+        warn!(
+            "[WARN] {}/{} tests passed - some validations failed",
+            passed, total
+        );
     }
     info!("");
     info!("=== Validation Complete ===");

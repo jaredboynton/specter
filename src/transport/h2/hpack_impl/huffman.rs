@@ -1048,9 +1048,8 @@ mod tests {
     #[test]
     fn test_huffman_encode_if_smaller() {
         let short = b"a";
-        let (_, use_huff) = huffman_encode_if_smaller(short);
-        // Very short strings might not benefit
-        assert!(use_huff || !use_huff); // Either is fine
+        let (_, _use_huff) = huffman_encode_if_smaller(short);
+        // Very short strings might not benefit - just verify function doesn't panic
 
         let long = b"www.example.com";
         let (_, use_huff) = huffman_encode_if_smaller(long);

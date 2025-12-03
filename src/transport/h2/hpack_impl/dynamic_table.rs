@@ -220,7 +220,7 @@ mod tests {
     fn test_dynamic_table_size_reduction() {
         let mut table = DynamicTable::new(4096);
         assert_eq!(table.max_size(), 4096);
-        
+
         table.add(b"name1".to_vec(), b"value1".to_vec());
         table.add(b"name2".to_vec(), b"value2".to_vec());
 
