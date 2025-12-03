@@ -1,21 +1,36 @@
 repos:
   - repo: local
     hooks:
+      # Pre-commit: fast auto-formatting
       - id: cargo-fmt
         name: cargo fmt
-        entry: cargo fmt --
+        entry: cargo fmt
         language: system
         types: [rust]
         pass_filenames: false
+        stages: [pre-commit]
+
+      # Pre-push: full validation
+      - id: cargo-fmt-check
+        name: cargo fmt --check
+        entry: cargo fmt -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
       - id: cargo-clippy
         name: cargo clippy
         entry: cargo clippy --all-features --all-targets -- -D warnings -A dead_code
         language: system
         types: [rust]
         pass_filenames: false
+        stages: [pre-push]
+
       - id: cargo-test
         name: cargo test
         entry: cargo test --all-features
         language: system
         types: [rust]
         pass_filenames: false
+        stages: [pre-push]
