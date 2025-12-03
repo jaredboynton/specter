@@ -22,7 +22,7 @@ pub mod transport;
 pub mod pool;
 
 // Re-exports for convenient access
-pub use cookie::CookieJar;
+pub use cookie::{CookieJar, hash_cookie_value};
 pub use error::{Error, Result};
 pub use response::Response;
 pub use version::HttpVersion;

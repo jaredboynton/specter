@@ -303,10 +303,26 @@ impl Cookie {
     }
 
     pub fn value_hash(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let result = Sha256::digest(self.value.as_bytes());
-        result[..4].iter().map(|b| format!("{:02x}", b)).collect()
+        hash_cookie_value(&self.value)
     }
+}
+
+/// Hash a cookie value using SHA-256 (8-digit hex).
+///
+/// Uses first 4 bytes (8 hex characters) for a short hash.
+/// This is useful for tracking and debugging cookie values without storing the full value.
+///
+/// # Arguments
+///
+/// * `value` - Cookie value to hash
+///
+/// # Returns
+///
+/// 8-character hexadecimal hash string.
+pub fn hash_cookie_value(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let result = Sha256::digest(value.as_bytes());
+    result[..4].iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 impl fmt::Display for Cookie {
