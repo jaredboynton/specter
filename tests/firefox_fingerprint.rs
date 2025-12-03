@@ -5,7 +5,7 @@
 use specter::fingerprint::http2::Http2Settings;
 use specter::fingerprint::profiles::FingerprintProfile;
 use specter::fingerprint::tls::TlsFingerprint;
-use specter::headers::{firefox_133_headers, firefox_133_ajax_headers, firefox_133_form_headers};
+use specter::headers::{firefox_133_ajax_headers, firefox_133_form_headers, firefox_133_headers};
 
 #[test]
 fn test_firefox_tls_fingerprint_constants() {
@@ -48,7 +48,10 @@ fn test_firefox_http2_settings() {
     assert_eq!(settings.initial_window_update, 12517377); // vs Chrome's 15663105
 
     // Firefox only sends selective settings
-    assert!(!settings.send_all_settings, "Firefox should NOT send all 6 settings");
+    assert!(
+        !settings.send_all_settings,
+        "Firefox should NOT send all 6 settings"
+    );
 
     // Firefox sends PRIORITY frames
     assert!(settings.priority_tree.is_some());
@@ -117,16 +120,10 @@ fn test_firefox_http2_pseudo_header_order() {
     use specter::transport::h2::PseudoHeaderOrder;
 
     // Firefox uses m,p,a,s order
-    assert_eq!(
-        format!("{:?}", PseudoHeaderOrder::Firefox),
-        "Firefox"
-    );
+    assert_eq!(format!("{:?}", PseudoHeaderOrder::Firefox), "Firefox");
 
     // Verify this differs from Chrome
-    assert_ne!(
-        PseudoHeaderOrder::Chrome,
-        PseudoHeaderOrder::Firefox
-    );
+    assert_ne!(PseudoHeaderOrder::Chrome, PseudoHeaderOrder::Firefox);
 }
 
 #[test]

@@ -17,7 +17,9 @@
 //! Note: Chrome also sends GREASE settings (random IDs) which vary per connection
 
 use specter::error::Result;
-use specter::fingerprint::{http2::Http2Settings, profiles::FingerprintProfile, tls::TlsFingerprint};
+use specter::fingerprint::{
+    http2::Http2Settings, profiles::FingerprintProfile, tls::TlsFingerprint,
+};
 use specter::headers::OrderedHeaders;
 use specter::transport::connector::{BoringConnector, MaybeHttpsStream};
 use specter::transport::h2::{H2Connection, PseudoHeaderOrder};
@@ -424,7 +426,10 @@ async fn test_firefox_tls_fingerprint() -> Result<()> {
         fp.sigalgs.len()
     );
     info!("      - Curves: {:?}", fp.curves);
-    info!("      - GREASE: {} (Firefox does NOT use GREASE)", fp.grease);
+    info!(
+        "      - GREASE: {} (Firefox does NOT use GREASE)",
+        fp.grease
+    );
 
     // Create connector with fingerprint
     let connector = BoringConnector::with_fingerprint(fp);
@@ -473,9 +478,15 @@ async fn test_firefox_h2_fingerprint() -> Result<()> {
 
     info!("      Configured Firefox HTTP/2 SETTINGS:");
     info!("      - HEADER_TABLE_SIZE: {}", settings.header_table_size);
-    info!("      - INITIAL_WINDOW_SIZE: {}", settings.initial_window_size);
+    info!(
+        "      - INITIAL_WINDOW_SIZE: {}",
+        settings.initial_window_size
+    );
     info!("      - MAX_FRAME_SIZE: {}", settings.max_frame_size);
-    info!("      - send_all_settings: {} (Firefox only sends 3)", settings.send_all_settings);
+    info!(
+        "      - send_all_settings: {} (Firefox only sends 3)",
+        settings.send_all_settings
+    );
 
     // Expected Firefox values
     info!("      Expected Firefox 133 values:");
@@ -498,7 +509,10 @@ async fn test_firefox_h2_fingerprint() -> Result<()> {
 
     // Expected Akamai format
     info!("      Expected Firefox Akamai HTTP/2 format:");
-    info!("      - SETTINGS: {} [REFERENCE]", EXPECTED_FIREFOX_AKAMAI_SETTINGS);
+    info!(
+        "      - SETTINGS: {} [REFERENCE]",
+        EXPECTED_FIREFOX_AKAMAI_SETTINGS
+    );
     info!(
         "      - WINDOW_UPDATE: {} [REFERENCE]",
         EXPECTED_FIREFOX_WINDOW_UPDATE
@@ -525,7 +539,8 @@ async fn test_firefox_h2_fingerprint() -> Result<()> {
             }
 
             // Create H2 connection with Firefox settings and pseudo-header order
-            match H2Connection::connect(stream, settings.clone(), PseudoHeaderOrder::Firefox).await {
+            match H2Connection::connect(stream, settings.clone(), PseudoHeaderOrder::Firefox).await
+            {
                 Ok(mut h2_conn) => {
                     info!("      [PASS] HTTP/2 connection established with Firefox SETTINGS");
 
@@ -589,7 +604,10 @@ fn test_header_order() -> Result<()> {
     info!("      [PASS] Firefox headers ordered correctly");
 
     // Verify headers are different (different User-Agent, no Client Hints in Firefox)
-    assert_ne!(chrome_ja4h, firefox_ja4h, "Chrome and Firefox should have different JA4H");
+    assert_ne!(
+        chrome_ja4h, firefox_ja4h,
+        "Chrome and Firefox should have different JA4H"
+    );
     info!("      [PASS] Chrome and Firefox have distinct JA4H fingerprints");
 
     Ok(())
@@ -956,8 +974,14 @@ fn print_fingerprint_summary() {
     info!("      - Pseudo order:    {}", EXPECTED_PSEUDO_ORDER);
     info!("");
     info!("      Expected HTTP/2 Akamai format (Firefox 133):");
-    info!("      - SETTINGS:        {} (only 3 settings)", EXPECTED_FIREFOX_AKAMAI_SETTINGS);
-    info!("      - WINDOW_UPDATE:   {}", EXPECTED_FIREFOX_WINDOW_UPDATE);
+    info!(
+        "      - SETTINGS:        {} (only 3 settings)",
+        EXPECTED_FIREFOX_AKAMAI_SETTINGS
+    );
+    info!(
+        "      - WINDOW_UPDATE:   {}",
+        EXPECTED_FIREFOX_WINDOW_UPDATE
+    );
     info!("      - Pseudo order:    {}", EXPECTED_FIREFOX_PSEUDO_ORDER);
     info!("");
     info!("      HTTP/2 SETTINGS breakdown (Chrome):");

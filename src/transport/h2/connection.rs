@@ -131,7 +131,7 @@ where
     ) -> Result<Self> {
         // Build SETTINGS frame with fingerprint-specific settings
         let mut settings_frame = SettingsFrame::new();
-        
+
         if settings.send_all_settings {
             // Chrome sends ALL 6 settings
             settings_frame
@@ -174,7 +174,8 @@ where
         // Send PRIORITY frames if configured (Chrome/Firefox fingerprint)
         if let Some(ref priority_tree) = settings.priority_tree {
             for (stream_id, depends_on, weight, exclusive) in &priority_tree.priorities {
-                let priority_frame = PriorityFrame::new(*stream_id, *depends_on, *weight, *exclusive);
+                let priority_frame =
+                    PriorityFrame::new(*stream_id, *depends_on, *weight, *exclusive);
                 handshake_buf.extend_from_slice(&priority_frame.serialize());
             }
         }
@@ -1667,23 +1668,23 @@ where
     pub async fn send_ping(&mut self) -> Result<[u8; 8]> {
         use crate::transport::h2::frame::PingFrame;
         use getrandom::fill as getrandom_fill;
-        
+
         // Generate random 8-byte ping data
         let mut ping_data = [0u8; 8];
         getrandom_fill(&mut ping_data)
             .map_err(|e| Error::HttpProtocol(format!("Failed to generate ping data: {}", e)))?;
-        
+
         let ping_frame = PingFrame::new(ping_data);
         self.stream
             .write_all(&ping_frame.serialize())
             .await
             .map_err(|e| Error::HttpProtocol(format!("Failed to send PING: {}", e)))?;
-        
+
         self.stream
             .flush()
             .await
             .map_err(|e| Error::HttpProtocol(format!("Failed to flush PING: {}", e)))?;
-        
+
         Ok(ping_data)
     }
 

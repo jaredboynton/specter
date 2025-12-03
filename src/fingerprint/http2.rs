@@ -28,9 +28,9 @@ impl PriorityTree {
     pub fn chrome() -> Self {
         Self {
             priorities: vec![
-                (3, 0, 201, false),  // High priority resource
-                (5, 0, 101, false),  // Medium priority resource
-                (7, 0, 1, false),    // Low priority resource
+                (3, 0, 201, false), // High priority resource
+                (5, 0, 101, false), // Medium priority resource
+                (7, 0, 1, false),   // Low priority resource
                 (9, 7, 1, false),   // Depends on stream 7
                 (11, 3, 1, false),  // Depends on stream 3
             ],
@@ -50,11 +50,7 @@ impl PriorityTree {
         // Firefox typically sends fewer PRIORITY frames than Chrome
         // and uses different dependency patterns
         Self {
-            priorities: vec![
-                (3, 0, 201, false),
-                (5, 0, 101, false),
-                (7, 0, 1, false),
-            ],
+            priorities: vec![(3, 0, 201, false), (5, 0, 101, false), (7, 0, 1, false)],
         }
     }
 
@@ -106,7 +102,7 @@ impl Default for Http2Settings {
             max_frame_size: 16384,
             max_header_list_size: 262144,
             initial_window_update: 15663105, // Chrome's 15MB window update
-            send_all_settings: true, // Chrome sends all 6 settings
+            send_all_settings: true,         // Chrome sends all 6 settings
             priority_tree: Some(PriorityTree::chrome()), // Chrome sends PRIORITY frames
             ping_interval: Some(Duration::from_secs(45)), // Chrome sends PING ~every 45s
             handshake_timeout: Some(Duration::from_secs(10)),

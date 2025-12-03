@@ -169,6 +169,26 @@ Local/CI checks:
 - `cargo run --example protocol_test -- --verbose` walks through HTTP/1.1 preference, HTTP/2 pooling, HTTP/3 only, and connection header filtering. Pass `--target example.com` to test a custom origin.
 - `cargo clippy -p specter -- -D warnings` stays clean to make CI fail-fast on regressions.
 
+## Development
+
+### Pre-commit Hooks
+
+This project uses [pre-commit](https://pre-commit.com/) to automatically format code and run clippy before commits. Install it once:
+
+```bash
+# Install pre-commit (if not installed)
+brew install pre-commit  # or: pip install pre-commit
+
+# Install hooks in this repo
+pre-commit install
+```
+
+After installation, `cargo fmt` and `cargo clippy` will run automatically on each commit. To run manually:
+
+```bash
+pre-commit run --all-files
+```
+
 ## Versioning & Stability
 
 - The crate follows SemVer. While we are `<1.0`, minor releases (`0.x`) may still tweak the public API as we harden the fingerprinting surface.

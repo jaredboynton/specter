@@ -13,10 +13,10 @@ fn test_priority_tree_chrome() {
     assert_eq!(tree.priorities.len(), 5);
 
     // Verify Chrome priority pattern
-    assert_eq!(tree.priorities[0], (3, 0, 201, false));  // High priority
-    assert_eq!(tree.priorities[1], (5, 0, 101, false));  // Medium priority
-    assert_eq!(tree.priorities[2], (7, 0, 1, false));    // Low priority
-    assert_eq!(tree.priorities[3], (9, 7, 1, false));   // Depends on stream 7
+    assert_eq!(tree.priorities[0], (3, 0, 201, false)); // High priority
+    assert_eq!(tree.priorities[1], (5, 0, 101, false)); // Medium priority
+    assert_eq!(tree.priorities[2], (7, 0, 1, false)); // Low priority
+    assert_eq!(tree.priorities[3], (9, 7, 1, false)); // Depends on stream 7
     assert_eq!(tree.priorities[4], (11, 3, 1, false)); // Depends on stream 3
 
     // Verify weights are valid (1-256, stored as 0-255 in u8)
@@ -54,11 +54,15 @@ fn test_priority_frame_serialization() {
     let bytes = frame.serialize();
 
     // PRIORITY frame: 9-byte header + 5-byte payload
-    assert_eq!(bytes.len(), FRAME_HEADER_SIZE + 5, "PRIORITY frame should be 14 bytes");
+    assert_eq!(
+        bytes.len(),
+        FRAME_HEADER_SIZE + 5,
+        "PRIORITY frame should be 14 bytes"
+    );
 
     // Parse frame header
-    let header = FrameHeader::parse(&bytes[..FRAME_HEADER_SIZE])
-        .expect("Should parse frame header");
+    let header =
+        FrameHeader::parse(&bytes[..FRAME_HEADER_SIZE]).expect("Should parse frame header");
 
     assert_eq!(header.frame_type, FrameType::Priority);
     assert_eq!(header.length, 5, "PRIORITY payload should be 5 bytes");
@@ -66,18 +70,13 @@ fn test_priority_frame_serialization() {
 
     // Parse payload (RFC 9113 Section 6.3.2)
     let payload = &bytes[FRAME_HEADER_SIZE..];
-    
+
     // First 4 bytes: stream dependency (31 bits) + exclusive flag (1 bit)
-    let dep_and_exclusive = u32::from_be_bytes([
-        payload[0],
-        payload[1],
-        payload[2],
-        payload[3],
-    ]);
-    
+    let dep_and_exclusive = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+
     let exclusive = (dep_and_exclusive & 0x80000000) != 0;
     let stream_dependency = dep_and_exclusive & 0x7FFFFFFF;
-    
+
     assert!(!exclusive, "Chrome stream 3 should not be exclusive");
     assert_eq!(stream_dependency, 0, "Stream 3 depends on root (0)");
 
@@ -95,12 +94,7 @@ fn test_priority_frame_with_dependency() {
     let bytes = frame.serialize();
 
     let payload = &bytes[FRAME_HEADER_SIZE..];
-    let dep_and_exclusive = u32::from_be_bytes([
-        payload[0],
-        payload[1],
-        payload[2],
-        payload[3],
-    ]);
+    let dep_and_exclusive = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
 
     let exclusive = (dep_and_exclusive & 0x80000000) != 0;
     let stream_dependency = dep_and_exclusive & 0x7FFFFFFF;
@@ -119,12 +113,7 @@ fn test_priority_frame_exclusive() {
     let bytes = frame.serialize();
 
     let payload = &bytes[FRAME_HEADER_SIZE..];
-    let dep_and_exclusive = u32::from_be_bytes([
-        payload[0],
-        payload[1],
-        payload[2],
-        payload[3],
-    ]);
+    let dep_and_exclusive = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
 
     let exclusive = (dep_and_exclusive & 0x80000000) != 0;
     let stream_dependency = dep_and_exclusive & 0x7FFFFFFF;
@@ -159,11 +148,14 @@ fn test_priority_akamai_format() {
     let mut akamai_parts = Vec::new();
     for (stream_id, depends_on, weight, exclusive) in &chrome_tree.priorities {
         let exclusive_val = if *exclusive { 1 } else { 0 };
-        akamai_parts.push(format!("{}:{}:{}:{}", stream_id, exclusive_val, depends_on, weight));
+        akamai_parts.push(format!(
+            "{}:{}:{}:{}",
+            stream_id, exclusive_val, depends_on, weight
+        ));
     }
 
     let akamai_str = akamai_parts.join(",");
-    
+
     // Verify format matches expected Chrome pattern
     assert!(akamai_str.contains("3:0:0:201"));
     assert!(akamai_str.contains("5:0:0:101"));

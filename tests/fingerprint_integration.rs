@@ -183,9 +183,9 @@ async fn test_http2_fingerprint_matches_chrome() {
             // HEADERS frame with correct pseudo-order
             // Note: With PRIORITY frames, HEADERS is no longer at index 3
             // Find the HEADERS frame dynamically
-            let headers_frame = frames.iter().find(|f| 
-                f.get("frame_type").and_then(|v| v.as_str()) == Some("HEADERS")
-            );
+            let headers_frame = frames
+                .iter()
+                .find(|f| f.get("frame_type").and_then(|v| v.as_str()) == Some("HEADERS"));
             if let Some(headers_frame) = headers_frame {
                 let headers = headers_frame["headers"].as_array().unwrap();
 
@@ -396,7 +396,8 @@ async fn test_firefox_http2_fingerprint_matches() {
     let headers = vec![
         (
             "user-agent".to_string(),
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0".to_string(),
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"
+                .to_string(),
         ),
         ("accept".to_string(), "application/json".to_string()),
     ];
@@ -425,9 +426,7 @@ async fn test_firefox_http2_fingerprint_matches() {
             // Firefox only sends 3 settings (1, 4, 5)
             let settings_parts: Vec<&str> = parts[0]
                 .split(';')
-                .filter(|s| {
-                    s.starts_with("1:") || s.starts_with("4:") || s.starts_with("5:")
-                })
+                .filter(|s| s.starts_with("1:") || s.starts_with("4:") || s.starts_with("5:"))
                 .collect();
             let normalized_settings = settings_parts.join(";");
             assert_eq!(
@@ -453,10 +452,11 @@ async fn test_firefox_http2_fingerprint_matches() {
             if let Some(settings_frame) = frames.first() {
                 assert_eq!(settings_frame["frame_type"], "SETTINGS");
                 let settings_list = settings_frame["settings"].as_array().unwrap();
-                
+
                 // Firefox sends exactly 3 settings (no GREASE)
                 assert_eq!(
-                    settings_list.len(), 3,
+                    settings_list.len(),
+                    3,
                     "Firefox should send exactly 3 SETTINGS parameters"
                 );
 
@@ -474,9 +474,9 @@ async fn test_firefox_http2_fingerprint_matches() {
 
             // HEADERS frame with Firefox pseudo-order (m,p,a,s)
             // Note: With PRIORITY frames, HEADERS is no longer at index 3
-            let headers_frame = frames.iter().find(|f| 
-                f.get("frame_type").and_then(|v| v.as_str()) == Some("HEADERS")
-            );
+            let headers_frame = frames
+                .iter()
+                .find(|f| f.get("frame_type").and_then(|v| v.as_str()) == Some("HEADERS"));
             if let Some(headers_frame) = headers_frame {
                 let headers = headers_frame["headers"].as_array().unwrap();
 
@@ -528,7 +528,11 @@ async fn test_firefox_browserleaks_passes() {
         .expect("HTTP/2 connection should succeed");
 
     let headers = vec![
-        ("user-agent".to_string(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0".to_string()),
+        (
+            "user-agent".to_string(),
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"
+                .to_string(),
+        ),
         ("accept".to_string(), "application/json".to_string()),
         ("accept-language".to_string(), "en-US,en;q=0.5".to_string()),
     ];
@@ -604,10 +608,10 @@ async fn test_priority_frames_in_akamai() {
             let parts: Vec<&str> = akamai_str.split('|').collect();
 
             assert_eq!(parts.len(), 4, "Akamai fingerprint should have 4 parts");
-            
+
             // Part 2 is PRIORITY (format: stream:exclusive:dependency:weight)
             let priority_str = parts[2];
-            
+
             // Chrome sends PRIORITY frames, so this should not be empty
             // Format may be "0" if no priority frames detected, or comma-separated list
             // The exact format depends on how tls.peet.ws detects and reports PRIORITY frames

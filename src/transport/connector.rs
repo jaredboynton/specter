@@ -105,7 +105,7 @@ impl BoringConnector {
                     SSL_CTX_set_permute_extensions(ctx, 1);
                 }
             }
-            
+
             // Note: extension_order field in TlsFingerprint is for reference only.
             // Modern browsers (Chrome 110+, Firefox 133+) randomize extension order,
             // so we cannot set a static order. The extension_order field is used for
@@ -255,55 +255,61 @@ impl BoringConnector {
             });
 
         let addr = format!("{}:{}", host, port);
-        
+
         // Configure TCP socket options if fingerprint is provided
         let tcp_stream = if let Some(ref tcp_fp) = self.tcp_fingerprint {
             // Create socket2 socket, configure it, then connect and convert to tokio TcpStream
             use socket2::{Domain, Socket, Type};
             use std::net::SocketAddr;
-            use tokio::task;
             use tokio::net::lookup_host;
-            
+            use tokio::task;
+
             // Resolve hostname to IP address (tokio handles async DNS resolution)
             let socket_addr: SocketAddr = lookup_host(&addr)
                 .await
-                .map_err(|e| Error::Connection(format!("DNS resolution failed for {}: {}", addr, e)))?
+                .map_err(|e| {
+                    Error::Connection(format!("DNS resolution failed for {}: {}", addr, e))
+                })?
                 .next()
                 .ok_or_else(|| Error::Connection(format!("No addresses found for {}", addr)))?;
-            
+
             let domain = match socket_addr {
                 SocketAddr::V4(_) => Domain::IPV4,
                 SocketAddr::V6(_) => Domain::IPV6,
             };
-            
+
             // Perform blocking socket operations in a blocking task
             let tcp_fp_clone = tcp_fp.clone();
             let socket_addr_copy = socket_addr;
             let std_stream = task::spawn_blocking(move || -> Result<std::net::TcpStream, Error> {
                 let socket = Socket::new(domain, Type::STREAM, Some(socket2::Protocol::TCP))
                     .map_err(|e| Error::Connection(format!("Failed to create socket: {}", e)))?;
-                
+
                 // Configure TCP fingerprint options
-                configure_tcp_socket(&socket, &tcp_fp_clone)
-                    .map_err(|e| Error::Connection(format!("Failed to configure TCP socket: {}", e)))?;
-                
+                configure_tcp_socket(&socket, &tcp_fp_clone).map_err(|e| {
+                    Error::Connection(format!("Failed to configure TCP socket: {}", e))
+                })?;
+
                 // Connect synchronously (socket2 handles this)
-                socket.connect(&socket_addr_copy.into())
+                socket
+                    .connect(&socket_addr_copy.into())
                     .map_err(|e| Error::Connection(format!("Failed to connect: {}", e)))?;
-                
+
                 // Set to non-blocking mode for tokio compatibility (required by tokio 1.48+)
-                socket.set_nonblocking(true)
+                socket
+                    .set_nonblocking(true)
                     .map_err(|e| Error::Connection(format!("Failed to set non-blocking: {}", e)))?;
-                
+
                 // Convert to std::net::TcpStream
                 Ok(socket.into())
             })
             .await
             .map_err(|e| Error::Connection(format!("Blocking task failed: {}", e)))??;
-            
+
             // Convert to tokio TcpStream (socket is already non-blocking)
-            TcpStream::from_std(std_stream)
-                .map_err(|e| Error::Connection(format!("Failed to convert to tokio stream: {}", e)))?
+            TcpStream::from_std(std_stream).map_err(|e| {
+                Error::Connection(format!("Failed to convert to tokio stream: {}", e))
+            })?
         } else {
             // Default connection without TCP fingerprinting
             TcpStream::connect(&addr)

@@ -32,10 +32,7 @@ fn test_ja4h_fingerprint_deterministic() {
     let ordered2 = OrderedHeaders::new(headers);
 
     // Same headers should produce same JA4H
-    assert_eq!(
-        ordered1.ja4h_fingerprint(),
-        ordered2.ja4h_fingerprint()
-    );
+    assert_eq!(ordered1.ja4h_fingerprint(), ordered2.ja4h_fingerprint());
 }
 
 #[test]
@@ -50,7 +47,7 @@ fn test_ja4h_fingerprint_format() {
 
     // JA4H format: header_names|hash
     assert!(ja4h.contains('|'), "JA4H should contain separator");
-    
+
     let parts: Vec<&str> = ja4h.split('|').collect();
     assert_eq!(parts.len(), 2, "JA4H should have 2 parts");
 
@@ -58,12 +55,19 @@ fn test_ja4h_fingerprint_format() {
     let names = parts[0];
     assert!(names.contains("user-agent"));
     assert!(names.contains("accept"));
-    assert_eq!(names, names.to_lowercase(), "Header names should be lowercase");
+    assert_eq!(
+        names,
+        names.to_lowercase(),
+        "Header names should be lowercase"
+    );
 
     // Second part: hash (6 hex characters)
     let hash = parts[1];
     assert_eq!(hash.len(), 6, "Hash should be 6 hex characters");
-    assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+    assert!(
+        hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "Hash should be hex"
+    );
 }
 
 #[test]
@@ -152,7 +156,7 @@ fn test_ordered_headers_add_preserves_order() {
 #[test]
 fn test_ordered_headers_conversion() {
     let chrome_ordered = OrderedHeaders::chrome_navigation();
-    
+
     // Convert to Vec
     let vec: Vec<(String, String)> = chrome_ordered.clone().into();
     assert!(!vec.is_empty());
@@ -186,5 +190,8 @@ fn test_ja4h_order_sensitive() {
     let names1 = ja4h1.split('|').next().unwrap();
     let names2 = ja4h2.split('|').next().unwrap();
 
-    assert_ne!(names1, names2, "Different order should produce different header names string");
+    assert_ne!(
+        names1, names2,
+        "Different order should produce different header names string"
+    );
 }

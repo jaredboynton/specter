@@ -147,27 +147,25 @@ impl OrderedHeaders {
     /// - header_order_hash: hash of header order
     pub fn ja4h_fingerprint(&self) -> String {
         use sha2::{Digest, Sha256};
-        
+
         // Extract header names (lowercase) in order
-        let header_names: Vec<String> = self.headers
+        let header_names: Vec<String> = self
+            .headers
             .iter()
             .map(|(name, _)| name.to_lowercase())
             .collect();
-        
+
         // Create header names string
         let names_str = header_names.join(",");
-        
+
         // Calculate hash of header order (using names for simplicity)
         let mut hasher = Sha256::new();
         hasher.update(names_str.as_bytes());
         let hash = hasher.finalize();
-        
+
         // Use first 12 hex characters (24 bits) for fingerprint
-        let hash_str: String = hash[..3]
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
-        
+        let hash_str: String = hash[..3].iter().map(|b| format!("{:02x}", b)).collect();
+
         format!("{}|{}", names_str, hash_str)
     }
 
@@ -199,8 +197,14 @@ impl From<OrderedHeaders> for Vec<(String, String)> {
 /// Firefox does NOT send Sec-Ch-Ua headers (Client Hints).
 pub fn firefox_133_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.5"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Sec-Fetch-Dest", "document"),
@@ -215,7 +219,10 @@ pub fn firefox_133_headers() -> Vec<(&'static str, &'static str)> {
 /// Firefox 133 headers for AJAX/API requests.
 pub fn firefox_133_ajax_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
+        ),
         ("Accept", "application/json, text/plain, */*"),
         ("Accept-Language", "en-US,en;q=0.5"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
@@ -230,8 +237,14 @@ pub fn firefox_133_ajax_headers() -> Vec<(&'static str, &'static str)> {
 /// Firefox 133 headers for form submissions.
 pub fn firefox_133_form_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.5"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Content-Type", "application/x-www-form-urlencoded"),

@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match connector.connect(&uri).await {
         Ok(stream) => {
             info!("[SUCCESS] Connection established with TCP fingerprint");
-            
+
             // Verify connection properties
             if let specter::transport::connector::MaybeHttpsStream::Https(ssl_stream) = &stream {
                 info!("  - TLS Version: {:?}", ssl_stream.ssl().version_str());
@@ -91,7 +91,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     info!("Custom TCP Fingerprint:");
-    info!("  - Window Size: {} bytes (custom)", custom_tcp_fp.window_size);
+    info!(
+        "  - Window Size: {} bytes (custom)",
+        custom_tcp_fp.window_size
+    );
     info!("  - Window Scale: {} (custom)", custom_tcp_fp.window_scale);
     info!("");
 

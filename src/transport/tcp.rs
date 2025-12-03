@@ -40,7 +40,7 @@ impl Default for TcpFingerprint {
         // Chrome defaults on macOS
         Self {
             window_size: 65535,
-            ttl: 64, // macOS default
+            ttl: 64,   // macOS default
             mss: 1460, // Ethernet MTU - headers
             window_scale: 6,
             sack_permitted: true,
@@ -66,10 +66,7 @@ impl TcpFingerprint {
 ///
 /// Uses socket2 crate for cross-platform socket options.
 /// Note: Some options may not be available on all platforms.
-pub fn configure_tcp_socket(
-    socket: &socket2::Socket,
-    fp: &TcpFingerprint,
-) -> io::Result<()> {
+pub fn configure_tcp_socket(socket: &socket2::Socket, fp: &TcpFingerprint) -> io::Result<()> {
     // Set receive buffer size (influences window size)
     socket.set_recv_buffer_size(fp.window_size as usize)?;
 
