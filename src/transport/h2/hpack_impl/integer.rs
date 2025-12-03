@@ -110,7 +110,6 @@ pub fn decode_integer(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +172,4 @@ mod tests {
         assert_eq!(buf[1], 0x9A); // 154 = 26 + 128
         assert_eq!(buf[2], 0x0A); // 10
     }
-
 }
