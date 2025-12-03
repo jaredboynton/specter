@@ -129,37 +129,55 @@ where
         settings: Http2Settings,
         pseudo_order: PseudoHeaderOrder,
     ) -> Result<Self> {
-        // Build SETTINGS frame with Chrome fingerprint
-        // CRITICAL: Chrome sends ALL 6 settings. Do NOT remove any.
+        // Build SETTINGS frame with fingerprint-specific settings
         let mut settings_frame = SettingsFrame::new();
-        settings_frame
-            .set(SettingsId::HeaderTableSize, settings.header_table_size)
-            .set(
-                SettingsId::EnablePush,
-                if settings.enable_push { 1 } else { 0 },
-            )
-            .set(
-                SettingsId::MaxConcurrentStreams,
-                settings.max_concurrent_streams,
-            )
-            .set(SettingsId::InitialWindowSize, settings.initial_window_size)
-            .set(SettingsId::MaxFrameSize, settings.max_frame_size)
-            .set(SettingsId::MaxHeaderListSize, settings.max_header_list_size);
+        
+        if settings.send_all_settings {
+            // Chrome sends ALL 6 settings
+            settings_frame
+                .set(SettingsId::HeaderTableSize, settings.header_table_size)
+                .set(
+                    SettingsId::EnablePush,
+                    if settings.enable_push { 1 } else { 0 },
+                )
+                .set(
+                    SettingsId::MaxConcurrentStreams,
+                    settings.max_concurrent_streams,
+                )
+                .set(SettingsId::InitialWindowSize, settings.initial_window_size)
+                .set(SettingsId::MaxFrameSize, settings.max_frame_size)
+                .set(SettingsId::MaxHeaderListSize, settings.max_header_list_size);
 
-        // Add GREASE setting (Chrome often sends 0x0a0a, 0x1a1a, etc.)
-        // This helps look like a real browser and not a naive automation tool.
-        settings_frame.set(0x0a0a_u16, 0);
+            // Add GREASE setting (Chrome often sends 0x0a0a, 0x1a1a, etc.)
+            // This helps look like a real browser and not a naive automation tool.
+            settings_frame.set(0x0a0a_u16, 0);
+        } else {
+            // Firefox only sends 3 settings: HEADER_TABLE_SIZE (1), INITIAL_WINDOW_SIZE (4), MAX_FRAME_SIZE (5)
+            settings_frame
+                .set(SettingsId::HeaderTableSize, settings.header_table_size)
+                .set(SettingsId::InitialWindowSize, settings.initial_window_size)
+                .set(SettingsId::MaxFrameSize, settings.max_frame_size);
+            // Firefox does NOT send GREASE settings
+        }
 
         let settings_bytes = settings_frame.serialize();
 
-        // Send WINDOW_UPDATE for connection-level window (Chrome behavior)
-        let window_update = WindowUpdateFrame::new(0, CHROME_WINDOW_UPDATE);
+        // Send WINDOW_UPDATE for connection-level window (configurable per profile)
+        let window_update = WindowUpdateFrame::new(0, settings.initial_window_update);
 
         // Combine all handshake frames into a single write to minimize packets/TLS records
         let mut handshake_buf = BytesMut::new();
         handshake_buf.extend_from_slice(CONNECTION_PREFACE);
         handshake_buf.extend_from_slice(&settings_bytes);
         handshake_buf.extend_from_slice(&window_update.serialize());
+
+        // Send PRIORITY frames if configured (Chrome/Firefox fingerprint)
+        if let Some(ref priority_tree) = settings.priority_tree {
+            for (stream_id, depends_on, weight, exclusive) in &priority_tree.priorities {
+                let priority_frame = PriorityFrame::new(*stream_id, *depends_on, *weight, *exclusive);
+                handshake_buf.extend_from_slice(&priority_frame.serialize());
+            }
+        }
 
         stream
             .write_all(&handshake_buf)
@@ -179,7 +197,7 @@ where
             pseudo_order,
             next_stream_id: 1,
             streams: HashMap::new(),
-            conn_recv_window: (DEFAULT_INITIAL_WINDOW_SIZE + CHROME_WINDOW_UPDATE) as i32,
+            conn_recv_window: (DEFAULT_INITIAL_WINDOW_SIZE + settings.initial_window_update) as i32,
             conn_send_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
             peer_settings: PeerSettings::default(),
             read_buf: BytesMut::with_capacity(16384),
@@ -1638,6 +1656,35 @@ where
     /// Get the settings.
     pub fn settings(&self) -> &Http2Settings {
         &self.settings
+    }
+
+    /// Send a PING frame to keep the connection alive.
+    ///
+    /// Browsers send PING frames periodically (Chrome: ~45s, Firefox: ~30s)
+    /// to detect dead connections and keep them alive.
+    ///
+    /// Returns the PING data (8 bytes) that should be echoed back in the PONG.
+    pub async fn send_ping(&mut self) -> Result<[u8; 8]> {
+        use crate::transport::h2::frame::PingFrame;
+        use getrandom::fill as getrandom_fill;
+        
+        // Generate random 8-byte ping data
+        let mut ping_data = [0u8; 8];
+        getrandom_fill(&mut ping_data)
+            .map_err(|e| Error::HttpProtocol(format!("Failed to generate ping data: {}", e)))?;
+        
+        let ping_frame = PingFrame::new(ping_data);
+        self.stream
+            .write_all(&ping_frame.serialize())
+            .await
+            .map_err(|e| Error::HttpProtocol(format!("Failed to send PING: {}", e)))?;
+        
+        self.stream
+            .flush()
+            .await
+            .map_err(|e| Error::HttpProtocol(format!("Failed to flush PING: {}", e)))?;
+        
+        Ok(ping_data)
     }
 
     /// Validate response headers per RFC 9113 Section 8.1.2.

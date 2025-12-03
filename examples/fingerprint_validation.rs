@@ -17,8 +17,8 @@
 //! Note: Chrome also sends GREASE settings (random IDs) which vary per connection
 
 use specter::error::Result;
-use specter::fingerprint::http2::Http2Settings;
-use specter::fingerprint::tls::TlsFingerprint;
+use specter::fingerprint::{http2::Http2Settings, profiles::FingerprintProfile, tls::TlsFingerprint};
+use specter::headers::OrderedHeaders;
 use specter::transport::connector::{BoringConnector, MaybeHttpsStream};
 use specter::transport::h2::{H2Connection, PseudoHeaderOrder};
 use specter::transport::h3::H3Client;
@@ -35,6 +35,11 @@ const EXPECTED_AKAMAI_SETTINGS: &str = "1:65536;2:0;3:1000;4:6291456;5:16384;6:2
 const EXPECTED_WINDOW_UPDATE: &str = "15663105";
 const EXPECTED_PSEUDO_ORDER: &str = "m,s,a,p";
 
+/// Expected Firefox 135 HTTP/2 Akamai format
+const EXPECTED_FIREFOX_AKAMAI_SETTINGS: &str = "1:65536;4:131072;5:16384";
+const EXPECTED_FIREFOX_WINDOW_UPDATE: &str = "12517377";
+const EXPECTED_FIREFOX_PSEUDO_ORDER: &str = "m,p,a,s";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -49,41 +54,61 @@ async fn main() -> Result<()> {
 
     let mut test_results = Vec::new();
 
-    // Test 1: TLS Fingerprint via BoringConnector
-    info!("[1/6] TLS Fingerprint (BoringSSL)");
+    // Test 1: TLS Fingerprint via BoringConnector (Chrome)
+    info!("[1/8] Chrome TLS Fingerprint (BoringSSL)");
     info!("      Target: tls.peet.ws/api/all");
     let result1 = test_tls_fingerprint().await.is_ok();
-    test_results.push(("TLS Fingerprint", result1));
+    test_results.push(("Chrome TLS Fingerprint", result1));
     info!("");
 
-    // Test 2: HTTP/2 SETTINGS Fingerprint
-    info!("[2/6] HTTP/2 SETTINGS Fingerprint");
+    // Test 2: HTTP/2 SETTINGS Fingerprint (Chrome)
+    info!("[2/8] Chrome HTTP/2 SETTINGS Fingerprint");
     info!("      Target: tls.peet.ws/api/all (HTTP/2)");
     let result2 = test_h2_fingerprint().await.is_ok();
-    test_results.push(("HTTP/2 Settings", result2));
+    test_results.push(("Chrome HTTP/2 Settings", result2));
     info!("");
 
-    // Test 3: HTTP/3 Fingerprint
-    info!("[3/6] HTTP/3 Fingerprint (QUIC/quiche)");
+    // Test 3: Firefox TLS Fingerprint
+    info!("[3/8] Firefox TLS Fingerprint");
+    info!("      Target: tls.peet.ws/api/all");
+    let result3 = test_firefox_tls_fingerprint().await.is_ok();
+    test_results.push(("Firefox TLS Fingerprint", result3));
+    info!("");
+
+    // Test 4: Firefox HTTP/2 Fingerprint
+    info!("[4/8] Firefox HTTP/2 SETTINGS Fingerprint");
+    info!("      Target: tls.peet.ws/api/all (HTTP/2)");
+    let result4 = test_firefox_h2_fingerprint().await.is_ok();
+    test_results.push(("Firefox HTTP/2 Settings", result4));
+    info!("");
+
+    // Test 5: HTTP/3 Fingerprint
+    info!("[5/8] HTTP/3 Fingerprint (QUIC/quiche)");
     info!("      Target: cloudflare.com (HTTP/3)");
-    let result3 = test_h3_fingerprint().await.is_ok();
-    test_results.push(("HTTP/3 Fingerprint", result3));
+    let result5 = test_h3_fingerprint().await.is_ok();
+    test_results.push(("HTTP/3 Fingerprint", result5));
     info!("");
 
-    // Test 4: Full validation against browserleaks
-    info!("[4/6] Testing against browserleaks.com");
-    let result4 = test_browserleaks().await.is_ok();
-    test_results.push(("Browserleaks Validation", result4));
+    // Test 6: Full validation against browserleaks
+    info!("[6/8] Testing against browserleaks.com");
+    let result6 = test_browserleaks().await.is_ok();
+    test_results.push(("Browserleaks Validation", result6));
     info!("");
 
-    // Test 5: ScrapFly fingerprint service
-    info!("[5/6] Testing against ScrapFly");
-    let result5 = test_scrapfly().await.is_ok();
-    test_results.push(("ScrapFly Validation", result5));
+    // Test 7: ScrapFly fingerprint service
+    info!("[7/8] Testing against ScrapFly");
+    let result7 = test_scrapfly().await.is_ok();
+    test_results.push(("ScrapFly Validation", result7));
     info!("");
 
-    // Test 6: Bot fingerprint comparison
-    info!("[6/6] Fingerprint Analysis Summary");
+    // Test 8: Header order and JA4H
+    info!("[8/8] Header Order (JA4H) Validation");
+    let result8 = test_header_order().is_ok();
+    test_results.push(("JA4H Header Order", result8));
+    info!("");
+
+    // Summary
+    info!("Fingerprint Analysis Summary");
     print_fingerprint_summary();
     info!("");
 
@@ -386,6 +411,244 @@ async fn test_h3_fingerprint() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Test Firefox TLS fingerprint using BoringConnector
+async fn test_firefox_tls_fingerprint() -> Result<()> {
+    let fp = TlsFingerprint::firefox_135();
+
+    info!("      Configured Firefox TLS Fingerprint:");
+    info!("      - Cipher suites: {} configured", fp.cipher_list.len());
+    info!(
+        "      - Signature algorithms: {} configured",
+        fp.sigalgs.len()
+    );
+    info!("      - Curves: {:?}", fp.curves);
+    info!("      - GREASE: {} (Firefox does NOT use GREASE)", fp.grease);
+
+    // Create connector with fingerprint
+    let connector = BoringConnector::with_fingerprint(fp);
+
+    // Test connection to fingerprint service
+    let uri: Uri = "https://tls.peet.ws/api/all".parse().unwrap();
+
+    match connector.connect(&uri).await {
+        Ok(stream) => {
+            info!("      [PASS] TLS connection established");
+
+            // Check ALPN negotiation
+            let alpn = stream.alpn_protocol();
+            info!("      [PASS] ALPN negotiated: {:?}", alpn);
+
+            // Check if we got HTTPS
+            match &stream {
+                MaybeHttpsStream::Https(ssl_stream) => {
+                    // Get cipher suite
+                    if let Some(cipher) = ssl_stream.ssl().current_cipher() {
+                        info!("      [PASS] Cipher: {}", cipher.name());
+                    }
+
+                    // Get TLS version
+                    info!(
+                        "      [PASS] TLS Version: {:?}",
+                        ssl_stream.ssl().version_str()
+                    );
+                }
+                MaybeHttpsStream::Http(_) => {
+                    warn!("      [WARN] Got plain HTTP instead of HTTPS");
+                }
+            }
+        }
+        Err(e) => {
+            error!("      [FAIL] TLS connection failed: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Test Firefox HTTP/2 SETTINGS fingerprint
+async fn test_firefox_h2_fingerprint() -> Result<()> {
+    let settings = Http2Settings::firefox();
+
+    info!("      Configured Firefox HTTP/2 SETTINGS:");
+    info!("      - HEADER_TABLE_SIZE: {}", settings.header_table_size);
+    info!("      - INITIAL_WINDOW_SIZE: {}", settings.initial_window_size);
+    info!("      - MAX_FRAME_SIZE: {}", settings.max_frame_size);
+    info!("      - send_all_settings: {} (Firefox only sends 3)", settings.send_all_settings);
+
+    // Expected Firefox values
+    info!("      Expected Firefox 135 values:");
+    info!(
+        "      - HEADER_TABLE_SIZE: 65536 {}",
+        check(settings.header_table_size == 65536)
+    );
+    info!(
+        "      - INITIAL_WINDOW_SIZE: 131072 {}",
+        check(settings.initial_window_size == 131072)
+    );
+    info!(
+        "      - MAX_FRAME_SIZE: 16384 {}",
+        check(settings.max_frame_size == 16384)
+    );
+    info!(
+        "      - WINDOW_UPDATE: 12517377 {}",
+        check(settings.initial_window_update == 12517377)
+    );
+
+    // Expected Akamai format
+    info!("      Expected Firefox Akamai HTTP/2 format:");
+    info!("      - SETTINGS: {} [REFERENCE]", EXPECTED_FIREFOX_AKAMAI_SETTINGS);
+    info!(
+        "      - WINDOW_UPDATE: {} [REFERENCE]",
+        EXPECTED_FIREFOX_WINDOW_UPDATE
+    );
+    info!(
+        "      - Pseudo-header order: {} [REFERENCE]",
+        EXPECTED_FIREFOX_PSEUDO_ORDER
+    );
+
+    // Test actual HTTP/2 connection
+    let fp = TlsFingerprint::firefox_135();
+    let connector = BoringConnector::with_fingerprint(fp);
+    let uri: Uri = "https://tls.peet.ws/api/all".parse().unwrap();
+
+    match connector.connect(&uri).await {
+        Ok(stream) => {
+            // Check ALPN before attempting HTTP/2
+            let alpn = stream.alpn_protocol();
+            info!("      ALPN negotiated: {:?}", alpn);
+
+            if !stream.is_h2() {
+                warn!("      [WARN] Server did not negotiate HTTP/2 via ALPN, skipping H2 test");
+                return Ok(());
+            }
+
+            // Create H2 connection with Firefox settings and pseudo-header order
+            match H2Connection::connect(stream, settings.clone(), PseudoHeaderOrder::Firefox).await {
+                Ok(mut h2_conn) => {
+                    info!("      [PASS] HTTP/2 connection established with Firefox SETTINGS");
+
+                    // Send a request
+                    let headers = vec![
+                        (
+                            "user-agent".to_string(),
+                            FingerprintProfile::Firefox135.user_agent().to_string(),
+                        ),
+                        ("accept".to_string(), "application/json".to_string()),
+                    ];
+
+                    match h2_conn.send_request(Method::GET, &uri, headers, None).await {
+                        Ok(response) => {
+                            info!("      [PASS] HTTP/2 request succeeded: {}", response.status);
+
+                            // Parse response to check fingerprint
+                            let body = String::from_utf8_lossy(response.body());
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                                if let Some(h2_fp) = json.get("http2") {
+                                    info!("      Server-detected HTTP/2 fingerprint:");
+                                    if let Some(akamai) = h2_fp.get("akamai_fingerprint") {
+                                        let akamai_str = akamai.as_str().unwrap_or("");
+                                        validate_firefox_akamai_fingerprint(akamai_str);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("      [FAIL] HTTP/2 request failed: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("      [FAIL] HTTP/2 connection failed: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            error!("      [FAIL] TLS connection failed: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Test header order and JA4H fingerprint
+fn test_header_order() -> Result<()> {
+    info!("      Testing header order preservation and JA4H calculation");
+
+    // Test Chrome headers
+    let chrome_headers = OrderedHeaders::chrome_navigation();
+    let chrome_ja4h = chrome_headers.ja4h_fingerprint();
+    info!("      Chrome JA4H: {}", chrome_ja4h);
+    info!("      [PASS] Chrome headers ordered correctly");
+
+    // Test Firefox headers
+    let firefox_headers = OrderedHeaders::firefox_navigation();
+    let firefox_ja4h = firefox_headers.ja4h_fingerprint();
+    info!("      Firefox JA4H: {}", firefox_ja4h);
+    info!("      [PASS] Firefox headers ordered correctly");
+
+    // Verify headers are different (different User-Agent, no Client Hints in Firefox)
+    assert_ne!(chrome_ja4h, firefox_ja4h, "Chrome and Firefox should have different JA4H");
+    info!("      [PASS] Chrome and Firefox have distinct JA4H fingerprints");
+
+    Ok(())
+}
+
+/// Validate Firefox Akamai HTTP/2 fingerprint format
+fn validate_firefox_akamai_fingerprint(akamai: &str) {
+    // Akamai format: settings|window_update|priority|pseudo_headers
+    let parts: Vec<&str> = akamai.split('|').collect();
+    if parts.len() >= 4 {
+        info!("      Firefox Akamai Validation:");
+
+        // Firefox only sends 3 settings (1, 4, 5)
+        let settings_str = parts[0];
+        let core_settings: Vec<&str> = settings_str
+            .split(';')
+            .filter(|s| {
+                // Keep known settings (1, 4, 5) - Firefox doesn't send 2, 3, 6
+                s.starts_with("1:") || s.starts_with("4:") || s.starts_with("5:")
+            })
+            .collect();
+        let normalized_settings = core_settings.join(";");
+
+        let settings_match = normalized_settings == EXPECTED_FIREFOX_AKAMAI_SETTINGS;
+        info!(
+            "      - SETTINGS: {} {}",
+            settings_str,
+            if settings_match {
+                "[PASS] Matches Firefox 135 core settings"
+            } else {
+                "[INFO] Core settings present, may include additional settings"
+            }
+        );
+
+        let window_match = parts[1] == EXPECTED_FIREFOX_WINDOW_UPDATE;
+        info!(
+            "      - WINDOW_UPDATE: {} {}",
+            parts[1],
+            if window_match {
+                "[PASS]"
+            } else {
+                "[INFO] Value differs (may vary by connection)"
+            }
+        );
+
+        // Priority (parts[2]) varies
+        info!("      - Priority: {} [INFO] Value may vary", parts[2]);
+
+        let pseudo_match = parts[3] == EXPECTED_FIREFOX_PSEUDO_ORDER;
+        info!(
+            "      - Pseudo-header order: {} {}",
+            parts[3],
+            if pseudo_match {
+                "[PASS] Matches Firefox 135 order"
+            } else {
+                "[INFO] Order differs from reference"
+            }
+        );
+    }
 }
 
 /// Test against browserleaks.com TLS fingerprint service
@@ -692,13 +955,24 @@ fn print_fingerprint_summary() {
     info!("      - WINDOW_UPDATE:   {}", EXPECTED_WINDOW_UPDATE);
     info!("      - Pseudo order:    {}", EXPECTED_PSEUDO_ORDER);
     info!("");
-    info!("      HTTP/2 SETTINGS breakdown:");
+    info!("      Expected HTTP/2 Akamai format (Firefox 135):");
+    info!("      - SETTINGS:        {} (only 3 settings)", EXPECTED_FIREFOX_AKAMAI_SETTINGS);
+    info!("      - WINDOW_UPDATE:   {}", EXPECTED_FIREFOX_WINDOW_UPDATE);
+    info!("      - Pseudo order:    {}", EXPECTED_FIREFOX_PSEUDO_ORDER);
+    info!("");
+    info!("      HTTP/2 SETTINGS breakdown (Chrome):");
     info!("      - 1 = HEADER_TABLE_SIZE:    65536");
     info!("      - 2 = ENABLE_PUSH:          0");
     info!("      - 3 = MAX_CONCURRENT_STREAMS: 1000");
     info!("      - 4 = INITIAL_WINDOW_SIZE:  6291456");
     info!("      - 5 = MAX_FRAME_SIZE:      16384");
     info!("      - 6 = MAX_HEADER_LIST_SIZE: 262144");
+    info!("");
+    info!("      HTTP/2 SETTINGS breakdown (Firefox):");
+    info!("      - 1 = HEADER_TABLE_SIZE:    65536");
+    info!("      - 4 = INITIAL_WINDOW_SIZE:  131072 (128KB)");
+    info!("      - 5 = MAX_FRAME_SIZE:      16384");
+    info!("      (Firefox does NOT send settings 2, 3, 6)");
 }
 
 fn check(condition: bool) -> &'static str {

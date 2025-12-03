@@ -24,7 +24,8 @@ pub mod pool;
 // Re-exports for convenient access
 pub use cookie::{hash_cookie_value, CookieJar};
 pub use error::{Error, Result};
-pub use fingerprint::FingerprintProfile;
+pub use fingerprint::{FingerprintProfile, PriorityTree};
+pub use headers::OrderedHeaders;
 pub use response::Response;
 pub use version::HttpVersion;
 
@@ -34,6 +35,8 @@ pub use transport::h1::H1Connection;
 pub use transport::h1_h2::{Client, ClientBuilder, RequestBuilder};
 pub use transport::h2::{H2ClientBuilder, H2Connection, H2PooledConnection, PseudoHeaderOrder};
 pub use transport::h3::H3Client;
+pub use transport::session::SessionCache;
+pub use transport::tcp::TcpFingerprint;
 
 // Pool re-exports
 pub use pool::alt_svc::{AltSvcCache, AltSvcEntry};

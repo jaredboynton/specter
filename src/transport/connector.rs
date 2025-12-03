@@ -1,6 +1,6 @@
 //! BoringSSL TLS connector.
 
-use boring::ssl::{SslConnector, SslMethod, SslVersion};
+use boring::ssl::{SslConnector, SslMethod, SslSessionCacheMode, SslVersion};
 use http::Uri;
 use std::io;
 use std::pin::Pin;
@@ -11,6 +11,7 @@ use tokio_boring::SslStream;
 
 use crate::error::Error;
 use crate::fingerprint::tls::TlsFingerprint;
+use crate::transport::tcp::{configure_tcp_socket, TcpFingerprint};
 
 // FFI bindings for BoringSSL extension control
 use boring_sys::SSL_CTX;
@@ -27,19 +28,38 @@ extern "C" {
 #[derive(Clone)]
 pub struct BoringConnector {
     tls_config: Option<TlsFingerprint>,
+    tcp_fingerprint: Option<TcpFingerprint>,
 }
 
 impl BoringConnector {
     /// Create a new connector with default TLS configuration.
     pub fn new() -> Self {
-        Self { tls_config: None }
+        Self {
+            tls_config: None,
+            tcp_fingerprint: None,
+        }
     }
 
     /// Create a connector with TLS fingerprint configuration.
     pub fn with_fingerprint(fp: TlsFingerprint) -> Self {
         Self {
             tls_config: Some(fp),
+            tcp_fingerprint: None,
         }
+    }
+
+    /// Create a connector with both TLS and TCP fingerprint configuration.
+    pub fn with_fingerprints(tls_fp: TlsFingerprint, tcp_fp: TcpFingerprint) -> Self {
+        Self {
+            tls_config: Some(tls_fp),
+            tcp_fingerprint: Some(tcp_fp),
+        }
+    }
+
+    /// Set TCP fingerprint configuration.
+    pub fn with_tcp_fingerprint(mut self, tcp_fp: TcpFingerprint) -> Self {
+        self.tcp_fingerprint = Some(tcp_fp);
+        self
     }
 
     fn configure_ssl(&self, _domain: &str) -> Result<SslConnector, Error> {
@@ -72,13 +92,25 @@ impl BoringConnector {
             }
 
             // Enable GREASE and extension permutation for Chrome-like behavior
-            if fp.grease {
-                unsafe {
-                    let ctx = builder.as_ptr() as *mut SSL_CTX;
+            // Firefox also randomizes extensions but doesn't use GREASE
+            unsafe {
+                let ctx = builder.as_ptr() as *mut SSL_CTX;
+                if fp.grease {
+                    // Chrome: enable GREASE and extension permutation
                     SSL_CTX_set_grease_enabled(ctx, 1);
+                    SSL_CTX_set_permute_extensions(ctx, 1);
+                } else {
+                    // Firefox: enable extension permutation but NOT GREASE
+                    SSL_CTX_set_grease_enabled(ctx, 0);
                     SSL_CTX_set_permute_extensions(ctx, 1);
                 }
             }
+            
+            // Note: extension_order field in TlsFingerprint is for reference only.
+            // Modern browsers (Chrome 110+, Firefox 135+) randomize extension order,
+            // so we cannot set a static order. The extension_order field is used for
+            // JA3 fingerprint reference (though JA3 will vary due to randomization)
+            // and JA4 fingerprinting (which sorts extensions alphabetically).
 
             // Set min/max TLS version
             builder
@@ -96,6 +128,10 @@ impl BoringConnector {
                 .set_max_proto_version(Some(SslVersion::TLS1_3))
                 .map_err(|e| Error::Tls(format!("Failed to set max TLS version: {}", e)))?;
         }
+
+        // Enable session caching (browsers use this for session resumption)
+        // This enables TLS session tickets and session ID caching
+        builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
 
         // Enable ALPN for HTTP/2
         builder
@@ -219,9 +255,61 @@ impl BoringConnector {
             });
 
         let addr = format!("{}:{}", host, port);
-        let tcp_stream = TcpStream::connect(&addr)
+        
+        // Configure TCP socket options if fingerprint is provided
+        let tcp_stream = if let Some(ref tcp_fp) = self.tcp_fingerprint {
+            // Create socket2 socket, configure it, then connect and convert to tokio TcpStream
+            use socket2::{Domain, Socket, Type};
+            use std::net::SocketAddr;
+            use tokio::task;
+            use tokio::net::lookup_host;
+            
+            // Resolve hostname to IP address (tokio handles async DNS resolution)
+            let socket_addr: SocketAddr = lookup_host(&addr)
+                .await
+                .map_err(|e| Error::Connection(format!("DNS resolution failed for {}: {}", addr, e)))?
+                .next()
+                .ok_or_else(|| Error::Connection(format!("No addresses found for {}", addr)))?;
+            
+            let domain = match socket_addr {
+                SocketAddr::V4(_) => Domain::IPV4,
+                SocketAddr::V6(_) => Domain::IPV6,
+            };
+            
+            // Perform blocking socket operations in a blocking task
+            let tcp_fp_clone = tcp_fp.clone();
+            let socket_addr_copy = socket_addr;
+            let std_stream = task::spawn_blocking(move || -> Result<std::net::TcpStream, Error> {
+                let socket = Socket::new(domain, Type::STREAM, Some(socket2::Protocol::TCP))
+                    .map_err(|e| Error::Connection(format!("Failed to create socket: {}", e)))?;
+                
+                // Configure TCP fingerprint options
+                configure_tcp_socket(&socket, &tcp_fp_clone)
+                    .map_err(|e| Error::Connection(format!("Failed to configure TCP socket: {}", e)))?;
+                
+                // Connect synchronously (socket2 handles this)
+                socket.connect(&socket_addr_copy.into())
+                    .map_err(|e| Error::Connection(format!("Failed to connect: {}", e)))?;
+                
+                // Set to non-blocking mode for tokio compatibility (required by tokio 1.48+)
+                socket.set_nonblocking(true)
+                    .map_err(|e| Error::Connection(format!("Failed to set non-blocking: {}", e)))?;
+                
+                // Convert to std::net::TcpStream
+                Ok(socket.into())
+            })
             .await
-            .map_err(|e| Error::Connection(format!("Failed to connect to {}: {}", addr, e)))?;
+            .map_err(|e| Error::Connection(format!("Blocking task failed: {}", e)))??;
+            
+            // Convert to tokio TcpStream (socket is already non-blocking)
+            TcpStream::from_std(std_stream)
+                .map_err(|e| Error::Connection(format!("Failed to convert to tokio stream: {}", e)))?
+        } else {
+            // Default connection without TCP fingerprinting
+            TcpStream::connect(&addr)
+                .await
+                .map_err(|e| Error::Connection(format!("Failed to connect to {}: {}", addr, e)))?
+        };
 
         if uri.scheme_str() == Some("https") {
             let ssl_connector = self.configure_ssl(host)?;
