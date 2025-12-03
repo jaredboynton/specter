@@ -106,15 +106,15 @@ fn test_chrome_headers_contain_client_hints() {
 
     // Chrome sends Client Hints
     assert!(
-        header_names.iter().any(|k| *k == "Sec-Ch-Ua"),
+        header_names.contains(&"Sec-Ch-Ua"),
         "Chrome should send Sec-Ch-Ua header"
     );
     assert!(
-        header_names.iter().any(|k| *k == "Sec-Ch-Ua-Mobile"),
+        header_names.contains(&"Sec-Ch-Ua-Mobile"),
         "Chrome should send Sec-Ch-Ua-Mobile header"
     );
     assert!(
-        header_names.iter().any(|k| *k == "Sec-Ch-Ua-Platform"),
+        header_names.contains(&"Sec-Ch-Ua-Platform"),
         "Chrome should send Sec-Ch-Ua-Platform header"
     );
 }
@@ -132,11 +132,11 @@ fn test_firefox_headers_no_client_hints() {
 
     // But should send other Sec- headers
     assert!(
-        header_names.iter().any(|k| *k == "Sec-Fetch-Dest"),
+        header_names.contains(&"Sec-Fetch-Dest"),
         "Firefox should send Sec-Fetch-Dest"
     );
     assert!(
-        header_names.iter().any(|k| *k == "Sec-Fetch-Mode"),
+        header_names.contains(&"Sec-Fetch-Mode"),
         "Firefox should send Sec-Fetch-Mode"
     );
 }

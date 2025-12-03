@@ -19,11 +19,8 @@ fn test_priority_tree_chrome() {
     assert_eq!(tree.priorities[3], (9, 7, 1, false)); // Depends on stream 7
     assert_eq!(tree.priorities[4], (11, 3, 1, false)); // Depends on stream 3
 
-    // Verify weights are valid (1-256, stored as 0-255 in u8)
-    // Note: HTTP/2 weight is 1-256, but stored as weight-1 in u8 (0-255)
-    for (_, _, weight, _) in &tree.priorities {
-        assert!(*weight <= 255, "Weight must be <= 255 (represents 1-256)");
-    }
+    // Note: HTTP/2 weight is 1-256, stored as u8 (0-255 representing weight-1)
+    // Type system guarantees valid range
 }
 
 #[test]
@@ -82,7 +79,7 @@ fn test_priority_frame_serialization() {
 
     // 5th byte: weight (HTTP/2 spec says weight is 1-256, stored as weight-1, so 0-255)
     // But our PriorityFrame stores it directly (201), not as weight-1
-    let weight_value = payload[4] as u8;
+    let weight_value = payload[4];
     // PriorityFrame stores weight directly, not as weight-1
     assert_eq!(weight_value, 201, "Weight should be 201 (stored directly)");
 }
@@ -102,7 +99,7 @@ fn test_priority_frame_with_dependency() {
     assert!(!exclusive);
     assert_eq!(stream_dependency, 7, "Stream 9 should depend on stream 7");
 
-    let weight = payload[4] as u8;
+    let weight = payload[4];
     assert_eq!(weight, 1, "Weight should be 1 (stored directly)");
 }
 
