@@ -1,7 +1,7 @@
 //! HTTP/3 transport via quiche.
 
 use bytes::Bytes;
-use getrandom::getrandom;
+use getrandom::fill as getrandom_fill;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -369,7 +369,7 @@ impl H3Client {
 /// Generate a random connection ID.
 fn generate_cid() -> Result<Vec<u8>> {
     let mut cid = vec![0u8; 20];
-    getrandom(&mut cid)
+    getrandom_fill(&mut cid)
         .map_err(|e| Error::Quic(format!("Failed to generate connection ID: {}", e)))?;
     Ok(cid)
 }
