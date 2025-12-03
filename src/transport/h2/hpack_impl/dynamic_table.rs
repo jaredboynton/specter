@@ -59,22 +59,31 @@ impl DynamicTable {
         self.evict_to_max_size();
     }
 
+    // The following inspection methods are marked with #[allow(dead_code)] because
+    // they are part of the public API and useful for debugging/inspection, even
+    // though they are not currently used within the library code itself. They are
+    // used in tests and may be used by library consumers.
+
     /// Get the current maximum size.
+    #[allow(dead_code)]
     pub fn max_size(&self) -> usize {
         self.max_size
     }
 
     /// Get the current table size in bytes.
+    #[allow(dead_code)]
     pub fn current_size(&self) -> usize {
         self.current_size
     }
 
     /// Get the number of entries.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Check if the table is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -210,11 +219,14 @@ mod tests {
     #[test]
     fn test_dynamic_table_size_reduction() {
         let mut table = DynamicTable::new(4096);
+        assert_eq!(table.max_size(), 4096);
+        
         table.add(b"name1".to_vec(), b"value1".to_vec());
         table.add(b"name2".to_vec(), b"value2".to_vec());
 
         let initial_size = table.current_size();
         table.set_max_size(50);
+        assert_eq!(table.max_size(), 50);
 
         // Should have evicted entries
         assert!(table.current_size() <= 50);
