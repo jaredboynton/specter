@@ -61,8 +61,15 @@ pub fn chrome_142_form_headers() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Add Cookie header from jar.
-pub fn with_cookies(base: Vec<(&'static str, &'static str)>, url: &str, jar: &CookieJar) -> Vec<(String, String)> {
-    let mut headers: Vec<(String, String)> = base.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+pub fn with_cookies(
+    base: Vec<(&'static str, &'static str)>,
+    url: &str,
+    jar: &CookieJar,
+) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = base
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     if let Some(cookie_header) = jar.build_cookie_header(url) {
         headers.push(("Cookie".to_string(), cookie_header));
     }
@@ -85,10 +92,16 @@ pub fn with_referer(mut headers: Vec<(String, String)>, referer: &str) -> Vec<(S
 
 /// Convert owned headers to references.
 pub fn headers_as_refs(headers: &[(String, String)]) -> Vec<(&str, &str)> {
-    headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+    headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect()
 }
 
 /// Convert static headers to owned.
 pub fn headers_to_owned(headers: Vec<(&'static str, &'static str)>) -> Vec<(String, String)> {
-    headers.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    headers
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
 }

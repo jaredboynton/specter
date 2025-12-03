@@ -1,7 +1,7 @@
 //! TLS fingerprint configuration for browser impersonation.
 //!
 //! WARNING: Chrome randomizes TLS extension order since v110, making static
-//! JA3 fingerprints unreliable. Modern anti-bot systems use JA4 which sorts
+//! JA3 fingerprints unreliable. Modern fingerprint detection systems use JA4 which sorts
 //! extensions alphabetically. This implementation provides cipher suite,
 //! signature algorithm, and curve ordering - but extension ordering may not
 //! match real browsers.

@@ -38,16 +38,22 @@ impl H1Connection {
     ) -> Result<Response> {
         // Build and send the request
         let request_bytes = self.build_request(&method, uri, &headers, body.as_ref())?;
-        self.stream.write_all(&request_bytes).await
+        self.stream
+            .write_all(&request_bytes)
+            .await
             .map_err(|e| Error::HttpProtocol(format!("Failed to write request: {}", e)))?;
 
         // Send body if present
         if let Some(body) = body {
-            self.stream.write_all(&body).await
+            self.stream
+                .write_all(&body)
+                .await
                 .map_err(|e| Error::HttpProtocol(format!("Failed to write body: {}", e)))?;
         }
 
-        self.stream.flush().await
+        self.stream
+            .flush()
+            .await
             .map_err(|e| Error::HttpProtocol(format!("Failed to flush: {}", e)))?;
 
         // Read and parse the response
@@ -65,9 +71,7 @@ impl H1Connection {
         let mut request = Vec::with_capacity(1024);
 
         // Request line: METHOD /path HTTP/1.1\r\n
-        let path = uri.path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/");
+        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
         request.extend_from_slice(method.as_str().as_bytes());
         request.push(b' ');
@@ -75,7 +79,9 @@ impl H1Connection {
         request.extend_from_slice(b" HTTP/1.1\r\n");
 
         // Host header (required for HTTP/1.1)
-        let host = uri.host().ok_or_else(|| Error::HttpProtocol("Missing host".into()))?;
+        let host = uri
+            .host()
+            .ok_or_else(|| Error::HttpProtocol("Missing host".into()))?;
         request.extend_from_slice(b"Host: ");
         request.extend_from_slice(host.as_bytes());
         if let Some(port) = uri.port() {
@@ -98,7 +104,8 @@ impl H1Connection {
 
         // Content-Length if body present and not already set
         if let Some(body) = body {
-            let has_content_length = headers.iter()
+            let has_content_length = headers
+                .iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
             if !has_content_length {
                 request.extend_from_slice(b"Content-Length: ");
@@ -124,11 +131,16 @@ impl H1Connection {
                 return Err(Error::HttpProtocol("Response headers too large".into()));
             }
 
-            let n = self.stream.read(&mut buffer[total_read..]).await
+            let n = self
+                .stream
+                .read(&mut buffer[total_read..])
+                .await
                 .map_err(|e| Error::HttpProtocol(format!("Failed to read response: {}", e)))?;
 
             if n == 0 {
-                return Err(Error::HttpProtocol("Connection closed before response complete".into()));
+                return Err(Error::HttpProtocol(
+                    "Connection closed before response complete".into(),
+                ));
             }
 
             total_read += n;
@@ -145,7 +157,8 @@ impl H1Connection {
         let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS_COUNT];
         let mut response = httparse::Response::new(&mut headers);
 
-        let parsed = response.parse(buffer)
+        let parsed = response
+            .parse(buffer)
             .map_err(|e| Error::HttpProtocol(format!("Failed to parse response: {}", e)))?;
 
         let headers_len = match parsed {
@@ -155,22 +168,26 @@ impl H1Connection {
             }
         };
 
-        let status = response.code.ok_or_else(|| Error::HttpProtocol("Missing status code".into()))?;
+        let status = response
+            .code
+            .ok_or_else(|| Error::HttpProtocol("Missing status code".into()))?;
         let version = format!("HTTP/1.{}", response.version.unwrap_or(1));
 
         // Collect headers
-        let response_headers: Vec<String> = response.headers.iter()
+        let response_headers: Vec<String> = response
+            .headers
+            .iter()
             .filter(|h| !h.name.is_empty())
-            .map(|h| {
-                format!("{}: {}", h.name, String::from_utf8_lossy(h.value))
-            })
+            .map(|h| format!("{}: {}", h.name, String::from_utf8_lossy(h.value)))
             .collect();
 
         // Determine body handling from headers
         let content_length = find_header_value(&response_headers, "content-length")
             .and_then(|v| v.parse::<usize>().ok());
         let transfer_encoding = find_header_value(&response_headers, "transfer-encoding");
-        let is_chunked = transfer_encoding.map(|v| v.contains("chunked")).unwrap_or(false);
+        let is_chunked = transfer_encoding
+            .map(|v| v.contains("chunked"))
+            .unwrap_or(false);
 
         // Read body
         let body_start = &buffer[headers_len..];
@@ -193,7 +210,10 @@ impl H1Connection {
 
         while body.len() < content_length {
             let mut chunk = vec![0u8; content_length - body.len()];
-            let n = self.stream.read(&mut chunk).await
+            let n = self
+                .stream
+                .read(&mut chunk)
+                .await
                 .map_err(|e| Error::HttpProtocol(format!("Failed to read body: {}", e)))?;
 
             if n == 0 {
@@ -217,8 +237,10 @@ impl H1Connection {
                 Some((size, end)) => (size, end),
                 None => {
                     // Need more data
-                    let n = self.stream.read(&mut read_buf).await
-                        .map_err(|e| Error::HttpProtocol(format!("Failed to read chunk: {}", e)))?;
+                    let n =
+                        self.stream.read(&mut read_buf).await.map_err(|e| {
+                            Error::HttpProtocol(format!("Failed to read chunk: {}", e))
+                        })?;
                     if n == 0 {
                         break;
                     }
@@ -238,8 +260,9 @@ impl H1Connection {
             // Read chunk data + CRLF
             let chunk_end = chunk_size + 2; // data + \r\n
             while buffer.len() < chunk_end {
-                let n = self.stream.read(&mut read_buf).await
-                    .map_err(|e| Error::HttpProtocol(format!("Failed to read chunk data: {}", e)))?;
+                let n = self.stream.read(&mut read_buf).await.map_err(|e| {
+                    Error::HttpProtocol(format!("Failed to read chunk data: {}", e))
+                })?;
                 if n == 0 {
                     break;
                 }
@@ -262,7 +285,7 @@ impl H1Connection {
 /// Find the end of HTTP headers (\r\n\r\n).
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     for i in 0..buffer.len().saturating_sub(3) {
-        if &buffer[i..i+4] == b"\r\n\r\n" {
+        if &buffer[i..i + 4] == b"\r\n\r\n" {
             return Some(i + 4);
         }
     }
@@ -285,7 +308,7 @@ fn find_header_value<'a>(headers: &'a [String], name: &str) -> Option<&'a str> {
 fn find_chunk_size(buffer: &[u8]) -> Option<(usize, usize)> {
     // Find CRLF
     for i in 0..buffer.len().saturating_sub(1) {
-        if &buffer[i..i+2] == b"\r\n" {
+        if &buffer[i..i + 2] == b"\r\n" {
             // Parse hex size (may have chunk extensions after ;)
             let line = &buffer[..i];
             let size_str = String::from_utf8_lossy(line);
@@ -325,7 +348,10 @@ mod tests {
             "Content-Type: text/html".to_string(),
             "Content-Length: 100".to_string(),
         ];
-        assert_eq!(find_header_value(&headers, "content-type"), Some("text/html"));
+        assert_eq!(
+            find_header_value(&headers, "content-type"),
+            Some("text/html")
+        );
         assert_eq!(find_header_value(&headers, "Content-Length"), Some("100"));
         assert_eq!(find_header_value(&headers, "missing"), None);
     }

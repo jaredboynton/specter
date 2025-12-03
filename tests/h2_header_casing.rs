@@ -1,4 +1,4 @@
-use specter::transport::h2::{HpackEncoder, HpackDecoder};
+use specter::transport::h2::{HpackDecoder, HpackEncoder};
 
 #[test]
 fn test_uppercase_headers_are_not_lowercased() {
@@ -13,13 +13,7 @@ fn test_uppercase_headers_are_not_lowercased() {
         ("x-custom-Header".to_string(), "value".to_string()),
     ];
 
-    let encoded = encoder.encode_request(
-        "GET",
-        "https",
-        "example.com",
-        "/resource",
-        &headers,
-    );
+    let encoded = encoder.encode_request("GET", "https", "example.com", "/resource", &headers);
 
     // 3. Decode the block
     let mut decoder = HpackDecoder::new();
@@ -35,21 +29,42 @@ fn test_uppercase_headers_are_not_lowercased() {
     let mut found_custom_lower = false;
 
     for (name, _value) in decoded {
-        if name == "Authorization" { found_auth_upper = true; }
-        if name == "authorization" { found_auth_lower = true; }
-        
-        if name == "Content-Type" { found_content_type_upper = true; }
-        if name == "content-type" { found_content_type_lower = true; }
+        if name == "Authorization" {
+            found_auth_upper = true;
+        }
+        if name == "authorization" {
+            found_auth_lower = true;
+        }
 
-        if name == "x-custom-Header" { found_custom_mixed = true; }
-        if name == "x-custom-header" { found_custom_lower = true; }
+        if name == "Content-Type" {
+            found_content_type_upper = true;
+        }
+        if name == "content-type" {
+            found_content_type_lower = true;
+        }
+
+        if name == "x-custom-Header" {
+            found_custom_mixed = true;
+        }
+        if name == "x-custom-header" {
+            found_custom_lower = true;
+        }
     }
 
     // Assert correct behavior:
     // 1. Uppercase/mixed versions should NOT exist
-    assert!(!found_auth_upper, "Found 'Authorization' (uppercase) - should have been lowercased");
-    assert!(!found_content_type_upper, "Found 'Content-Type' (uppercase) - should have been lowercased");
-    assert!(!found_custom_mixed, "Found 'x-custom-Header' (mixed) - should have been lowercased");
+    assert!(
+        !found_auth_upper,
+        "Found 'Authorization' (uppercase) - should have been lowercased"
+    );
+    assert!(
+        !found_content_type_upper,
+        "Found 'Content-Type' (uppercase) - should have been lowercased"
+    );
+    assert!(
+        !found_custom_mixed,
+        "Found 'x-custom-Header' (mixed) - should have been lowercased"
+    );
 
     // 2. Lowercase versions MUST exist
     assert!(found_auth_lower, "Missing 'authorization' header");

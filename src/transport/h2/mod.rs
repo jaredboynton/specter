@@ -25,18 +25,18 @@
 //! let response = conn.send_request(Method::GET, &uri, headers, None).await?;
 //! ```
 
+mod connection;
 mod frame;
 mod hpack;
-mod connection;
+mod hpack_impl;
 
-pub use frame::{
-    FrameType, FrameHeader, SettingsFrame, SettingsId, WindowUpdateFrame,
-    HeadersFrame, DataFrame, PingFrame, GoAwayFrame, RstStreamFrame,
-    PriorityFrame, PushPromiseFrame, PriorityData, ErrorCode, flags,
-    FRAME_HEADER_SIZE, CONNECTION_PREFACE, DEFAULT_MAX_FRAME_SIZE,
-};
-pub use hpack::{PseudoHeaderOrder, HpackEncoder, HpackDecoder};
 pub use connection::{H2Connection as RawH2Connection, StreamResponse, CHROME_WINDOW_UPDATE};
+pub use frame::{
+    flags, DataFrame, ErrorCode, FrameHeader, FrameType, GoAwayFrame, HeadersFrame, PingFrame,
+    PriorityData, PriorityFrame, PushPromiseFrame, RstStreamFrame, SettingsFrame, SettingsId,
+    WindowUpdateFrame, CONNECTION_PREFACE, DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_SIZE,
+};
+pub use hpack::{HpackDecoder, HpackEncoder, PseudoHeaderOrder};
 
 // Re-export wrapper types for convenience
 use bytes::Bytes;

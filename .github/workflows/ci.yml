@@ -1,0 +1,69 @@
+name: Specter CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Disable incremental compilation in CI (sccache handles caching)
+  CARGO_INCREMENTAL: 0
+  # RUSTC_WRAPPER set after sccache is initialized (see step below)
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  ci:
+    name: CI
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Configure sccache for Rust
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run Clippy (first compile, covers all targets)
+        run: cargo clippy --all-features --all-targets -- -D warnings -A dead_code
+
+      - name: Run tests
+        run: cargo test --all-features
+
+      - name: Run fingerprint_validation example
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 2
+          max_attempts: 3
+          retry_wait_seconds: 10
+          command: cargo run --example fingerprint_validation
+
+      - name: Run protocol_test example
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 3
+          max_attempts: 3
+          retry_wait_seconds: 10
+          command: cargo run --example protocol_test

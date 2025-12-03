@@ -148,13 +148,13 @@ impl FrameHeader {
         let length = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32);
         let frame_type = FrameType::from(buf[3]);
         let flags = buf[4];
-        
+
         // RFC 9113 Section 4.1: Stream ID is 31 bits, high bit (bit 0 of first byte) is reserved
         // Check reserved bit - must be 0
         if (buf[5] & 0x80) != 0 {
             return None; // Reserved bit set - invalid frame
         }
-        
+
         let stream_id = ((buf[5] as u32 & 0x7f) << 24)
             | ((buf[6] as u32) << 16)
             | ((buf[7] as u32) << 8)
@@ -273,7 +273,10 @@ pub struct WindowUpdateFrame {
 impl WindowUpdateFrame {
     /// Create a new WINDOW_UPDATE frame.
     pub fn new(stream_id: u32, increment: u32) -> Self {
-        Self { stream_id, increment }
+        Self {
+            stream_id,
+            increment,
+        }
     }
 
     /// Serialize to bytes (including frame header).
@@ -302,14 +305,17 @@ impl WindowUpdateFrame {
         }
         let increment_raw = payload.get_u32();
         let increment = increment_raw & 0x7fffffff;
-        
+
         // RFC 9113 Section 6.9.1: Window size increment MUST be between 1 and 2^31-1
         // A value of 0 is invalid and MUST be treated as a connection error (FLOW_CONTROL_ERROR)
         if increment == 0 {
             return None;
         }
-        
-        Some(Self { stream_id, increment })
+
+        Some(Self {
+            stream_id,
+            increment,
+        })
     }
 }
 
@@ -567,7 +573,11 @@ impl DataFrame {
 
         let mut buf = BytesMut::with_capacity(FRAME_HEADER_SIZE + payload_len);
 
-        let mut frame_flags = if self.end_stream { flags::END_STREAM } else { 0 };
+        let mut frame_flags = if self.end_stream {
+            flags::END_STREAM
+        } else {
+            0
+        };
         if self.padding_len > 0 {
             frame_flags |= flags::PADDED;
         }
@@ -856,7 +866,11 @@ impl PushPromiseFrame {
         let header = FrameHeader {
             length: payload_len as u32,
             frame_type: FrameType::PushPromise,
-            flags: if self.end_headers { flags::END_HEADERS } else { 0 },
+            flags: if self.end_headers {
+                flags::END_HEADERS
+            } else {
+                0
+            },
             stream_id: self.stream_id,
         };
         header.serialize(&mut buf);
@@ -929,7 +943,10 @@ pub struct RstStreamFrame {
 impl RstStreamFrame {
     /// Create a new RST_STREAM frame.
     pub fn new(stream_id: u32, error_code: ErrorCode) -> Self {
-        Self { stream_id, error_code }
+        Self {
+            stream_id,
+            error_code,
+        }
     }
 
     /// Serialize to bytes.
@@ -976,7 +993,10 @@ impl RstStreamFrame {
             _ => ErrorCode::ProtocolError,
         };
 
-        Ok(Self { stream_id, error_code })
+        Ok(Self {
+            stream_id,
+            error_code,
+        })
     }
 }
 

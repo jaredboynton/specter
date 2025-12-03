@@ -30,6 +30,9 @@ impl HttpVersion {
 
     /// Check if this version supports multiplexing.
     pub fn supports_multiplexing(&self) -> bool {
-        matches!(self, Self::Http2 | Self::Http3 | Self::Http3Only | Self::Auto)
+        matches!(
+            self,
+            Self::Http2 | Self::Http3 | Self::Http3Only | Self::Auto
+        )
     }
 }

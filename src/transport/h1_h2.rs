@@ -15,15 +15,15 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::timeout as tokio_timeout;
 
-use crate::fingerprint::{FingerprintProfile, http2::Http2Settings};
+use crate::error::{Error, Result};
+use crate::fingerprint::{http2::Http2Settings, FingerprintProfile};
 use crate::pool::alt_svc::AltSvcCache;
 use crate::pool::multiplexer::PoolKey;
+use crate::response::Response;
 use crate::transport::connector::{BoringConnector, MaybeHttpsStream};
 use crate::transport::h1::H1Connection;
 use crate::transport::h2::{H2Connection, H2PooledConnection, PseudoHeaderOrder};
 use crate::transport::h3::H3Client;
-use crate::response::Response;
-use crate::error::{Error, Result};
 use crate::version::HttpVersion;
 
 /// Unified HTTP client with HTTP/1.1, HTTP/2, and HTTP/3 support.
@@ -188,7 +188,10 @@ impl<'a> RequestBuilder<'a> {
         if matches!(version, HttpVersion::Auto) && self.client.h3_upgrade_enabled {
             let origin = self.get_origin();
             if let Some(alt_svc) = self.client.alt_svc_cache.get_h3_alternative(&origin).await {
-                tracing::debug!("Alt-Svc indicates HTTP/3 support for {}, attempting upgrade", origin);
+                tracing::debug!(
+                    "Alt-Svc indicates HTTP/3 support for {}, attempting upgrade",
+                    origin
+                );
 
                 // Try HTTP/3 to the alternative endpoint
                 let h3_url = if let Some(ref host) = alt_svc.host {
@@ -199,12 +202,20 @@ impl<'a> RequestBuilder<'a> {
                     self.uri.clone()
                 };
 
-                match self.client.h3_client.send_request(
-                    &h3_url,
-                    self.method.as_str(),
-                    self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
-                    self.body.clone(),
-                ).await {
+                match self
+                    .client
+                    .h3_client
+                    .send_request(
+                        &h3_url,
+                        self.method.as_str(),
+                        self.headers
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.as_str()))
+                            .collect(),
+                        self.body.clone(),
+                    )
+                    .await
+                {
                     Ok(response) => return Ok(response.with_url(h3_url)),
                     Err(e) => {
                         tracing::debug!("HTTP/3 upgrade failed, using HTTP/1.1 or HTTP/2: {}", e);
@@ -228,7 +239,10 @@ impl<'a> RequestBuilder<'a> {
         let fut = self.client.h3_client.send_request(
             &self.uri,
             self.method.as_str(),
-            self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
+            self.headers
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect(),
             self.body.clone(),
         );
 
@@ -253,7 +267,9 @@ impl<'a> RequestBuilder<'a> {
         let request_url = self.uri.clone();
 
         // Parse URI
-        let uri: Uri = self.uri.parse()
+        let uri: Uri = self
+            .uri
+            .parse()
             .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
 
         // Determine if we should use HTTP/2
@@ -283,12 +299,14 @@ impl<'a> RequestBuilder<'a> {
 
             if let Some(conn) = pooled {
                 // Try to use pooled connection
-                let result = conn.send_request(
-                    self.method.clone(),
-                    &uri,
-                    self.headers.clone(),
-                    self.body.clone().map(Bytes::from),
-                ).await;
+                let result = conn
+                    .send_request(
+                        self.method.clone(),
+                        &uri,
+                        self.headers.clone(),
+                        self.body.clone().map(Bytes::from),
+                    )
+                    .await;
 
                 match result {
                     Ok(response) => {
@@ -325,7 +343,8 @@ impl<'a> RequestBuilder<'a> {
                     stream,
                     self.client.http2_settings.clone(),
                     self.client.pseudo_order,
-                ).await?;
+                )
+                .await?;
                 let pooled_conn = H2PooledConnection::new(h2_conn);
 
                 // Store in pool
@@ -381,7 +400,8 @@ impl<'a> RequestBuilder<'a> {
                 stream,
                 self.client.http2_settings.clone(),
                 self.client.pseudo_order,
-            ).await?;
+            )
+            .await?;
             let pooled_conn = H2PooledConnection::new(h2_conn);
 
             // Store in pool for reuse
@@ -457,7 +477,9 @@ impl<'a> RequestBuilder<'a> {
         if let Ok(uri) = self.uri.parse::<Uri>() {
             let scheme = uri.scheme_str().unwrap_or("https");
             let host = uri.host().unwrap_or("localhost");
-            let port = uri.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 });
+            let port = uri
+                .port_u16()
+                .unwrap_or(if scheme == "https" { 443 } else { 80 });
 
             if (scheme == "https" && port == 443) || (scheme == "http" && port == 80) {
                 format!("{}://{}", scheme, host)
