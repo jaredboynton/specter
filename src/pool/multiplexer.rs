@@ -62,8 +62,10 @@ impl PoolEntry {
 
     /// Check if this connection can handle another multiplexed stream
     pub fn can_multiplex(&self) -> bool {
-        matches!(self.version, HttpVersion::Http2 | HttpVersion::Http3 | HttpVersion::Http3Only)
-            && self.active_streams < self.max_streams
+        matches!(
+            self.version,
+            HttpVersion::Http2 | HttpVersion::Http3 | HttpVersion::Http3Only
+        ) && self.active_streams < self.max_streams
             && self.is_valid
     }
 
@@ -142,7 +144,11 @@ impl ConnectionPool {
     /// Returns:
     /// - `Ok(Some(entry))`: Reusable connection found (HTTP/2 or HTTP/3)
     /// - `Ok(None)`: No reusable connection, create new one
-    pub async fn get_or_create(&self, key: &PoolKey, version: HttpVersion) -> Result<Option<PoolEntry>> {
+    pub async fn get_or_create(
+        &self,
+        key: &PoolKey,
+        version: HttpVersion,
+    ) -> Result<Option<PoolEntry>> {
         let mut entries = self.entries.write().await;
 
         // HTTP/1.1 doesn't support multiplexing - always create new connection
@@ -183,9 +189,7 @@ impl ConnectionPool {
     /// Remove expired and invalid connections
     pub async fn cleanup(&self) {
         let mut entries = self.entries.write().await;
-        entries.retain(|_key, entry| {
-            entry.is_valid && !entry.is_expired(self.max_idle_duration)
-        });
+        entries.retain(|_key, entry| entry.is_valid && !entry.is_expired(self.max_idle_duration));
     }
 
     /// Spawn a background cleanup task that runs periodically
@@ -298,7 +302,10 @@ mod tests {
         let key = PoolKey::new("example.com".to_string(), 443, true);
 
         // HTTP/1.1 should always return None (no pooling)
-        let result = pool.get_or_create(&key, HttpVersion::Http1_1).await.unwrap();
+        let result = pool
+            .get_or_create(&key, HttpVersion::Http1_1)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 

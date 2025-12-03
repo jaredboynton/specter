@@ -9,12 +9,12 @@
 //!
 //! Run with: cargo test --test bot_detection_validation
 
-use specter::fingerprint::tls::TlsFingerprint;
+use http::{Method, Uri};
 use specter::fingerprint::http2::Http2Settings;
+use specter::fingerprint::tls::TlsFingerprint;
 use specter::transport::connector::BoringConnector;
 use specter::transport::h2::{H2Connection, PseudoHeaderOrder};
 use specter::transport::h3::H3Client;
-use http::{Method, Uri};
 use tracing::warn;
 
 /// Known bot fingerprints that we MUST NOT match
@@ -36,7 +36,10 @@ async fn test_tls_fingerprint_not_bot() {
     let connector = BoringConnector::with_fingerprint(fp);
     let uri: Uri = "https://tls.peet.ws/api/all".parse().unwrap();
 
-    let stream = connector.connect(&uri).await.expect("TLS connection should succeed");
+    let stream = connector
+        .connect(&uri)
+        .await
+        .expect("TLS connection should succeed");
 
     // Verify ALPN negotiated h2
     assert!(stream.is_h2(), "Should negotiate HTTP/2 via ALPN");
@@ -49,7 +52,10 @@ async fn test_http2_fingerprint_matches_chrome() {
     let settings = Http2Settings::default();
     let uri: Uri = "https://tls.peet.ws/api/all".parse().unwrap();
 
-    let stream = connector.connect(&uri).await.expect("TLS connection should succeed");
+    let stream = connector
+        .connect(&uri)
+        .await
+        .expect("TLS connection should succeed");
 
     if !stream.is_h2() {
         panic!("Server did not negotiate HTTP/2");
@@ -60,11 +66,15 @@ async fn test_http2_fingerprint_matches_chrome() {
         .expect("HTTP/2 connection should succeed");
 
     let headers = vec![
-        ("user-agent".to_string(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36".to_string()),
+        (
+            "user-agent".to_string(),
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36".to_string(),
+        ),
         ("accept".to_string(), "application/json".to_string()),
     ];
 
-    let response = h2_conn.send_request(Method::GET, &uri, headers, None)
+    let response = h2_conn
+        .send_request(Method::GET, &uri, headers, None)
         .await
         .expect("HTTP/2 request should succeed");
 
@@ -72,8 +82,8 @@ async fn test_http2_fingerprint_matches_chrome() {
 
     // Parse response JSON
     let body = String::from_utf8_lossy(response.body());
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .expect("Response should be valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_str(&body).expect("Response should be valid JSON");
 
     // Validate HTTP/2 fingerprint
     if let Some(h2_fp) = json.get("http2") {
@@ -83,10 +93,19 @@ async fn test_http2_fingerprint_matches_chrome() {
             let parts: Vec<&str> = akamai_str.split('|').collect();
 
             assert_eq!(parts.len(), 4, "Akamai fingerprint should have 4 parts");
-            assert_eq!(parts[0], CHROME_AKAMAI_SETTINGS, "SETTINGS should match Chrome");
-            assert_eq!(parts[1], CHROME_WINDOW_UPDATE, "WINDOW_UPDATE should match Chrome");
+            assert_eq!(
+                parts[0], CHROME_AKAMAI_SETTINGS,
+                "SETTINGS should match Chrome"
+            );
+            assert_eq!(
+                parts[1], CHROME_WINDOW_UPDATE,
+                "WINDOW_UPDATE should match Chrome"
+            );
             assert_eq!(parts[2], CHROME_PRIORITY, "Priority should match Chrome");
-            assert_eq!(parts[3], CHROME_PSEUDO_ORDER, "Pseudo-header order should match Chrome");
+            assert_eq!(
+                parts[3], CHROME_PSEUDO_ORDER,
+                "Pseudo-header order should match Chrome"
+            );
         } else {
             panic!("Response should include akamai_fingerprint");
         }
@@ -106,7 +125,11 @@ async fn test_http2_fingerprint_matches_chrome() {
             if let Some(settings_frame) = frames.get(0) {
                 assert_eq!(settings_frame["frame_type"], "SETTINGS");
                 let settings_list = settings_frame["settings"].as_array().unwrap();
-                assert_eq!(settings_list.len(), 6, "Should send all 6 SETTINGS parameters");
+                assert_eq!(
+                    settings_list.len(),
+                    6,
+                    "Should send all 6 SETTINGS parameters"
+                );
 
                 // Verify settings order and values
                 assert_eq!(settings_list[0], "HEADER_TABLE_SIZE = 65536");
@@ -161,7 +184,10 @@ async fn test_browserleaks_passes() {
     let settings = Http2Settings::default();
     let uri: Uri = "https://tls.browserleaks.com/json".parse().unwrap();
 
-    let stream = connector.connect(&uri).await.expect("TLS connection should succeed");
+    let stream = connector
+        .connect(&uri)
+        .await
+        .expect("TLS connection should succeed");
 
     if !stream.is_h2() {
         warn!("WARNING: Server did not negotiate HTTP/2, skipping test");
@@ -178,16 +204,20 @@ async fn test_browserleaks_passes() {
         ("accept-language".to_string(), "en-US,en;q=0.9".to_string()),
     ];
 
-    let response = h2_conn.send_request(Method::GET, &uri, headers, None)
+    let response = h2_conn
+        .send_request(Method::GET, &uri, headers, None)
         .await
         .expect("browserleaks.com should accept our fingerprint");
 
-    assert_eq!(response.status, 200, "browserleaks.com should return 200 OK");
+    assert_eq!(
+        response.status, 200,
+        "browserleaks.com should return 200 OK"
+    );
 
     // Parse and validate response
     let body = String::from_utf8_lossy(response.body());
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .expect("Response should be valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_str(&body).expect("Response should be valid JSON");
 
     // Verify JA3 doesn't match bot fingerprints
     if let Some(ja3) = json.get("ja3_hash") {
@@ -212,28 +242,41 @@ async fn test_http3_fingerprint_works() {
     let h3_client = H3Client::with_fingerprint(fp);
 
     // Test against Cloudflare (known HTTP/3 support)
-    let response = h3_client.send_request(
-        "https://cloudflare.com/cdn-cgi/trace",
-        "GET",
-        vec![
-            ("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"),
-            ("accept", "*/*"),
-        ],
-        None,
-    ).await.expect("HTTP/3 request should succeed");
+    let response = h3_client
+        .send_request(
+            "https://cloudflare.com/cdn-cgi/trace",
+            "GET",
+            vec![
+                (
+                    "user-agent",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                ),
+                ("accept", "*/*"),
+            ],
+            None,
+        )
+        .await
+        .expect("HTTP/3 request should succeed");
 
     assert_eq!(response.status, 200);
     assert_eq!(response.http_version(), "HTTP/3");
 
     // Verify trace shows http/3
     let body = String::from_utf8_lossy(response.body());
-    assert!(body.contains("http=http/3"), "Cloudflare trace should confirm HTTP/3");
+    assert!(
+        body.contains("http=http/3"),
+        "Cloudflare trace should confirm HTTP/3"
+    );
 }
 
 #[test]
 fn test_pseudo_header_order_is_chrome() {
     let order = PseudoHeaderOrder::Chrome;
-    assert_eq!(order.akamai_string(), "m,s,a,p", "Chrome uses m,s,a,p order");
+    assert_eq!(
+        order.akamai_string(),
+        "m,s,a,p",
+        "Chrome uses m,s,a,p order"
+    );
 }
 
 #[test]
@@ -259,15 +302,11 @@ fn test_akamai_fingerprint_format() {
     // Validate our understanding of Akamai format
     let expected = format!(
         "{}|{}|{}|{}",
-        CHROME_AKAMAI_SETTINGS,
-        CHROME_WINDOW_UPDATE,
-        CHROME_PRIORITY,
-        CHROME_PSEUDO_ORDER
+        CHROME_AKAMAI_SETTINGS, CHROME_WINDOW_UPDATE, CHROME_PRIORITY, CHROME_PSEUDO_ORDER
     );
 
     assert_eq!(
-        expected,
-        "1:65536;2:0;3:1000;4:6291456;5:16384;6:262144|15663105|0|m,s,a,p",
+        expected, "1:65536;2:0;3:1000;4:6291456;5:16384;6:262144|15663105|0|m,s,a,p",
         "Akamai format should match Chrome exactly"
     );
 }
@@ -280,17 +319,24 @@ async fn test_full_fingerprint_validation_against_peet() {
     let settings = Http2Settings::default();
     let uri: Uri = "https://tls.peet.ws/api/all".parse().unwrap();
 
-    let stream = connector.connect(&uri).await.expect("Connection should succeed");
+    let stream = connector
+        .connect(&uri)
+        .await
+        .expect("Connection should succeed");
     let mut h2_conn = H2Connection::connect(stream, settings, PseudoHeaderOrder::Chrome)
         .await
         .expect("H2 connection should succeed");
 
     let headers = vec![
-        ("user-agent".to_string(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36".to_string()),
+        (
+            "user-agent".to_string(),
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36".to_string(),
+        ),
         ("accept".to_string(), "application/json".to_string()),
     ];
 
-    let response = h2_conn.send_request(Method::GET, &uri, headers, None)
+    let response = h2_conn
+        .send_request(Method::GET, &uri, headers, None)
         .await
         .expect("Request should succeed");
 
@@ -301,7 +347,8 @@ async fn test_full_fingerprint_validation_against_peet() {
 
     // Validate complete Akamai fingerprint
     if let Some(h2_fp) = json.get("http2") {
-        let akamai_fp = h2_fp.get("akamai_fingerprint")
+        let akamai_fp = h2_fp
+            .get("akamai_fingerprint")
             .and_then(|v| v.as_str())
             .expect("Should have akamai_fingerprint");
 
@@ -314,17 +361,24 @@ async fn test_full_fingerprint_validation_against_peet() {
         assert_eq!(parts[3], CHROME_PSEUDO_ORDER, "Pseudo-order mismatch");
 
         // Validate hash
-        let hash = h2_fp.get("akamai_fingerprint_hash")
+        let hash = h2_fp
+            .get("akamai_fingerprint_hash")
             .and_then(|v| v.as_str())
             .expect("Should have akamai_fingerprint_hash");
 
-        assert_eq!(hash, CHROME_AKAMAI_HASH, "Akamai hash should match h2 crate");
+        assert_eq!(
+            hash, CHROME_AKAMAI_HASH,
+            "Akamai hash should match h2 crate"
+        );
     }
 
     // Validate we don't match bot fingerprints
     if let Some(tls_fp) = json.get("tls") {
         if let Some(ja3) = tls_fp.get("ja3_hash").and_then(|v| v.as_str()) {
-            assert_ne!(ja3, BOT_JA3_PYTHON_REQUESTS, "Should NOT match Python requests");
+            assert_ne!(
+                ja3, BOT_JA3_PYTHON_REQUESTS,
+                "Should NOT match Python requests"
+            );
             assert_ne!(ja3, BOT_JA3_CURL_7X, "Should NOT match cURL 7.x");
         }
     }
@@ -338,7 +392,10 @@ async fn test_browserleaks_detection_passes() {
     let settings = Http2Settings::default();
     let uri: Uri = "https://tls.browserleaks.com/json".parse().unwrap();
 
-    let stream = connector.connect(&uri).await.expect("Connection should succeed");
+    let stream = connector
+        .connect(&uri)
+        .await
+        .expect("Connection should succeed");
 
     if !stream.is_h2() {
         warn!("Server did not negotiate HTTP/2, skipping");
@@ -355,7 +412,8 @@ async fn test_browserleaks_detection_passes() {
         ("accept-language".to_string(), "en-US,en;q=0.9".to_string()),
     ];
 
-    let response = h2_conn.send_request(Method::GET, &uri, headers, None)
+    let response = h2_conn
+        .send_request(Method::GET, &uri, headers, None)
         .await
         .expect("browserleaks should accept our fingerprint");
 
@@ -366,12 +424,18 @@ async fn test_browserleaks_detection_passes() {
 
     // Validate anti-bot checks pass
     if let Some(ja3) = json.get("ja3_hash").and_then(|v| v.as_str()) {
-        assert_ne!(ja3, BOT_JA3_PYTHON_REQUESTS, "Should NOT be detected as Python requests bot");
+        assert_ne!(
+            ja3, BOT_JA3_PYTHON_REQUESTS,
+            "Should NOT be detected as Python requests bot"
+        );
         assert_ne!(ja3, BOT_JA3_CURL_7X, "Should NOT be detected as cURL bot");
     }
 
     if let Some(akamai_hash) = json.get("akamai_hash").and_then(|v| v.as_str()) {
-        assert_eq!(akamai_hash, CHROME_AKAMAI_HASH, "Should match Chrome Akamai hash");
+        assert_eq!(
+            akamai_hash, CHROME_AKAMAI_HASH,
+            "Should match Chrome Akamai hash"
+        );
     }
 }
 
@@ -381,14 +445,18 @@ async fn test_http3_cloudflare_trace() {
     let fp = TlsFingerprint::chrome_142();
     let h3_client = H3Client::with_fingerprint(fp);
 
-    let response = h3_client.send_request(
-        "https://cloudflare.com/cdn-cgi/trace",
-        "GET",
-        vec![
-            ("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"),
-        ],
-        None,
-    ).await.expect("HTTP/3 should work");
+    let response = h3_client
+        .send_request(
+            "https://cloudflare.com/cdn-cgi/trace",
+            "GET",
+            vec![(
+                "user-agent",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            )],
+            None,
+        )
+        .await
+        .expect("HTTP/3 should work");
 
     assert_eq!(response.status, 200);
     assert_eq!(response.http_version(), "HTTP/3");
@@ -405,8 +473,14 @@ fn test_settings_frame_serialization() {
     let mut frame = SettingsFrame::new();
     frame
         .set(SettingsId::HeaderTableSize, settings.header_table_size)
-        .set(SettingsId::EnablePush, if settings.enable_push { 1 } else { 0 })
-        .set(SettingsId::MaxConcurrentStreams, settings.max_concurrent_streams)
+        .set(
+            SettingsId::EnablePush,
+            if settings.enable_push { 1 } else { 0 },
+        )
+        .set(
+            SettingsId::MaxConcurrentStreams,
+            settings.max_concurrent_streams,
+        )
         .set(SettingsId::InitialWindowSize, settings.initial_window_size)
         .set(SettingsId::MaxFrameSize, settings.max_frame_size)
         .set(SettingsId::MaxHeaderListSize, settings.max_header_list_size);
@@ -423,8 +497,8 @@ fn test_settings_frame_serialization() {
 
 #[test]
 fn test_goaway_graceful_shutdown() {
-    use specter::transport::h2::{GoAwayFrame, ErrorCode, FRAME_HEADER_SIZE};
     use bytes::Bytes;
+    use specter::transport::h2::{ErrorCode, GoAwayFrame, FRAME_HEADER_SIZE};
 
     // Server sends GOAWAY with NoError and last_stream_id=1
     let goaway = GoAwayFrame::new(1, ErrorCode::NoError);

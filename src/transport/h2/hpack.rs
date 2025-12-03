@@ -1,11 +1,12 @@
 //! HPACK header compression with custom pseudo-header ordering.
 //!
-//! This module wraps fluke-hpack to provide:
+//! This module provides a custom HPACK implementation with:
 //! - Custom pseudo-header ordering (Chrome uses `:method, :scheme, :authority, :path`)
 //! - Full control over header encoding for fingerprint accuracy
+//! - Complete Huffman encoding support
 
+use crate::transport::h2::hpack_impl::{Decoder, Encoder};
 use bytes::Bytes;
-use fluke_hpack::{Encoder, Decoder};
 
 /// Pseudo-header ordering for HTTP/2 fingerprinting.
 ///
@@ -33,13 +34,13 @@ impl PseudoHeaderOrder {
     fn order(&self) -> [usize; 4] {
         match self {
             // Chrome: m,s,a,p -> method, scheme, authority, path
-            Self::Chrome => [0, 2, 1, 3],     // m=0, s=2, a=1, p=3
+            Self::Chrome => [0, 2, 1, 3], // m=0, s=2, a=1, p=3
             // Firefox: m,p,a,s
-            Self::Firefox => [0, 3, 1, 2],    // m=0, p=3, a=1, s=2
+            Self::Firefox => [0, 3, 1, 2], // m=0, p=3, a=1, s=2
             // Safari: m,s,p,a
-            Self::Safari => [0, 2, 3, 1],     // m=0, s=2, p=3, a=1
+            Self::Safari => [0, 2, 3, 1], // m=0, s=2, p=3, a=1
             // Legacy: m,a,s,p (old incorrect Chrome assumption)
-            Self::Standard => [0, 1, 2, 3],   // m=0, a=1, s=2, p=3
+            Self::Standard => [0, 1, 2, 3], // m=0, a=1, s=2, p=3
             Self::Custom(order) => [
                 order[0] as usize,
                 order[1] as usize,
@@ -62,12 +63,12 @@ impl PseudoHeaderOrder {
 }
 
 /// HPACK encoder with custom pseudo-header ordering.
-pub struct HpackEncoder<'a> {
-    encoder: Encoder<'a>,
+pub struct HpackEncoder {
+    encoder: Encoder,
     pseudo_order: PseudoHeaderOrder,
 }
 
-impl<'a> HpackEncoder<'a> {
+impl HpackEncoder {
     /// Create a new encoder with the specified pseudo-header order.
     pub fn new(pseudo_order: PseudoHeaderOrder) -> Self {
         Self {
@@ -108,7 +109,7 @@ impl<'a> HpackEncoder<'a> {
 
         // Collect all headers in the correct order
         let mut all_headers: Vec<(&[u8], &[u8])> = Vec::new();
-        
+
         // Storage for processed valid headers (lowercased name, value ref)
         // We need this intermediate storage to ensure the Strings live long enough
         // and to avoid borrow checker issues (references into a growing Vec).
@@ -120,20 +121,22 @@ impl<'a> HpackEncoder<'a> {
             if name.starts_with(':') {
                 continue;
             }
-            
+
             // RFC 9113 Section 8.1.2: Validate header name
             if name.is_empty() {
                 continue;
             }
-            if name.as_bytes().iter().any(|&b| {
-                b < 0x21 || (b > 0x7E && b != 0x7F)
-            }) {
+            if name
+                .as_bytes()
+                .iter()
+                .any(|&b| b < 0x21 || (b > 0x7E && b != 0x7F))
+            {
                 continue;
             }
-            
+
             // HTTP/2 requires header names to be lowercase
             let name_lower = name.to_lowercase();
-            
+
             // Skip connection-specific headers forbidden in HTTP/2
             if name_lower == "connection"
                 || name_lower == "keep-alive"
@@ -143,12 +146,12 @@ impl<'a> HpackEncoder<'a> {
             {
                 continue;
             }
-            
+
             // RFC 9113 Section 8.1.2.2: TE header allowed ONLY if value is "trailers"
             if name_lower == "te" && value.to_lowercase() != "trailers" {
                 continue;
             }
-            
+
             valid_headers.push((name_lower, value));
         }
 
@@ -164,16 +167,16 @@ impl<'a> HpackEncoder<'a> {
         }
 
         // Encode all headers
-        let encoded = self.encoder.encode(all_headers);
+        let encoded = self.encoder.encode(&all_headers);
         Bytes::from(encoded)
     }
 
     /// Split an encoded header block into chunks if it exceeds max_frame_size.
     /// Returns (first_chunk, remaining_chunks).
-    /// 
+    ///
     /// This is used when header blocks exceed MAX_FRAME_SIZE and must be
     /// split across HEADERS + CONTINUATION frames per RFC 9113 Section 6.10.
-    /// 
+    ///
     /// Use this after calling encode_request() to chunk the result if needed.
     pub fn chunk_encoded(encoded: Bytes, max_frame_size: usize) -> (Bytes, Vec<Bytes>) {
         if encoded.len() <= max_frame_size {
@@ -193,11 +196,11 @@ impl<'a> HpackEncoder<'a> {
 }
 
 /// HPACK decoder.
-pub struct HpackDecoder<'a> {
-    decoder: Decoder<'a>,
+pub struct HpackDecoder {
+    decoder: Decoder,
 }
 
-impl<'a> HpackDecoder<'a> {
+impl HpackDecoder {
     /// Create a new decoder.
     pub fn new() -> Self {
         Self {
@@ -214,17 +217,19 @@ impl<'a> HpackDecoder<'a> {
     pub fn decode(&mut self, data: &[u8]) -> Result<Vec<(String, String)>, String> {
         let mut headers = Vec::new();
 
-        self.decoder.decode_with_cb(data, |name, value| {
-            let name_str = String::from_utf8_lossy(&name).into_owned();
-            let value_str = String::from_utf8_lossy(&value).into_owned();
-            headers.push((name_str, value_str));
-        }).map_err(|e| format!("HPACK decode error: {:?}", e))?;
+        self.decoder
+            .decode_with_cb(data, |name, value| {
+                let name_str = String::from_utf8_lossy(name).into_owned();
+                let value_str = String::from_utf8_lossy(value).into_owned();
+                headers.push((name_str, value_str));
+            })
+            .map_err(|e| format!("HPACK decode error: {:?}", e))?;
 
         Ok(headers)
     }
 }
 
-impl Default for HpackDecoder<'_> {
+impl Default for HpackDecoder {
     fn default() -> Self {
         Self::new()
     }
@@ -283,13 +288,7 @@ mod tests {
     #[test]
     fn test_encoder_standard_order() {
         let mut encoder = HpackEncoder::new(PseudoHeaderOrder::Standard);
-        let block = encoder.encode_request(
-            "GET",
-            "https",
-            "example.com",
-            "/",
-            &[],
-        );
+        let block = encoder.encode_request("GET", "https", "example.com", "/", &[]);
 
         let mut decoder = HpackDecoder::new();
         let headers = decoder.decode(&block).unwrap();

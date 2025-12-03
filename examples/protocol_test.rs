@@ -15,8 +15,8 @@
 //!   cargo run --example protocol_test -- --verbose
 //!   cargo run --example protocol_test -- --target cloudflare.com
 
-use specter::{ClientBuilder, HttpVersion, FingerprintProfile};
 use specter::headers::chrome_142_headers;
+use specter::{ClientBuilder, FingerprintProfile, HttpVersion};
 use std::time::{Duration, Instant};
 use tracing::info;
 
@@ -95,7 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse args
     let args: Vec<String> = std::env::args().collect();
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
-    let custom_target = args.iter()
+    let custom_target = args
+        .iter()
         .position(|a| a == "--target")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str());
@@ -125,13 +126,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             supports_h3: true, // Assume all, will fail gracefully
         }]
     } else {
-        TARGETS.iter().map(|t| TestTarget {
-            name: t.name,
-            url: t.url,
-            supports_h1: t.supports_h1,
-            supports_h2: t.supports_h2,
-            supports_h3: t.supports_h3,
-        }).collect()
+        TARGETS
+            .iter()
+            .map(|t| TestTarget {
+                name: t.name,
+                url: t.url,
+                supports_h1: t.supports_h1,
+                supports_h2: t.supports_h2,
+                supports_h3: t.supports_h3,
+            })
+            .collect()
     };
 
     for target in &targets {
@@ -204,16 +208,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if failed > 0 {
         info!("Failed tests:");
         for result in all_results.iter().filter(|r| !r.success) {
-            info!("  - {}: {}", result.name, result.error.as_ref().unwrap_or(&"Unknown".to_string()));
+            info!(
+                "  - {}: {}",
+                result.name,
+                result.error.as_ref().unwrap_or(&"Unknown".to_string())
+            );
         }
     }
 
     // Protocol breakdown
     info!("");
     info!("Protocol breakdown:");
-    let h1_results: Vec<_> = all_results.iter().filter(|r| r.protocol == "HTTP/1.1").collect();
-    let h2_results: Vec<_> = all_results.iter().filter(|r| r.protocol == "HTTP/2").collect();
-    let h3_results: Vec<_> = all_results.iter().filter(|r| r.protocol == "HTTP/3").collect();
+    let h1_results: Vec<_> = all_results
+        .iter()
+        .filter(|r| r.protocol == "HTTP/1.1")
+        .collect();
+    let h2_results: Vec<_> = all_results
+        .iter()
+        .filter(|r| r.protocol == "HTTP/2")
+        .collect();
+    let h3_results: Vec<_> = all_results
+        .iter()
+        .filter(|r| r.protocol == "HTTP/3")
+        .collect();
 
     if !h1_results.is_empty() {
         let h1_passed = h1_results.iter().filter(|r| r.success).count();
@@ -239,17 +256,16 @@ fn print_result(result: &TestResult) {
     if result.success {
         info!(
             "  [PASS] {} - {} {} ({}ms, {} bytes)",
-            result.name,
-            result.protocol,
-            result.status,
-            result.duration_ms,
-            result.body_len
+            result.name, result.protocol, result.status, result.duration_ms, result.body_len
         );
     } else {
         info!(
             "  [FAIL] {} - {}",
             result.name,
-            result.error.as_ref().unwrap_or(&"Unknown error".to_string())
+            result
+                .error
+                .as_ref()
+                .unwrap_or(&"Unknown error".to_string())
         );
     }
 }
@@ -275,7 +291,8 @@ async fn test_http1_explicit(url: &str, _verbose: bool) -> TestResult {
     let headers = chrome_headers_owned();
     let start = Instant::now();
 
-    match client.get(url)
+    match client
+        .get(url)
         .headers(headers)
         .version(HttpVersion::Http1_1)
         .send()
@@ -312,7 +329,8 @@ async fn test_http2_explicit(url: &str, _verbose: bool) -> TestResult {
     let headers = chrome_headers_owned();
     let start = Instant::now();
 
-    match client.get(url)
+    match client
+        .get(url)
         .headers(headers)
         .version(HttpVersion::Http2)
         .send()
@@ -341,7 +359,7 @@ async fn test_http2_auto_upgrade(url: &str, _verbose: bool) -> TestResult {
     // Build client with HTTP/1.1 preference (but ALPN still offers h2)
     let client = match ClientBuilder::new()
         .fingerprint(FingerprintProfile::Chrome142)
-        .prefer_http2(false)  // Prefer H1, but should upgrade if server selects H2
+        .prefer_http2(false) // Prefer H1, but should upgrade if server selects H2
         .timeout(Duration::from_secs(30))
         .build()
     {
@@ -355,11 +373,7 @@ async fn test_http2_auto_upgrade(url: &str, _verbose: bool) -> TestResult {
 
     let start = Instant::now();
 
-    match client.get(url)
-        .headers(headers)
-        .send()
-        .await
-    {
+    match client.get(url).headers(headers).send().await {
         Ok(response) => {
             let duration = start.elapsed().as_millis() as u64;
             let protocol = response.http_version();
@@ -396,7 +410,8 @@ async fn test_http2_pooling(url: &str, _verbose: bool) -> TestResult {
 
     for i in 0..3 {
         let headers = chrome_headers_owned();
-        match client.get(url)
+        match client
+            .get(url)
             .headers(headers)
             .version(HttpVersion::Http2)
             .send()
@@ -442,7 +457,8 @@ async fn test_http3_explicit(url: &str, _verbose: bool) -> TestResult {
 
     let start = Instant::now();
 
-    match client.get(url)
+    match client
+        .get(url)
         .headers(headers)
         .version(HttpVersion::Http3Only)
         .send()
@@ -489,7 +505,8 @@ async fn test_connection_header_filtering(url: &str, _verbose: bool) -> TestResu
     let start = Instant::now();
 
     // If headers aren't filtered, the h2 crate will reject with "malformed headers"
-    match client.get(url)
+    match client
+        .get(url)
         .headers(headers)
         .version(HttpVersion::Http2)
         .send()
@@ -543,7 +560,8 @@ async fn test_post_request(base_url: &str, _verbose: bool) -> TestResult {
 
     let start = Instant::now();
 
-    match client.post(&url)
+    match client
+        .post(&url)
         .headers(headers)
         .body(body.as_bytes().to_vec())
         .version(HttpVersion::Http2)

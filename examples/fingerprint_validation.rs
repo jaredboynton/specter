@@ -15,15 +15,16 @@
 //! HTTP/2 Akamai format: settings|window_update|priority|pseudo_headers
 //! Chrome values: 1:65536;3:1000;4:6291456;6:262144|15663105|0|m,a,s,p
 
-use specter::fingerprint::tls::TlsFingerprint;
+use specter::error::Result;
 use specter::fingerprint::http2::Http2Settings;
+use specter::fingerprint::tls::TlsFingerprint;
 use specter::transport::connector::{BoringConnector, MaybeHttpsStream};
 use specter::transport::h2::{H2Connection, PseudoHeaderOrder};
 use specter::transport::h3::H3Client;
-use specter::error::Result;
 
 use http::{Method, Uri};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
+use tracing_subscriber;
 
 /// Known bot fingerprints to avoid
 const BOT_JA3_PYTHON_REQUESTS: &str = "8d9f7747675e24454cd9b7ed35c58707";
@@ -36,6 +37,13 @@ const EXPECTED_PSEUDO_ORDER: &str = "m,a,s,p";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .init();
+
     info!("=== Specter Fingerprint Validation ===");
 
     // Test 1: TLS Fingerprint via BoringConnector
@@ -124,25 +132,55 @@ async fn test_h2_fingerprint() -> Result<()> {
     info!("   Configured HTTP/2 SETTINGS:");
     info!("   - HEADER_TABLE_SIZE: {}", settings.header_table_size);
     info!("   - ENABLE_PUSH: {}", settings.enable_push);
-    info!("   - MAX_CONCURRENT_STREAMS: {}", settings.max_concurrent_streams);
+    info!(
+        "   - MAX_CONCURRENT_STREAMS: {}",
+        settings.max_concurrent_streams
+    );
     info!("   - INITIAL_WINDOW_SIZE: {}", settings.initial_window_size);
     info!("   - MAX_FRAME_SIZE: {}", settings.max_frame_size);
-    info!("   - MAX_HEADER_LIST_SIZE: {}", settings.max_header_list_size);
+    info!(
+        "   - MAX_HEADER_LIST_SIZE: {}",
+        settings.max_header_list_size
+    );
 
     // Expected Chrome values
     info!("   Expected Chrome 142 values:");
-    info!("   - HEADER_TABLE_SIZE: 65536 {}", check(settings.header_table_size == 65536));
+    info!(
+        "   - HEADER_TABLE_SIZE: 65536 {}",
+        check(settings.header_table_size == 65536)
+    );
     info!("   - ENABLE_PUSH: false {}", check(!settings.enable_push));
-    info!("   - MAX_CONCURRENT_STREAMS: 1000 {}", check(settings.max_concurrent_streams == 1000));
-    info!("   - INITIAL_WINDOW_SIZE: 6291456 {}", check(settings.initial_window_size == 6291456));
-    info!("   - MAX_FRAME_SIZE: 16384 {}", check(settings.max_frame_size == 16384));
-    info!("   - MAX_HEADER_LIST_SIZE: 262144 {}", check(settings.max_header_list_size == 262144));
+    info!(
+        "   - MAX_CONCURRENT_STREAMS: 1000 {}",
+        check(settings.max_concurrent_streams == 1000)
+    );
+    info!(
+        "   - INITIAL_WINDOW_SIZE: 6291456 {}",
+        check(settings.initial_window_size == 6291456)
+    );
+    info!(
+        "   - MAX_FRAME_SIZE: 16384 {}",
+        check(settings.max_frame_size == 16384)
+    );
+    info!(
+        "   - MAX_HEADER_LIST_SIZE: 262144 {}",
+        check(settings.max_header_list_size == 262144)
+    );
 
     // Expected Akamai format
     info!("   Expected Akamai HTTP/2 format:");
-    info!("   - SETTINGS: {} {}", EXPECTED_AKAMAI_SETTINGS, "[REFERENCE]");
-    info!("   - WINDOW_UPDATE: {} {}", EXPECTED_WINDOW_UPDATE, "[REFERENCE]");
-    info!("   - Pseudo-header order: {} {}", EXPECTED_PSEUDO_ORDER, "[REFERENCE]");
+    info!(
+        "   - SETTINGS: {} {}",
+        EXPECTED_AKAMAI_SETTINGS, "[REFERENCE]"
+    );
+    info!(
+        "   - WINDOW_UPDATE: {} {}",
+        EXPECTED_WINDOW_UPDATE, "[REFERENCE]"
+    );
+    info!(
+        "   - Pseudo-header order: {} {}",
+        EXPECTED_PSEUDO_ORDER, "[REFERENCE]"
+    );
 
     // Test actual HTTP/2 connection
     let fp = TlsFingerprint::chrome_142();
@@ -167,7 +205,11 @@ async fn test_h2_fingerprint() -> Result<()> {
 
                     // Send a request
                     let headers = vec![
-                        ("user-agent".to_string(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36".to_string()),
+                        (
+                            "user-agent".to_string(),
+                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                                .to_string(),
+                        ),
                         ("accept".to_string(), "application/json".to_string()),
                     ];
 
@@ -185,7 +227,10 @@ async fn test_h2_fingerprint() -> Result<()> {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                                 if let Some(h2_fp) = json.get("http2") {
                                     info!("   Server-detected HTTP/2 fingerprint:");
-                                    info!("   {}", serde_json::to_string_pretty(h2_fp).unwrap_or_default());
+                                    info!(
+                                        "   {}",
+                                        serde_json::to_string_pretty(h2_fp).unwrap_or_default()
+                                    );
 
                                     // Check Akamai fingerprint if present
                                     if let Some(akamai) = h2_fp.get("akamai_fingerprint") {
@@ -241,15 +286,21 @@ async fn test_h3_fingerprint() -> Result<()> {
 
     info!("   Testing HTTP/3 connection to: {}", url);
 
-    match h3_client.send_request(
-        url,
-        "GET",
-        vec![
-            ("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"),
-            ("accept", "*/*"),
-        ],
-        None,
-    ).await {
+    match h3_client
+        .send_request(
+            url,
+            "GET",
+            vec![
+                (
+                    "user-agent",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                ),
+                ("accept", "*/*"),
+            ],
+            None,
+        )
+        .await
+    {
         Ok(response) => {
             info!("   [OK] HTTP/3 request succeeded: {}", response.status);
             info!("   [OK] Protocol: {}", response.http_version());
@@ -277,15 +328,21 @@ async fn test_h3_fingerprint() -> Result<()> {
     info!("   Testing HTTP/3 fingerprint detection at quic.tech...");
     let quic_url = "https://quic.tech:8443/";
 
-    match h3_client.send_request(
-        quic_url,
-        "GET",
-        vec![
-            ("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"),
-            ("accept", "text/html"),
-        ],
-        None,
-    ).await {
+    match h3_client
+        .send_request(
+            quic_url,
+            "GET",
+            vec![
+                (
+                    "user-agent",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                ),
+                ("accept", "text/html"),
+            ],
+            None,
+        )
+        .await
+    {
         Ok(response) => {
             info!("   [OK] quic.tech response: {}", response.status);
             if response.http_version() == "HTTP/3" {
@@ -293,7 +350,10 @@ async fn test_h3_fingerprint() -> Result<()> {
             }
         }
         Err(e) => {
-            info!("   [INFO] quic.tech test: {} (server may be unavailable)", e);
+            info!(
+                "   [INFO] quic.tech test: {} (server may be unavailable)",
+                e
+            );
         }
     }
 
@@ -374,7 +434,10 @@ async fn test_browserleaks() -> Result<()> {
                                     info!("   User-Agent Match: {} {}", ua_match, check(ua_match));
                                 }
                             } else {
-                                info!("   Response body (raw):\n   {}", &body[..body.len().min(500)]);
+                                info!(
+                                    "   Response body (raw):\n   {}",
+                                    &body[..body.len().min(500)]
+                                );
                             }
                         }
                         Err(e) => {
@@ -474,7 +537,10 @@ async fn test_scrapfly() -> Result<()> {
                                     info!("   - HTTP/2 Pseudo Order: {}", h2_pseudo);
                                 }
                             } else {
-                                info!("   Response body (raw):\n   {}", &body[..body.len().min(500)]);
+                                info!(
+                                    "   Response body (raw):\n   {}",
+                                    &body[..body.len().min(500)]
+                                );
                             }
                         }
                         Err(e) => {
@@ -512,13 +578,34 @@ fn validate_akamai_fingerprint(akamai: &str) {
     let parts: Vec<&str> = akamai.split('|').collect();
     if parts.len() >= 4 {
         info!("     Akamai Validation:");
-        info!("       - SETTINGS: {} {}", parts[0],
-            if parts[0] == EXPECTED_AKAMAI_SETTINGS { "[OK]" } else { "[DIFFERS]" });
-        info!("       - WINDOW_UPDATE: {} {}", parts[1],
-            if parts[1] == EXPECTED_WINDOW_UPDATE { "[OK]" } else { "[DIFFERS]" });
+        info!(
+            "       - SETTINGS: {} {}",
+            parts[0],
+            if parts[0] == EXPECTED_AKAMAI_SETTINGS {
+                "[OK]"
+            } else {
+                "[DIFFERS]"
+            }
+        );
+        info!(
+            "       - WINDOW_UPDATE: {} {}",
+            parts[1],
+            if parts[1] == EXPECTED_WINDOW_UPDATE {
+                "[OK]"
+            } else {
+                "[DIFFERS]"
+            }
+        );
         // Priority (parts[2]) varies
-        info!("       - Pseudo order: {} {}", parts[3],
-            if parts[3] == EXPECTED_PSEUDO_ORDER { "[OK]" } else { "[DIFFERS]" });
+        info!(
+            "       - Pseudo order: {} {}",
+            parts[3],
+            if parts[3] == EXPECTED_PSEUDO_ORDER {
+                "[OK]"
+            } else {
+                "[DIFFERS]"
+            }
+        );
     }
 }
 
@@ -543,5 +630,9 @@ fn print_fingerprint_summary() {
 }
 
 fn check(condition: bool) -> &'static str {
-    if condition { "[OK]" } else { "[MISMATCH]" }
+    if condition {
+        "[OK]"
+    } else {
+        "[MISMATCH]"
+    }
 }

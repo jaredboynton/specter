@@ -1,16 +1,16 @@
 //! BoringSSL TLS connector.
 
 use boring::ssl::{SslConnector, SslMethod, SslVersion};
-use tokio_boring::SslStream;
-use tokio::net::TcpStream;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use http::Uri;
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::io;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
+use tokio_boring::SslStream;
 
-use crate::fingerprint::tls::TlsFingerprint;
 use crate::error::Error;
+use crate::fingerprint::tls::TlsFingerprint;
 
 // FFI bindings for BoringSSL extension control
 use boring_sys::SSL_CTX;
@@ -34,38 +34,43 @@ impl BoringConnector {
     pub fn new() -> Self {
         Self { tls_config: None }
     }
-    
+
     /// Create a connector with TLS fingerprint configuration.
     pub fn with_fingerprint(fp: TlsFingerprint) -> Self {
-        Self { tls_config: Some(fp) }
+        Self {
+            tls_config: Some(fp),
+        }
     }
-    
+
     fn configure_ssl(&self, _domain: &str) -> Result<SslConnector, Error> {
         let mut builder = SslConnector::builder(SslMethod::tls_client())
             .map_err(|e| Error::Tls(format!("Failed to create SSL connector: {}", e)))?;
-        
+
         if let Some(fp) = &self.tls_config {
             // Set cipher list from fingerprint
             if !fp.cipher_list.is_empty() {
                 let cipher_str = fp.cipher_list.join(":");
-                builder.set_cipher_list(&cipher_str)
+                builder
+                    .set_cipher_list(&cipher_str)
                     .map_err(|e| Error::Tls(format!("Failed to set cipher list: {}", e)))?;
             }
-            
+
             // Set curves/groups from fingerprint
             if !fp.curves.is_empty() {
                 let curves_str = fp.curves.join(":");
-                builder.set_curves_list(&curves_str)
+                builder
+                    .set_curves_list(&curves_str)
                     .map_err(|e| Error::Tls(format!("Failed to set curves: {}", e)))?;
             }
-            
+
             // Set signature algorithms from fingerprint
             if !fp.sigalgs.is_empty() {
                 let sigalgs_str = fp.sigalgs.join(":");
-                builder.set_sigalgs_list(&sigalgs_str)
-                    .map_err(|e| Error::Tls(format!("Failed to set signature algorithms: {}", e)))?;
+                builder.set_sigalgs_list(&sigalgs_str).map_err(|e| {
+                    Error::Tls(format!("Failed to set signature algorithms: {}", e))
+                })?;
             }
-            
+
             // Enable GREASE and extension permutation for Chrome-like behavior
             if fp.grease {
                 unsafe {
@@ -74,24 +79,29 @@ impl BoringConnector {
                     SSL_CTX_set_permute_extensions(ctx, 1);
                 }
             }
-            
+
             // Set min/max TLS version
-            builder.set_min_proto_version(Some(SslVersion::TLS1_2))
+            builder
+                .set_min_proto_version(Some(SslVersion::TLS1_2))
                 .map_err(|e| Error::Tls(format!("Failed to set min TLS version: {}", e)))?;
-            builder.set_max_proto_version(Some(SslVersion::TLS1_3))
+            builder
+                .set_max_proto_version(Some(SslVersion::TLS1_3))
                 .map_err(|e| Error::Tls(format!("Failed to set max TLS version: {}", e)))?;
         } else {
             // Default configuration
-            builder.set_min_proto_version(Some(SslVersion::TLS1_2))
+            builder
+                .set_min_proto_version(Some(SslVersion::TLS1_2))
                 .map_err(|e| Error::Tls(format!("Failed to set min TLS version: {}", e)))?;
-            builder.set_max_proto_version(Some(SslVersion::TLS1_3))
+            builder
+                .set_max_proto_version(Some(SslVersion::TLS1_3))
                 .map_err(|e| Error::Tls(format!("Failed to set max TLS version: {}", e)))?;
         }
-        
+
         // Enable ALPN for HTTP/2
-        builder.set_alpn_protos(b"\x02h2\x08http/1.1")
+        builder
+            .set_alpn_protos(b"\x02h2\x08http/1.1")
             .map_err(|e| Error::Tls(format!("Failed to set ALPN: {}", e)))?;
-        
+
         Ok(builder.build())
     }
 }
@@ -138,13 +148,11 @@ impl MaybeHttpsStream {
     pub fn alpn_protocol(&self) -> AlpnProtocol {
         match self {
             MaybeHttpsStream::Http(_) => AlpnProtocol::Unknown,
-            MaybeHttpsStream::Https(stream) => {
-                match stream.ssl().selected_alpn_protocol() {
-                    Some(b"h2") => AlpnProtocol::H2,
-                    Some(b"http/1.1") => AlpnProtocol::Http1,
-                    _ => AlpnProtocol::Unknown,
-                }
-            }
+            MaybeHttpsStream::Https(stream) => match stream.ssl().selected_alpn_protocol() {
+                Some(b"h2") => AlpnProtocol::H2,
+                Some(b"http/1.1") => AlpnProtocol::Http1,
+                _ => AlpnProtocol::Unknown,
+            },
         }
     }
 
@@ -199,22 +207,31 @@ impl AsyncWrite for MaybeHttpsStream {
 impl BoringConnector {
     /// Connect to a URI, returning either a plain TCP or TLS stream.
     pub async fn connect(&self, uri: &Uri) -> Result<MaybeHttpsStream, Error> {
-        let host = uri.host().ok_or_else(|| Error::Connection("Missing host".into()))?;
-        let port = uri.port_u16().unwrap_or(
-            if uri.scheme_str() == Some("https") { 443 } else { 80 }
-        );
+        let host = uri
+            .host()
+            .ok_or_else(|| Error::Connection("Missing host".into()))?;
+        let port = uri
+            .port_u16()
+            .unwrap_or(if uri.scheme_str() == Some("https") {
+                443
+            } else {
+                80
+            });
 
         let addr = format!("{}:{}", host, port);
-        let tcp_stream = TcpStream::connect(&addr).await
+        let tcp_stream = TcpStream::connect(&addr)
+            .await
             .map_err(|e| Error::Connection(format!("Failed to connect to {}: {}", addr, e)))?;
 
         if uri.scheme_str() == Some("https") {
             let ssl_connector = self.configure_ssl(host)?;
 
-            let ssl_config = ssl_connector.configure()
+            let ssl_config = ssl_connector
+                .configure()
                 .map_err(|e| Error::Tls(format!("Failed to configure SSL: {}", e)))?;
 
-            let ssl_stream = tokio_boring::connect(ssl_config, host, tcp_stream).await
+            let ssl_stream = tokio_boring::connect(ssl_config, host, tcp_stream)
+                .await
                 .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
 
             Ok(MaybeHttpsStream::Https(ssl_stream))

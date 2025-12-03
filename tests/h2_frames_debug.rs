@@ -2,11 +2,11 @@
 //!
 //! Run with: cargo test --test h2_frames_debug -- --nocapture
 
-use specter::transport::h2::{
-    SettingsFrame, SettingsId, WindowUpdateFrame, FrameType, FrameHeader,
-    CONNECTION_PREFACE, CHROME_WINDOW_UPDATE,
-};
 use specter::fingerprint::http2::Http2Settings;
+use specter::transport::h2::{
+    FrameHeader, FrameType, SettingsFrame, SettingsId, WindowUpdateFrame, CHROME_WINDOW_UPDATE,
+    CONNECTION_PREFACE,
+};
 use tracing::info;
 
 #[test]
@@ -17,8 +17,14 @@ fn test_settings_frame_serialization() {
     let mut settings_frame = SettingsFrame::new();
     settings_frame
         .set(SettingsId::HeaderTableSize, settings.header_table_size)
-        .set(SettingsId::EnablePush, if settings.enable_push { 1 } else { 0 })
-        .set(SettingsId::MaxConcurrentStreams, settings.max_concurrent_streams)
+        .set(
+            SettingsId::EnablePush,
+            if settings.enable_push { 1 } else { 0 },
+        )
+        .set(
+            SettingsId::MaxConcurrentStreams,
+            settings.max_concurrent_streams,
+        )
         .set(SettingsId::InitialWindowSize, settings.initial_window_size)
         .set(SettingsId::MaxFrameSize, settings.max_frame_size)
         .set(SettingsId::MaxHeaderListSize, settings.max_header_list_size);
@@ -80,7 +86,10 @@ fn test_window_update_frame() {
 
     // Parse increment value
     let increment = u32::from_be_bytes([bytes[9], bytes[10], bytes[11], bytes[12]]);
-    info!("Increment: {} (expected: {})", increment, CHROME_WINDOW_UPDATE);
+    info!(
+        "Increment: {} (expected: {})",
+        increment, CHROME_WINDOW_UPDATE
+    );
     assert_eq!(increment, CHROME_WINDOW_UPDATE);
 }
 

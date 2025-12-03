@@ -62,9 +62,9 @@ pub struct H2Connection<S> {
     /// Underlying stream (TLS socket).
     stream: S,
     /// HPACK encoder with custom pseudo-header order.
-    encoder: HpackEncoder<'static>,
+    encoder: HpackEncoder,
     /// HPACK decoder.
-    decoder: HpackDecoder<'static>,
+    decoder: HpackDecoder,
     /// Connection settings.
     settings: Http2Settings,
     /// Pseudo-header order for fingerprinting.
@@ -134,8 +134,14 @@ where
         let mut settings_frame = SettingsFrame::new();
         settings_frame
             .set(SettingsId::HeaderTableSize, settings.header_table_size)
-            .set(SettingsId::EnablePush, if settings.enable_push { 1 } else { 0 })
-            .set(SettingsId::MaxConcurrentStreams, settings.max_concurrent_streams)
+            .set(
+                SettingsId::EnablePush,
+                if settings.enable_push { 1 } else { 0 },
+            )
+            .set(
+                SettingsId::MaxConcurrentStreams,
+                settings.max_concurrent_streams,
+            )
             .set(SettingsId::InitialWindowSize, settings.initial_window_size)
             .set(SettingsId::MaxFrameSize, settings.max_frame_size)
             .set(SettingsId::MaxHeaderListSize, settings.max_header_list_size);
@@ -148,17 +154,21 @@ where
 
         // Send WINDOW_UPDATE for connection-level window (Chrome behavior)
         let window_update = WindowUpdateFrame::new(0, CHROME_WINDOW_UPDATE);
-        
+
         // Combine all handshake frames into a single write to minimize packets/TLS records
         let mut handshake_buf = BytesMut::new();
         handshake_buf.extend_from_slice(CONNECTION_PREFACE);
         handshake_buf.extend_from_slice(&settings_bytes);
         handshake_buf.extend_from_slice(&window_update.serialize());
-        
-        stream.write_all(&handshake_buf).await
+
+        stream
+            .write_all(&handshake_buf)
+            .await
             .map_err(|e| Error::HttpProtocol(format!("Failed to send handshake: {}", e)))?;
 
-        stream.flush().await
+        stream
+            .flush()
+            .await
             .map_err(|e| Error::HttpProtocol(format!("Failed to flush: {}", e)))?;
 
         let conn = Self {
@@ -182,7 +192,7 @@ where
         // (in the same packet/flight if possible).
         // We skip waiting here; the server's SETTINGS frame will be handled by `read_response`
         // or `read_streaming_frames` when we start reading the response.
-        
+
         /*
         match settings.handshake_timeout {
             Some(duration) => {
@@ -212,17 +222,21 @@ where
     fn apply_peer_settings(&mut self, settings: &SettingsFrame) {
         for (id, value) in &settings.settings {
             match *id {
-                0x1 => { // HeaderTableSize
+                0x1 => {
+                    // HeaderTableSize
                     self.peer_settings.header_table_size = *value;
                     self.encoder.set_max_table_size(*value as usize);
                 }
-                0x2 => { // EnablePush
+                0x2 => {
+                    // EnablePush
                     self.peer_settings.enable_push = *value != 0;
                 }
-                0x3 => { // MaxConcurrentStreams
+                0x3 => {
+                    // MaxConcurrentStreams
                     self.peer_settings.max_concurrent_streams = *value;
                 }
-                0x4 => { // InitialWindowSize
+                0x4 => {
+                    // InitialWindowSize
                     // RFC 9113 Section 6.5.2: INITIAL_WINDOW_SIZE must be <= 2^31-1
                     // RFC 9113 Section 6.9.2: When INITIAL_WINDOW_SIZE changes, adjust all stream windows
                     // Validate new window size (must be <= 2^31-1) before casting
@@ -231,11 +245,11 @@ where
                     }
                     let old_size = self.peer_settings.initial_window_size as i32;
                     let new_size = *value as i32;
-                    
+
                     let delta = new_size - old_size;
-                    
+
                     self.peer_settings.initial_window_size = *value;
-                    
+
                     // Adjust all existing stream send windows by delta
                     for stream in self.streams.values_mut() {
                         // RFC 9113 Section 6.9.2: Window can go negative, but must not exceed 2^31-1
@@ -243,14 +257,16 @@ where
                         stream.send_window = new_window;
                     }
                 }
-                0x5 => { // MaxFrameSize
+                0x5 => {
+                    // MaxFrameSize
                     // RFC 9113 Section 6.5.2: MAX_FRAME_SIZE must be between 16384 and 16777215
                     if *value < 16384 || *value > 16777215 {
                         continue; // Invalid setting, ignore per RFC 9113 Section 6.5.2
                     }
                     self.peer_settings.max_frame_size = *value;
                 }
-                0x6 => { // MaxHeaderListSize
+                0x6 => {
+                    // MaxHeaderListSize
                     self.peer_settings.max_header_list_size = *value;
                 }
                 _ => {} // Ignore unknown settings (including GREASE)
@@ -271,55 +287,47 @@ where
         let stream_id = self.next_stream_id;
         if stream_id == 0 || (stream_id & 0x1) == 0 {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: Client stream ID must be odd and non-zero".into()
+                "PROTOCOL_ERROR: Client stream ID must be odd and non-zero".into(),
             ));
         }
         self.next_stream_id += 2; // Client uses odd stream IDs
 
         // Extract URI components
         let scheme = uri.scheme_str().unwrap_or("https");
-        let authority = uri.authority()
-            .map(|a| a.as_str())
-            .unwrap_or("localhost");
-        let path = uri.path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/");
+        let authority = uri.authority().map(|a| a.as_str()).unwrap_or("localhost");
+        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
         // RFC 9113 Section 8.1.2.3: Validate pseudo-header values
         if method.as_str().is_empty() {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :method pseudo-header cannot be empty".into()
+                "PROTOCOL_ERROR: :method pseudo-header cannot be empty".into(),
             ));
         }
         if scheme.is_empty() {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :scheme pseudo-header cannot be empty".into()
+                "PROTOCOL_ERROR: :scheme pseudo-header cannot be empty".into(),
             ));
         }
         if authority.is_empty() {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :authority pseudo-header cannot be empty".into()
+                "PROTOCOL_ERROR: :authority pseudo-header cannot be empty".into(),
             ));
         }
         if path.is_empty() {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :path pseudo-header cannot be empty".into()
+                "PROTOCOL_ERROR: :path pseudo-header cannot be empty".into(),
             ));
         }
 
         // Encode headers with custom pseudo-header order
-        let header_block = self.encoder.encode_request(
-            method.as_str(),
-            scheme,
-            authority,
-            path,
-            &headers,
-        );
+        let header_block =
+            self.encoder
+                .encode_request(method.as_str(), scheme, authority, path, &headers);
 
         // RFC 9113 Section 6.2: HEADERS frame header block must not be empty
         if header_block.is_empty() {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: HEADERS frame header block cannot be empty".into()
+                "PROTOCOL_ERROR: HEADERS frame header block cannot be empty".into(),
             ));
         }
 
@@ -333,7 +341,9 @@ where
                 .end_stream(end_stream)
                 .end_headers(true);
 
-            self.stream.write_all(&headers_frame.serialize()).await
+            self.stream
+                .write_all(&headers_frame.serialize())
+                .await
                 .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
         } else {
             // Split across HEADERS + CONTINUATION frames
@@ -348,7 +358,9 @@ where
                 .end_stream(end_stream)
                 .end_headers(false);
 
-            self.stream.write_all(&headers_frame.serialize()).await
+            self.stream
+                .write_all(&headers_frame.serialize())
+                .await
                 .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
 
             // Middle: CONTINUATION frames
@@ -356,12 +368,14 @@ where
             for (idx, chunk) in chunks.into_iter().skip(1).enumerate() {
                 let is_last = idx == num_chunks - 2; // -2 because we skipped first chunk
                 let cont_frame = ContinuationFrame::new(
-                    stream_id,
-                    chunk,
-                    is_last, // Only last chunk has END_HEADERS
+                    stream_id, chunk, is_last, // Only last chunk has END_HEADERS
                 );
-                self.stream.write_all(&cont_frame.serialize()).await
-                    .map_err(|e| Error::HttpProtocol(format!("Failed to send CONTINUATION: {}", e)))?;
+                self.stream
+                    .write_all(&cont_frame.serialize())
+                    .await
+                    .map_err(|e| {
+                        Error::HttpProtocol(format!("Failed to send CONTINUATION: {}", e))
+                    })?;
             }
         }
 
@@ -370,18 +384,22 @@ where
             // Check send-side flow control
             let data_len = body_data.len() as i32;
             if self.conn_send_window < data_len {
-                return Err(Error::HttpProtocol("Connection send window exhausted".into()));
+                return Err(Error::HttpProtocol(
+                    "Connection send window exhausted".into(),
+                ));
             }
             if let Some(stream) = self.streams.get(&stream_id) {
                 if stream.send_window < data_len {
                     return Err(Error::HttpProtocol("Stream send window exhausted".into()));
                 }
             }
-            
+
             let data_frame = DataFrame::new(stream_id, body_data).end_stream(true);
-            self.stream.write_all(&data_frame.serialize()).await
+            self.stream
+                .write_all(&data_frame.serialize())
+                .await
                 .map_err(|e| Error::HttpProtocol(format!("Failed to send DATA: {}", e)))?;
-            
+
             // Decrement send windows
             self.conn_send_window -= data_len;
             if let Some(stream) = self.streams.get_mut(&stream_id) {
@@ -389,21 +407,30 @@ where
             }
         }
 
-        self.stream.flush().await
+        self.stream
+            .flush()
+            .await
             .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
 
         // Register stream
-        let stream_state = if end_stream { StreamState::HalfClosedLocal } else { StreamState::Open };
-        self.streams.insert(stream_id, Stream {
-            id: stream_id,
-            state: stream_state,
-            recv_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
-            send_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
-            response_tx: None,
-            streaming_tx: None,
-            response_headers: Vec::new(),
-            response_data: BytesMut::new(),
-        });
+        let stream_state = if end_stream {
+            StreamState::HalfClosedLocal
+        } else {
+            StreamState::Open
+        };
+        self.streams.insert(
+            stream_id,
+            Stream {
+                id: stream_id,
+                state: stream_state,
+                recv_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
+                send_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
+                response_tx: None,
+                streaming_tx: None,
+                response_headers: Vec::new(),
+                response_data: BytesMut::new(),
+            },
+        );
 
         // Read response
         self.read_response(stream_id).await
@@ -421,56 +448,47 @@ where
 
         // Extract URI components
         let scheme = uri.scheme_str().unwrap_or("https");
-        let authority = uri.authority()
-            .map(|a| a.as_str())
-            .unwrap_or("localhost");
-        let path = uri.path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/");
+        let authority = uri.authority().map(|a| a.as_str()).unwrap_or("localhost");
+        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
         // RFC 9113 Section 8.1.2.3: Validate pseudo-header values
         if method.as_str().is_empty() {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :method pseudo-header cannot be empty".into()
+                "PROTOCOL_ERROR: :method pseudo-header cannot be empty".into(),
             ));
         }
         if scheme.is_empty() {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :scheme pseudo-header cannot be empty".into()
+                "PROTOCOL_ERROR: :scheme pseudo-header cannot be empty".into(),
             ));
         }
         if authority.is_empty() {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :authority pseudo-header cannot be empty".into()
+                "PROTOCOL_ERROR: :authority pseudo-header cannot be empty".into(),
             ));
         }
         if path.is_empty() {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :path pseudo-header cannot be empty".into()
+                "PROTOCOL_ERROR: :path pseudo-header cannot be empty".into(),
             ));
         }
 
         // Convert headers to Vec<(String, String)>
-        let headers: Vec<(String, String)> = request.headers()
+        let headers: Vec<(String, String)> = request
+            .headers()
             .iter()
-            .map(|(name, value)| {
-                (name.to_string(), value.to_str().unwrap_or("").to_string())
-            })
+            .map(|(name, value)| (name.to_string(), value.to_str().unwrap_or("").to_string()))
             .collect();
 
         // Encode headers with custom pseudo-header order
-        let header_block = self.encoder.encode_request(
-            method.as_str(),
-            scheme,
-            authority,
-            path,
-            &headers,
-        );
+        let header_block =
+            self.encoder
+                .encode_request(method.as_str(), scheme, authority, path, &headers);
 
         // RFC 9113 Section 6.2: HEADERS frame header block must not be empty
         if header_block.is_empty() {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: HEADERS frame header block cannot be empty".into()
+                "PROTOCOL_ERROR: HEADERS frame header block cannot be empty".into(),
             ));
         }
 
@@ -485,7 +503,9 @@ where
                 .end_stream(end_stream)
                 .end_headers(true);
 
-            self.stream.write_all(&headers_frame.serialize()).await
+            self.stream
+                .write_all(&headers_frame.serialize())
+                .await
                 .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
         } else {
             // Split across HEADERS + CONTINUATION frames
@@ -500,7 +520,9 @@ where
                 .end_stream(end_stream)
                 .end_headers(false);
 
-            self.stream.write_all(&headers_frame.serialize()).await
+            self.stream
+                .write_all(&headers_frame.serialize())
+                .await
                 .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
 
             // Middle: CONTINUATION frames
@@ -508,12 +530,14 @@ where
             for (idx, chunk) in chunks.into_iter().skip(1).enumerate() {
                 let is_last = idx == num_chunks - 2; // -2 because we skipped first chunk
                 let cont_frame = ContinuationFrame::new(
-                    stream_id,
-                    chunk,
-                    is_last, // Only last chunk has END_HEADERS
+                    stream_id, chunk, is_last, // Only last chunk has END_HEADERS
                 );
-                self.stream.write_all(&cont_frame.serialize()).await
-                    .map_err(|e| Error::HttpProtocol(format!("Failed to send CONTINUATION: {}", e)))?;
+                self.stream
+                    .write_all(&cont_frame.serialize())
+                    .await
+                    .map_err(|e| {
+                        Error::HttpProtocol(format!("Failed to send CONTINUATION: {}", e))
+                    })?;
             }
         }
 
@@ -529,18 +553,22 @@ where
             // Check send-side flow control
             let data_len = body.len() as i32;
             if self.conn_send_window < data_len {
-                return Err(Error::HttpProtocol("Connection send window exhausted".into()));
+                return Err(Error::HttpProtocol(
+                    "Connection send window exhausted".into(),
+                ));
             }
             if let Some(stream) = self.streams.get(&stream_id) {
                 if stream.send_window < data_len {
                     return Err(Error::HttpProtocol("Stream send window exhausted".into()));
                 }
             }
-            
+
             let data_frame = DataFrame::new(stream_id, body.clone()).end_stream(true);
-            self.stream.write_all(&data_frame.serialize()).await
+            self.stream
+                .write_all(&data_frame.serialize())
+                .await
                 .map_err(|e| Error::HttpProtocol(format!("Failed to send DATA: {}", e)))?;
-            
+
             // Decrement send windows
             self.conn_send_window -= data_len;
             if let Some(stream) = self.streams.get_mut(&stream_id) {
@@ -549,7 +577,9 @@ where
             }
         }
 
-        self.stream.flush().await
+        self.stream
+            .flush()
+            .await
             .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
 
         Ok(stream_id)
@@ -561,7 +591,13 @@ where
     pub async fn send_request_streaming(
         &mut self,
         request: Request<Bytes>,
-    ) -> std::result::Result<(Response<Bytes>, mpsc::Receiver<std::result::Result<Bytes, H2Error>>), Error> {
+    ) -> std::result::Result<
+        (
+            Response<Bytes>,
+            mpsc::Receiver<std::result::Result<Bytes, H2Error>>,
+        ),
+        Error,
+    > {
         // Send request frames (HEADERS with END_STREAM if no body)
         let stream_id = self.send_request_frames(&request).await?;
 
@@ -569,16 +605,19 @@ where
         let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, H2Error>>(32);
 
         // Register stream with streaming channel
-        self.streams.insert(stream_id, Stream {
-            id: stream_id,
-            state: StreamState::Open,
-            recv_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
-            send_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
-            response_tx: None,
-            streaming_tx: Some(tx.clone()),
-            response_headers: Vec::new(),
-            response_data: BytesMut::new(),
-        });
+        self.streams.insert(
+            stream_id,
+            Stream {
+                id: stream_id,
+                state: StreamState::Open,
+                recv_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
+                send_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
+                response_tx: None,
+                streaming_tx: Some(tx.clone()),
+                response_headers: Vec::new(),
+                response_data: BytesMut::new(),
+            },
+        );
 
         // Read response headers (blocking until HEADERS frame received)
         let (status, headers) = self.read_response_headers(stream_id).await?;
@@ -590,7 +629,8 @@ where
         for (name, value) in headers {
             response_builder = response_builder.header(name, value);
         }
-        let response = response_builder.body(Bytes::new())
+        let response = response_builder
+            .body(Bytes::new())
             .map_err(|e| Error::HttpProtocol(format!("Failed to build response: {}", e)))?;
 
         Ok((response, rx))
@@ -604,7 +644,10 @@ where
         // Read frame header
         while self.read_buf.len() < FRAME_HEADER_SIZE {
             let mut buf = [0u8; 16384];
-            let n = self.stream.read(&mut buf).await
+            let n = self
+                .stream
+                .read(&mut buf)
+                .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
             if n == 0 {
                 return Err(Error::HttpProtocol("Connection closed".into()));
@@ -612,8 +655,9 @@ where
             self.read_buf.extend_from_slice(&buf[..n]);
         }
 
-        let header = FrameHeader::parse(&self.read_buf[..FRAME_HEADER_SIZE])
-            .ok_or_else(|| Error::HttpProtocol("Invalid frame header (reserved bits set)".into()))?;
+        let header = FrameHeader::parse(&self.read_buf[..FRAME_HEADER_SIZE]).ok_or_else(|| {
+            Error::HttpProtocol("Invalid frame header (reserved bits set)".into())
+        })?;
 
         // RFC 9113 Section 4.2: Frame size validation
         if header.length > self.peer_settings.max_frame_size {
@@ -627,7 +671,10 @@ where
         let frame_len = FRAME_HEADER_SIZE + header.length as usize;
         while self.read_buf.len() < frame_len {
             let mut buf = [0u8; 16384];
-            let n = self.stream.read(&mut buf).await
+            let n = self
+                .stream
+                .read(&mut buf)
+                .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
             if n == 0 {
                 return Err(Error::HttpProtocol("Connection closed".into()));
@@ -651,17 +698,20 @@ where
         match header.frame_type {
             FrameType::Data => {
                 let stream_id = header.stream_id;
-                
+
                 // RFC 9113 Section 5.1: Validate stream ID (server-initiated streams use even IDs)
                 // As a client, we should only receive DATA frames on streams we initiated (odd IDs)
                 if (stream_id & 0x1) == 0 {
-                    return Err(Error::HttpProtocol(
-                        format!("PROTOCOL_ERROR: Received DATA frame on server-initiated stream {}", stream_id)
-                    ));
+                    return Err(Error::HttpProtocol(format!(
+                        "PROTOCOL_ERROR: Received DATA frame on server-initiated stream {}",
+                        stream_id
+                    )));
                 }
 
                 let end_stream_flag = (header.flags & flags::END_STREAM) != 0;
-                let is_streaming = self.streams.get(&stream_id)
+                let is_streaming = self
+                    .streams
+                    .get(&stream_id)
                     .and_then(|s| s.streaming_tx.as_ref())
                     .is_some();
 
@@ -679,7 +729,7 @@ where
                         if stream.id != stream_id {
                             return Err(Error::HttpProtocol("Stream ID mismatch".into()));
                         }
-                        
+
                         if let Some(tx) = stream.streaming_tx.take() {
                             let send_result = tx.send(Ok(data_frame.data.clone())).await.is_ok();
                             if send_result && !end_stream_flag {
@@ -724,18 +774,24 @@ where
                     if let Some(stream) = self.streams.get_mut(&stream_id) {
                         // Use stream.id to verify
                         if stream.id != stream_id {
-                            return Err(Error::HttpProtocol("Stream ID mismatch in RST_STREAM".into()));
+                            return Err(Error::HttpProtocol(
+                                "Stream ID mismatch in RST_STREAM".into(),
+                            ));
                         }
                         // RFC 9113 Section 5.1: RST_STREAM transitions stream to Closed
                         stream.state = StreamState::Closed;
                         if let Some(tx) = stream.streaming_tx.take() {
-                            let _ = tx.send(Err(Error::HttpProtocol(format!(
-                                "Stream reset by server: {:?}", rst.error_code
-                            )))).await;
+                            let _ = tx
+                                .send(Err(Error::HttpProtocol(format!(
+                                    "Stream reset by server: {:?}",
+                                    rst.error_code
+                                ))))
+                                .await;
                         }
                         if let Some(tx) = stream.response_tx.take() {
                             let _ = tx.send(Err(Error::HttpProtocol(format!(
-                                "Stream reset by server: {:?}", rst.error_code
+                                "Stream reset by server: {:?}",
+                                rst.error_code
                             ))));
                         }
                     }
@@ -749,7 +805,10 @@ where
                 // RFC 9113 Section 6.3: PRIORITY frames can be sent on any stream
                 // Parse and validate (but we don't use priority information currently)
                 if let Err(e) = PriorityFrame::parse(header.stream_id, payload.clone()) {
-                    return Err(Error::HttpProtocol(format!("Invalid PRIORITY frame: {}", e)));
+                    return Err(Error::HttpProtocol(format!(
+                        "Invalid PRIORITY frame: {}",
+                        e
+                    )));
                 }
                 Ok(true) // Continue reading
             }
@@ -758,19 +817,30 @@ where
                 // As a client, we should not receive these if ENABLE_PUSH is disabled
                 if !self.peer_settings.enable_push {
                     return Err(Error::HttpProtocol(
-                        "PROTOCOL_ERROR: Received PUSH_PROMISE but ENABLE_PUSH is disabled".into()
+                        "PROTOCOL_ERROR: Received PUSH_PROMISE but ENABLE_PUSH is disabled".into(),
                     ));
                 }
                 // Parse and validate (but we don't support server push currently)
-                if let Err(e) = PushPromiseFrame::parse(header.stream_id, header.flags, payload.clone()) {
-                    return Err(Error::HttpProtocol(format!("Invalid PUSH_PROMISE frame: {}", e)));
+                if let Err(e) =
+                    PushPromiseFrame::parse(header.stream_id, header.flags, payload.clone())
+                {
+                    return Err(Error::HttpProtocol(format!(
+                        "Invalid PUSH_PROMISE frame: {}",
+                        e
+                    )));
                 }
                 // Server push is not supported, so we ignore the frame
                 Ok(true) // Continue reading
             }
             _ => {
                 // Handle control frames
-                self.handle_control_frame(header.frame_type, header.stream_id, header.flags, &payload).await?;
+                self.handle_control_frame(
+                    header.frame_type,
+                    header.stream_id,
+                    header.flags,
+                    &payload,
+                )
+                .await?;
                 Ok(true) // Continue reading
             }
         }
@@ -785,7 +855,10 @@ where
             // Read frame header
             while self.read_buf.len() < FRAME_HEADER_SIZE {
                 let mut buf = [0u8; 16384];
-                let n = self.stream.read(&mut buf).await
+                let n = self
+                    .stream
+                    .read(&mut buf)
+                    .await
                     .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
                 if n == 0 {
                     return Err(Error::HttpProtocol("Connection closed".into()));
@@ -793,8 +866,10 @@ where
                 self.read_buf.extend_from_slice(&buf[..n]);
             }
 
-            let header = FrameHeader::parse(&self.read_buf[..FRAME_HEADER_SIZE])
-                .ok_or_else(|| Error::HttpProtocol("Invalid frame header (reserved bits set)".into()))?;
+            let header =
+                FrameHeader::parse(&self.read_buf[..FRAME_HEADER_SIZE]).ok_or_else(|| {
+                    Error::HttpProtocol("Invalid frame header (reserved bits set)".into())
+                })?;
 
             // RFC 9113 Section 4.2: Frame size validation
             if header.length > self.peer_settings.max_frame_size {
@@ -808,7 +883,10 @@ where
             let frame_len = FRAME_HEADER_SIZE + header.length as usize;
             while self.read_buf.len() < frame_len {
                 let mut buf = [0u8; 16384];
-                let n = self.stream.read(&mut buf).await
+                let n = self
+                    .stream
+                    .read(&mut buf)
+                    .await
                     .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
                 if n == 0 {
                     return Err(Error::HttpProtocol("Connection closed".into()));
@@ -831,15 +909,25 @@ where
                         }
 
                         // Parse HEADERS frame using proper parse method (handles padding and priority)
-                        let headers_frame = HeadersFrame::parse(header.stream_id, header.flags, payload_bytes.clone())
-                            .map_err(|e| Error::HttpProtocol(format!("Invalid HEADERS frame: {}", e)))?;
+                        let headers_frame = HeadersFrame::parse(
+                            header.stream_id,
+                            header.flags,
+                            payload_bytes.clone(),
+                        )
+                        .map_err(|e| {
+                            Error::HttpProtocol(format!("Invalid HEADERS frame: {}", e))
+                        })?;
 
                         let end_headers = headers_frame.end_headers;
 
                         if end_headers {
                             // Complete headers in single frame
-                            let decoded = self.decoder.decode(&headers_frame.header_block)
-                                .map_err(|e| Error::HttpProtocol(format!("HPACK decode error: {}", e)))?;
+                            let decoded = self
+                                .decoder
+                                .decode(&headers_frame.header_block)
+                                .map_err(|e| {
+                                    Error::HttpProtocol(format!("HPACK decode error: {}", e))
+                                })?;
 
                             // Validate headers per RFC 9113 Section 8.1.2
                             Self::validate_response_headers(&decoded)?;
@@ -849,7 +937,9 @@ where
                                 .iter()
                                 .find(|(name, _)| name == ":status")
                                 .and_then(|(_, value)| value.parse::<u16>().ok())
-                                .ok_or_else(|| Error::HttpProtocol("Missing :status header".into()))?;
+                                .ok_or_else(|| {
+                                    Error::HttpProtocol("Missing :status header".into())
+                                })?;
 
                             // Filter out pseudo-headers, keep only real headers
                             let real_headers: Vec<(String, String)> = decoded
@@ -857,13 +947,18 @@ where
                                 .filter(|(name, _)| !name.starts_with(':'))
                                 .collect();
 
-                            return Ok((StatusCode::from_u16(status)
-                                .map_err(|_| Error::HttpProtocol("Invalid status code".into()))?, real_headers));
+                            return Ok((
+                                StatusCode::from_u16(status).map_err(|_| {
+                                    Error::HttpProtocol("Invalid status code".into())
+                                })?,
+                                real_headers,
+                            ));
                         } else {
                             // Incomplete headers, expect CONTINUATION
                             if self.pending_headers.is_some() {
                                 return Err(Error::HttpProtocol(
-                                    "PROTOCOL_ERROR: received HEADERS while CONTINUATION pending".into()
+                                    "PROTOCOL_ERROR: received HEADERS while CONTINUATION pending"
+                                        .into(),
                                 ));
                             }
                             let mut fragments = BytesMut::new();
@@ -874,24 +969,34 @@ where
                 }
                 FrameType::Continuation => {
                     if let Some((pending_stream_id, fragments)) = &mut self.pending_headers {
-                        if *pending_stream_id == stream_id && *pending_stream_id == header.stream_id {
+                        if *pending_stream_id == stream_id && *pending_stream_id == header.stream_id
+                        {
                             // Parse CONTINUATION frame using parse() method
-                            let cont_frame = ContinuationFrame::parse(header.stream_id, header.flags, payload_bytes.clone())
-                                .map_err(|e| Error::HttpProtocol(format!("Invalid CONTINUATION frame: {}", e)))?;
-                            
+                            let cont_frame = ContinuationFrame::parse(
+                                header.stream_id,
+                                header.flags,
+                                payload_bytes.clone(),
+                            )
+                            .map_err(|e| {
+                                Error::HttpProtocol(format!("Invalid CONTINUATION frame: {}", e))
+                            })?;
+
                             fragments.extend_from_slice(&cont_frame.header_fragment);
 
                             if cont_frame.end_headers() {
                                 // Complete! Decode accumulated headers
-                                let decoded = self.decoder.decode(fragments)
-                                    .map_err(|e| Error::HttpProtocol(format!("HPACK decode error: {}", e)))?;
+                                let decoded = self.decoder.decode(fragments).map_err(|e| {
+                                    Error::HttpProtocol(format!("HPACK decode error: {}", e))
+                                })?;
 
                                 // Extract :status pseudo-header
                                 let status = decoded
                                     .iter()
                                     .find(|(name, _)| name == ":status")
                                     .and_then(|(_, value)| value.parse::<u16>().ok())
-                                    .ok_or_else(|| Error::HttpProtocol("Missing :status header".into()))?;
+                                    .ok_or_else(|| {
+                                        Error::HttpProtocol("Missing :status header".into())
+                                    })?;
 
                                 // Filter out pseudo-headers, keep only real headers
                                 let real_headers: Vec<(String, String)> = decoded
@@ -900,15 +1005,25 @@ where
                                     .collect();
 
                                 self.pending_headers = None;
-                                return Ok((StatusCode::from_u16(status)
-                                    .map_err(|_| Error::HttpProtocol("Invalid status code".into()))?, real_headers));
+                                return Ok((
+                                    StatusCode::from_u16(status).map_err(|_| {
+                                        Error::HttpProtocol("Invalid status code".into())
+                                    })?,
+                                    real_headers,
+                                ));
                             }
                         }
                     }
                 }
                 _ => {
                     // Handle other frames but continue looking for HEADERS
-                    self.handle_control_frame(header.frame_type, header.stream_id, header.flags, &payload_bytes).await?;
+                    self.handle_control_frame(
+                        header.frame_type,
+                        header.stream_id,
+                        header.flags,
+                        &payload_bytes,
+                    )
+                    .await?;
                 }
             }
         }
@@ -927,23 +1042,24 @@ where
                 // RFC 9113 Section 6.5: SETTINGS frames MUST be on stream 0
                 if stream_id != 0 {
                     return Err(Error::HttpProtocol(
-                        "PROTOCOL_ERROR: SETTINGS frame must be on stream 0".into()
+                        "PROTOCOL_ERROR: SETTINGS frame must be on stream 0".into(),
                     ));
                 }
                 if (flags & flags::ACK) == 0 {
                     let settings = SettingsFrame::parse(flags, payload.clone());
-                    
+
                     // RFC 9113 Section 6.5: A SETTINGS frame MUST NOT contain multiple values for the same setting
                     let mut seen_settings = std::collections::HashSet::new();
                     for (id, _) in &settings.settings {
                         let id_u16 = *id;
                         if !seen_settings.insert(id_u16) {
-                            return Err(Error::HttpProtocol(
-                                format!("PROTOCOL_ERROR: Duplicate setting ID {} in SETTINGS frame", id_u16)
-                            ));
+                            return Err(Error::HttpProtocol(format!(
+                                "PROTOCOL_ERROR: Duplicate setting ID {} in SETTINGS frame",
+                                id_u16
+                            )));
                         }
                     }
-                    
+
                     self.apply_peer_settings(&settings);
                     let ack = SettingsFrame::ack();
                     self.stream.write_all(&ack.serialize()).await.ok();
@@ -986,13 +1102,8 @@ where
         Ok(())
     }
 
-
     /// Handles incoming DATA frame with proper flow control
-    async fn handle_data_frame(
-        &mut self,
-        data_frame: &DataFrame,
-        stream_id: u32,
-    ) -> Result<()> {
+    async fn handle_data_frame(&mut self, data_frame: &DataFrame, stream_id: u32) -> Result<()> {
         let payload_len = data_frame.data.len() as i32;
 
         // Decrement connection-level receive window
@@ -1002,7 +1113,9 @@ where
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             // Use stream.id to verify
             if stream.id != stream_id {
-                return Err(Error::HttpProtocol("Stream ID mismatch in handle_data_frame".into()));
+                return Err(Error::HttpProtocol(
+                    "Stream ID mismatch in handle_data_frame".into(),
+                ));
             }
             stream.recv_window -= payload_len;
         }
@@ -1015,7 +1128,9 @@ where
         }
 
         // Send stream-level WINDOW_UPDATE when window gets low
-        let needs_stream_update = self.streams.get(&stream_id)
+        let needs_stream_update = self
+            .streams
+            .get(&stream_id)
             .map(|s| {
                 // Use stream.id to verify
                 if s.id != stream_id {
@@ -1059,9 +1174,13 @@ where
     /// Sends WINDOW_UPDATE frame for connection (stream_id=0) or specific stream
     async fn send_window_update(&mut self, stream_id: u32, increment: u32) -> Result<()> {
         let frame = WindowUpdateFrame::new(stream_id, increment);
-        self.stream.write_all(&frame.serialize()).await
+        self.stream
+            .write_all(&frame.serialize())
+            .await
             .map_err(|e| Error::HttpProtocol(format!("Failed to send WINDOW_UPDATE: {}", e)))?;
-        self.stream.flush().await
+        self.stream
+            .flush()
+            .await
             .map_err(|e| Error::HttpProtocol(format!("Failed to flush WINDOW_UPDATE: {}", e)))?;
         Ok(())
     }
@@ -1070,7 +1189,7 @@ where
     async fn read_response(&mut self, stream_id: u32) -> Result<SpecterResponse> {
         let mut status = 0u16;
         let mut stream_done = false;
-        
+
         // Verify stream exists and read stream.id
         if let Some(stream) = self.streams.get(&stream_id) {
             if stream.id != stream_id {
@@ -1084,7 +1203,10 @@ where
             // Read frame header
             while self.read_buf.len() < FRAME_HEADER_SIZE {
                 let mut buf = [0u8; 16384];
-                let n = self.stream.read(&mut buf).await
+                let n = self
+                    .stream
+                    .read(&mut buf)
+                    .await
                     .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
                 if n == 0 {
                     return Err(Error::HttpProtocol("Connection closed".into()));
@@ -1092,8 +1214,10 @@ where
                 self.read_buf.extend_from_slice(&buf[..n]);
             }
 
-            let header = FrameHeader::parse(&self.read_buf[..FRAME_HEADER_SIZE])
-                .ok_or_else(|| Error::HttpProtocol("Invalid frame header (reserved bits set)".into()))?;
+            let header =
+                FrameHeader::parse(&self.read_buf[..FRAME_HEADER_SIZE]).ok_or_else(|| {
+                    Error::HttpProtocol("Invalid frame header (reserved bits set)".into())
+                })?;
 
             // RFC 9113 Section 4.2: Frame size validation
             if header.length > self.peer_settings.max_frame_size {
@@ -1107,7 +1231,10 @@ where
             let frame_len = FRAME_HEADER_SIZE + header.length as usize;
             while self.read_buf.len() < frame_len {
                 let mut buf = [0u8; 16384];
-                let n = self.stream.read(&mut buf).await
+                let n = self
+                    .stream
+                    .read(&mut buf)
+                    .await
                     .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
                 if n == 0 {
                     return Err(Error::HttpProtocol("Connection closed".into()));
@@ -1134,21 +1261,29 @@ where
                     // RFC 9113 Section 5.1: Validate stream ID (server-initiated streams use even IDs)
                     // As a client, we should only receive HEADERS frames on streams we initiated (odd IDs)
                     if (header.stream_id & 0x1) == 0 {
-                        return Err(Error::HttpProtocol(
-                            format!("PROTOCOL_ERROR: Received HEADERS frame on server-initiated stream {}", header.stream_id)
-                        ));
+                        return Err(Error::HttpProtocol(format!(
+                            "PROTOCOL_ERROR: Received HEADERS frame on server-initiated stream {}",
+                            header.stream_id
+                        )));
                     }
 
                     // Parse HEADERS frame using proper parse method (handles padding and priority)
-                    let headers_frame = HeadersFrame::parse(header.stream_id, header.flags, payload_bytes.clone())
-                        .map_err(|e| Error::HttpProtocol(format!("Invalid HEADERS frame: {}", e)))?;
+                    let headers_frame =
+                        HeadersFrame::parse(header.stream_id, header.flags, payload_bytes.clone())
+                            .map_err(|e| {
+                                Error::HttpProtocol(format!("Invalid HEADERS frame: {}", e))
+                            })?;
 
                     let end_headers = headers_frame.end_headers;
 
                     if end_headers {
                         // Complete headers in single frame
-                        let decoded = self.decoder.decode(&headers_frame.header_block)
-                            .map_err(|e| Error::HttpProtocol(format!("HPACK decode error: {}", e)))?;
+                        let decoded =
+                            self.decoder
+                                .decode(&headers_frame.header_block)
+                                .map_err(|e| {
+                                    Error::HttpProtocol(format!("HPACK decode error: {}", e))
+                                })?;
 
                         // Validate headers per RFC 9113 Section 8.1.2
                         Self::validate_response_headers(&decoded)?;
@@ -1171,7 +1306,8 @@ where
                         // Incomplete headers, expect CONTINUATION
                         if self.pending_headers.is_some() {
                             return Err(Error::HttpProtocol(
-                                "PROTOCOL_ERROR: received HEADERS while CONTINUATION pending".into()
+                                "PROTOCOL_ERROR: received HEADERS while CONTINUATION pending"
+                                    .into(),
                             ));
                         }
                         let mut fragments = BytesMut::new();
@@ -1187,7 +1323,7 @@ where
                     match &mut self.pending_headers {
                         None => {
                             return Err(Error::HttpProtocol(
-                                "PROTOCOL_ERROR: CONTINUATION without preceding HEADERS".into()
+                                "PROTOCOL_ERROR: CONTINUATION without preceding HEADERS".into(),
                             ));
                         }
                         Some((pending_stream_id, fragments)) => {
@@ -1198,9 +1334,15 @@ where
                             }
 
                             // Parse CONTINUATION frame using parse() method
-                            let cont_frame = ContinuationFrame::parse(header.stream_id, header.flags, payload_bytes.clone())
-                                .map_err(|e| Error::HttpProtocol(format!("Invalid CONTINUATION frame: {}", e)))?;
-                            
+                            let cont_frame = ContinuationFrame::parse(
+                                header.stream_id,
+                                header.flags,
+                                payload_bytes.clone(),
+                            )
+                            .map_err(|e| {
+                                Error::HttpProtocol(format!("Invalid CONTINUATION frame: {}", e))
+                            })?;
+
                             // Append fragment
                             fragments.extend_from_slice(&cont_frame.header_fragment);
 
@@ -1208,13 +1350,16 @@ where
                                 // Complete! Decode accumulated headers
                                 // Only process if this is for our stream
                                 if header.stream_id == stream_id {
-                                    let decoded = self.decoder.decode(fragments)
-                                        .map_err(|e| Error::HttpProtocol(format!("HPACK decode error: {}", e)))?;
+                                    let decoded = self.decoder.decode(fragments).map_err(|e| {
+                                        Error::HttpProtocol(format!("HPACK decode error: {}", e))
+                                    })?;
 
                                     if let Some(stream) = self.streams.get_mut(&stream_id) {
                                         // Use stream.id to verify
                                         if stream.id != stream_id {
-                                            return Err(Error::HttpProtocol("Stream ID mismatch".into()));
+                                            return Err(Error::HttpProtocol(
+                                                "Stream ID mismatch".into(),
+                                            ));
                                         }
                                         for (name, value) in decoded {
                                             if name == ":status" {
@@ -1248,14 +1393,18 @@ where
                     // RFC 9113 Section 5.1: Validate stream ID (server-initiated streams use even IDs)
                     // As a client, we should only receive DATA frames on streams we initiated (odd IDs)
                     if (header.stream_id & 0x1) == 0 {
-                        return Err(Error::HttpProtocol(
-                            format!("PROTOCOL_ERROR: Received DATA frame on server-initiated stream {}", header.stream_id)
-                        ));
+                        return Err(Error::HttpProtocol(format!(
+                            "PROTOCOL_ERROR: Received DATA frame on server-initiated stream {}",
+                            header.stream_id
+                        )));
                     }
 
                     // Parse DATA frame using proper parse method (handles padding)
-                    let data_frame = DataFrame::parse(header.stream_id, header.flags, payload_bytes.clone())
-                        .map_err(|e| Error::HttpProtocol(format!("Invalid DATA frame: {}", e)))?;
+                    let data_frame =
+                        DataFrame::parse(header.stream_id, header.flags, payload_bytes.clone())
+                            .map_err(|e| {
+                                Error::HttpProtocol(format!("Invalid DATA frame: {}", e))
+                            })?;
 
                     // Handle flow control (decrement windows, send WINDOW_UPDATE if needed)
                     self.handle_data_frame(&data_frame, stream_id).await?;
@@ -1277,25 +1426,26 @@ where
                     // RFC 9113 Section 6.5: SETTINGS frames MUST be on stream 0
                     if header.stream_id != 0 {
                         return Err(Error::HttpProtocol(
-                            "PROTOCOL_ERROR: SETTINGS frame must be on stream 0".into()
+                            "PROTOCOL_ERROR: SETTINGS frame must be on stream 0".into(),
                         ));
                     }
                     // Settings frames on stream 0 are allowed during CONTINUATION
                     if (header.flags & flags::ACK) == 0 {
                         // Server settings update
                         let settings = SettingsFrame::parse(header.flags, payload_bytes.clone());
-                        
+
                         // RFC 9113 Section 6.5: A SETTINGS frame MUST NOT contain multiple values for the same setting
                         let mut seen_settings = std::collections::HashSet::new();
                         for (id, _) in &settings.settings {
                             let id_u16 = *id;
                             if !seen_settings.insert(id_u16) {
-                                return Err(Error::HttpProtocol(
-                                    format!("PROTOCOL_ERROR: Duplicate setting ID {} in SETTINGS frame", id_u16)
-                                ));
+                                return Err(Error::HttpProtocol(format!(
+                                    "PROTOCOL_ERROR: Duplicate setting ID {} in SETTINGS frame",
+                                    id_u16
+                                )));
                             }
                         }
-                        
+
                         self.apply_peer_settings(&settings);
 
                         // Send ACK
@@ -1304,33 +1454,35 @@ where
                         self.stream.flush().await.ok();
                     }
                 }
-            FrameType::WindowUpdate => {
-                // WindowUpdate frames on stream 0 are allowed during CONTINUATION
-                if let Some(wu) = WindowUpdateFrame::parse(header.stream_id, payload_bytes.clone()) {
-                    if wu.stream_id == 0 {
-                        // Connection-level window update
-                        // Increment validated in parse() (must be > 0)
-                        self.conn_send_window += wu.increment as i32;
-                    } else {
-                        if self.pending_headers.is_some() {
-                            // WindowUpdate on non-zero stream during CONTINUATION is PROTOCOL_ERROR
-                            return Err(Error::HttpProtocol(
+                FrameType::WindowUpdate => {
+                    // WindowUpdate frames on stream 0 are allowed during CONTINUATION
+                    if let Some(wu) =
+                        WindowUpdateFrame::parse(header.stream_id, payload_bytes.clone())
+                    {
+                        if wu.stream_id == 0 {
+                            // Connection-level window update
+                            // Increment validated in parse() (must be > 0)
+                            self.conn_send_window += wu.increment as i32;
+                        } else {
+                            if self.pending_headers.is_some() {
+                                // WindowUpdate on non-zero stream during CONTINUATION is PROTOCOL_ERROR
+                                return Err(Error::HttpProtocol(
                                 "PROTOCOL_ERROR: received WINDOW_UPDATE during CONTINUATION sequence".into()
                             ));
+                            }
+                            // Stream-level window update
+                            // Increment validated in parse() (must be > 0)
+                            if let Some(stream) = self.streams.get_mut(&wu.stream_id) {
+                                stream.send_window += wu.increment as i32;
+                            }
                         }
-                        // Stream-level window update
-                        // Increment validated in parse() (must be > 0)
-                        if let Some(stream) = self.streams.get_mut(&wu.stream_id) {
-                            stream.send_window += wu.increment as i32;
-                        }
+                    } else {
+                        // Invalid WINDOW_UPDATE (e.g., increment = 0)
+                        return Err(Error::HttpProtocol(
+                            "FLOW_CONTROL_ERROR: WINDOW_UPDATE increment must be > 0".into(),
+                        ));
                     }
-                } else {
-                    // Invalid WINDOW_UPDATE (e.g., increment = 0)
-                    return Err(Error::HttpProtocol(
-                        "FLOW_CONTROL_ERROR: WINDOW_UPDATE increment must be > 0".into()
-                    ));
                 }
-            }
                 FrameType::Ping => {
                     // Ping frames on stream 0 are allowed during CONTINUATION
                     if let Some(ping) = PingFrame::parse(header.flags, &payload_bytes) {
@@ -1349,7 +1501,9 @@ where
                         self.goaway_last_stream_id = Some(goaway.last_stream_id);
 
                         // If current stream is allowed to complete, continue reading
-                        if stream_id <= goaway.last_stream_id && goaway.error_code == ErrorCode::NoError {
+                        if stream_id <= goaway.last_stream_id
+                            && goaway.error_code == ErrorCode::NoError
+                        {
                             // Graceful shutdown - allow stream to complete
                             continue;
                         }
@@ -1365,7 +1519,10 @@ where
                     // RFC 9113 Section 6.3: PRIORITY frames can be sent on any stream
                     // Parse and validate (but we don't use priority information currently)
                     if let Err(e) = PriorityFrame::parse(header.stream_id, payload_bytes.clone()) {
-                        return Err(Error::HttpProtocol(format!("Invalid PRIORITY frame: {}", e)));
+                        return Err(Error::HttpProtocol(format!(
+                            "Invalid PRIORITY frame: {}",
+                            e
+                        )));
                     }
                     // Priority information is parsed and validated, but not used for now
                 }
@@ -1374,12 +1531,20 @@ where
                     // As a client, we should not receive these if ENABLE_PUSH is disabled
                     if !self.peer_settings.enable_push {
                         return Err(Error::HttpProtocol(
-                            "PROTOCOL_ERROR: Received PUSH_PROMISE but ENABLE_PUSH is disabled".into()
+                            "PROTOCOL_ERROR: Received PUSH_PROMISE but ENABLE_PUSH is disabled"
+                                .into(),
                         ));
                     }
                     // Parse and validate (but we don't support server push currently)
-                    if let Err(e) = PushPromiseFrame::parse(header.stream_id, header.flags, payload_bytes.clone()) {
-                        return Err(Error::HttpProtocol(format!("Invalid PUSH_PROMISE frame: {}", e)));
+                    if let Err(e) = PushPromiseFrame::parse(
+                        header.stream_id,
+                        header.flags,
+                        payload_bytes.clone(),
+                    ) {
+                        return Err(Error::HttpProtocol(format!(
+                            "Invalid PUSH_PROMISE frame: {}",
+                            e
+                        )));
                     }
                     // Server push is not supported, so we ignore the frame
                     // In a full implementation, we would handle the promised stream
@@ -1387,7 +1552,9 @@ where
                 FrameType::RstStream => {
                     if header.stream_id == stream_id {
                         // Parse RST_STREAM frame
-                        if let Ok(rst) = RstStreamFrame::parse(header.stream_id, payload_bytes.clone()) {
+                        if let Ok(rst) =
+                            RstStreamFrame::parse(header.stream_id, payload_bytes.clone())
+                        {
                             // RFC 9113 Section 5.1: RST_STREAM transitions stream to Closed
                             if let Some(stream) = self.streams.get_mut(&stream_id) {
                                 stream.state = StreamState::Closed;
@@ -1399,7 +1566,8 @@ where
                                 }
                             }
                             return Err(Error::HttpProtocol(format!(
-                                "Stream {} reset by server: {:?}", stream_id, rst.error_code
+                                "Stream {} reset by server: {:?}",
+                                stream_id, rst.error_code
                             )));
                         } else {
                             return Err(Error::HttpProtocol("Invalid RST_STREAM frame".into()));
@@ -1407,16 +1575,18 @@ where
                     } else if self.pending_headers.is_some() {
                         // RST_STREAM on different stream during CONTINUATION is PROTOCOL_ERROR
                         return Err(Error::HttpProtocol(
-                            "PROTOCOL_ERROR: received RST_STREAM during CONTINUATION sequence".into()
+                            "PROTOCOL_ERROR: received RST_STREAM during CONTINUATION sequence"
+                                .into(),
                         ));
                     }
                 }
                 _ => {
                     // Any other frame type during CONTINUATION sequence is PROTOCOL_ERROR
                     if self.pending_headers.is_some() {
-                        return Err(Error::HttpProtocol(
-                            format!("PROTOCOL_ERROR: received {:?} during CONTINUATION sequence", header.frame_type)
-                        ));
+                        return Err(Error::HttpProtocol(format!(
+                            "PROTOCOL_ERROR: received {:?} during CONTINUATION sequence",
+                            header.frame_type
+                        )));
                     }
                 }
             }
@@ -1427,7 +1597,7 @@ where
             // Read all stream fields
             let headers = stream.response_headers.clone();
             let body = stream.response_data.clone();
-            
+
             // Create StreamResponse and send through channel if stream has response_tx
             if let Some(tx) = stream.response_tx.take() {
                 let response = StreamResponse {
@@ -1437,7 +1607,7 @@ where
                 };
                 let _ = tx.send(Ok(response));
             }
-            
+
             (headers, body)
         } else {
             (Vec::new(), BytesMut::new())
@@ -1447,7 +1617,8 @@ where
         self.streams.remove(&stream_id);
 
         // Convert headers to string format for SpecterResponse
-        let response_headers_str: Vec<String> = final_headers.iter()
+        let response_headers_str: Vec<String> = final_headers
+            .iter()
             .map(|(name, value)| format!("{}: {}", name, value))
             .collect();
 
@@ -1479,9 +1650,10 @@ where
             if name.starts_with(':') {
                 // Pseudo-header validation
                 if seen_pseudo.contains(name) {
-                    return Err(Error::HttpProtocol(
-                        format!("PROTOCOL_ERROR: Duplicate pseudo-header: {}", name)
-                    ));
+                    return Err(Error::HttpProtocol(format!(
+                        "PROTOCOL_ERROR: Duplicate pseudo-header: {}",
+                        name
+                    )));
                 }
                 seen_pseudo.insert(name.clone());
 
@@ -1490,22 +1662,25 @@ where
                         has_status = true;
                         // Validate status code format (3-digit number)
                         if value.len() != 3 || !value.chars().all(|c| c.is_ascii_digit()) {
-                            return Err(Error::HttpProtocol(
-                                format!("PROTOCOL_ERROR: Invalid :status value: {}", value)
-                            ));
+                            return Err(Error::HttpProtocol(format!(
+                                "PROTOCOL_ERROR: Invalid :status value: {}",
+                                value
+                            )));
                         }
                     }
                     ":method" | ":scheme" | ":authority" | ":path" => {
                         // These pseudo-headers should not appear in responses
-                        return Err(Error::HttpProtocol(
-                            format!("PROTOCOL_ERROR: Request pseudo-header {} in response", name)
-                        ));
+                        return Err(Error::HttpProtocol(format!(
+                            "PROTOCOL_ERROR: Request pseudo-header {} in response",
+                            name
+                        )));
                     }
                     _ => {
                         // Unknown pseudo-header
-                        return Err(Error::HttpProtocol(
-                            format!("PROTOCOL_ERROR: Unknown pseudo-header: {}", name)
-                        ));
+                        return Err(Error::HttpProtocol(format!(
+                            "PROTOCOL_ERROR: Unknown pseudo-header: {}",
+                            name
+                        )));
                     }
                 }
             } else {
@@ -1518,16 +1693,17 @@ where
                     || name_lower == "transfer-encoding"
                     || name_lower == "upgrade"
                 {
-                    return Err(Error::HttpProtocol(
-                        format!("PROTOCOL_ERROR: Connection-specific header forbidden: {}", name)
-                    ));
+                    return Err(Error::HttpProtocol(format!(
+                        "PROTOCOL_ERROR: Connection-specific header forbidden: {}",
+                        name
+                    )));
                 }
             }
         }
 
         if !has_status {
             return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: Missing required :status pseudo-header".into()
+                "PROTOCOL_ERROR: Missing required :status pseudo-header".into(),
             ));
         }
 

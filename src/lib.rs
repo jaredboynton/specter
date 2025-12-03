@@ -22,11 +22,11 @@ pub mod transport;
 pub mod pool;
 
 // Re-exports for convenient access
-pub use cookie::{CookieJar, hash_cookie_value};
+pub use cookie::{hash_cookie_value, CookieJar};
 pub use error::{Error, Result};
+pub use fingerprint::FingerprintProfile;
 pub use response::Response;
 pub use version::HttpVersion;
-pub use fingerprint::FingerprintProfile;
 
 // Transport re-exports
 pub use transport::connector::{AlpnProtocol, BoringConnector, MaybeHttpsStream};
@@ -35,6 +35,6 @@ pub use transport::h1_h2::{Client, ClientBuilder, RequestBuilder};
 pub use transport::h2::{H2ClientBuilder, H2Connection, H2PooledConnection, PseudoHeaderOrder};
 pub use transport::h3::H3Client;
 
-// Pool re-exports  
-pub use pool::multiplexer::{ConnectionPool, PoolKey, PoolEntry};
+// Pool re-exports
 pub use pool::alt_svc::{AltSvcCache, AltSvcEntry};
+pub use pool::multiplexer::{ConnectionPool, PoolEntry, PoolKey};

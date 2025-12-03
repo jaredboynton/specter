@@ -1,8 +1,8 @@
 //! HTTP response handling with explicit decompression.
 
-use std::io::Read;
-use bytes::Bytes;
 use crate::error::{Error, Result};
+use bytes::Bytes;
+use std::io::Read;
 
 /// HTTP response with explicit decompression.
 #[derive(Debug)]
@@ -16,7 +16,13 @@ pub struct Response {
 
 impl Response {
     pub fn new(status: u16, headers: Vec<String>, body: Bytes, http_version: String) -> Self {
-        Self { status, headers, body, http_version, effective_url: None }
+        Self {
+            status,
+            headers,
+            body,
+            http_version,
+            effective_url: None,
+        }
     }
 
     /// Set the effective URL (the URL that was actually requested).
@@ -26,12 +32,24 @@ impl Response {
         self
     }
 
-    pub fn http_version(&self) -> &str { &self.http_version }
-    pub fn body(&self) -> &Bytes { &self.body }
-    pub fn into_body(self) -> Bytes { self.body }
-    pub fn is_success(&self) -> bool { (200..300).contains(&self.status) }
-    pub fn is_redirect(&self) -> bool { (300..400).contains(&self.status) }
-    pub fn redirect_url(&self) -> Option<&str> { self.get_header("Location") }
+    pub fn http_version(&self) -> &str {
+        &self.http_version
+    }
+    pub fn body(&self) -> &Bytes {
+        &self.body
+    }
+    pub fn into_body(self) -> Bytes {
+        self.body
+    }
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+    pub fn is_redirect(&self) -> bool {
+        (300..400).contains(&self.status)
+    }
+    pub fn redirect_url(&self) -> Option<&str> {
+        self.get_header("Location")
+    }
 
     pub fn get_header(&self, name: &str) -> Option<&str> {
         let name_lower = name.to_lowercase();
@@ -47,22 +65,34 @@ impl Response {
 
     pub fn get_headers(&self, name: &str) -> Vec<&str> {
         let name_lower = name.to_lowercase();
-        self.headers.iter().filter_map(|h| {
-            let (key, value) = h.split_once(':')?;
-            if key.trim().to_lowercase() == name_lower { Some(value.trim()) } else { None }
-        }).collect()
+        self.headers
+            .iter()
+            .filter_map(|h| {
+                let (key, value) = h.split_once(':')?;
+                if key.trim().to_lowercase() == name_lower {
+                    Some(value.trim())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
-    pub fn content_type(&self) -> Option<&str> { self.get_header("Content-Type") }
-    pub fn content_encoding(&self) -> Option<&str> { self.get_header("Content-Encoding") }
+    pub fn content_type(&self) -> Option<&str> {
+        self.get_header("Content-Type")
+    }
+    pub fn content_encoding(&self) -> Option<&str> {
+        self.get_header("Content-Encoding")
+    }
 
     /// Decode body based on Content-Encoding (gzip, deflate, br, zstd).
     /// Supports chained encodings (e.g., "gzip, deflate") by applying decodings in reverse order.
     pub fn decoded_body(&self) -> Result<Bytes> {
-        let encodings: Vec<&str> = self.content_encoding()
+        let encodings: Vec<&str> = self
+            .content_encoding()
             .map(|s| s.split(',').map(str::trim).collect())
             .unwrap_or_default();
-        
+
         // If Content-Encoding header is present, process encodings in reverse order
         // (last encoding applied first during decode)
         if !encodings.is_empty() {
@@ -82,11 +112,15 @@ impl Response {
             }
             return Ok(data);
         }
-        
+
         // No Content-Encoding header: check magic bytes
         if self.body.len() >= 4 {
             // zstd magic: 0x28 0xB5 0x2F 0xFD
-            if self.body[0] == 0x28 && self.body[1] == 0xB5 && self.body[2] == 0x2F && self.body[3] == 0xFD {
+            if self.body[0] == 0x28
+                && self.body[1] == 0xB5
+                && self.body[2] == 0x2F
+                && self.body[3] == 0xFD
+            {
                 return decode_zstd(&self.body);
             }
         }
@@ -96,7 +130,7 @@ impl Response {
                 return decode_gzip(&self.body);
             }
         }
-        
+
         Ok(self.body.clone())
     }
 
@@ -115,17 +149,23 @@ impl Response {
 fn decode_gzip(data: &[u8]) -> Result<Bytes> {
     let mut decoder = flate2::read::GzDecoder::new(data);
     let mut decoded = Vec::new();
-    decoder.read_to_end(&mut decoded).map_err(|e| Error::Decompression(format!("gzip: {}", e)))?;
+    decoder
+        .read_to_end(&mut decoded)
+        .map_err(|e| Error::Decompression(format!("gzip: {}", e)))?;
     Ok(Bytes::from(decoded))
 }
 
 fn decode_deflate(data: &[u8]) -> Result<Bytes> {
     let mut decoded = Vec::new();
-    if flate2::read::ZlibDecoder::new(data).read_to_end(&mut decoded).is_ok() {
+    if flate2::read::ZlibDecoder::new(data)
+        .read_to_end(&mut decoded)
+        .is_ok()
+    {
         return Ok(Bytes::from(decoded));
     }
     decoded.clear();
-    flate2::read::DeflateDecoder::new(data).read_to_end(&mut decoded)
+    flate2::read::DeflateDecoder::new(data)
+        .read_to_end(&mut decoded)
         .map_err(|e| Error::Decompression(format!("deflate: {}", e)))?;
     Ok(Bytes::from(decoded))
 }
@@ -133,7 +173,9 @@ fn decode_deflate(data: &[u8]) -> Result<Bytes> {
 fn decode_brotli(data: &[u8]) -> Result<Bytes> {
     let mut decoder = brotli::Decompressor::new(data, 4096);
     let mut decoded = Vec::new();
-    decoder.read_to_end(&mut decoded).map_err(|e| Error::Decompression(format!("brotli: {}", e)))?;
+    decoder
+        .read_to_end(&mut decoded)
+        .map_err(|e| Error::Decompression(format!("brotli: {}", e)))?;
     Ok(Bytes::from(decoded))
 }
 

@@ -45,7 +45,11 @@ pub struct Cookie {
 }
 
 impl Cookie {
-    pub fn new(name: impl Into<String>, value: impl Into<String>, domain: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        value: impl Into<String>,
+        domain: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             value: value.into(),
@@ -101,7 +105,8 @@ impl Cookie {
 
     pub fn from_set_cookie_header(header: &str, request_url: &str) -> Result<Self> {
         let parsed_url = Url::parse(request_url).map_err(|e| Error::CookieParse(e.to_string()))?;
-        let request_domain = parsed_url.host_str()
+        let request_domain = parsed_url
+            .host_str()
             .ok_or_else(|| Error::CookieParse("No host in URL".to_string()))?;
 
         let parts: Vec<&str> = header.split(';').map(str::trim).collect();
@@ -170,15 +175,24 @@ impl Cookie {
 
         // RFC 6265 Section 5.3: Reject cookies for public suffixes
         if is_public_suffix(&cookie.domain) {
-            return Err(Error::CookieParse(format!("Cannot set cookie for public suffix: {}", cookie.domain)));
+            return Err(Error::CookieParse(format!(
+                "Cannot set cookie for public suffix: {}",
+                cookie.domain
+            )));
         }
 
         Ok(cookie)
     }
 
     pub fn matches_url(&self, url: &str) -> bool {
-        let parsed = match Url::parse(url) { Ok(u) => u, Err(_) => return false };
-        let request_domain = match parsed.host_str() { Some(h) => h.to_lowercase(), None => return false };
+        let parsed = match Url::parse(url) {
+            Ok(u) => u,
+            Err(_) => return false,
+        };
+        let request_domain = match parsed.host_str() {
+            Some(h) => h.to_lowercase(),
+            None => return false,
+        };
 
         // Check secure flag (HTTPS-only cookies)
         if self.secure && parsed.scheme() != "https" {
@@ -266,12 +280,15 @@ impl Cookie {
 
     pub fn to_netscape_line(&self) -> String {
         // Netscape format: include_subdomains is TRUE for domain cookies (host_only=false)
-        format!("{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.domain,
             if self.host_only { "FALSE" } else { "TRUE" },
             self.path,
             if self.secure { "TRUE" } else { "FALSE" },
-            self.expires.map(|dt| dt.timestamp().to_string()).unwrap_or_else(|| "0".to_string()),
+            self.expires
+                .map(|dt| dt.timestamp().to_string())
+                .unwrap_or_else(|| "0".to_string()),
             self.name,
             self.value
         )
@@ -280,7 +297,10 @@ impl Cookie {
     pub fn from_netscape_line(line: &str) -> Result<Self> {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 7 {
-            return Err(Error::CookieParse(format!("Invalid Netscape format: expected 7 fields, got {}", parts.len())));
+            return Err(Error::CookieParse(format!(
+                "Invalid Netscape format: expected 7 fields, got {}",
+                parts.len()
+            )));
         }
         // Netscape format field 1 (index 1) is include_subdomains flag
         // TRUE means domain cookie (host_only=false), FALSE means host-only (host_only=true)
@@ -293,7 +313,11 @@ impl Cookie {
             secure: parts[3].eq_ignore_ascii_case("true"),
             http_only: false,
             same_site: None,
-            expires: parts[4].parse::<i64>().ok().filter(|&ts| ts > 0).and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+            expires: parts[4]
+                .parse::<i64>()
+                .ok()
+                .filter(|&ts| ts > 0)
+                .and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
             max_age: None,
             host_only: !include_subdomains,
             source_url: None,
@@ -338,38 +362,62 @@ pub struct CookieJar {
 }
 
 impl CookieJar {
-    pub fn new() -> Self { Self::default() }
-
-    pub fn store(&mut self, cookie: Cookie) {
-        self.cookies.entry(cookie.domain.clone()).or_default().insert(cookie.name.clone(), cookie);
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn add(&mut self, cookie: Cookie) { self.store(cookie); }
+    pub fn store(&mut self, cookie: Cookie) {
+        self.cookies
+            .entry(cookie.domain.clone())
+            .or_default()
+            .insert(cookie.name.clone(), cookie);
+    }
+
+    pub fn add(&mut self, cookie: Cookie) {
+        self.store(cookie);
+    }
 
     pub fn cookies(&self) -> Vec<&Cookie> {
         self.cookies.values().flat_map(|m| m.values()).collect()
     }
 
     pub fn cookies_for_url(&self, url: &str) -> Vec<&Cookie> {
-        self.cookies.values().flat_map(|m| m.values()).filter(|c| c.matches_url(url)).collect()
+        self.cookies
+            .values()
+            .flat_map(|m| m.values())
+            .filter(|c| c.matches_url(url))
+            .collect()
     }
 
     pub fn build_cookie_header(&self, url: &str) -> Option<String> {
         let mut cookies = self.cookies_for_url(url);
-        if cookies.is_empty() { return None; }
-        
+        if cookies.is_empty() {
+            return None;
+        }
+
         // RFC 6265 Section 5.4: Sort cookies by longest path first, then by creation time (oldest first)
         cookies.sort_by(|a, b| {
-            b.path.len().cmp(&a.path.len())
+            b.path
+                .len()
+                .cmp(&a.path.len())
                 .then_with(|| a.creation_time.cmp(&b.creation_time))
         });
-        
-        Some(cookies.iter().map(|c| format!("{}={}", c.name, c.value)).collect::<Vec<_>>().join("; "))
+
+        Some(
+            cookies
+                .iter()
+                .map(|c| format!("{}={}", c.name, c.value))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
     }
 
     pub fn store_from_headers(&mut self, headers: &[String], request_url: &str) {
         for header in headers {
-            if let Some(value) = header.strip_prefix("Set-Cookie:").or_else(|| header.strip_prefix("set-cookie:")) {
+            if let Some(value) = header
+                .strip_prefix("Set-Cookie:")
+                .or_else(|| header.strip_prefix("set-cookie:"))
+            {
                 if let Ok(cookie) = Cookie::from_set_cookie_header(value.trim(), request_url) {
                     self.store(cookie);
                 }
@@ -378,27 +426,24 @@ impl CookieJar {
     }
 
     pub async fn save_to_file(&self, path: impl AsRef<Path>) -> Result<()> {
-        let mut file = tokio::fs::File::create(path).await
-            .map_err(Error::Io)?;
-        file.write_all(b"# Netscape HTTP Cookie File\n").await
+        let mut file = tokio::fs::File::create(path).await.map_err(Error::Io)?;
+        file.write_all(b"# Netscape HTTP Cookie File\n")
+            .await
             .map_err(Error::Io)?;
         for cookies in self.cookies.values() {
             for cookie in cookies.values() {
                 let line = format!("{}\n", cookie.to_netscape_line());
-                file.write_all(line.as_bytes()).await
-                    .map_err(Error::Io)?;
+                file.write_all(line.as_bytes()).await.map_err(Error::Io)?;
             }
         }
         Ok(())
     }
 
     pub async fn load_from_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
-        let file = tokio::fs::File::open(path).await
-            .map_err(Error::Io)?;
+        let file = tokio::fs::File::open(path).await.map_err(Error::Io)?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
-        while reader.read_line(&mut line).await
-            .map_err(Error::Io)? > 0 {
+        while reader.read_line(&mut line).await.map_err(Error::Io)? > 0 {
             let trimmed = line.trim_end();
             if !trimmed.is_empty() && !trimmed.starts_with('#') {
                 if let Ok(cookie) = Cookie::from_netscape_line(trimmed) {
@@ -415,12 +460,20 @@ impl CookieJar {
     }
 
     pub fn remove(&mut self, domain: &str, name: &str) -> Option<Cookie> {
-        self.cookies.get_mut(&normalize_domain(domain))?.remove(name)
+        self.cookies
+            .get_mut(&normalize_domain(domain))?
+            .remove(name)
     }
 
-    pub fn clear(&mut self) { self.cookies.clear(); }
-    pub fn len(&self) -> usize { self.cookies.values().map(|m| m.len()).sum() }
-    pub fn is_empty(&self) -> bool { self.cookies.is_empty() }
+    pub fn clear(&mut self) {
+        self.cookies.clear();
+    }
+    pub fn len(&self) -> usize {
+        self.cookies.values().map(|m| m.len()).sum()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.cookies.is_empty()
+    }
 }
 
 fn normalize_domain(domain: &str) -> String {
@@ -431,24 +484,27 @@ fn parse_cookie_date(date_str: &str) -> Option<DateTime<Utc>> {
     // RFC 6265 Section 5.1.1: Cookie date formats
     // Try RFC 1123, RFC 850, ANSI C asctime(), and common variations
     const FORMATS: &[&str] = &[
-        "%a, %d %b %Y %H:%M:%S GMT",      // RFC 1123 (e.g., "Mon, 01 Jan 2024 12:00:00 GMT")
-        "%A, %d-%b-%y %H:%M:%S GMT",      // RFC 850 (e.g., "Monday, 01-Jan-24 12:00:00 GMT")
-        "%a %b %e %H:%M:%S %Y",           // ANSI C asctime() (e.g., "Mon Jan  1 12:00:00 2024")
-        "%a, %d-%b-%Y %H:%M:%S GMT",      // RFC 1036 variation
-        "%d %b %Y %H:%M:%S GMT",          // No weekday prefix
-        "%a, %d %b %Y %H:%M:%S %z",       // With timezone offset
-        "%Y-%m-%dT%H:%M:%SZ",             // ISO 8601 UTC
-        "%Y-%m-%dT%H:%M:%S%.fZ",          // ISO 8601 with fractional seconds
+        "%a, %d %b %Y %H:%M:%S GMT", // RFC 1123 (e.g., "Mon, 01 Jan 2024 12:00:00 GMT")
+        "%A, %d-%b-%y %H:%M:%S GMT", // RFC 850 (e.g., "Monday, 01-Jan-24 12:00:00 GMT")
+        "%a %b %e %H:%M:%S %Y",      // ANSI C asctime() (e.g., "Mon Jan  1 12:00:00 2024")
+        "%a, %d-%b-%Y %H:%M:%S GMT", // RFC 1036 variation
+        "%d %b %Y %H:%M:%S GMT",     // No weekday prefix
+        "%a, %d %b %Y %H:%M:%S %z",  // With timezone offset
+        "%Y-%m-%dT%H:%M:%SZ",        // ISO 8601 UTC
+        "%Y-%m-%dT%H:%M:%S%.fZ",     // ISO 8601 with fractional seconds
     ];
-    
+
     for fmt in FORMATS {
         if let Ok(dt) = chrono::DateTime::parse_from_str(date_str, fmt) {
             return Some(dt.with_timezone(&Utc));
         }
     }
-    
+
     // Fallback: try parsing as Unix timestamp
-    date_str.parse::<i64>().ok().and_then(|ts| Utc.timestamp_opt(ts, 0).single())
+    date_str
+        .parse::<i64>()
+        .ok()
+        .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
 }
 
 /// Check if a domain is a public suffix per RFC 6265 Section 5.3.
@@ -456,7 +512,7 @@ fn parse_cookie_date(date_str: &str) -> Option<DateTime<Utc>> {
 fn is_public_suffix(domain: &str) -> bool {
     // Remove leading dot if present
     let domain_clean = domain.strip_prefix('.').unwrap_or(domain);
-    
+
     // Use psl to check if this is a public suffix
     psl::suffix(domain_clean.as_bytes())
         .map(|suffix| {

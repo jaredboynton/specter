@@ -1,16 +1,16 @@
 //! HTTP/3 transport via quiche.
 
+use bytes::Bytes;
+use getrandom::getrandom;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use bytes::Bytes;
 use tokio::net::UdpSocket;
-use tokio::time::{timeout, sleep};
+use tokio::time::{sleep, timeout};
 use url::Url;
-use getrandom::getrandom;
 
+use crate::error::{Error, Result};
 use crate::fingerprint::tls::TlsFingerprint;
 use crate::response::Response;
-use crate::error::{Error, Result};
 
 // Import NameValue trait for Header name/value access
 use quiche::h3::NameValue;
@@ -52,7 +52,7 @@ impl H3Client {
     fn configure_quic(&self) -> Result<quiche::Config> {
         let mut config = if let Some(ref fp) = self.tls_fingerprint {
             // Use BoringSSL context builder for TLS fingerprinting
-            use boring::ssl::{SslMethod, SslContextBuilder};
+            use boring::ssl::{SslContextBuilder, SslMethod};
 
             let mut ssl_ctx_builder = SslContextBuilder::new(SslMethod::tls_client())
                 .map_err(|e| Error::Tls(format!("Failed to create SSL context: {}", e)))?;
@@ -63,40 +63,53 @@ impl H3Client {
             // The cipher_list in TlsFingerprint is intended for TLS 1.2 connections only.
 
             // Apply TLS 1.2 cipher suites only if they look like TLS 1.2 names (contain ECDHE/RSA/etc)
-            let tls12_ciphers: Vec<&str> = fp.cipher_list.iter()
+            let tls12_ciphers: Vec<&str> = fp
+                .cipher_list
+                .iter()
                 .filter(|c| !c.starts_with("TLS_"))
                 .map(|s| s.as_ref())
                 .collect();
             if !tls12_ciphers.is_empty() {
                 let cipher_str = tls12_ciphers.join(":");
-                ssl_ctx_builder.set_cipher_list(&cipher_str)
+                ssl_ctx_builder
+                    .set_cipher_list(&cipher_str)
                     .map_err(|e| Error::Tls(format!("Failed to set cipher list: {}", e)))?;
             }
-            
+
             // Apply curves/groups
             if !fp.curves.is_empty() {
                 let curves_str = fp.curves.join(":");
-                ssl_ctx_builder.set_curves_list(&curves_str)
+                ssl_ctx_builder
+                    .set_curves_list(&curves_str)
                     .map_err(|e| Error::Tls(format!("Failed to set curves: {}", e)))?;
             }
-            
+
             // Apply signature algorithms
             if !fp.sigalgs.is_empty() {
                 let sigalgs_str = fp.sigalgs.join(":");
-                ssl_ctx_builder.set_sigalgs_list(&sigalgs_str)
-                    .map_err(|e| Error::Tls(format!("Failed to set signature algorithms: {}", e)))?;
+                ssl_ctx_builder
+                    .set_sigalgs_list(&sigalgs_str)
+                    .map_err(|e| {
+                        Error::Tls(format!("Failed to set signature algorithms: {}", e))
+                    })?;
             }
-            
+
             // Create config with custom SSL context
             quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, ssl_ctx_builder)
-                .map_err(|e| Error::Quic(format!("Failed to create quiche config with TLS fingerprint: {}", e)))?
+                .map_err(|e| {
+                Error::Quic(format!(
+                    "Failed to create quiche config with TLS fingerprint: {}",
+                    e
+                ))
+            })?
         } else {
             quiche::Config::new(quiche::PROTOCOL_VERSION)
                 .map_err(|e| Error::Quic(format!("Failed to create quiche config: {}", e)))?
         };
 
         // Set application protocol to HTTP/3
-        config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        config
+            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
             .map_err(|e| Error::Quic(format!("Failed to set ALPN: {}", e)))?;
 
         // Configure QUIC parameters
@@ -133,11 +146,11 @@ impl H3Client {
             .ok_or_else(|| Error::Connection(format!("No address found for {}:{}", host, port)))?;
 
         // Create UDP socket
-        let local_addr: SocketAddr = "0.0.0.0:0".parse()
+        let local_addr: SocketAddr = "0.0.0.0:0"
+            .parse()
             .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
 
-        let socket = UdpSocket::bind(local_addr).await
-            .map_err(Error::Io)?;
+        let socket = UdpSocket::bind(local_addr).await.map_err(Error::Io)?;
 
         // Generate connection ID
         let scid_bytes = generate_cid()?;
@@ -165,7 +178,10 @@ impl H3Client {
                 let stats = conn.stats();
                 return Err(Error::Timeout(format!(
                     "QUIC handshake timed out: sent={}, recv={}, lost={}, closed={}",
-                    stats.sent, stats.recv, stats.lost, conn.is_closed()
+                    stats.sent,
+                    stats.recv,
+                    stats.lost,
+                    conn.is_closed()
                 )));
             }
 
@@ -240,12 +256,14 @@ impl H3Client {
             .collect();
 
         // Send HTTP/3 request
-        let stream_id = h3_conn.send_request(&mut conn, &quiche_headers, body.is_none())
+        let stream_id = h3_conn
+            .send_request(&mut conn, &quiche_headers, body.is_none())
             .map_err(|e| Error::Quic(format!("Failed to send HTTP/3 request: {}", e)))?;
 
         // Send body if present
         if let Some(ref body_data) = body {
-            h3_conn.send_body(&mut conn, stream_id, body_data, true)
+            h3_conn
+                .send_body(&mut conn, stream_id, body_data, true)
                 .map_err(|e| Error::Quic(format!("Failed to send HTTP/3 body: {}", e)))?;
         }
 
@@ -267,7 +285,9 @@ impl H3Client {
             }
 
             // 1. RECEIVE: Get all available packets from network
-            while let Ok(Ok(_)) = timeout(Duration::from_millis(1), recv_ingress(&socket, &mut conn)).await {
+            while let Ok(Ok(_)) =
+                timeout(Duration::from_millis(1), recv_ingress(&socket, &mut conn)).await
+            {
                 // Keep receiving
             }
 
@@ -293,7 +313,8 @@ impl H3Client {
                     Ok((id, quiche::h3::Event::Data)) => {
                         if id == stream_id {
                             let mut buf = vec![0u8; 65535];
-                            while let Ok(amount) = h3_conn.recv_body(&mut conn, stream_id, &mut buf) {
+                            while let Ok(amount) = h3_conn.recv_body(&mut conn, stream_id, &mut buf)
+                            {
                                 if amount == 0 {
                                     break;
                                 }
@@ -359,11 +380,15 @@ fn parse_url(url: &str) -> Result<(String, u16, String)> {
 
     // Validate scheme
     if parsed.scheme() != "https" {
-        return Err(Error::HttpProtocol(format!("Unsupported scheme: {}, only https:// is supported for HTTP/3", parsed.scheme())));
+        return Err(Error::HttpProtocol(format!(
+            "Unsupported scheme: {}, only https:// is supported for HTTP/3",
+            parsed.scheme()
+        )));
     }
 
     // Extract host
-    let host = parsed.host_str()
+    let host = parsed
+        .host_str()
         .ok_or_else(|| Error::Missing("URL must have a host".into()))?
         .to_string();
 
@@ -388,8 +413,7 @@ async fn flush_egress(
         match conn.send(&mut out) {
             Ok((len, _info)) => {
                 if len > 0 {
-                    socket.send_to(&out[..len], peer).await
-                        .map_err(Error::Io)?;
+                    socket.send_to(&out[..len], peer).await.map_err(Error::Io)?;
                 } else {
                     break;
                 }
@@ -406,18 +430,14 @@ async fn flush_egress(
 }
 
 /// Receive ingress packets from UDP socket and process with QUIC connection.
-async fn recv_ingress(
-    socket: &UdpSocket,
-    conn: &mut quiche::Connection,
-) -> Result<()> {
+async fn recv_ingress(socket: &UdpSocket, conn: &mut quiche::Connection) -> Result<()> {
     let mut buf = vec![0u8; 65535];
-    
+
     match socket.recv_from(&mut buf).await {
         Ok((len, from)) => {
             let recv_info = quiche::RecvInfo {
                 from,
-                to: socket.local_addr()
-                    .map_err(Error::Io)?,
+                to: socket.local_addr().map_err(Error::Io)?,
             };
 
             match conn.recv(&mut buf[..len], recv_info) {
@@ -426,9 +446,7 @@ async fn recv_ingress(
                 Err(e) => Err(Error::Quic(format!("Failed to process QUIC packet: {}", e))),
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-            Ok(())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
         Err(e) => Err(Error::Io(e)),
     }
 }
