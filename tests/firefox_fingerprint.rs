@@ -1,23 +1,23 @@
 //! Firefox-specific fingerprint validation tests.
 //!
-//! Validates Firefox 135 TLS, HTTP/2, and header fingerprints match expected values.
+//! Validates Firefox 133 TLS, HTTP/2, and header fingerprints match expected values.
 
 use specter::fingerprint::http2::Http2Settings;
 use specter::fingerprint::profiles::FingerprintProfile;
 use specter::fingerprint::tls::TlsFingerprint;
-use specter::headers::{firefox_135_headers, firefox_135_ajax_headers, firefox_135_form_headers};
+use specter::headers::{firefox_133_headers, firefox_133_ajax_headers, firefox_133_form_headers};
 
 #[test]
 fn test_firefox_tls_fingerprint_constants() {
-    let fp = TlsFingerprint::firefox_135();
+    let fp = TlsFingerprint::firefox_133();
 
     // Firefox does NOT use GREASE
     assert!(!fp.grease, "Firefox should NOT use GREASE");
 
-    // Verify cipher suite order (ChaCha20 prioritized higher than Chrome)
+    // Verify cipher suite order (AES-GCM preferred, ChaCha20 third)
     assert_eq!(fp.cipher_list[0], "TLS_AES_128_GCM_SHA256");
-    assert_eq!(fp.cipher_list[1], "TLS_CHACHA20_POLY1305_SHA256"); // Higher priority than Chrome
-    assert_eq!(fp.cipher_list[2], "TLS_AES_256_GCM_SHA384");
+    assert_eq!(fp.cipher_list[1], "TLS_AES_256_GCM_SHA384");
+    assert_eq!(fp.cipher_list[2], "TLS_CHACHA20_POLY1305_SHA256");
 
     // Verify Firefox supports more curves (includes P-521)
     // Note: BoringSSL uses P-256/P-384/P-521 format
@@ -58,11 +58,11 @@ fn test_firefox_http2_settings() {
 
 #[test]
 fn test_firefox_profile_enum() {
-    let profile = FingerprintProfile::Firefox135;
+    let profile = FingerprintProfile::Firefox133;
 
     // Verify User-Agent
     let ua = profile.user_agent();
-    assert!(ua.contains("Firefox/135.0"));
+    assert!(ua.contains("Firefox/133.0"));
     assert!(ua.contains("Gecko"));
     assert!(!ua.contains("Chrome")); // Should NOT contain Chrome
 
@@ -79,7 +79,7 @@ fn test_firefox_profile_enum() {
 #[test]
 fn test_firefox_headers_no_client_hints() {
     // Navigation headers
-    let nav_headers = firefox_135_headers();
+    let nav_headers = firefox_133_headers();
     let nav_header_names: Vec<&str> = nav_headers.iter().map(|(k, _)| *k).collect();
 
     // Firefox does NOT send Client Hints
@@ -94,7 +94,7 @@ fn test_firefox_headers_no_client_hints() {
     assert!(nav_header_names.contains(&"Sec-Fetch-Dest"));
 
     // AJAX headers
-    let ajax_headers = firefox_135_ajax_headers();
+    let ajax_headers = firefox_133_ajax_headers();
     let ajax_header_names: Vec<&str> = ajax_headers.iter().map(|(k, _)| *k).collect();
 
     assert!(
@@ -103,7 +103,7 @@ fn test_firefox_headers_no_client_hints() {
     );
 
     // Form headers
-    let form_headers = firefox_135_form_headers();
+    let form_headers = firefox_133_form_headers();
     let form_header_names: Vec<&str> = form_headers.iter().map(|(k, _)| *k).collect();
 
     assert!(
@@ -132,15 +132,17 @@ fn test_firefox_http2_pseudo_header_order() {
 #[test]
 fn test_firefox_vs_chrome_differences() {
     let chrome_fp = TlsFingerprint::chrome_142();
-    let firefox_fp = TlsFingerprint::firefox_135();
+    let firefox_fp = TlsFingerprint::firefox_133();
 
     // GREASE difference
     assert!(chrome_fp.grease, "Chrome should use GREASE");
     assert!(!firefox_fp.grease, "Firefox should NOT use GREASE");
 
-    // Cipher suite order difference
-    assert_eq!(chrome_fp.cipher_list[1], "TLS_AES_256_GCM_SHA384");
-    assert_eq!(firefox_fp.cipher_list[1], "TLS_CHACHA20_POLY1305_SHA256");
+    // TLS 1.3 cipher order is now the same for both browsers
+    // (AES-128-GCM, AES-256-GCM, ChaCha20)
+    assert_eq!(chrome_fp.cipher_list[0], firefox_fp.cipher_list[0]);
+    assert_eq!(chrome_fp.cipher_list[1], firefox_fp.cipher_list[1]);
+    assert_eq!(chrome_fp.cipher_list[2], firefox_fp.cipher_list[2]);
 
     // Curve count difference
     assert_eq!(chrome_fp.curves.len(), 3);

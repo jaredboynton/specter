@@ -107,7 +107,7 @@ impl BoringConnector {
             }
             
             // Note: extension_order field in TlsFingerprint is for reference only.
-            // Modern browsers (Chrome 110+, Firefox 135+) randomize extension order,
+            // Modern browsers (Chrome 110+, Firefox 133+) randomize extension order,
             // so we cannot set a static order. The extension_order field is used for
             // JA3 fingerprint reference (though JA3 will vary due to randomization)
             // and JA4 fingerprinting (which sorts extensions alphabetically).

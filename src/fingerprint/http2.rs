@@ -115,7 +115,7 @@ impl Default for Http2Settings {
 }
 
 impl Http2Settings {
-    /// Create Firefox 135 HTTP/2 settings.
+    /// Create Firefox 133 HTTP/2 settings.
     ///
     /// Firefox differs from Chrome:
     /// - HEADER_TABLE_SIZE: 65536 (same)

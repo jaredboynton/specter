@@ -356,7 +356,7 @@ fn test_goaway_graceful_shutdown() {
 
 #[tokio::test]
 async fn test_firefox_tls_fingerprint_unique() {
-    let fp = TlsFingerprint::firefox_135();
+    let fp = TlsFingerprint::firefox_133();
     let connector = BoringConnector::with_fingerprint(fp);
     let uri: Uri = "https://tls.peet.ws/api/all".parse().unwrap();
 
@@ -369,13 +369,13 @@ async fn test_firefox_tls_fingerprint_unique() {
     assert!(stream.is_h2(), "Should negotiate HTTP/2 via ALPN");
 
     // Verify Firefox does NOT use GREASE (check TLS fingerprint)
-    let fp_check = TlsFingerprint::firefox_135();
+    let fp_check = TlsFingerprint::firefox_133();
     assert!(!fp_check.grease, "Firefox should NOT use GREASE");
 }
 
 #[tokio::test]
 async fn test_firefox_http2_fingerprint_matches() {
-    let fp = TlsFingerprint::firefox_135();
+    let fp = TlsFingerprint::firefox_133();
     let connector = BoringConnector::with_fingerprint(fp);
     let settings = Http2Settings::firefox();
     let uri: Uri = "https://tls.peet.ws/api/all".parse().unwrap();
@@ -396,7 +396,7 @@ async fn test_firefox_http2_fingerprint_matches() {
     let headers = vec![
         (
             "user-agent".to_string(),
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0".to_string(),
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0".to_string(),
         ),
         ("accept".to_string(), "application/json".to_string()),
     ];
@@ -508,7 +508,7 @@ async fn test_firefox_http2_fingerprint_matches() {
 
 #[tokio::test]
 async fn test_firefox_browserleaks_passes() {
-    let fp = TlsFingerprint::firefox_135();
+    let fp = TlsFingerprint::firefox_133();
     let connector = BoringConnector::with_fingerprint(fp);
     let settings = Http2Settings::firefox();
     let uri: Uri = "https://tls.browserleaks.com/json".parse().unwrap();
@@ -528,7 +528,7 @@ async fn test_firefox_browserleaks_passes() {
         .expect("HTTP/2 connection should succeed");
 
     let headers = vec![
-        ("user-agent".to_string(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0".to_string()),
+        ("user-agent".to_string(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0".to_string()),
         ("accept".to_string(), "application/json".to_string()),
         ("accept-language".to_string(), "en-US,en;q=0.5".to_string()),
     ];

@@ -2,7 +2,7 @@
 //!
 //! Validates OrderedHeaders preserves order and JA4H fingerprint calculation.
 
-use specter::headers::{chrome_142_headers, firefox_135_headers, OrderedHeaders};
+use specter::headers::{chrome_142_headers, firefox_133_headers, OrderedHeaders};
 
 #[test]
 fn test_ordered_headers_preserves_order() {
@@ -117,7 +117,7 @@ fn test_chrome_headers_contain_client_hints() {
 
 #[test]
 fn test_firefox_headers_no_client_hints() {
-    let firefox_headers = firefox_135_headers();
+    let firefox_headers = firefox_133_headers();
     let header_names: Vec<&str> = firefox_headers.iter().map(|(k, _)| *k).collect();
 
     // Firefox does NOT send Client Hints

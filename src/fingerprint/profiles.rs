@@ -5,7 +5,7 @@ use super::tls::TlsFingerprint;
 
 /// Browser fingerprint profile for impersonation.
 ///
-/// Note: Both Chrome 110+ and Firefox 135+ randomize TLS extension order,
+/// Note: Both Chrome 110+ and Firefox 133+ randomize TLS extension order,
 /// making static JA3 fingerprints unreliable. Modern fingerprint detection
 /// systems use JA4 which sorts extensions alphabetically for stable fingerprints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -15,10 +15,10 @@ pub enum FingerprintProfile {
     /// will not match real Chrome exactly.
     #[default]
     Chrome142,
-    /// Firefox 135 on macOS - basic fingerprint (cipher suites, curves, sigalgs)
+    /// Firefox 133 on macOS - basic fingerprint (cipher suites, curves, sigalgs)
     /// TLS extension order is randomized by Firefox, so this fingerprint
     /// will not match real Firefox exactly. Firefox does NOT use GREASE.
-    Firefox135,
+    Firefox133,
     /// No fingerprinting - use default TLS settings
     None,
 }
@@ -30,8 +30,8 @@ impl FingerprintProfile {
             Self::Chrome142 => {
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
             }
-            Self::Firefox135 => {
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0"
+            Self::Firefox133 => {
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"
             }
             Self::None => "specter/0.1",
         }
@@ -41,7 +41,7 @@ impl FingerprintProfile {
     pub fn tls_fingerprint(&self) -> TlsFingerprint {
         match self {
             FingerprintProfile::Chrome142 => TlsFingerprint::chrome_142(),
-            FingerprintProfile::Firefox135 => TlsFingerprint::firefox_135(),
+            FingerprintProfile::Firefox133 => TlsFingerprint::firefox_133(),
             FingerprintProfile::None => TlsFingerprint::default(),
         }
     }
@@ -50,7 +50,7 @@ impl FingerprintProfile {
     pub fn http2_settings(&self) -> Http2Settings {
         match self {
             FingerprintProfile::Chrome142 => Http2Settings::default(),
-            FingerprintProfile::Firefox135 => Http2Settings::firefox(),
+            FingerprintProfile::Firefox133 => Http2Settings::firefox(),
             FingerprintProfile::None => Http2Settings::default(),
         }
     }

@@ -132,7 +132,7 @@ impl OrderedHeaders {
 
     /// Create Firefox navigation headers with exact order.
     pub fn firefox_navigation() -> Self {
-        Self::new(headers_to_owned(firefox_135_headers()))
+        Self::new(headers_to_owned(firefox_133_headers()))
     }
 
     /// Get headers as vector.
@@ -195,11 +195,11 @@ impl From<OrderedHeaders> for Vec<(String, String)> {
     }
 }
 
-/// Firefox 135 browser headers for page navigation.
+/// Firefox 133 browser headers for page navigation.
 /// Firefox does NOT send Sec-Ch-Ua headers (Client Hints).
-pub fn firefox_135_headers() -> Vec<(&'static str, &'static str)> {
+pub fn firefox_133_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0"),
+        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"),
         ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"),
         ("Accept-Language", "en-US,en;q=0.5"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
@@ -212,10 +212,10 @@ pub fn firefox_135_headers() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Firefox 135 headers for AJAX/API requests.
-pub fn firefox_135_ajax_headers() -> Vec<(&'static str, &'static str)> {
+/// Firefox 133 headers for AJAX/API requests.
+pub fn firefox_133_ajax_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0"),
+        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"),
         ("Accept", "application/json, text/plain, */*"),
         ("Accept-Language", "en-US,en;q=0.5"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
@@ -227,10 +227,10 @@ pub fn firefox_135_ajax_headers() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Firefox 135 headers for form submissions.
-pub fn firefox_135_form_headers() -> Vec<(&'static str, &'static str)> {
+/// Firefox 133 headers for form submissions.
+pub fn firefox_133_form_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0"),
+        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"),
         ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"),
         ("Accept-Language", "en-US,en;q=0.5"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
