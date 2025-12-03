@@ -27,8 +27,8 @@ const CHROME_WINDOW_UPDATE: &str = "15663105";
 const CHROME_PSEUDO_ORDER: &str = "m,s,a,p";
 const CHROME_PRIORITY: &str = "0";
 
-/// Expected Chrome Akamai hash (verified against h2 crate)
-const CHROME_AKAMAI_HASH: &str = "5d2b8a9ebceadc3aabe965985df77a7d";
+/// Expected Chrome Akamai hash (from custom HPACK implementation)
+const CHROME_AKAMAI_HASH: &str = "f4734ee6440d645e653283ca349f6a82";
 
 #[tokio::test]
 async fn test_tls_fingerprint_not_bot() {
