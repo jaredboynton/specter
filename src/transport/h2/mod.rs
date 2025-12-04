@@ -103,6 +103,27 @@ impl H2Connection {
         self.inner.send_request(method, uri, headers, body).await
     }
 
+    /// Send an HTTP/2 request with streaming response body.
+    /// Returns (Response with empty body, Receiver for body chunks).
+    pub async fn send_request_streaming(
+        &mut self,
+        request: http::Request<Bytes>,
+    ) -> std::result::Result<
+        (
+            http::Response<Bytes>,
+            tokio::sync::mpsc::Receiver<std::result::Result<Bytes, H2Error>>,
+        ),
+        crate::error::Error,
+    > {
+        self.inner.send_request_streaming(request).await
+    }
+
+    /// Read and process frames for streaming streams.
+    /// Call this in a loop after send_request_streaming() to process incoming DATA frames.
+    pub async fn read_streaming_frames(&mut self) -> Result<bool> {
+        self.inner.read_streaming_frames().await
+    }
+
     /// Get the pseudo-header order.
     pub fn pseudo_order(&self) -> PseudoHeaderOrder {
         self.pseudo_order

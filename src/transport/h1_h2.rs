@@ -188,30 +188,22 @@ impl<'a> RequestBuilder<'a> {
             .parse()
             .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
 
-        let pool_key = Self::make_pool_key(&uri);
+        let _pool_key = Self::make_pool_key(&uri);
 
         // For HTTP/2 streaming, we need direct connection access (no pooling for streaming)
-        let stream = self
-            .client
-            .connector
-            .connect(
-                uri.host().unwrap_or("localhost"),
-                uri.port_u16().unwrap_or(443),
-                true,
-            )
-            .await?;
+        let stream = self.client.connector.connect(&uri).await?;
 
         // Ensure ALPN negotiated h2
         let alpn = stream.alpn_protocol();
-        if alpn != Some(b"h2") {
+        if !alpn.is_h2() {
             return Err(Error::HttpProtocol(format!(
                 "Expected h2 ALPN, got {:?}",
-                alpn.map(|b| String::from_utf8_lossy(b))
+                alpn
             )));
         }
 
         // Create H2 connection
-        let mut h2_conn = H2Connection::new(
+        let mut h2_conn = H2Connection::connect(
             stream,
             self.client.http2_settings.clone(),
             self.client.pseudo_order,
@@ -245,7 +237,7 @@ impl<'a> RequestBuilder<'a> {
             request_builder = request_builder.header(key.as_str(), value.as_str());
         }
 
-        let body = self.body.map(Bytes::from).unwrap_or_else(Bytes::new);
+        let body = self.body.map(Bytes::from).unwrap_or_default();
         let request = request_builder
             .body(body)
             .map_err(|e| Error::HttpProtocol(format!("Failed to build request: {}", e)))?;
@@ -269,18 +261,18 @@ impl<'a> RequestBuilder<'a> {
 
         // Convert http::Response to our Response type
         let status = response.status().as_u16();
-        let headers: Vec<(String, String)> = response
+        let headers: Vec<String> = response
             .headers()
             .iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .map(|(k, v)| format!("{}: {}", k.as_str(), v.to_str().unwrap_or("")))
             .collect();
 
-        let our_response = crate::response::Response {
+        let our_response = crate::response::Response::new(
             status,
             headers,
-            body: Vec::new(), // Body comes through rx
-            effective_url: None,
-        };
+            Bytes::new(), // Body comes through rx
+            "HTTP/2".to_string(),
+        );
 
         Ok((our_response.with_url(self.uri.clone()), rx))
     }

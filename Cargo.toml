@@ -50,3 +50,6 @@ socket2 = { version = "0.5", features = ["all"] }
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
+
+# Make this crate standalone (not part of parent workspace)
+[workspace]
