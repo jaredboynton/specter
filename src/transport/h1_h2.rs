@@ -164,6 +164,128 @@ impl<'a> RequestBuilder<'a> {
         self
     }
 
+    /// Send the request and return the response with streaming body.
+    /// Returns (Response, Receiver for body chunks).
+    /// The response body is empty - chunks arrive via the receiver.
+    pub async fn send_streaming(
+        self,
+    ) -> Result<(Response, tokio::sync::mpsc::Receiver<std::result::Result<Bytes, crate::transport::h2::H2Error>>)>
+    {
+        let version = self.version.unwrap_or(self.client.default_version);
+
+        // Only HTTP/2 supports streaming currently
+        if !matches!(version, HttpVersion::Http2 | HttpVersion::Auto) {
+            return Err(Error::HttpProtocol(
+                "Streaming only supported for HTTP/2".into(),
+            ));
+        }
+
+        // Parse URI
+        let uri: Uri = self
+            .uri
+            .parse()
+            .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
+
+        let pool_key = Self::make_pool_key(&uri);
+
+        // For HTTP/2 streaming, we need direct connection access (no pooling for streaming)
+        let stream = self
+            .client
+            .connector
+            .connect(
+                uri.host().unwrap_or("localhost"),
+                uri.port_u16().unwrap_or(443),
+                true,
+            )
+            .await?;
+
+        // Ensure ALPN negotiated h2
+        let alpn = stream.alpn_protocol();
+        if alpn != Some(b"h2") {
+            return Err(Error::HttpProtocol(format!(
+                "Expected h2 ALPN, got {:?}",
+                alpn.map(|b| String::from_utf8_lossy(b))
+            )));
+        }
+
+        // Create H2 connection
+        let mut h2_conn = H2Connection::new(
+            stream,
+            self.client.http2_settings.clone(),
+            self.client.pseudo_order,
+        )
+        .await?;
+
+        // Build HTTP request
+        let path = uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+        let host = uri.host().unwrap_or("localhost");
+        let authority = if let Some(port) = uri.port_u16() {
+            if port == 443 {
+                host.to_string()
+            } else {
+                format!("{}:{}", host, port)
+            }
+        } else {
+            host.to_string()
+        };
+
+        let mut request_builder = http::Request::builder()
+            .method(self.method.clone())
+            .uri(path);
+
+        // Add pseudo headers
+        request_builder = request_builder
+            .header(":authority", &authority)
+            .header(":scheme", "https");
+
+        // Add custom headers
+        for (key, value) in &self.headers {
+            request_builder = request_builder.header(key.as_str(), value.as_str());
+        }
+
+        let body = self.body.map(Bytes::from).unwrap_or_else(Bytes::new);
+        let request = request_builder
+            .body(body)
+            .map_err(|e| Error::HttpProtocol(format!("Failed to build request: {}", e)))?;
+
+        // Send streaming request
+        let (response, rx) = h2_conn.send_request_streaming(request).await?;
+
+        // Spawn task to read streaming frames
+        tokio::spawn(async move {
+            loop {
+                match h2_conn.read_streaming_frames().await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(e) => {
+                        tracing::debug!("Streaming read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Convert http::Response to our Response type
+        let status = response.status().as_u16();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+
+        let our_response = crate::response::Response {
+            status,
+            headers,
+            body: Vec::new(), // Body comes through rx
+            effective_url: None,
+        };
+
+        Ok((our_response.with_url(self.uri.clone()), rx))
+    }
+
     /// Send the request and return the response.
     pub async fn send(self) -> Result<Response> {
         let version = self.version.unwrap_or(self.client.default_version);

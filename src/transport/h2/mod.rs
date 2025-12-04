@@ -37,7 +37,7 @@ mod frame;
 mod hpack;
 mod hpack_impl;
 
-pub use connection::{H2Connection as RawH2Connection, StreamResponse, CHROME_WINDOW_UPDATE};
+pub use connection::{H2Connection as RawH2Connection, H2Error, StreamResponse, CHROME_WINDOW_UPDATE};
 pub use frame::{
     flags, DataFrame, ErrorCode, FrameHeader, FrameType, GoAwayFrame, HeadersFrame, PingFrame,
     PriorityData, PriorityFrame, PushPromiseFrame, RstStreamFrame, SettingsFrame, SettingsId,
