@@ -16,13 +16,20 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
+//! ```no_run
 //! use specter::transport::h2::{H2Connection, PseudoHeaderOrder};
 //! use specter::fingerprint::http2::Http2Settings;
+//! use specter::transport::connector::MaybeHttpsStream;
+//! use http::{Method, Uri};
 //!
+//! # async fn example(stream: MaybeHttpsStream) -> Result<(), Box<dyn std::error::Error>> {
+//! # let uri: Uri = "https://example.com".parse()?;
+//! # let headers = vec![];
 //! let settings = Http2Settings::default(); // Chrome settings
-//! let conn = H2Connection::connect(stream, settings, PseudoHeaderOrder::Chrome).await?;
+//! let mut conn = H2Connection::connect(stream, settings, PseudoHeaderOrder::Chrome).await?;
 //! let response = conn.send_request(Method::GET, &uri, headers, None).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 mod connection;

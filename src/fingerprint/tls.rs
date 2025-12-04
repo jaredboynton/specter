@@ -7,6 +7,16 @@
 //! match real browsers.
 //!
 //! Current implementation: Chrome 142 (Dec 2025)
+//!
+//! ## Post-Quantum Cryptography (Kyber)
+//!
+//! Chrome 124+ enables X25519Kyber768 hybrid key exchange by default. This requires
+//! BoringSSL compiled with post-quantum cryptography support. The `enable_kyber` flag
+//! in `TlsFingerprint` will attempt to enable Kyber, but will silently fail if the
+//! BoringSSL build does not support it.
+//!
+//! To verify Kyber support, check if connections show "X25519Kyber768" in the key
+//! exchange algorithm when connecting to servers that support it (e.g., Google, Cloudflare).
 
 /// Chrome 142 cipher suites in exact order.
 pub const CHROME_142_CIPHER_SUITES: &[&str] = &[
@@ -93,6 +103,17 @@ pub const FIREFOX_133_CURVES: &[&str] = &["x25519", "P-256", "P-384", "P-521"];
 pub const FIREFOX_133_EXTENSION_IDS: &[u16] =
     &[0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43, 27, 21];
 
+/// Certificate compression algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertCompression {
+    /// Brotli compression (Chrome uses this).
+    Brotli,
+    /// Zlib compression.
+    Zlib,
+    /// No certificate compression.
+    None,
+}
+
 /// TLS fingerprint configuration.
 #[derive(Debug, Clone)]
 pub struct TlsFingerprint {
@@ -108,6 +129,13 @@ pub struct TlsFingerprint {
     pub extension_order: Vec<u16>,
     /// Enable GREASE values.
     pub grease: bool,
+    /// Certificate compression algorithm (compress_certificate extension).
+    /// Chrome 142 uses Brotli. Firefox does not use certificate compression.
+    pub cert_compression: CertCompression,
+    /// Enable post-quantum X25519Kyber768 hybrid key exchange.
+    /// Chrome 124+ enables this by default. Requires BoringSSL with post-quantum support.
+    /// Implemented by including "X25519Kyber768Draft00" in the curves/groups list.
+    pub enable_kyber: bool,
 }
 
 impl Default for TlsFingerprint {
@@ -119,6 +147,8 @@ impl Default for TlsFingerprint {
             extensions: vec![],
             extension_order: vec![],
             grease: true,
+            cert_compression: CertCompression::None,
+            enable_kyber: false,
         }
     }
 }
@@ -133,6 +163,8 @@ impl TlsFingerprint {
             extensions: CHROME_142_EXTENSION_IDS.to_vec(),
             extension_order: CHROME_142_EXTENSION_IDS.to_vec(),
             grease: true,
+            cert_compression: CertCompression::Brotli, // Chrome uses Brotli certificate compression
+            enable_kyber: true, // Chrome 124+ enables post-quantum Kyber by default
         }
     }
 
@@ -143,6 +175,8 @@ impl TlsFingerprint {
     /// - More curves supported (includes P-521)
     /// - No GREASE values (Firefox doesn't use GREASE)
     /// - Extension order randomization (like Chrome 110+)
+    /// - No certificate compression (Firefox does not use compress_certificate)
+    /// - Post-quantum Kyber disabled by default (requires manual flag)
     pub fn firefox_133() -> Self {
         Self {
             cipher_list: FIREFOX_133_CIPHER_SUITES.to_vec(),
@@ -150,7 +184,9 @@ impl TlsFingerprint {
             curves: FIREFOX_133_CURVES.to_vec(),
             extensions: FIREFOX_133_EXTENSION_IDS.to_vec(),
             extension_order: FIREFOX_133_EXTENSION_IDS.to_vec(),
-            grease: false, // Firefox does NOT use GREASE
+            grease: false,                           // Firefox does NOT use GREASE
+            cert_compression: CertCompression::None, // Firefox does not use certificate compression
+            enable_kyber: false,                     // Firefox requires manual flag for Kyber
         }
     }
 }

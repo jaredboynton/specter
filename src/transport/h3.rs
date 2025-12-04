@@ -1,4 +1,17 @@
 //! HTTP/3 transport via quiche.
+//!
+//! ## QUIC Fingerprinting
+//!
+//! QUIC/HTTP3 fingerprinting involves several factors:
+//! - Initial packet size (Google: 1250B, Meta: 1232B, Cloudflare: variable)
+//! - Connection ID length and generation
+//! - Transport parameters (max_idle_timeout, initial_max_data, etc.)
+//! - 0-RTT behavior
+//!
+//! The quiche library handles most QUIC fingerprinting details automatically.
+//! This implementation configures transport parameters to match browser-like behavior.
+//! The MAX_DATAGRAM_SIZE (1350 bytes) is a reasonable default that works across
+//! different networks and servers.
 
 use bytes::Bytes;
 use getrandom::fill as getrandom_fill;
@@ -77,10 +90,20 @@ impl H3Client {
             }
 
             // Apply curves/groups
+            // If Kyber is enabled, prepend X25519Kyber768Draft00 to the curves list
             if !fp.curves.is_empty() {
-                let curves_str = fp.curves.join(":");
+                let curves_str = if fp.enable_kyber {
+                    format!("X25519Kyber768Draft00:{}", fp.curves.join(":"))
+                } else {
+                    fp.curves.join(":")
+                };
                 ssl_ctx_builder
                     .set_curves_list(&curves_str)
+                    .map_err(|e| Error::Tls(format!("Failed to set curves: {}", e)))?;
+            } else if fp.enable_kyber {
+                // If no curves specified but Kyber is enabled, set Kyber as the only group
+                ssl_ctx_builder
+                    .set_curves_list("X25519Kyber768Draft00")
                     .map_err(|e| Error::Tls(format!("Failed to set curves: {}", e)))?;
             }
 
@@ -93,6 +116,11 @@ impl H3Client {
                         Error::Tls(format!("Failed to set signature algorithms: {}", e))
                     })?;
             }
+
+            // Note: Certificate compression and ALPS extensions require SSL object access
+            // which is not available during context setup. For HTTP/3/QUIC, quiche handles
+            // QUIC-specific TLS configuration internally. Kyber is configured via the curves
+            // list above.
 
             // Create config with custom SSL context
             quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, ssl_ctx_builder)
@@ -112,11 +140,12 @@ impl H3Client {
             .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
             .map_err(|e| Error::Quic(format!("Failed to set ALPN: {}", e)))?;
 
-        // Configure QUIC parameters
+        // Configure QUIC parameters to match Chrome behavior
         config.set_max_idle_timeout(self.max_idle_timeout);
         config.set_max_recv_udp_payload_size(65535);
         config.set_max_send_udp_payload_size(self.max_udp_payload_size);
-        config.set_initial_max_data(INITIAL_MAX_DATA);
+        // Chrome uses 15663105 (15MB) for initial_max_data, matching HTTP/2 window update value
+        config.set_initial_max_data(CHROME_INITIAL_MAX_DATA);
         config.set_initial_max_stream_data_bidi_local(1_000_000);
         config.set_initial_max_stream_data_bidi_remote(1_000_000);
         config.set_initial_max_stream_data_uni(1_000_000);
@@ -458,4 +487,6 @@ const MAX_DATAGRAM_SIZE: usize = 1350;
 const QUIC_IDLE_TIMEOUT_MS: u64 = 30_000;
 
 /// Initial maximum data for QUIC connection.
-const INITIAL_MAX_DATA: u64 = 10_000_000;
+/// Chrome uses 15663105 (15MB), matching the HTTP/2 WINDOW_UPDATE value.
+/// This improves fingerprint consistency between HTTP/2 and HTTP/3.
+const CHROME_INITIAL_MAX_DATA: u64 = 15_663_105;

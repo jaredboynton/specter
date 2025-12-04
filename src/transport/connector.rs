@@ -3,6 +3,7 @@
 use boring::ssl::{SslConnector, SslMethod, SslSessionCacheMode, SslVersion};
 use http::Uri;
 use std::io;
+use std::io::Read;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -14,7 +15,7 @@ use crate::fingerprint::tls::TlsFingerprint;
 use crate::transport::tcp::{configure_tcp_socket, TcpFingerprint};
 
 // FFI bindings for BoringSSL extension control
-use boring_sys::SSL_CTX;
+use boring_sys::{CRYPTO_BUFFER, SSL, SSL_CTX};
 use std::os::raw::c_int;
 
 extern "C" {
@@ -22,6 +23,84 @@ extern "C" {
     pub fn SSL_CTX_set_grease_enabled(ctx: *mut SSL_CTX, enabled: c_int) -> c_int;
     /// Enable extension order permutation (Chrome 110+ behavior)
     pub fn SSL_CTX_set_permute_extensions(ctx: *mut SSL_CTX, enabled: c_int) -> c_int;
+}
+
+/// Brotli certificate decompression callback for BoringSSL.
+///
+/// This function is called by BoringSSL when it receives a Brotli-compressed certificate.
+/// It decompresses the input data and returns it in a CRYPTO_BUFFER.
+unsafe extern "C" fn decompress_brotli_cert(
+    _ssl: *mut SSL,
+    out: *mut *mut CRYPTO_BUFFER,
+    uncompressed_len: usize,
+    in_: *const u8,
+    in_len: usize,
+) -> c_int {
+    use std::slice;
+
+    // Read compressed data
+    let compressed = slice::from_raw_parts(in_, in_len);
+
+    // Decompress using Brotli
+    let mut decompressed = Vec::with_capacity(uncompressed_len);
+    let mut decoder = brotli::Decompressor::new(compressed, uncompressed_len);
+    match decoder.read_to_end(&mut decompressed) {
+        Ok(_) if decompressed.len() == uncompressed_len => {
+            // Create CRYPTO_BUFFER from decompressed data
+            // CRYPTO_BUFFER_new(data, len, pool) - pool can be null for one-off buffers
+            let buffer = boring_sys::CRYPTO_BUFFER_new(
+                decompressed.as_ptr(),
+                decompressed.len(),
+                std::ptr::null_mut(),
+            );
+            if buffer.is_null() {
+                return 0; // Error
+            }
+            *out = buffer;
+            // CRYPTO_BUFFER_new copies the data, so decompressed Vec can be dropped normally
+            1 // Success
+        }
+        _ => 0, // Decompression failed or wrong size
+    }
+}
+
+/// Zlib certificate decompression callback for BoringSSL.
+///
+/// This function is called by BoringSSL when it receives a Zlib-compressed certificate.
+unsafe extern "C" fn decompress_zlib_cert(
+    _ssl: *mut SSL,
+    out: *mut *mut CRYPTO_BUFFER,
+    uncompressed_len: usize,
+    in_: *const u8,
+    in_len: usize,
+) -> c_int {
+    use flate2::read::DeflateDecoder;
+    use std::slice;
+
+    // Read compressed data
+    let compressed = slice::from_raw_parts(in_, in_len);
+
+    // Decompress using Zlib (Deflate)
+    let mut decoder = DeflateDecoder::new(compressed);
+    let mut decompressed = Vec::with_capacity(uncompressed_len);
+    match decoder.read_to_end(&mut decompressed) {
+        Ok(_) if decompressed.len() == uncompressed_len => {
+            // Create CRYPTO_BUFFER from decompressed data
+            // CRYPTO_BUFFER_new(data, len, pool) - pool can be null for one-off buffers
+            let buffer = boring_sys::CRYPTO_BUFFER_new(
+                decompressed.as_ptr(),
+                decompressed.len(),
+                std::ptr::null_mut(),
+            );
+            if buffer.is_null() {
+                return 0; // Error
+            }
+            *out = buffer;
+            // CRYPTO_BUFFER_new copies the data, so decompressed Vec can be dropped normally
+            1 // Success
+        }
+        _ => 0, // Decompression failed or wrong size
+    }
 }
 
 /// BoringSSL-based TLS connector for hyper.
@@ -76,10 +155,20 @@ impl BoringConnector {
             }
 
             // Set curves/groups from fingerprint
+            // If Kyber is enabled, prepend X25519Kyber768Draft00 to the curves list
             if !fp.curves.is_empty() {
-                let curves_str = fp.curves.join(":");
+                let curves_str = if fp.enable_kyber {
+                    format!("X25519Kyber768Draft00:{}", fp.curves.join(":"))
+                } else {
+                    fp.curves.join(":")
+                };
                 builder
                     .set_curves_list(&curves_str)
+                    .map_err(|e| Error::Tls(format!("Failed to set curves: {}", e)))?;
+            } else if fp.enable_kyber {
+                // If no curves specified but Kyber is enabled, set Kyber as the only group
+                builder
+                    .set_curves_list("X25519Kyber768Draft00")
                     .map_err(|e| Error::Tls(format!("Failed to set curves: {}", e)))?;
             }
 
@@ -104,6 +193,39 @@ impl BoringConnector {
                     SSL_CTX_set_grease_enabled(ctx, 0);
                     SSL_CTX_set_permute_extensions(ctx, 1);
                 }
+
+                // Configure certificate compression (compress_certificate extension)
+                // Chrome uses Brotli, Firefox does not use compression
+                // Note: Certificate compression is configured via SSL_CTX_add_cert_compression_alg
+                // which requires callback functions. We only implement decompression (client receives
+                // compressed certs from server).
+                match fp.cert_compression {
+                    crate::fingerprint::CertCompression::Brotli => {
+                        let _ = boring_sys::SSL_CTX_add_cert_compression_alg(
+                            ctx,
+                            boring_sys::TLSEXT_cert_compression_brotli as u16,
+                            None, // No compression callback (client doesn't compress)
+                            Some(decompress_brotli_cert),
+                        );
+                    }
+                    crate::fingerprint::CertCompression::Zlib => {
+                        let _ = boring_sys::SSL_CTX_add_cert_compression_alg(
+                            ctx,
+                            boring_sys::TLSEXT_cert_compression_zlib as u16,
+                            None, // No compression callback (client doesn't compress)
+                            Some(decompress_zlib_cert),
+                        );
+                    }
+                    crate::fingerprint::CertCompression::None => {
+                        // No certificate compression
+                    }
+                }
+
+                // Note: ALPS (Application-Layer Protocol Settings) extension is deferred.
+                // The API requires SSL_add_application_settings() which works on the SSL object
+                // (not SSL_CTX), meaning it must be called after SSL object creation during
+                // connection setup. This would require architectural changes to access the SSL
+                // object before handshake completion.
             }
 
             // Note: extension_order field in TlsFingerprint is for reference only.

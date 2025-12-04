@@ -18,12 +18,20 @@ pub fn chrome_142_headers() -> Vec<(&'static str, &'static str)> {
         ("Sec-Ch-Ua", r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="24""#),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
+        ("Sec-Ch-Ua-Arch", r#""arm64""#),
+        ("Sec-Ch-Ua-Bitness", r#""64""#),
+        ("Sec-Ch-Ua-Full-Version-List", r#""Chromium";v="142.0.6367.118", "Google Chrome";v="142.0.6367.118", "Not_A Brand";v="24.0.0.0""#),
+        ("Sec-Ch-Ua-Model", r#""""#),
+        ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
+        ("Sec-Ch-Ua-Wow64", "?0"),
         ("Upgrade-Insecure-Requests", "1"),
         ("Connection", "keep-alive"),
     ]
 }
 
 /// Chrome 142 headers for AJAX/API requests.
+/// Note: Extended Client Hints are typically only sent on navigation requests,
+/// not on AJAX/API requests unless explicitly requested by the server.
 pub fn chrome_142_ajax_headers() -> Vec<(&'static str, &'static str)> {
     vec![
         ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
@@ -55,6 +63,12 @@ pub fn chrome_142_form_headers() -> Vec<(&'static str, &'static str)> {
         ("Sec-Ch-Ua", r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="24""#),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
+        ("Sec-Ch-Ua-Arch", r#""arm64""#),
+        ("Sec-Ch-Ua-Bitness", r#""64""#),
+        ("Sec-Ch-Ua-Full-Version-List", r#""Chromium";v="142.0.6367.118", "Google Chrome";v="142.0.6367.118", "Not_A Brand";v="24.0.0.0""#),
+        ("Sec-Ch-Ua-Model", r#""""#),
+        ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
+        ("Sec-Ch-Ua-Wow64", "?0"),
         ("Upgrade-Insecure-Requests", "1"),
         ("Connection", "keep-alive"),
     ]

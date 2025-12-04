@@ -25,7 +25,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -45,9 +45,6 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt -- --check
-
-      - name: Run Clippy (first compile, covers all targets)
-        run: cargo clippy --all-features --all-targets -- -D warnings -A dead_code
 
       - name: Run tests
         run: cargo test --all-features

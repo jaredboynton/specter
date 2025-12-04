@@ -6,3 +6,4 @@ pub mod tls;
 
 pub use http2::PriorityTree;
 pub use profiles::FingerprintProfile;
+pub use tls::{CertCompression, TlsFingerprint};
