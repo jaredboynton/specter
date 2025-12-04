@@ -169,8 +169,10 @@ impl<'a> RequestBuilder<'a> {
     /// The response body is empty - chunks arrive via the receiver.
     pub async fn send_streaming(
         self,
-    ) -> Result<(Response, tokio::sync::mpsc::Receiver<std::result::Result<Bytes, crate::transport::h2::H2Error>>)>
-    {
+    ) -> Result<(
+        Response,
+        tokio::sync::mpsc::Receiver<std::result::Result<Bytes, crate::transport::h2::H2Error>>,
+    )> {
         let version = self.version.unwrap_or(self.client.default_version);
 
         // Only HTTP/2 supports streaming currently
@@ -217,10 +219,7 @@ impl<'a> RequestBuilder<'a> {
         .await?;
 
         // Build HTTP request
-        let path = uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/");
+        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
         let host = uri.host().unwrap_or("localhost");
         let authority = if let Some(port) = uri.port_u16() {
             if port == 443 {
