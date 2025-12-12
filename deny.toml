@@ -1,0 +1,36 @@
+# Cargo deny configuration
+# See https://github.com/EmbarkStudios/cargo-deny for documentation
+
+# License checking
+[licenses]
+# Allow these licenses
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+]
+
+# Check for security vulnerabilities
+[advisories]
+# Check for unmaintained crates
+unmaintained = "none"
+# Check for yanked crates
+yanked = "deny"
+
+# Ban specific crates
+[bans]
+# Don't allow multiple versions of the same crate
+multiple-versions = "warn"
+
+# Check for sources
+[sources]
+# Only allow crates from crates.io
+unknown-registry = "deny"
+# Allow git dependencies
+unknown-git = "allow"

@@ -75,7 +75,7 @@ impl MockH2Connection {
         stream.read_exact(&mut preface).await?;
 
         const EXPECTED_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-        if &preface != EXPECTED_PREFACE {
+        if preface.as_slice() != EXPECTED_PREFACE {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Invalid HTTP/2 preface",

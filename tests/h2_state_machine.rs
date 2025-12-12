@@ -17,10 +17,8 @@ async fn perform_handshake_and_read_headers(conn: &MockH2Connection) -> std::io:
     // Read client preface
     conn.read_preface().await?;
 
-    let mut stream_id = 0;
-
     // Loop until we get HEADERS
-    loop {
+    let stream_id = loop {
         let (len, frame_type, flags, sid, _) = conn.read_frame().await?;
         tracing::debug!(
             "Server RX: Type={} Flags={} Len={} Sid={}",
@@ -33,8 +31,7 @@ async fn perform_handshake_and_read_headers(conn: &MockH2Connection) -> std::io:
         match frame_type {
             0x01 => {
                 // HEADERS
-                stream_id = sid;
-                break;
+                break sid;
             }
             0x04 => {
                 // SETTINGS
@@ -50,7 +47,7 @@ async fn perform_handshake_and_read_headers(conn: &MockH2Connection) -> std::io:
                 // Ignore WINDOW_UPDATE (0x08) and others during handshake
             }
         }
-    }
+    };
 
     Ok(stream_id)
 }
