@@ -21,10 +21,7 @@ impl ConnectionTracker {
     /// Record a connection to a given address.
     pub fn record_connection(&self, addr: SocketAddr) {
         let mut conns = self.connections.lock().unwrap();
-        conns
-            .entry(addr)
-            .or_insert_with(Vec::new)
-            .push(Instant::now());
+        conns.entry(addr).or_default().push(Instant::now());
     }
 
     /// Get the number of unique connections to an address.

@@ -56,7 +56,7 @@ async fn test_h2_multiplexing_performance() {
         let task_start = Instant::now();
         let res = task.await.unwrap();
         let task_wait = task_start.elapsed();
-        let resp = res.expect(&format!("Request {} failed", i + 1));
+        let resp = res.unwrap_or_else(|_| panic!("Request {} failed", i + 1));
         if resp.status != 200 {
             println!(
                 "Request {} failed with status {}. Body: {:?}",

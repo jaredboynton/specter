@@ -69,7 +69,7 @@ async fn test_h1_multiple_sequential_requests() {
             .get(&url)
             .send()
             .await
-            .expect(&format!("Request {} failed", i + 1));
+            .unwrap_or_else(|_| panic!("Request {} failed", i + 1));
         assert_eq!(resp.status, 200);
         assert_eq!(resp.text().unwrap(), "Hello");
     }
