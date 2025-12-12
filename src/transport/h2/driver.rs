@@ -15,7 +15,7 @@ pub type StreamingHeadersResult = Result<(u16, Vec<(String, String)>)>;
 
 use crate::error::{Error, Result};
 use crate::transport::h2::connection::{
-    ControlAction, H2Connection as RawH2Connection, H2Error, StreamResponse,
+    ControlAction, H2Connection as RawH2Connection, StreamResponse,
 };
 use crate::transport::h2::frame::{flags, FrameHeader, FrameType};
 
