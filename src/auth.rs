@@ -43,6 +43,7 @@ pub fn parse_basic_auth(header: &str) -> Option<(String, String)> {
 /// * `qop` - quality of protection ("auth" supported)
 /// * `algorithm` - "MD5", "MD5-sess", "SHA-256", "SHA-256-sess"
 /// * `opaque` - opaque data string
+#[allow(clippy::too_many_arguments)]
 pub fn digest_auth(
     username: &str,
     password: &str,
