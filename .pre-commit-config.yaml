@@ -2,35 +2,45 @@ repos:
   - repo: local
     hooks:
       # Pre-commit: fast auto-formatting
+      # Auto-fixes formatting and re-stages changed files
       - id: cargo-fmt
-        name: cargo fmt
-        entry: bash -c 'cargo fmt && git add -u'
+        name: cargo fmt (auto-fix)
+        entry: bash -c 'set -e; cargo fmt --all && git add -u'
         language: system
         types: [rust]
         pass_filenames: false
         stages: [pre-commit]
+        always_run: false
 
       # Pre-push: full validation
+      # Verifies formatting hasn't regressed (safety check)
       - id: cargo-fmt-check
         name: cargo fmt --check
-        entry: cargo fmt -- --check
+        entry: bash -c 'set -e; cargo fmt --all -- --check'
         language: system
         types: [rust]
         pass_filenames: false
         stages: [pre-push]
+        always_run: false
 
+      # Pre-push: linting with strict warnings
+      # Fails if clippy finds issues (user must fix manually)
       - id: cargo-clippy
-        name: cargo clippy
-        entry: cargo clippy --all-features --all-targets -- -D warnings -A dead_code
+        name: cargo clippy (strict)
+        entry: bash -c 'set -e; cargo clippy --all-features --all-targets -- -D warnings -A dead_code'
         language: system
         types: [rust]
         pass_filenames: false
         stages: [pre-push]
+        always_run: false
 
+      # Pre-push: run tests
+      # Ensures code passes all tests before pushing
       - id: cargo-test
         name: cargo test
-        entry: cargo test --all-features
+        entry: bash -c 'set -e; cargo test --all-features'
         language: system
         types: [rust]
         pass_filenames: false
         stages: [pre-push]
+        always_run: false
