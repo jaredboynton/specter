@@ -288,6 +288,7 @@ impl AlpnProtocol {
 }
 
 /// Stream that can be either HTTP (plain TCP) or HTTPS (TLS).
+#[derive(Debug)]
 pub enum MaybeHttpsStream {
     /// Plain TCP stream for HTTP.
     Http(TcpStream),

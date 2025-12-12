@@ -4,7 +4,7 @@ repos:
       # Pre-commit: fast auto-formatting
       - id: cargo-fmt
         name: cargo fmt
-        entry: cargo fmt
+        entry: bash -c 'cargo fmt && git add -u'
         language: system
         types: [rust]
         pass_filenames: false

@@ -28,6 +28,11 @@ impl H1Connection {
         Self { stream }
     }
 
+    /// Extract the underlying stream.
+    pub fn into_inner(self) -> MaybeHttpsStream {
+        self.stream
+    }
+
     /// Send an HTTP/1.1 request and receive the response.
     pub async fn send_request(
         &mut self,
@@ -91,15 +96,26 @@ impl H1Connection {
         request.extend_from_slice(b"\r\n");
 
         // User-provided headers (preserving order)
+        let mut has_connection_header = false;
         for (name, value) in headers {
             // Skip Host header if user provided one (we already added it)
             if name.eq_ignore_ascii_case("host") {
                 continue;
             }
+            // Track if user provided Connection header
+            if name.eq_ignore_ascii_case("connection") {
+                has_connection_header = true;
+            }
             request.extend_from_slice(name.as_bytes());
             request.extend_from_slice(b": ");
             request.extend_from_slice(value.as_bytes());
             request.extend_from_slice(b"\r\n");
+        }
+
+        // Add Connection: keep-alive if not explicitly set by user
+        // This enables connection reuse for HTTP/1.1 pooling
+        if !has_connection_header {
+            request.extend_from_slice(b"Connection: keep-alive\r\n");
         }
 
         // Content-Length if body present and not already set

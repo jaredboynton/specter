@@ -7,6 +7,7 @@ use http::{Method, Request, Response, StatusCode, Uri};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
+use tracing;
 
 use crate::error::{Error, Result};
 use crate::fingerprint::http2::Http2Settings;
@@ -51,10 +52,22 @@ struct Stream {
 }
 
 /// Response data collected for a stream.
+#[derive(Debug, Clone)]
 pub struct StreamResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Bytes,
+}
+
+/// Action to take after a control frame.
+#[derive(Debug)]
+pub enum ControlAction {
+    /// No action needed (frame handled internally).
+    None,
+    /// Stream reset by peer.
+    RstStream(u32, ErrorCode),
+    /// GOAWAY received.
+    GoAway(u32),
 }
 
 /// HTTP/2 connection with full fingerprint control.
@@ -90,14 +103,14 @@ pub struct H2Connection<S> {
 }
 
 /// Peer's settings (received from server).
-#[derive(Debug, Clone)]
-struct PeerSettings {
-    header_table_size: u32,
-    enable_push: bool,
-    max_concurrent_streams: u32,
-    initial_window_size: u32,
-    max_frame_size: u32,
-    max_header_list_size: u32,
+#[derive(Debug, Clone, Copy)]
+pub struct PeerSettings {
+    pub header_table_size: u32,
+    pub enable_push: bool,
+    pub max_concurrent_streams: u32,
+    pub initial_window_size: u32,
+    pub max_frame_size: u32,
+    pub max_header_list_size: u32,
 }
 
 impl Default for PeerSettings {
@@ -431,33 +444,14 @@ where
             .await
             .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
 
-        // Register stream
-        let stream_state = if end_stream {
-            StreamState::HalfClosedLocal
-        } else {
-            StreamState::Open
-        };
-        self.streams.insert(
-            stream_id,
-            Stream {
-                id: stream_id,
-                state: stream_state,
-                recv_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
-                send_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
-                response_tx: None,
-                streaming_tx: None,
-                response_headers: Vec::new(),
-                response_data: BytesMut::new(),
-            },
-        );
-
-        // Read response
+        // Stream registration is now handled by send_request_frames calls
+        // We only need to wait for response
         self.read_response(stream_id).await
     }
 
     /// Send request frames (HEADERS + optional DATA) and return stream ID.
     /// Internal helper for both send_request and send_request_streaming.
-    async fn send_request_frames(&mut self, request: &Request<Bytes>) -> Result<u32> {
+    pub async fn send_request_frames(&mut self, request: &Request<Bytes>) -> Result<u32> {
         // Allocate stream ID
         let stream_id = self.next_stream_id;
         self.next_stream_id += 2; // Client uses odd stream IDs
@@ -491,6 +485,28 @@ where
                 "PROTOCOL_ERROR: :path pseudo-header cannot be empty".into(),
             ));
         }
+
+        // Register stream immediately so flow control checks work
+        let stream_state = if request.body().is_empty() {
+            // Will be updated if body present
+            StreamState::HalfClosedLocal
+        } else {
+            StreamState::Open
+        };
+
+        self.streams.insert(
+            stream_id,
+            Stream {
+                id: stream_id,
+                state: stream_state,
+                recv_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
+                send_window: self.peer_settings.initial_window_size as i32,
+                response_tx: None,
+                streaming_tx: None,
+                response_headers: Vec::new(),
+                response_data: BytesMut::new(),
+            },
+        );
 
         // Convert headers to Vec<(String, String)>
         let headers: Vec<(String, String)> = request
@@ -594,6 +610,9 @@ where
                 stream.send_window -= data_len;
                 stream.state = StreamState::HalfClosedLocal;
             }
+        } else {
+            // No body, we already set HalfClosedLocal in registration if body was empty
+            // H2Connection operates on Bytes.
         }
 
         self.stream
@@ -602,6 +621,171 @@ where
             .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
 
         Ok(stream_id)
+    }
+
+    /// Read the next frame from the connection.
+    /// Returns (FrameHeader, Payload).
+    pub async fn read_next_frame(&mut self) -> Result<(FrameHeader, Bytes)> {
+        // Read frame header
+        while self.read_buf.len() < FRAME_HEADER_SIZE {
+            let mut buf = [0u8; 16384];
+            let n = self
+                .stream
+                .read(&mut buf)
+                .await
+                .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
+            if n == 0 {
+                return Err(Error::HttpProtocol("Connection closed".into()));
+            }
+            self.read_buf.extend_from_slice(&buf[..n]);
+        }
+
+        let header = FrameHeader::parse(&self.read_buf[..FRAME_HEADER_SIZE]).ok_or_else(|| {
+            Error::HttpProtocol("Invalid frame header (reserved bits set)".into())
+        })?;
+
+        // RFC 9113 Section 4.2: Frame size validation
+        if header.length > self.peer_settings.max_frame_size {
+            return Err(Error::HttpProtocol(format!(
+                "FRAME_SIZE_ERROR: Frame size {} exceeds MAX_FRAME_SIZE {}",
+                header.length, self.peer_settings.max_frame_size
+            )));
+        }
+
+        // Wait for full frame
+        let frame_len = FRAME_HEADER_SIZE + header.length as usize;
+        while self.read_buf.len() < frame_len {
+            let mut buf = [0u8; 16384];
+            let n = self
+                .stream
+                .read(&mut buf)
+                .await
+                .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
+            if n == 0 {
+                return Err(Error::HttpProtocol("Connection closed".into()));
+            }
+            self.read_buf.extend_from_slice(&buf[..n]);
+        }
+
+        let payload_bytes = Bytes::from(self.read_buf[FRAME_HEADER_SIZE..frame_len].to_vec());
+        self.read_buf.advance(frame_len);
+
+        Ok((header, payload_bytes))
+    }
+
+    /// Handle a control frame (SETTINGS, PING, WINDOW_UPDATE, GOAWAY, RST_STREAM).
+    /// Returns an action if the driver needs to react (e.g. close a stream channel).
+    pub async fn handle_control_frame(
+        &mut self,
+        header: &FrameHeader,
+        payload: Bytes,
+    ) -> Result<ControlAction> {
+        match header.frame_type {
+            FrameType::Settings => {
+                let settings = SettingsFrame::parse(header.flags, payload);
+
+                if (header.flags & flags::ACK) != 0 {
+                    // ACK received - fine
+                } else {
+                    // Update settings
+                    self.apply_peer_settings(&settings);
+
+                    // Send ACK
+                    let ack = SettingsFrame::ack();
+                    self.stream.write_all(&ack.serialize()).await.map_err(|e| {
+                        Error::HttpProtocol(format!("Failed to send SETTINGS ACK: {}", e))
+                    })?;
+                    self.stream.flush().await.map_err(|e| {
+                        Error::HttpProtocol(format!("Failed to flush SETTINGS ACK: {}", e))
+                    })?;
+                }
+                Ok(ControlAction::None)
+            }
+            FrameType::WindowUpdate => {
+                let wu = WindowUpdateFrame::parse(header.stream_id, payload)
+                    .ok_or_else(|| Error::HttpProtocol("Invalid WINDOW_UPDATE frame".into()))?;
+
+                if wu.increment == 0 {
+                    return Err(Error::HttpProtocol(
+                        "FLOW_CONTROL_ERROR: WINDOW_UPDATE increment must be > 0".into(),
+                    ));
+                }
+
+                if header.stream_id == 0 {
+                    // Connection-level window update
+                    self.conn_send_window += wu.increment as i32;
+                } else {
+                    // Stream-level window update
+                    if let Some(stream) = self.streams.get_mut(&header.stream_id) {
+                        stream.send_window += wu.increment as i32;
+                    }
+                }
+                Ok(ControlAction::None)
+            }
+            FrameType::Ping => {
+                if let Some(ping) = PingFrame::parse(header.flags, &payload) {
+                    if !ping.ack {
+                        let pong = PingFrame::ack(ping.data);
+                        self.stream
+                            .write_all(&pong.serialize())
+                            .await
+                            .map_err(|e| {
+                                Error::HttpProtocol(format!("Failed to send PING ACK: {}", e))
+                            })?;
+                        self.stream.flush().await.map_err(|e| {
+                            Error::HttpProtocol(format!("Failed to flush PING ACK: {}", e))
+                        })?;
+                    }
+                }
+                Ok(ControlAction::None)
+            }
+            FrameType::GoAway => {
+                if let Some(goaway) = GoAwayFrame::parse(payload) {
+                    self.goaway_last_stream_id = Some(goaway.last_stream_id);
+                    Ok(ControlAction::GoAway(goaway.last_stream_id))
+                } else {
+                    Err(Error::HttpProtocol("Invalid GOAWAY frame".into()))
+                }
+            }
+            FrameType::RstStream => {
+                if let Ok(rst) = RstStreamFrame::parse(header.stream_id, payload) {
+                    if let Some(stream) = self.streams.get_mut(&header.stream_id) {
+                        stream.state = StreamState::Closed;
+                    }
+                    Ok(ControlAction::RstStream(header.stream_id, rst.error_code))
+                } else {
+                    Err(Error::HttpProtocol("Invalid RST_STREAM frame".into()))
+                }
+            }
+            _ => {
+                // Ignore Priority, PushPromise for now, or already handled
+                Ok(ControlAction::None)
+            }
+        }
+    }
+
+    /// Decode a header block (HPACK).
+    pub fn decode_header_block(&mut self, header_block: Bytes) -> Result<Vec<(String, String)>> {
+        self.decoder
+            .decode(&header_block)
+            .map_err(|e| Error::HttpProtocol(format!("HPACK decoding failed: {}", e)))
+    }
+
+    /// Process an inbound DATA frame.
+    /// Handles flow control (deducts window, sends WINDOW_UPDATE).
+    /// Returns the DATA payload.
+    pub async fn process_inbound_data_frame(
+        &mut self,
+        stream_id: u32,
+        flags: u8,
+        payload: Bytes,
+    ) -> Result<Bytes> {
+        let data_frame = DataFrame::parse(stream_id, flags, payload)
+            .map_err(|e| Error::HttpProtocol(format!("Invalid DATA frame: {}", e)))?;
+
+        self.handle_data_frame(&data_frame, stream_id).await?;
+
+        Ok(data_frame.data)
     }
 
     /// Reads response with streaming body - yields headers then streams DATA frames incrementally.
@@ -623,20 +807,15 @@ where
         // Create channel for streaming body chunks (32-buffer for backpressure)
         let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, H2Error>>(32);
 
-        // Register stream with streaming channel
-        self.streams.insert(
-            stream_id,
-            Stream {
-                id: stream_id,
-                state: StreamState::Open,
-                recv_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
-                send_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
-                response_tx: None,
-                streaming_tx: Some(tx.clone()),
-                response_headers: Vec::new(),
-                response_data: BytesMut::new(),
-            },
-        );
+        // Stream already registered by send_request_frames
+        // Update to add streaming_tx
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.streaming_tx = Some(tx.clone());
+        } else {
+            return Err(Error::HttpProtocol(
+                "Stream not found after sending request".into(),
+            ));
+        }
 
         // Read response headers (blocking until HEADERS frame received)
         let (status, headers) = self.read_response_headers(stream_id).await?;
@@ -853,13 +1032,7 @@ where
             }
             _ => {
                 // Handle control frames
-                self.handle_control_frame(
-                    header.frame_type,
-                    header.stream_id,
-                    header.flags,
-                    &payload,
-                )
-                .await?;
+                self.handle_control_frame(&header, payload.clone()).await?;
                 Ok(true) // Continue reading
             }
         }
@@ -1036,89 +1209,138 @@ where
                 }
                 _ => {
                     // Handle other frames but continue looking for HEADERS
-                    self.handle_control_frame(
-                        header.frame_type,
-                        header.stream_id,
-                        header.flags,
-                        &payload_bytes,
-                    )
-                    .await?;
+                    self.handle_control_frame(&header, payload_bytes.clone())
+                        .await?;
                 }
             }
         }
     }
 
-    /// Handles control frames (SETTINGS, WINDOW_UPDATE, PING, etc.) that can arrive between HEADERS and DATA.
-    async fn handle_control_frame(
-        &mut self,
-        frame_type: FrameType,
-        stream_id: u32,
-        flags: u8,
-        payload: &Bytes,
-    ) -> Result<()> {
-        match frame_type {
-            FrameType::Settings => {
-                // RFC 9113 Section 6.5: SETTINGS frames MUST be on stream 0
-                if stream_id != 0 {
-                    return Err(Error::HttpProtocol(
-                        "PROTOCOL_ERROR: SETTINGS frame must be on stream 0".into(),
-                    ));
-                }
-                if (flags & flags::ACK) == 0 {
-                    let settings = SettingsFrame::parse(flags, payload.clone());
+    /// Read response for a stream.
+    async fn read_response(&mut self, stream_id: u32) -> Result<SpecterResponse> {
+        let read_start = std::time::Instant::now();
+        tracing::debug!(
+            "H2Connection: Starting read_response for stream {}",
+            stream_id
+        );
 
-                    // RFC 9113 Section 6.5: A SETTINGS frame MUST NOT contain multiple values for the same setting
-                    let mut seen_settings = std::collections::HashSet::new();
-                    for (id, _) in &settings.settings {
-                        let id_u16 = *id;
-                        if !seen_settings.insert(id_u16) {
-                            return Err(Error::HttpProtocol(format!(
-                                "PROTOCOL_ERROR: Duplicate setting ID {} in SETTINGS frame",
-                                id_u16
-                            )));
+        let mut status = 0u16;
+        let mut stream_done = false;
+
+        // Verify stream exists including ID match
+        if let Some(stream) = self.streams.get(&stream_id) {
+            if stream.id != stream_id {
+                return Err(Error::HttpProtocol("Stream ID mismatch".into()));
+            }
+        } else {
+            return Err(Error::HttpProtocol("Stream not found".into()));
+        }
+
+        while !stream_done {
+            let (header, payload) = self.read_next_frame().await?;
+
+            // Handle control frames
+            match self.handle_control_frame(&header, payload.clone()).await? {
+                ControlAction::RstStream(sid, code) => {
+                    if sid == stream_id {
+                        return Err(Error::HttpProtocol(format!(
+                            "Stream {} reset by server: {:?}",
+                            sid, code
+                        )));
+                    }
+                }
+                ControlAction::GoAway(last_sid) => {
+                    if stream_id > last_sid {
+                        return Err(Error::HttpProtocol(format!(
+                            "Server sent GOAWAY, last_stream_id={}",
+                            last_sid
+                        )));
+                    }
+                }
+                _ => {}
+            }
+
+            match header.frame_type {
+                FrameType::Headers => {
+                    if header.stream_id != stream_id {
+                        continue;
+                    }
+
+                    // Handle CONTINUATION
+                    let mut block = BytesMut::from(payload);
+                    if (header.flags & flags::END_HEADERS) == 0 {
+                        loop {
+                            let (next_header, next_payload) = self.read_next_frame().await?;
+                            if next_header.frame_type != FrameType::Continuation
+                                || next_header.stream_id != stream_id
+                            {
+                                return Err(Error::HttpProtocol(
+                                    "Expected CONTINUATION frame for stream".into(),
+                                ));
+                            }
+                            block.extend_from_slice(&next_payload);
+                            if (next_header.flags & flags::END_HEADERS) != 0 {
+                                break;
+                            }
                         }
                     }
 
-                    self.apply_peer_settings(&settings);
-                    let ack = SettingsFrame::ack();
-                    self.stream.write_all(&ack.serialize()).await.ok();
-                    self.stream.flush().await.ok();
-                }
-            }
-            FrameType::WindowUpdate => {
-                if let Some(wu) = WindowUpdateFrame::parse(stream_id, payload.clone()) {
-                    if wu.stream_id == 0 {
-                        // Connection-level window update
-                        self.conn_send_window += wu.increment as i32;
-                    } else {
-                        // Stream-level window update
-                        if let Some(stream) = self.streams.get_mut(&wu.stream_id) {
-                            stream.send_window += wu.increment as i32;
+                    let decoded = self.decode_header_block(block.freeze())?;
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        for (name, value) in decoded {
+                            if name == ":status" {
+                                status = value.parse().unwrap_or(0);
+                            } else if !name.starts_with(':') {
+                                stream.response_headers.push((name, value));
+                            }
                         }
                     }
-                }
-            }
-            FrameType::Ping => {
-                if let Some(ping) = PingFrame::parse(flags, payload) {
-                    if !ping.ack {
-                        let pong = PingFrame::ack(ping.data);
-                        self.stream.write_all(&pong.serialize()).await.ok();
-                        self.stream.flush().await.ok();
+
+                    if (header.flags & flags::END_STREAM) != 0 {
+                        stream_done = true;
                     }
                 }
-            }
-            FrameType::GoAway => {
-                // RFC 9113 Section 6.8: Store last_stream_id for graceful shutdown
-                if let Some(goaway) = GoAwayFrame::parse(payload.clone()) {
-                    self.goaway_last_stream_id = Some(goaway.last_stream_id);
+                FrameType::Data => {
+                    if header.stream_id != stream_id {
+                        continue;
+                    }
+
+                    let data = self
+                        .process_inbound_data_frame(stream_id, header.flags, payload)
+                        .await?;
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        stream.response_data.extend_from_slice(&data);
+                    }
+
+                    if (header.flags & flags::END_STREAM) != 0 {
+                        stream_done = true;
+                    }
                 }
-                // Don't return error - let in-flight streams complete
-            }
-            _ => {
-                // Ignore other control frames during header reading
+                _ => {} // Ignore others
             }
         }
-        Ok(())
+
+        // Build Final Response
+        if let Some(stream) = self.streams.remove(&stream_id) {
+            let response = SpecterResponse::new(
+                status,
+                stream
+                    .response_headers
+                    .iter()
+                    .map(|(n, v)| format!("{}: {}", n, v))
+                    .collect(),
+                stream.response_data.freeze(),
+                "HTTP/2".to_string(),
+            );
+            tracing::debug!(
+                "Read response stream {} done in {:?}",
+                stream_id,
+                read_start.elapsed()
+            );
+            Ok(response)
+        } else {
+            Err(Error::HttpProtocol("Stream lost during read".into()))
+        }
     }
 
     /// Handles incoming DATA frame with proper flow control
@@ -1204,454 +1426,14 @@ where
         Ok(())
     }
 
-    /// Read response for a stream.
-    async fn read_response(&mut self, stream_id: u32) -> Result<SpecterResponse> {
-        let mut status = 0u16;
-        let mut stream_done = false;
-
-        // Verify stream exists and read stream.id
-        if let Some(stream) = self.streams.get(&stream_id) {
-            if stream.id != stream_id {
-                return Err(Error::HttpProtocol("Stream ID mismatch".into()));
-            }
-        } else {
-            return Err(Error::HttpProtocol("Stream not found".into()));
-        }
-
-        while !stream_done {
-            // Read frame header
-            while self.read_buf.len() < FRAME_HEADER_SIZE {
-                let mut buf = [0u8; 16384];
-                let n = self
-                    .stream
-                    .read(&mut buf)
-                    .await
-                    .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
-                if n == 0 {
-                    return Err(Error::HttpProtocol("Connection closed".into()));
-                }
-                self.read_buf.extend_from_slice(&buf[..n]);
-            }
-
-            let header =
-                FrameHeader::parse(&self.read_buf[..FRAME_HEADER_SIZE]).ok_or_else(|| {
-                    Error::HttpProtocol("Invalid frame header (reserved bits set)".into())
-                })?;
-
-            // RFC 9113 Section 4.2: Frame size validation
-            if header.length > self.peer_settings.max_frame_size {
-                return Err(Error::HttpProtocol(format!(
-                    "FRAME_SIZE_ERROR: Frame size {} exceeds MAX_FRAME_SIZE {}",
-                    header.length, self.peer_settings.max_frame_size
-                )));
-            }
-
-            // Wait for full frame
-            let frame_len = FRAME_HEADER_SIZE + header.length as usize;
-            while self.read_buf.len() < frame_len {
-                let mut buf = [0u8; 16384];
-                let n = self
-                    .stream
-                    .read(&mut buf)
-                    .await
-                    .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
-                if n == 0 {
-                    return Err(Error::HttpProtocol("Connection closed".into()));
-                }
-                self.read_buf.extend_from_slice(&buf[..n]);
-            }
-
-            let payload_bytes = Bytes::from(self.read_buf[FRAME_HEADER_SIZE..frame_len].to_vec());
-            self.read_buf.advance(frame_len);
-
-            match header.frame_type {
-                FrameType::Headers => {
-                    // Check for PROTOCOL_ERROR: HEADERS received while CONTINUATION pending
-                    if let Some((pending_stream_id, _)) = &self.pending_headers {
-                        return Err(Error::HttpProtocol(
-                            format!("PROTOCOL_ERROR: received HEADERS while CONTINUATION pending for stream {}", pending_stream_id)
-                        ));
-                    }
-
-                    if header.stream_id != stream_id {
-                        continue; // Different stream, ignore for now
-                    }
-
-                    // RFC 9113 Section 5.1: Validate stream ID (server-initiated streams use even IDs)
-                    // As a client, we should only receive HEADERS frames on streams we initiated (odd IDs)
-                    if (header.stream_id & 0x1) == 0 {
-                        return Err(Error::HttpProtocol(format!(
-                            "PROTOCOL_ERROR: Received HEADERS frame on server-initiated stream {}",
-                            header.stream_id
-                        )));
-                    }
-
-                    // Parse HEADERS frame using proper parse method (handles padding and priority)
-                    let headers_frame =
-                        HeadersFrame::parse(header.stream_id, header.flags, payload_bytes.clone())
-                            .map_err(|e| {
-                                Error::HttpProtocol(format!("Invalid HEADERS frame: {}", e))
-                            })?;
-
-                    let end_headers = headers_frame.end_headers;
-
-                    if end_headers {
-                        // Complete headers in single frame
-                        let decoded =
-                            self.decoder
-                                .decode(&headers_frame.header_block)
-                                .map_err(|e| {
-                                    Error::HttpProtocol(format!("HPACK decode error: {}", e))
-                                })?;
-
-                        // Validate headers per RFC 9113 Section 8.1.2
-                        Self::validate_response_headers(&decoded)?;
-
-                        if let Some(stream) = self.streams.get_mut(&stream_id) {
-                            // Use stream.id to verify
-                            if stream.id != stream_id {
-                                return Err(Error::HttpProtocol("Stream ID mismatch".into()));
-                            }
-                            for (name, value) in decoded {
-                                if name == ":status" {
-                                    status = value.parse().unwrap_or(0);
-                                } else if !name.starts_with(':') {
-                                    // Read and write to stream.response_headers
-                                    stream.response_headers.push((name, value));
-                                }
-                            }
-                        }
-                    } else {
-                        // Incomplete headers, expect CONTINUATION
-                        if self.pending_headers.is_some() {
-                            return Err(Error::HttpProtocol(
-                                "PROTOCOL_ERROR: received HEADERS while CONTINUATION pending"
-                                    .into(),
-                            ));
-                        }
-                        let mut fragments = BytesMut::new();
-                        fragments.extend_from_slice(&headers_frame.header_block);
-                        self.pending_headers = Some((header.stream_id, fragments));
-                    }
-
-                    if headers_frame.end_stream {
-                        stream_done = true;
-                    }
-                }
-                FrameType::Continuation => {
-                    match &mut self.pending_headers {
-                        None => {
-                            return Err(Error::HttpProtocol(
-                                "PROTOCOL_ERROR: CONTINUATION without preceding HEADERS".into(),
-                            ));
-                        }
-                        Some((pending_stream_id, fragments)) => {
-                            if *pending_stream_id != header.stream_id {
-                                return Err(Error::HttpProtocol(
-                                    format!("PROTOCOL_ERROR: CONTINUATION stream_id {} does not match pending HEADERS stream_id {}", header.stream_id, pending_stream_id)
-                                ));
-                            }
-
-                            // Parse CONTINUATION frame using parse() method
-                            let cont_frame = ContinuationFrame::parse(
-                                header.stream_id,
-                                header.flags,
-                                payload_bytes.clone(),
-                            )
-                            .map_err(|e| {
-                                Error::HttpProtocol(format!("Invalid CONTINUATION frame: {}", e))
-                            })?;
-
-                            // Append fragment
-                            fragments.extend_from_slice(&cont_frame.header_fragment);
-
-                            if cont_frame.end_headers() {
-                                // Complete! Decode accumulated headers
-                                // Only process if this is for our stream
-                                if header.stream_id == stream_id {
-                                    let decoded = self.decoder.decode(fragments).map_err(|e| {
-                                        Error::HttpProtocol(format!("HPACK decode error: {}", e))
-                                    })?;
-
-                                    if let Some(stream) = self.streams.get_mut(&stream_id) {
-                                        // Use stream.id to verify
-                                        if stream.id != stream_id {
-                                            return Err(Error::HttpProtocol(
-                                                "Stream ID mismatch".into(),
-                                            ));
-                                        }
-                                        for (name, value) in decoded {
-                                            if name == ":status" {
-                                                status = value.parse().unwrap_or(0);
-                                            } else if !name.starts_with(':') {
-                                                // Read and write to stream.response_headers
-                                                stream.response_headers.push((name, value));
-                                            }
-                                        }
-                                    }
-                                }
-                                // Clear pending headers
-                                self.pending_headers = None;
-                            }
-                            // Otherwise, more CONTINUATION frames expected
-                        }
-                    }
-                }
-                FrameType::Data => {
-                    // Check for PROTOCOL_ERROR: DATA received during CONTINUATION sequence
-                    if let Some((pending_stream_id, _)) = &self.pending_headers {
-                        return Err(Error::HttpProtocol(
-                            format!("PROTOCOL_ERROR: received DATA during CONTINUATION sequence for stream {}", pending_stream_id)
-                        ));
-                    }
-
-                    if header.stream_id != stream_id {
-                        continue;
-                    }
-
-                    // RFC 9113 Section 5.1: Validate stream ID (server-initiated streams use even IDs)
-                    // As a client, we should only receive DATA frames on streams we initiated (odd IDs)
-                    if (header.stream_id & 0x1) == 0 {
-                        return Err(Error::HttpProtocol(format!(
-                            "PROTOCOL_ERROR: Received DATA frame on server-initiated stream {}",
-                            header.stream_id
-                        )));
-                    }
-
-                    // Parse DATA frame using proper parse method (handles padding)
-                    let data_frame =
-                        DataFrame::parse(header.stream_id, header.flags, payload_bytes.clone())
-                            .map_err(|e| {
-                                Error::HttpProtocol(format!("Invalid DATA frame: {}", e))
-                            })?;
-
-                    // Handle flow control (decrement windows, send WINDOW_UPDATE if needed)
-                    self.handle_data_frame(&data_frame, stream_id).await?;
-
-                    // Read and write to stream.response_data
-                    if let Some(stream) = self.streams.get_mut(&stream_id) {
-                        // Use stream.id to verify
-                        if stream.id != stream_id {
-                            return Err(Error::HttpProtocol("Stream ID mismatch".into()));
-                        }
-                        stream.response_data.extend_from_slice(&data_frame.data);
-                    }
-
-                    if data_frame.end_stream {
-                        stream_done = true;
-                    }
-                }
-                FrameType::Settings => {
-                    // RFC 9113 Section 6.5: SETTINGS frames MUST be on stream 0
-                    if header.stream_id != 0 {
-                        return Err(Error::HttpProtocol(
-                            "PROTOCOL_ERROR: SETTINGS frame must be on stream 0".into(),
-                        ));
-                    }
-                    // Settings frames on stream 0 are allowed during CONTINUATION
-                    if (header.flags & flags::ACK) == 0 {
-                        // Server settings update
-                        let settings = SettingsFrame::parse(header.flags, payload_bytes.clone());
-
-                        // RFC 9113 Section 6.5: A SETTINGS frame MUST NOT contain multiple values for the same setting
-                        let mut seen_settings = std::collections::HashSet::new();
-                        for (id, _) in &settings.settings {
-                            let id_u16 = *id;
-                            if !seen_settings.insert(id_u16) {
-                                return Err(Error::HttpProtocol(format!(
-                                    "PROTOCOL_ERROR: Duplicate setting ID {} in SETTINGS frame",
-                                    id_u16
-                                )));
-                            }
-                        }
-
-                        self.apply_peer_settings(&settings);
-
-                        // Send ACK
-                        let ack = SettingsFrame::ack();
-                        self.stream.write_all(&ack.serialize()).await.ok();
-                        self.stream.flush().await.ok();
-                    }
-                }
-                FrameType::WindowUpdate => {
-                    // WindowUpdate frames on stream 0 are allowed during CONTINUATION
-                    if let Some(wu) =
-                        WindowUpdateFrame::parse(header.stream_id, payload_bytes.clone())
-                    {
-                        if wu.stream_id == 0 {
-                            // Connection-level window update
-                            // Increment validated in parse() (must be > 0)
-                            self.conn_send_window += wu.increment as i32;
-                        } else {
-                            if self.pending_headers.is_some() {
-                                // WindowUpdate on non-zero stream during CONTINUATION is PROTOCOL_ERROR
-                                return Err(Error::HttpProtocol(
-                                "PROTOCOL_ERROR: received WINDOW_UPDATE during CONTINUATION sequence".into()
-                            ));
-                            }
-                            // Stream-level window update
-                            // Increment validated in parse() (must be > 0)
-                            if let Some(stream) = self.streams.get_mut(&wu.stream_id) {
-                                stream.send_window += wu.increment as i32;
-                            }
-                        }
-                    } else {
-                        // Invalid WINDOW_UPDATE (e.g., increment = 0)
-                        return Err(Error::HttpProtocol(
-                            "FLOW_CONTROL_ERROR: WINDOW_UPDATE increment must be > 0".into(),
-                        ));
-                    }
-                }
-                FrameType::Ping => {
-                    // Ping frames on stream 0 are allowed during CONTINUATION
-                    if let Some(ping) = PingFrame::parse(header.flags, &payload_bytes) {
-                        if !ping.ack {
-                            // Respond to PING
-                            let pong = PingFrame::ack(ping.data);
-                            self.stream.write_all(&pong.serialize()).await.ok();
-                            self.stream.flush().await.ok();
-                        }
-                    }
-                }
-                FrameType::GoAway => {
-                    // RFC 9113 Section 6.8: GOAWAY allows graceful shutdown
-                    // Streams with ID <= last_stream_id can complete normally
-                    if let Some(goaway) = GoAwayFrame::parse(payload_bytes.clone()) {
-                        self.goaway_last_stream_id = Some(goaway.last_stream_id);
-
-                        // If current stream is allowed to complete, continue reading
-                        if stream_id <= goaway.last_stream_id
-                            && goaway.error_code == ErrorCode::NoError
-                        {
-                            // Graceful shutdown - allow stream to complete
-                            continue;
-                        }
-
-                        // Stream refused or connection error
-                        return Err(Error::HttpProtocol(format!(
-                            "Server sent GOAWAY: {:?}, last_stream_id={}, current_stream={}",
-                            goaway.error_code, goaway.last_stream_id, stream_id
-                        )));
-                    }
-                }
-                FrameType::Priority => {
-                    // RFC 9113 Section 6.3: PRIORITY frames can be sent on any stream
-                    // Parse and validate (but we don't use priority information currently)
-                    if let Err(e) = PriorityFrame::parse(header.stream_id, payload_bytes.clone()) {
-                        return Err(Error::HttpProtocol(format!(
-                            "Invalid PRIORITY frame: {}",
-                            e
-                        )));
-                    }
-                    // Priority information is parsed and validated, but not used for now
-                }
-                FrameType::PushPromise => {
-                    // RFC 9113 Section 6.6: PUSH_PROMISE frames are only sent by servers
-                    // As a client, we should not receive these if ENABLE_PUSH is disabled
-                    if !self.peer_settings.enable_push {
-                        return Err(Error::HttpProtocol(
-                            "PROTOCOL_ERROR: Received PUSH_PROMISE but ENABLE_PUSH is disabled"
-                                .into(),
-                        ));
-                    }
-                    // Parse and validate (but we don't support server push currently)
-                    if let Err(e) = PushPromiseFrame::parse(
-                        header.stream_id,
-                        header.flags,
-                        payload_bytes.clone(),
-                    ) {
-                        return Err(Error::HttpProtocol(format!(
-                            "Invalid PUSH_PROMISE frame: {}",
-                            e
-                        )));
-                    }
-                    // Server push is not supported, so we ignore the frame
-                    // In a full implementation, we would handle the promised stream
-                }
-                FrameType::RstStream => {
-                    if header.stream_id == stream_id {
-                        // Parse RST_STREAM frame
-                        if let Ok(rst) =
-                            RstStreamFrame::parse(header.stream_id, payload_bytes.clone())
-                        {
-                            // RFC 9113 Section 5.1: RST_STREAM transitions stream to Closed
-                            if let Some(stream) = self.streams.get_mut(&stream_id) {
-                                stream.state = StreamState::Closed;
-                            }
-                            // Clear pending headers if any
-                            if let Some((pending_stream_id, _)) = &self.pending_headers {
-                                if *pending_stream_id == stream_id {
-                                    self.pending_headers = None;
-                                }
-                            }
-                            return Err(Error::HttpProtocol(format!(
-                                "Stream {} reset by server: {:?}",
-                                stream_id, rst.error_code
-                            )));
-                        } else {
-                            return Err(Error::HttpProtocol("Invalid RST_STREAM frame".into()));
-                        }
-                    } else if self.pending_headers.is_some() {
-                        // RST_STREAM on different stream during CONTINUATION is PROTOCOL_ERROR
-                        return Err(Error::HttpProtocol(
-                            "PROTOCOL_ERROR: received RST_STREAM during CONTINUATION sequence"
-                                .into(),
-                        ));
-                    }
-                }
-                _ => {
-                    // Any other frame type during CONTINUATION sequence is PROTOCOL_ERROR
-                    if self.pending_headers.is_some() {
-                        return Err(Error::HttpProtocol(format!(
-                            "PROTOCOL_ERROR: received {:?} during CONTINUATION sequence",
-                            header.frame_type
-                        )));
-                    }
-                }
-            }
-        }
-
-        // Read stream fields and create StreamResponse
-        let (final_headers, final_body) = if let Some(stream) = self.streams.get_mut(&stream_id) {
-            // Read all stream fields
-            let headers = stream.response_headers.clone();
-            let body = stream.response_data.clone();
-
-            // Create StreamResponse and send through channel if stream has response_tx
-            if let Some(tx) = stream.response_tx.take() {
-                let response = StreamResponse {
-                    status,
-                    headers: headers.clone(),
-                    body: body.clone().freeze(),
-                };
-                let _ = tx.send(Ok(response));
-            }
-
-            (headers, body)
-        } else {
-            (Vec::new(), BytesMut::new())
-        };
-
-        // Clean up stream
-        self.streams.remove(&stream_id);
-
-        // Convert headers to string format for SpecterResponse
-        let response_headers_str: Vec<String> = final_headers
-            .iter()
-            .map(|(name, value)| format!("{}: {}", name, value))
-            .collect();
-
-        Ok(SpecterResponse::new(
-            status,
-            response_headers_str,
-            final_body.freeze(),
-            "HTTP/2".to_string(),
-        ))
-    }
-
     /// Get the pseudo-header order.
     pub fn pseudo_order(&self) -> PseudoHeaderOrder {
         self.pseudo_order
+    }
+
+    /// Get the peer settings.
+    pub fn peer_settings(&self) -> &PeerSettings {
+        &self.peer_settings
     }
 
     /// Get the settings.
@@ -1659,7 +1441,153 @@ where
         &self.settings
     }
 
-    /// Send a PING frame to keep the connection alive.
+    /// Send request frames (HEADERS + optional DATA) and register stream without reading response.
+    /// Returns the allocated stream ID.
+    /// The driver will read responses via read_one_frame_dispatch.
+    pub async fn write_request_frames(
+        &mut self,
+        method: http::Method,
+        uri: &http::Uri,
+        headers: Vec<(String, String)>,
+        body: Option<Bytes>,
+    ) -> Result<u32> {
+        // Allocate stream ID
+        let stream_id = self.next_stream_id;
+        if stream_id == 0 || (stream_id & 0x1) == 0 {
+            return Err(Error::HttpProtocol(
+                "PROTOCOL_ERROR: Client stream ID must be odd and non-zero".into(),
+            ));
+        }
+        self.next_stream_id += 2;
+
+        // Extract URI components
+        let scheme = uri.scheme_str().unwrap_or("https");
+        let authority = uri.authority().map(|a| a.as_str()).unwrap_or("localhost");
+        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+
+        // Validate pseudo-headers
+        if method.as_str().is_empty() {
+            return Err(Error::HttpProtocol(
+                "PROTOCOL_ERROR: :method pseudo-header cannot be empty".into(),
+            ));
+        }
+        if scheme.is_empty() {
+            return Err(Error::HttpProtocol(
+                "PROTOCOL_ERROR: :scheme pseudo-header cannot be empty".into(),
+            ));
+        }
+        if authority.is_empty() {
+            return Err(Error::HttpProtocol(
+                "PROTOCOL_ERROR: :authority pseudo-header cannot be empty".into(),
+            ));
+        }
+        if path.is_empty() {
+            return Err(Error::HttpProtocol(
+                "PROTOCOL_ERROR: :path pseudo-header cannot be empty".into(),
+            ));
+        }
+
+        // Encode headers
+        let header_block =
+            self.encoder
+                .encode_request(method.as_str(), scheme, authority, path, &headers);
+
+        if header_block.is_empty() {
+            return Err(Error::HttpProtocol(
+                "PROTOCOL_ERROR: HEADERS frame header block cannot be empty".into(),
+            ));
+        }
+
+        // Check if headers exceed max frame size and need CONTINUATION frames
+        let max_frame_size = self.peer_settings.max_frame_size as usize;
+        let end_stream = body.is_none();
+
+        if header_block.len() <= max_frame_size {
+            // Single HEADERS frame with END_HEADERS flag
+            let headers_frame = HeadersFrame::new(stream_id, header_block)
+                .end_stream(end_stream)
+                .end_headers(true);
+
+            self.stream
+                .write_all(&headers_frame.serialize())
+                .await
+                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
+        } else {
+            // Split across HEADERS + CONTINUATION frames
+            let chunks: Vec<Bytes> = header_block
+                .chunks(max_frame_size)
+                .map(Bytes::copy_from_slice)
+                .collect();
+
+            let first_chunk = chunks[0].clone();
+            let headers_frame = HeadersFrame::new(stream_id, first_chunk)
+                .end_stream(end_stream)
+                .end_headers(false);
+
+            self.stream
+                .write_all(&headers_frame.serialize())
+                .await
+                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
+
+            let num_chunks = chunks.len();
+            for (idx, chunk) in chunks.into_iter().skip(1).enumerate() {
+                let is_last = idx == num_chunks - 2;
+                let cont_frame = ContinuationFrame::new(stream_id, chunk, is_last);
+                self.stream
+                    .write_all(&cont_frame.serialize())
+                    .await
+                    .map_err(|e| {
+                        Error::HttpProtocol(format!("Failed to send CONTINUATION: {}", e))
+                    })?;
+            }
+        }
+
+        // Send DATA frame if there's a body
+        if let Some(body_data) = body {
+            let data_len = body_data.len() as i32;
+            if self.conn_send_window < data_len {
+                return Err(Error::HttpProtocol(
+                    "Connection send window exhausted".into(),
+                ));
+            }
+
+            let data_frame = DataFrame::new(stream_id, body_data).end_stream(true);
+            self.stream
+                .write_all(&data_frame.serialize())
+                .await
+                .map_err(|e| Error::HttpProtocol(format!("Failed to send DATA: {}", e)))?;
+
+            self.conn_send_window -= data_len;
+        }
+
+        self.stream
+            .flush()
+            .await
+            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
+
+        // Register stream
+        let stream_state = if end_stream {
+            StreamState::HalfClosedLocal
+        } else {
+            StreamState::Open
+        };
+        self.streams.insert(
+            stream_id,
+            Stream {
+                id: stream_id,
+                state: stream_state,
+                recv_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
+                send_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
+                response_tx: None,
+                streaming_tx: None,
+                response_headers: Vec::new(),
+                response_data: BytesMut::new(),
+            },
+        );
+
+        Ok(stream_id)
+    }
+
     ///
     /// Browsers send PING frames periodically (Chrome: ~45s, Firefox: ~30s)
     /// to detect dead connections and keep them alive.
@@ -1686,6 +1614,77 @@ where
             .map_err(|e| Error::HttpProtocol(format!("Failed to flush PING: {}", e)))?;
 
         Ok(ping_data)
+    }
+
+    /// Read one complete frame from the connection and process connection-level frames.
+    /// Returns Ok(true) if more frames may be coming, Ok(false) if GOAWAY received.
+    /// Note: Does NOT process stream-level frames (HEADERS, DATA, CONTINUATION) - those are handled by caller.
+    pub async fn read_one_frame_dispatch(&mut self) -> Result<bool> {
+        // Read frame header
+        while self.read_buf.len() < FRAME_HEADER_SIZE {
+            let mut buf = [0u8; 16384];
+            let n = self
+                .stream
+                .read(&mut buf)
+                .await
+                .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
+            if n == 0 {
+                return Err(Error::HttpProtocol("Connection closed".into()));
+            }
+            self.read_buf.extend_from_slice(&buf[..n]);
+        }
+
+        let header = FrameHeader::parse(&self.read_buf[..FRAME_HEADER_SIZE]).ok_or_else(|| {
+            Error::HttpProtocol("Invalid frame header (reserved bits set)".into())
+        })?;
+
+        // RFC 9113 Section 4.2: Frame size validation
+        if header.length > self.peer_settings.max_frame_size {
+            return Err(Error::HttpProtocol(format!(
+                "FRAME_SIZE_ERROR: Frame size {} exceeds MAX_FRAME_SIZE {}",
+                header.length, self.peer_settings.max_frame_size
+            )));
+        }
+
+        // Wait for full frame
+        let frame_len = FRAME_HEADER_SIZE + header.length as usize;
+        while self.read_buf.len() < frame_len {
+            let mut buf = [0u8; 16384];
+            let n = self
+                .stream
+                .read(&mut buf)
+                .await
+                .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
+            if n == 0 {
+                return Err(Error::HttpProtocol("Connection closed".into()));
+            }
+            self.read_buf.extend_from_slice(&buf[..n]);
+        }
+
+        let payload_bytes = Bytes::from(self.read_buf[FRAME_HEADER_SIZE..frame_len].to_vec());
+
+        // Check for GOAWAY before advancing buffer (need to preserve it if not handled)
+        if header.frame_type == FrameType::GoAway {
+            if let Some(goaway) = GoAwayFrame::parse(payload_bytes.clone()) {
+                self.goaway_last_stream_id = Some(goaway.last_stream_id);
+            }
+            self.read_buf.advance(frame_len);
+            return Ok(false); // Signal that connection is closing
+        }
+
+        // Handle connection-level control frames
+        match header.frame_type {
+            FrameType::Settings | FrameType::Ping | FrameType::WindowUpdate => {
+                self.handle_control_frame(&header, payload_bytes.clone())
+                    .await?;
+                self.read_buf.advance(frame_len);
+                Ok(true)
+            }
+            _ => {
+                // Stream-level frame or unknown - leave in buffer for caller to process
+                Ok(true)
+            }
+        }
     }
 
     /// Validate response headers per RFC 9113 Section 8.1.2.

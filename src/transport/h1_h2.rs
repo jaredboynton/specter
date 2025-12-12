@@ -18,7 +18,7 @@ use tokio::time::timeout as tokio_timeout;
 use crate::error::{Error, Result};
 use crate::fingerprint::{http2::Http2Settings, FingerprintProfile};
 use crate::pool::alt_svc::AltSvcCache;
-use crate::pool::multiplexer::PoolKey;
+use crate::pool::multiplexer::{ConnectionPool, PoolKey};
 use crate::response::Response;
 use crate::transport::connector::{BoringConnector, MaybeHttpsStream};
 use crate::transport::h1::H1Connection;
@@ -33,12 +33,16 @@ use crate::version::HttpVersion;
 ///
 /// HTTP/2 connections are pooled and multiplexed - multiple concurrent requests
 /// to the same host:port share a single TCP connection.
+/// HTTP/1.1 connections are also pooled for reuse via keep-alive.
+#[derive(Clone)]
 pub struct Client {
     connector: BoringConnector,
     h3_client: H3Client,
     alt_svc_cache: Arc<AltSvcCache>,
     /// HTTP/2 connection pool for multiplexing
     h2_pool: Arc<RwLock<HashMap<PoolKey, H2PooledConnection>>>,
+    /// HTTP/1.1 connection pool for reuse
+    h1_pool: Arc<ConnectionPool>,
     http2_settings: Http2Settings,
     pseudo_order: PseudoHeaderOrder,
     default_version: HttpVersion,
@@ -494,7 +498,7 @@ impl<'a> RequestBuilder<'a> {
             // Fall through to HTTP/1.1 if h2 not negotiated
         }
 
-        // HTTP/1.1 path (no pooling - one connection per request)
+        // HTTP/1.1 path (with connection pooling)
         let stream = self.client.connector.connect(&uri).await?;
 
         // Check if server negotiated HTTP/2 via ALPN - if so, we must use HTTP/2
@@ -539,21 +543,76 @@ impl<'a> RequestBuilder<'a> {
                 fut.await
             }?
         } else {
-            // HTTP/1.1 as expected
-            let fut = Self::do_send_http1(
-                stream,
-                self.method,
-                &uri,
-                self.headers,
-                self.body.map(Bytes::from),
-            );
-            if let Some(timeout_duration) = self.client.timeout {
-                tokio_timeout(timeout_duration, fut)
-                    .await
-                    .map_err(|_| Error::Timeout("Request timed out".into()))?
+            // HTTP/1.1 as expected - use connection pooling
+            let pool_key = Self::make_pool_key(&uri);
+
+            // Try to get a pooled connection
+            let mut stream_opt = self.client.h1_pool.get_h1(&pool_key).await;
+            let mut used_pooled = stream_opt.is_some();
+
+            // If no pooled connection, create a new one
+            let mut stream = if let Some(stream) = stream_opt.take() {
+                tracing::debug!("H1: Reusing pooled connection for {:?}", pool_key);
+                stream
             } else {
-                fut.await
-            }?
+                tracing::debug!("H1: Creating new connection for {:?}", pool_key);
+                self.client.connector.connect(&uri).await?
+            };
+
+            // Send request - retry with new connection if pooled connection fails
+            let result = loop {
+                let stream_for_request = stream;
+                let fut = Self::do_send_http1(
+                    stream_for_request,
+                    self.method.clone(),
+                    &uri,
+                    self.headers.clone(),
+                    self.body.clone().map(Bytes::from),
+                );
+
+                let request_result = if let Some(timeout_duration) = self.client.timeout {
+                    tokio_timeout(timeout_duration, fut)
+                        .await
+                        .map_err(|_| Error::Timeout("Request timed out".into()))?
+                } else {
+                    fut.await
+                };
+
+                match request_result {
+                    Ok((resp, returned_stream)) => {
+                        // Success - return stream to pool for reuse
+                        self.client
+                            .h1_pool
+                            .put_h1(pool_key.clone(), returned_stream)
+                            .await;
+                        break Ok(resp);
+                    }
+                    Err(e) => {
+                        // Check if this was a pooled connection that failed
+                        if used_pooled {
+                            tracing::debug!(
+                                "H1: Pooled connection failed for {:?}, creating new: {}",
+                                pool_key,
+                                e
+                            );
+                            // Try again with a fresh connection
+                            stream = self.client.connector.connect(&uri).await?;
+                            used_pooled = false; // Mark that we're no longer using a pooled connection
+                            continue;
+                        } else {
+                            // Fresh connection also failed - return error
+                            tracing::debug!(
+                                "H1: Request failed for {:?}, discarding connection: {}",
+                                pool_key,
+                                e
+                            );
+                            break Err(e);
+                        }
+                    }
+                }
+            };
+
+            result?
         };
 
         // Parse Alt-Svc header for HTTP/3 discovery
@@ -580,9 +639,11 @@ impl<'a> RequestBuilder<'a> {
         uri: &Uri,
         headers: Vec<(String, String)>,
         body: Option<Bytes>,
-    ) -> Result<Response> {
+    ) -> Result<(Response, MaybeHttpsStream)> {
         let mut conn = H1Connection::new(stream);
-        conn.send_request(method, uri, headers, body).await
+        let response = conn.send_request(method, uri, headers, body).await?;
+        let stream = conn.into_inner();
+        Ok((response, stream))
     }
 
     /// Extract origin (scheme://host:port) from URI.
@@ -694,6 +755,7 @@ impl ClientBuilder {
             h3_client,
             alt_svc_cache: Arc::new(AltSvcCache::new()),
             h2_pool: Arc::new(RwLock::new(HashMap::new())),
+            h1_pool: Arc::new(ConnectionPool::new()),
             http2_settings,
             pseudo_order: self.pseudo_order,
             default_version,

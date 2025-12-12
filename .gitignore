@@ -1,5 +1,7 @@
 # Build artifacts
 target/
 
-# Library crate - downstream apps manage lockfiles
-Cargo.lock
+
+
+
+

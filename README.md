@@ -147,6 +147,7 @@ jar.save_to_file("cookies.txt").await?;
 - Chrome pseudo-header order (m,s,a,p)
 - WINDOW_UPDATE: 15663105 (Chrome's connection window)
 - All headers properly lowercased per RFC 7540/9113
+- True multiplexing (concurrent requests on single connection, respecting `MAX_CONCURRENT_STREAMS`)
 
 **HTTP/3** - QUIC transport via quiche with TLS 1.3 fingerprinting.
 

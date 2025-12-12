@@ -33,25 +33,27 @@
 //! ```
 
 mod connection;
+mod driver;
 mod frame;
+mod handle;
 mod hpack;
 mod hpack_impl;
 
 pub use connection::{
     H2Connection as RawH2Connection, H2Error, StreamResponse, CHROME_WINDOW_UPDATE,
 };
+pub use driver::{DriverCommand, H2Driver};
 pub use frame::{
     flags, DataFrame, ErrorCode, FrameHeader, FrameType, GoAwayFrame, HeadersFrame, PingFrame,
     PriorityData, PriorityFrame, PushPromiseFrame, RstStreamFrame, SettingsFrame, SettingsId,
     WindowUpdateFrame, CONNECTION_PREFACE, DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_SIZE,
 };
+pub use handle::H2Handle;
 pub use hpack::{HpackDecoder, HpackEncoder, PseudoHeaderOrder};
 
 // Re-export wrapper types for convenience
 use bytes::Bytes;
 use http::{Method, Uri};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use crate::error::Result;
 use crate::fingerprint::http2::Http2Settings;
@@ -136,19 +138,37 @@ impl H2Connection {
 }
 
 /// HTTP/2 connection pool entry with multiplexing support.
+///
+/// Uses driver/handle architecture: a background task (driver) owns the connection
+/// and handles frame I/O, while handles send requests via channels.
 pub struct H2PooledConnection {
-    inner: Arc<Mutex<H2Connection>>,
+    handle: H2Handle,
 }
 
 impl H2PooledConnection {
-    /// Create a new pooled connection.
+    /// Create a new pooled connection from an H2Connection wrapper.
+    /// Spawns a driver task to handle frame I/O.
     pub fn new(conn: H2Connection) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(conn)),
-        }
+        const CHANNEL_BUFFER: usize = 32;
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER);
+
+        // Extract the inner connection
+        let driver = H2Driver::new(conn.inner, command_rx);
+
+        // Spawn driver task
+        tokio::spawn(async move {
+            if let Err(e) = driver.drive().await {
+                eprintln!("H2Driver error: {:?}", e);
+            }
+        });
+
+        let handle = H2Handle::new(command_tx);
+
+        Self { handle }
     }
 
     /// Send a request using this pooled connection.
+    /// This is non-blocking - the driver handles the actual I/O.
     pub async fn send_request(
         &self,
         method: Method,
@@ -156,15 +176,14 @@ impl H2PooledConnection {
         headers: Vec<(String, String)>,
         body: Option<Bytes>,
     ) -> Result<Response> {
-        let mut conn = self.inner.lock().await;
-        conn.send_request(method, uri, headers, body).await
+        self.handle.send_request(method, uri, headers, body).await
     }
 
     /// Clone this pooled connection handle.
     /// Multiple handles can use the same underlying HTTP/2 connection.
     pub fn clone_handle(&self) -> Self {
         Self {
-            inner: Arc::clone(&self.inner),
+            handle: self.handle.clone(),
         }
     }
 }
