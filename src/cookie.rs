@@ -484,11 +484,9 @@ impl CookieJar {
     pub fn remove(&mut self, domain: &str, name: &str) -> Option<Cookie> {
         // Remove the first match (ambiguous without path)
         let list = self.cookies.get_mut(&normalize_domain(domain))?;
-        if let Some(pos) = list.iter().position(|c| c.name == name) {
-            Some(list.remove(pos))
-        } else {
-            None
-        }
+        list.iter()
+            .position(|c| c.name == name)
+            .map(|pos| list.remove(pos))
     }
 
     pub fn clear(&mut self) {

@@ -26,6 +26,12 @@ pub struct HttpCache {
     entries: std::collections::HashMap<String, CacheEntry>,
 }
 
+impl Default for HttpCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HttpCache {
     pub fn new() -> Self {
         Self {
