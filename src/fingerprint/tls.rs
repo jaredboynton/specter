@@ -1,6 +1,6 @@
 //! TLS fingerprint configuration for browser impersonation.
 //!
-//! WARNING: Chrome randomizes TLS extension order since v110, making static
+//! Chrome randomizes TLS extension order since v110, making static
 //! JA3 fingerprints unreliable. Modern fingerprint detection systems use JA4 which sorts
 //! extensions alphabetically. This implementation provides cipher suite,
 //! signature algorithm, and curve ordering - but extension ordering may not
@@ -94,11 +94,12 @@ pub const FIREFOX_133_SIGNATURE_ALGORITHMS: &[&str] = &[
 
 /// Firefox 133 supported curves.
 /// Firefox supports more curves than Chrome, including P-521.
-/// Note: BoringSSL uses "P-256", "P-384", "P-521" (not secp256r1/secp384r1/secp521r1)
+/// BoringSSL uses curve names "P-256", "P-384", "P-521" rather than
+/// the standard "secp256r1", "secp384r1", "secp521r1" identifiers.
 pub const FIREFOX_133_CURVES: &[&str] = &["x25519", "P-256", "P-384", "P-521"];
 
 /// Firefox 133 extension IDs.
-/// Note: Firefox 133 also randomizes extension order (like Chrome 110+),
+/// Firefox 133 also randomizes extension order (similar to Chrome 110+),
 /// so JA3 fingerprints will vary. JA4 sorts extensions for stable fingerprinting.
 pub const FIREFOX_133_EXTENSION_IDS: &[u16] =
     &[0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43, 27, 21];

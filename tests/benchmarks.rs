@@ -11,7 +11,7 @@ async fn benchmark_h1_pooling() {
     let _client = Client::builder().prefer_http2(false).build().unwrap();
 
     // TODO: Use mock server once H1 pooling is integrated
-    println!("H1 pooling benchmark - requires integration");
+    tracing::info!("H1 pooling benchmark - requires integration");
 }
 
 /// Benchmark HTTP/2 multiplexing performance
@@ -45,7 +45,7 @@ async fn benchmark_h2_multiplexing() {
     }
 
     let elapsed = start.elapsed();
-    println!("10 concurrent H2 requests completed in {:?}", elapsed);
+    tracing::info!("10 concurrent H2 requests completed in {:?}", elapsed);
 
     // With true multiplexing: ~1s (all parallel)
     // With serialization: ~10s (all sequential)

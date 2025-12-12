@@ -14,7 +14,7 @@ async fn test_h2_multiplexing_performance() {
     let url = "https://www.google.com/";
 
     // Pre-warm connection to ensure we test multiplexing, not connection establishment
-    println!("Pre-warming connection...");
+    tracing::info!("Pre-warming connection...");
     let pre_warm_start = Instant::now();
     let _ = client
         .get("https://www.google.com/robots.txt")
@@ -22,7 +22,7 @@ async fn test_h2_multiplexing_performance() {
         .send()
         .await
         .expect("Pre-warm failed");
-    println!("Pre-warm complete in {:?}", pre_warm_start.elapsed());
+    tracing::info!("Pre-warm complete in {:?}", pre_warm_start.elapsed());
 
     let start = Instant::now();
     let mut tasks = Vec::new();
@@ -40,7 +40,7 @@ async fn test_h2_multiplexing_performance() {
                 .send()
                 .await;
             let req_duration = req_start.elapsed();
-            println!(
+            tracing::debug!(
                 "Request {} completed in {:?} (launched {:?} after start)",
                 i + 1,
                 req_duration,
@@ -58,7 +58,7 @@ async fn test_h2_multiplexing_performance() {
         let task_wait = task_start.elapsed();
         let resp = res.unwrap_or_else(|_| panic!("Request {} failed", i + 1));
         if resp.status != 200 {
-            println!(
+            tracing::warn!(
                 "Request {} failed with status {}. Body: {:?}",
                 i + 1,
                 resp.status,
@@ -71,12 +71,10 @@ async fn test_h2_multiplexing_performance() {
 
     let elapsed = start.elapsed();
 
-    println!("Total elapsed time: {:?}", elapsed);
-    println!("Individual request completion times:");
-    println!("Total elapsed time: {:?}", elapsed);
-    println!("Individual request completion times:");
+    tracing::info!("Total elapsed time: {:?}", elapsed);
+    tracing::info!("Individual request completion times:");
     for (req_num, duration) in completion_times {
-        println!("  Request {}: {:?}", req_num, duration);
+        tracing::info!("  Request {}: {:?}", req_num, duration);
     }
 
     // Just ensure they all passed

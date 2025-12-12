@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("  - HTTP/2: {}", stream.is_h2());
         }
         Err(e) => {
-            eprintln!("[ERROR] Connection failed: {}", e);
+            tracing::error!("Connection failed: {}", e);
             return Err(e.into());
         }
     }

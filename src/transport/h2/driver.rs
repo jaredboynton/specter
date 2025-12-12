@@ -17,7 +17,7 @@ use crate::error::{Error, Result};
 use crate::transport::h2::connection::{
     ControlAction, H2Connection as RawH2Connection, StreamResponse,
 };
-use crate::transport::h2::frame::{flags, FrameHeader, FrameType};
+use crate::transport::h2::frame::{flags, ErrorCode, FrameHeader, FrameType};
 
 /// Command sent from handle to driver
 #[derive(Debug)]
@@ -51,15 +51,21 @@ struct DriverStreamState {
     headers: Vec<(String, String)>,
     /// Accumulated response body
     body: BytesMut,
+    /// Pending request body to be sent (flow control buffer)
+    pending_body: Bytes,
+    /// Offset of pending body already sent
+    body_offset: usize,
 }
 
 impl DriverStreamState {
-    fn new(response_tx: oneshot::Sender<Result<StreamResponse>>) -> Self {
+    fn new(response_tx: oneshot::Sender<Result<StreamResponse>>, pending_body: Bytes) -> Self {
         Self {
             response_tx: Some(response_tx),
             status: None,
             headers: Vec::new(),
             body: BytesMut::new(),
+            pending_body,
+            body_offset: 0,
         }
     }
 }
@@ -96,6 +102,9 @@ where
             // Processing pending requests if slots available
             self.process_pending_requests().await?;
 
+            // Try to flush any pending data (flow control)
+            self.flush_pending_data().await?;
+
             tokio::select! {
                 // Handle incoming commands (send requests)
                 command = self.command_rx.recv() => {
@@ -106,7 +115,7 @@ where
                                     self.handle_send_request(cmd).await?;
                                 }
                                 DriverCommand::SendStreamingRequest { .. } => {
-                                    eprintln!("Streaming requests not yet implemented in driver");
+                                    tracing::warn!("Streaming requests not yet implemented in driver");
                                 }
                              }
                         }
@@ -123,8 +132,8 @@ where
                         Ok((header, payload)) => {
                             if let Err(e) = self.handle_frame(header, payload).await {
                                 tracing::error!("H2Driver frame error: {:?}", e);
-                                // If protocol error, maybe shutdown?
-                                // For now we assume connection might be usable or closed by peer.
+                                // Protocol errors are fatal and require connection termination.
+                                // The connection state may be inconsistent after this error.
                                 return Err(e);
                             }
                         }
@@ -187,25 +196,91 @@ where
 
             // Body
             let body_bytes = body.unwrap_or_default();
-            let req = match req_builder.body(body_bytes) {
+            let has_body = !body_bytes.is_empty();
+
+            let req = match req_builder.body(body_bytes.clone()) {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = response_tx
-                        .send(Err(Error::HttpProtocol(format!("Invalid request: {}", e))));
+                    if response_tx
+                        .send(Err(Error::HttpProtocol(format!("Invalid request: {}", e))))
+                        .is_err()
+                    {
+                        tracing::debug!("Response channel closed while sending error");
+                    }
                     return Ok(());
                 }
             };
 
-            // Send frame (non-blocking write)
-            match self.connection.send_request_frames(&req).await {
+            // Send HEADERS frame (non-blocking write)
+            // If body is present, end_stream=false (DATA frames will be sent separately)
+            let end_stream = !has_body;
+
+            match self.connection.send_headers(&req, end_stream).await {
                 Ok(stream_id) => {
                     // Register stream state
                     self.streams
-                        .insert(stream_id, DriverStreamState::new(response_tx));
+                        .insert(stream_id, DriverStreamState::new(response_tx, body_bytes));
+
+                    // Trigger flush to try sending body immediately
+                    self.flush_pending_data().await?;
                 }
                 Err(e) => {
                     // Notify error immediately
-                    let _ = response_tx.send(Err(e));
+                    if response_tx.send(Err(e)).is_err() {
+                        tracing::debug!("Response channel closed while sending error");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Iterate all active streams and try to send pending body data
+    async fn flush_pending_data(&mut self) -> Result<()> {
+        // Collect IDs to avoid borrow conflict
+        let stream_ids: Vec<u32> = self.streams.keys().cloned().collect();
+
+        for stream_id in stream_ids {
+            // Keep sending chunks for this stream until blocked or done
+            loop {
+                // Check if we have data to send
+                let (has_data, offset) = if let Some(stream) = self.streams.get(&stream_id) {
+                    (
+                        stream.body_offset < stream.pending_body.len(),
+                        stream.body_offset,
+                    )
+                } else {
+                    (false, 0)
+                };
+
+                if !has_data {
+                    break;
+                }
+
+                // Prepare arguments for send_data
+                // We clone the Bytes handle which is cheap
+                let pending_body = {
+                    let s = self.streams.get(&stream_id).unwrap();
+                    s.pending_body.clone()
+                };
+
+                let remaining = &pending_body[offset..];
+                let is_last_chunk = true;
+
+                // send_data returns bytes sent. If 0, it means blocked.
+                let sent = self
+                    .connection
+                    .send_data(stream_id, remaining, is_last_chunk)
+                    .await?;
+
+                if sent > 0 {
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        stream.body_offset += sent;
+                    }
+                    // Loop again to send next chunk
+                } else {
+                    // Blocked by flow control
+                    break;
                 }
             }
         }
@@ -224,10 +299,15 @@ where
                 // Notify stream of reset
                 if let Some(mut stream) = self.streams.remove(&sid) {
                     if let Some(tx) = stream.response_tx.take() {
-                        let _ = tx.send(Err(Error::HttpProtocol(format!(
-                            "Stream reset by peer: {:?}",
-                            code
-                        ))));
+                        if tx
+                            .send(Err(Error::HttpProtocol(format!(
+                                "Stream reset by peer: {:?}",
+                                code
+                            ))))
+                            .is_err()
+                        {
+                            tracing::debug!("Response channel closed while notifying stream reset");
+                        }
                     }
                 }
                 // Stream slot freed, try to process pending
@@ -241,13 +321,35 @@ where
                     if sid > last_sid {
                         if let Some(mut stream) = self.streams.remove(&sid) {
                             if let Some(tx) = stream.response_tx.take() {
-                                let _ = tx.send(Err(Error::HttpProtocol("GOAWAY received".into())));
+                                if tx
+                                    .send(Err(Error::HttpProtocol("GOAWAY received".into())))
+                                    .is_err()
+                                {
+                                    tracing::debug!(
+                                        "Response channel closed while notifying GOAWAY"
+                                    );
+                                }
                             }
                         }
                     }
                 }
-                // We could choose to shutdown driver here, but maybe wait for current streams?
+                // Driver continues processing existing streams until they complete.
+                // A future enhancement could implement immediate shutdown on GOAWAY.
                 return Ok(());
+            }
+            ControlAction::RefusePush(_stream_id, promised_id) => {
+                // Send RST_STREAM for the promised stream
+                // RFC 9113 8.4: RST_STREAM with REFUSED_STREAM
+                if let Err(e) = self
+                    .connection
+                    .send_rst_stream(promised_id, ErrorCode::RefusedStream)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to send RST_STREAM for refused push promise: {:?}",
+                        e
+                    );
+                }
             }
             ControlAction::None => {
                 // Continue to specific processing
@@ -259,12 +361,13 @@ where
             FrameType::Headers => {
                 let stream_id = header.stream_id;
 
-                // Handle CONTINUATION if needed (END_HEADERS not set)
-                // If this is a CONTINUATION frame, we shouldn't be here (block collected it)
-                // But this is the start of a header block (HEADERS frame)
+                // Handle CONTINUATION frames if needed (END_HEADERS flag not set).
+                // CONTINUATION frames are collected in the loop below; this branch handles
+                // the initial HEADERS frame that starts a header block.
                 if (header.flags & flags::END_HEADERS) == 0 {
                     // Loop to read CONTINUATION frames
-                    // NOTE: This inner loop blocks the driver select! but expected per RFC
+                    // This inner loop blocks the driver select! loop, which is expected
+                    // per RFC 9113 Section 6.2 (CONTINUATION frames must be processed sequentially).
                     let mut block = BytesMut::from(payload);
                     loop {
                         let (next_header, next_payload) = self.connection.read_next_frame().await?;
@@ -311,9 +414,9 @@ where
                 let stream_id = header.stream_id;
                 let end_stream = (header.flags & flags::END_STREAM) != 0;
 
-                // Process flow control
-                // We must pass flags? handle_data_frame parses flags from frame header?
-                // No, process_inbound_data_frame takes (stream_id, flags, payload).
+                // Process flow control for inbound DATA frame.
+                // The process_inbound_data_frame method takes stream_id, flags, and payload
+                // to handle window updates and flow control state.
                 let data = self
                     .connection
                     .process_inbound_data_frame(stream_id, header.flags, payload)
@@ -327,6 +430,12 @@ where
                     }
                 }
             }
+            FrameType::WindowUpdate => {
+                // Window update received and processed by handle_control_frame,
+                // which updates the connection/stream window in self.connection.
+                // Flush any pending data that was previously blocked by flow control.
+                self.flush_pending_data().await?;
+            }
             _ => {} // Other frames handled by handle_control_frame (or ignored)
         }
 
@@ -337,24 +446,25 @@ where
     fn complete_stream(&mut self, stream_id: u32) {
         if let Some(mut stream) = self.streams.remove(&stream_id) {
             if let Some(tx) = stream.response_tx.take() {
-                let status = stream.status.unwrap_or(200); // Default/Error?
-                let response = StreamResponse {
-                    status,
-                    headers: stream.headers,
-                    body: stream.body.freeze(),
+                // If no status was received, this is a protocol violation
+                // Return an error rather than defaulting to 200
+                let response = match stream.status {
+                    Some(status) => Ok(StreamResponse {
+                        status,
+                        headers: stream.headers,
+                        body: stream.body.freeze(),
+                    }),
+                    None => Err(Error::HttpProtocol(format!(
+                        "Stream {} completed without status code",
+                        stream_id
+                    ))),
                 };
-                let _ = tx.send(Ok(response));
+                if tx.send(response).is_err() {
+                    tracing::debug!("Response channel closed while completing stream");
+                }
             }
         }
-        // Slot freed, check queue - but this is called from drive loop which calls process_pending
-        // We can't await here easily if we are in sync context? No, complete_stream is synchronous helper?
-        // Ah, complete_stream is called from async handle_frame.
-        // But complete_stream is not async.
-        // We should call self.process_pending_requests() after complete_stream usage in handle_frame.
-        // Or make complete_stream async.
-        // Actually, drive loop calls handle_frame, which calls complete_stream.
-        // We should just call process_pending_requests at the top of the loop.
-        // But that might delay picking up a new request until next iteration.
-        // Let's rely on the loop top check for now.
+        // Stream slot is now available. The main loop will call process_pending_requests
+        // to process any queued requests waiting for available stream slots.
     }
 }

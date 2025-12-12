@@ -181,6 +181,13 @@ impl Cookie {
             )));
         }
 
+        // RFC 6265bis: SameSite=None requires Secure
+        if cookie.same_site == Some(SameSite::None) && !cookie.secure {
+            return Err(Error::CookieParse(
+                "SameSite=None requires Secure attribute".to_string(),
+            ));
+        }
+
         Ok(cookie)
     }
 
@@ -358,7 +365,7 @@ impl fmt::Display for Cookie {
 /// Cookie jar for manual cookie management.
 #[derive(Debug, Default, Clone)]
 pub struct CookieJar {
-    cookies: HashMap<String, HashMap<String, Cookie>>,
+    cookies: HashMap<String, Vec<Cookie>>,
 }
 
 impl CookieJar {
@@ -367,10 +374,21 @@ impl CookieJar {
     }
 
     pub fn store(&mut self, cookie: Cookie) {
-        self.cookies
-            .entry(cookie.domain.clone())
-            .or_default()
-            .insert(cookie.name.clone(), cookie);
+        let list = self.cookies.entry(cookie.domain.clone()).or_default();
+
+        // RFC 6265 Section 5.3:
+        // If the cookie store contains a cookie with the same name, domain, and path as the new cookie:
+        // 1. Let old-cookie be the existing cookie...
+        // 2. Remove old-cookie
+        // 3. Insert new-cookie
+        if let Some(pos) = list
+            .iter()
+            .position(|c| c.name == cookie.name && c.path == cookie.path)
+        {
+            list[pos] = cookie;
+        } else {
+            list.push(cookie);
+        }
     }
 
     pub fn add(&mut self, cookie: Cookie) {
@@ -378,13 +396,13 @@ impl CookieJar {
     }
 
     pub fn cookies(&self) -> Vec<&Cookie> {
-        self.cookies.values().flat_map(|m| m.values()).collect()
+        self.cookies.values().flat_map(|v| v.iter()).collect()
     }
 
     pub fn cookies_for_url(&self, url: &str) -> Vec<&Cookie> {
         self.cookies
             .values()
-            .flat_map(|m| m.values())
+            .flat_map(|v| v.iter())
             .filter(|c| c.matches_url(url))
             .collect()
     }
@@ -431,7 +449,7 @@ impl CookieJar {
             .await
             .map_err(Error::Io)?;
         for cookies in self.cookies.values() {
-            for cookie in cookies.values() {
+            for cookie in cookies {
                 let line = format!("{}\n", cookie.to_netscape_line());
                 file.write_all(line.as_bytes()).await.map_err(Error::Io)?;
             }
@@ -456,20 +474,28 @@ impl CookieJar {
     }
 
     pub fn get(&self, domain: &str, name: &str) -> Option<&Cookie> {
-        self.cookies.get(&normalize_domain(domain))?.get(name)
+        // Return the first match (ambiguous without path)
+        self.cookies
+            .get(&normalize_domain(domain))?
+            .iter()
+            .find(|c| c.name == name)
     }
 
     pub fn remove(&mut self, domain: &str, name: &str) -> Option<Cookie> {
-        self.cookies
-            .get_mut(&normalize_domain(domain))?
-            .remove(name)
+        // Remove the first match (ambiguous without path)
+        let list = self.cookies.get_mut(&normalize_domain(domain))?;
+        if let Some(pos) = list.iter().position(|c| c.name == name) {
+            Some(list.remove(pos))
+        } else {
+            None
+        }
     }
 
     pub fn clear(&mut self) {
         self.cookies.clear();
     }
     pub fn len(&self) -> usize {
-        self.cookies.values().map(|m| m.len()).sum()
+        self.cookies.values().map(|v| v.len()).sum()
     }
     pub fn is_empty(&self) -> bool {
         self.cookies.is_empty()
@@ -477,7 +503,10 @@ impl CookieJar {
 }
 
 fn normalize_domain(domain: &str) -> String {
-    domain.strip_prefix('.').unwrap_or(domain).to_lowercase()
+    domain
+        .trim_start_matches('.')
+        .trim_end_matches('.')
+        .to_lowercase()
 }
 
 fn parse_cookie_date(date_str: &str) -> Option<DateTime<Utc>> {
@@ -497,6 +526,9 @@ fn parse_cookie_date(date_str: &str) -> Option<DateTime<Utc>> {
     for fmt in FORMATS {
         if let Ok(dt) = chrono::DateTime::parse_from_str(date_str, fmt) {
             return Some(dt.with_timezone(&Utc));
+        }
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(date_str, fmt) {
+            return Some(chrono::TimeZone::from_utc_datetime(&Utc, &dt));
         }
     }
 

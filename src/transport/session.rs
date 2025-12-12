@@ -58,7 +58,7 @@ impl SessionCache {
 
     /// Store a session ticket for a host.
     pub fn store_ticket(&self, host: &str, ticket_data: Vec<u8>, max_age: Option<Duration>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("Session cache mutex poisoned");
         let max_age = max_age.unwrap_or(inner.max_age);
 
         inner.tickets.insert(
@@ -73,7 +73,7 @@ impl SessionCache {
 
     /// Get a session ticket for a host (if valid and not expired).
     pub fn get_ticket(&self, host: &str) -> Option<Vec<u8>> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("Session cache mutex poisoned");
 
         if let Some(ticket) = inner.tickets.get(host) {
             // Check if ticket is still valid
@@ -90,13 +90,13 @@ impl SessionCache {
 
     /// Clear all cached tickets.
     pub fn clear(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("Session cache mutex poisoned");
         inner.tickets.clear();
     }
 
     /// Remove expired tickets.
     pub fn cleanup_expired(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("Session cache mutex poisoned");
         inner
             .tickets
             .retain(|_, ticket| ticket.received_at.elapsed() < ticket.max_age);
@@ -104,7 +104,7 @@ impl SessionCache {
 
     /// Get the number of cached tickets.
     pub fn len(&self) -> usize {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().expect("Session cache mutex poisoned");
         inner.tickets.len()
     }
 

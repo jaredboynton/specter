@@ -114,9 +114,10 @@ async fn test_real_streaming_nghttp2() {
         total_bytes
     );
 
-    println!(
+    tracing::info!(
         "Streaming test passed: received {} bytes in {} chunks",
-        total_bytes, chunk_count
+        total_bytes,
+        chunk_count
     );
 }
 
@@ -137,7 +138,7 @@ async fn test_real_streaming_cloudflare_trace() {
 
     if !stream.is_h2() {
         // Some Cloudflare endpoints may not negotiate H2, skip test
-        println!("Cloudflare did not negotiate HTTP/2, skipping streaming test");
+        tracing::info!("Cloudflare did not negotiate HTTP/2, skipping streaming test");
         return;
     }
 
@@ -200,7 +201,7 @@ async fn test_real_streaming_cloudflare_trace() {
         "Cloudflare trace should contain connection info"
     );
 
-    println!("Cloudflare streaming test passed: {} bytes", body.len());
+    tracing::info!("Cloudflare streaming test passed: {} bytes", body.len());
 }
 
 /// Test streaming larger response to verify chunking behavior.
@@ -290,11 +291,12 @@ async fn test_streaming_larger_response() {
         total_bytes
     );
 
-    println!(
+    tracing::info!(
         "Large streaming test passed: {} bytes in {} chunks",
-        total_bytes, chunk_count
+        total_bytes,
+        chunk_count
     );
-    println!("Chunk sizes: {:?}", chunk_sizes);
+    tracing::debug!("Chunk sizes: {:?}", chunk_sizes);
 }
 
 /// Test that streaming API correctly handles response headers.
@@ -385,5 +387,5 @@ async fn test_streaming_headers_available_immediately() {
         );
     }
 
-    println!("Headers streaming test passed");
+    tracing::info!("Headers streaming test passed");
 }

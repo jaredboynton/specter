@@ -117,7 +117,7 @@ impl HpackEncoder {
 
         // Filter and process headers first
         for (name, value) in headers {
-            // Skip any pseudo-headers that might have been passed in
+            // Skip any pseudo-headers that were incorrectly passed in
             if name.starts_with(':') {
                 continue;
             }

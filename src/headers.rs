@@ -30,7 +30,7 @@ pub fn chrome_142_headers() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Chrome 142 headers for AJAX/API requests.
-/// Note: Extended Client Hints are typically only sent on navigation requests,
+/// Extended Client Hints are typically only sent on navigation requests,
 /// not on AJAX/API requests unless explicitly requested by the server.
 pub fn chrome_142_ajax_headers() -> Vec<(&'static str, &'static str)> {
     vec![

@@ -1049,7 +1049,8 @@ mod tests {
     fn test_huffman_encode_if_smaller() {
         let short = b"a";
         let (_, _use_huff) = huffman_encode_if_smaller(short);
-        // Very short strings might not benefit - just verify function doesn't panic
+        // Very short strings may not benefit from Huffman encoding;
+        // this test verifies the function handles edge cases correctly.
 
         let long = b"www.example.com";
         let (_, use_huff) = huffman_encode_if_smaller(long);

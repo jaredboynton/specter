@@ -1,0 +1,34 @@
+[profile.default]
+# Run tests in parallel with optimal thread count
+test-threads = "num-cpus"
+
+# Show test output for failures
+failure-output = "immediate-final"
+success-output = "never"
+
+# Retry flaky tests once
+retries = 1
+
+# Timeout settings
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[profile.ci]
+# CI profile with stricter settings
+retries = 0
+failure-output = "final"
+success-output = "never"
+
+# Fail fast in CI
+fail-fast = true
+
+[profile.pre-push]
+# Pre-push profile - balance between speed and thoroughness
+retries = 0
+failure-output = "immediate"
+success-output = "never"
+
+# Don't fail fast to see all failures
+fail-fast = false
+
+# Shorter timeout for pre-push
+slow-timeout = { period = "30s", terminate-after = 1 }

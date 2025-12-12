@@ -158,7 +158,7 @@ impl H2PooledConnection {
         // Spawn driver task
         tokio::spawn(async move {
             if let Err(e) = driver.drive().await {
-                eprintln!("H2Driver error: {:?}", e);
+                tracing::error!("H2Driver error: {:?}", e);
             }
         });
 

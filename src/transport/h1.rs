@@ -212,7 +212,7 @@ impl H1Connection {
         } else if let Some(len) = content_length {
             self.read_fixed_body(body_start, len).await?
         } else {
-            // No Content-Length and not chunked - might be empty or connection-close
+            // No Content-Length and not chunked - response may be empty or use connection-close
             Bytes::from(body_start.to_vec())
         };
 

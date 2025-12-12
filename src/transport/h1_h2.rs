@@ -49,6 +49,8 @@ pub struct Client {
     timeout: Option<Duration>,
     /// Whether to opportunistically try HTTP/3 when Alt-Svc indicates support
     h3_upgrade_enabled: bool,
+    /// Force HTTP/2 prior knowledge (H2C) for cleartext connections
+    http2_prior_knowledge: bool,
 }
 
 /// Builder for HTTP requests.
@@ -69,6 +71,7 @@ pub struct ClientBuilder {
     timeout: Option<Duration>,
     prefer_http2: bool,
     h3_upgrade_enabled: bool,
+    http2_prior_knowledge: bool,
 }
 
 impl Client {
@@ -333,7 +336,10 @@ impl<'a> RequestBuilder<'a> {
                     )
                     .await
                 {
-                    Ok(response) => return Ok(response.with_url(h3_url)),
+                    Ok(response) => {
+                        let resp: Response = response;
+                        return Ok(resp.with_url(h3_url));
+                    }
                     Err(e) => {
                         tracing::debug!("HTTP/3 upgrade failed, using HTTP/1.1 or HTTP/2: {}", e);
                         // Fall through to H1/H2
@@ -448,7 +454,11 @@ impl<'a> RequestBuilder<'a> {
             let stream = self.client.connector.connect(&uri).await?;
 
             // Verify ALPN negotiated h2
-            let use_http2 = if let MaybeHttpsStream::Https(ref ssl_stream) = stream {
+            let use_http2 = if self.client.http2_prior_knowledge && !stream.alpn_protocol().is_h2()
+            {
+                // For Prior Knowledge, we use H2 if strictly requested, even if no ALPN (e.g. cleartext)
+                true
+            } else if let MaybeHttpsStream::Https(ref ssl_stream) = stream {
                 ssl_stream.ssl().selected_alpn_protocol() == Some(b"h2")
             } else {
                 false
@@ -686,7 +696,9 @@ impl ClientBuilder {
             pseudo_order: PseudoHeaderOrder::Chrome,
             timeout: None,
             prefer_http2: false,
+
             h3_upgrade_enabled: true, // Enable by default
+            http2_prior_knowledge: false,
         }
     }
 
@@ -731,6 +743,17 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable HTTP/2 Prior Knowledge (H2C) for cleartext connections.
+    /// When enabled, connecting to `http://` URIs will assume HTTP/2.
+    pub fn http2_prior_knowledge(mut self, enabled: bool) -> Self {
+        self.http2_prior_knowledge = enabled;
+        // Prior knowledge implies preferring H2
+        if enabled {
+            self.prefer_http2 = true;
+        }
+        self
+    }
+
     /// Build the client.
     pub fn build(self) -> Result<Client> {
         // Create connector with TLS fingerprint
@@ -760,7 +783,9 @@ impl ClientBuilder {
             pseudo_order: self.pseudo_order,
             default_version,
             timeout: self.timeout,
+
             h3_upgrade_enabled: self.h3_upgrade_enabled,
+            http2_prior_knowledge: self.http2_prior_knowledge,
         })
     }
 }

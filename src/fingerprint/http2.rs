@@ -43,7 +43,8 @@ impl PriorityTree {
     /// establishing a dependency tree for future streams. Firefox uses a different
     /// pattern than Chrome.
     ///
-    /// Note: Exact Firefox pattern needs verification from real traffic.
+    /// The exact Firefox HTTP/2 fingerprint pattern requires verification against
+    /// real browser traffic captures.
     /// This is a placeholder based on Firefox's known behavior of sending
     /// PRIORITY frames for unopened streams.
     pub fn firefox() -> Self {

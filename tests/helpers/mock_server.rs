@@ -3,6 +3,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
+use tracing;
 
 /// A simple HTTP/1.1 mock server that handles keep-alive connections.
 pub struct MockHttpServer {
@@ -41,7 +42,7 @@ impl MockHttpServer {
                         tokio::spawn(handle_connection(stream));
                     }
                     Err(e) => {
-                        eprintln!("Accept error: {}", e);
+                        tracing::error!("Accept error: {}", e);
                         break;
                     }
                 }
@@ -77,7 +78,7 @@ impl MockHttpServer {
                         });
                     }
                     Err(e) => {
-                        eprintln!("Accept error: {}", e);
+                        tracing::error!("Accept error: {}", e);
                         break;
                     }
                 }
@@ -97,7 +98,7 @@ async fn handle_connection(mut stream: TcpStream) {
         let n = match read_result {
             Ok(Ok(n)) => n,
             Ok(Err(e)) => {
-                eprintln!("Read error: {}", e);
+                tracing::error!("Read error: {}", e);
                 break;
             }
             Err(_) => {
@@ -115,7 +116,7 @@ async fn handle_connection(mut stream: TcpStream) {
         let request_str = match std::str::from_utf8(&buf[..n]) {
             Ok(s) => s,
             Err(_) => {
-                eprintln!("Invalid UTF-8 in request");
+                tracing::warn!("Invalid UTF-8 in request");
                 break;
             }
         };

@@ -368,7 +368,8 @@ impl HeadersFrame {
     }
 
     /// Serialize to bytes (including frame header).
-    /// Note: Padding not currently supported in serialization (not needed for fingerprinting).
+    /// Padding is not currently supported in serialization as it is not required
+    /// for accurate browser fingerprinting.
     pub fn serialize(&self) -> BytesMut {
         let priority_len = if self.priority.is_some() { 5 } else { 0 };
         let payload_len = priority_len + self.header_block.len();

@@ -68,6 +68,8 @@ pub enum ControlAction {
     RstStream(u32, ErrorCode),
     /// GOAWAY received.
     GoAway(u32),
+    /// PUSH_PROMISE received (stream_id, promised_stream_id).
+    RefusePush(u32, u32),
 }
 
 /// HTTP/2 connection with full fingerprint control.
@@ -162,7 +164,7 @@ where
                 .set(SettingsId::MaxHeaderListSize, settings.max_header_list_size);
 
             // Add GREASE setting (Chrome often sends 0x0a0a, 0x1a1a, etc.)
-            // This helps look like a real browser and not a naive automation tool.
+            // GREASE values improve fingerprint authenticity by matching browser behavior.
             settings_frame.set(0x0a0a_u16, 0);
         } else {
             // Firefox only sends 3 settings: HEADER_TABLE_SIZE (1), INITIAL_WINDOW_SIZE (4), MAX_FRAME_SIZE (5)
@@ -234,8 +236,12 @@ where
                     Err(_) => {
                         // Timeout - send GOAWAY with SETTINGS_TIMEOUT before closing (RFC 9113)
                         let goaway = GoAwayFrame::new(0, ErrorCode::SettingsTimeout);
-                        let _ = conn.stream.write_all(&goaway.serialize()).await;
-                        let _ = conn.stream.flush().await;
+                        if let Err(e) = conn.stream.write_all(&goaway.serialize()).await {
+                            tracing::warn!("Failed to send GOAWAY on SETTINGS_TIMEOUT: {}", e);
+                        }
+                        if let Err(e) = conn.stream.flush().await {
+                            tracing::warn!("Failed to flush GOAWAY on SETTINGS_TIMEOUT: {}", e);
+                        }
                         return Err(Error::SettingsTimeout(duration));
                     }
                 }
@@ -307,6 +313,8 @@ where
     }
 
     /// Send an HTTP/2 request and receive the response.
+    /// This is a convenience wrapper that blocks until the response is received.
+    /// For multiplexed behavior, use H2Driver or send_headers/send_data manually.
     pub async fn send_request(
         &mut self,
         method: Method,
@@ -314,144 +322,56 @@ where
         headers: Vec<(String, String)>,
         body: Option<Bytes>,
     ) -> Result<SpecterResponse> {
-        // Allocate stream ID
-        // RFC 9113 Section 5.1.1: Client-initiated streams use odd-numbered stream IDs
-        let stream_id = self.next_stream_id;
-        if stream_id == 0 || (stream_id & 0x1) == 0 {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: Client stream ID must be odd and non-zero".into(),
-            ));
-        }
-        self.next_stream_id += 2; // Client uses odd stream IDs
+        // Construct http::Request
+        let mut builder = http::Request::builder().method(method).uri(uri);
 
-        // Extract URI components
-        let scheme = uri.scheme_str().unwrap_or("https");
-        let authority = uri.authority().map(|a| a.as_str()).unwrap_or("localhost");
-        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-
-        // RFC 9113 Section 8.1.2.3: Validate pseudo-header values
-        if method.as_str().is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :method pseudo-header cannot be empty".into(),
-            ));
-        }
-        if scheme.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :scheme pseudo-header cannot be empty".into(),
-            ));
-        }
-        if authority.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :authority pseudo-header cannot be empty".into(),
-            ));
-        }
-        if path.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :path pseudo-header cannot be empty".into(),
-            ));
+        for (name, value) in headers {
+            builder = builder.header(name, value);
         }
 
-        // Encode headers with custom pseudo-header order
-        let header_block =
-            self.encoder
-                .encode_request(method.as_str(), scheme, authority, path, &headers);
+        let body = body.unwrap_or_default();
+        let request = builder
+            .body(body.clone()) // Clone needed as request consumes body
+            .map_err(|e| Error::HttpProtocol(format!("Failed to build request: {}", e)))?;
 
-        // RFC 9113 Section 6.2: HEADERS frame header block must not be empty
-        if header_block.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: HEADERS frame header block cannot be empty".into(),
-            ));
-        }
+        // Send headers (registers stream)
+        let end_stream = body.is_empty();
+        let stream_id = self.send_headers(&request, end_stream).await?;
 
-        // Check if headers exceed max frame size and need CONTINUATION frames
-        let max_frame_size = self.peer_settings.max_frame_size as usize;
-        let end_stream = body.is_none();
+        // Send body if present
+        if !body.is_empty() {
+            // Flow control handling for synchronous wrapper mode.
+            // In async driver mode, reads and writes are interleaved to process WINDOW_UPDATE
+            // frames concurrently. This synchronous wrapper does not have a background read loop,
+            // so flow control is handled differently:
+            //
+            // - The default initial window size (64KB) is sufficient for most test scenarios.
+            // - If the window is exhausted, an error is returned rather than blocking indefinitely.
+            // - Large uploads in sync mode require interleaved frame reading, which is not
+            //   implemented in this wrapper.
 
-        if header_block.len() <= max_frame_size {
-            // Single HEADERS frame with END_HEADERS flag
-            let headers_frame = HeadersFrame::new(stream_id, header_block)
-                .end_stream(end_stream)
-                .end_headers(true);
-
-            self.stream
-                .write_all(&headers_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
-        } else {
-            // Split across HEADERS + CONTINUATION frames
-            let chunks: Vec<Bytes> = header_block
-                .chunks(max_frame_size)
-                .map(Bytes::copy_from_slice)
-                .collect();
-
-            // First: HEADERS without END_HEADERS
-            let first_chunk = chunks[0].clone();
-            let headers_frame = HeadersFrame::new(stream_id, first_chunk)
-                .end_stream(end_stream)
-                .end_headers(false);
-
-            self.stream
-                .write_all(&headers_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
-
-            // Middle: CONTINUATION frames
-            let num_chunks = chunks.len();
-            for (idx, chunk) in chunks.into_iter().skip(1).enumerate() {
-                let is_last = idx == num_chunks - 2; // -2 because we skipped first chunk
-                let cont_frame = ContinuationFrame::new(
-                    stream_id, chunk, is_last, // Only last chunk has END_HEADERS
-                );
-                self.stream
-                    .write_all(&cont_frame.serialize())
-                    .await
-                    .map_err(|e| {
-                        Error::HttpProtocol(format!("Failed to send CONTINUATION: {}", e))
-                    })?;
-            }
-        }
-
-        // Send DATA frame if there's a body
-        if let Some(body_data) = body {
-            // Check send-side flow control
-            let data_len = body_data.len() as i32;
-            if self.conn_send_window < data_len {
+            let sent = self.send_data(stream_id, &body, true).await?;
+            if sent < body.len() {
+                // Flow control window exhausted. In sync mode without a read loop to process
+                // WINDOW_UPDATE frames, we cannot proceed. Return an error to indicate
+                // the limitation of this synchronous wrapper.
                 return Err(Error::HttpProtocol(
-                    "Connection send window exhausted".into(),
+                    "Flow control window exhausted in sync send_request".into(),
                 ));
             }
-            if let Some(stream) = self.streams.get(&stream_id) {
-                if stream.send_window < data_len {
-                    return Err(Error::HttpProtocol("Stream send window exhausted".into()));
-                }
-            }
-
-            let data_frame = DataFrame::new(stream_id, body_data).end_stream(true);
-            self.stream
-                .write_all(&data_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send DATA: {}", e)))?;
-
-            // Decrement send windows
-            self.conn_send_window -= data_len;
-            if let Some(stream) = self.streams.get_mut(&stream_id) {
-                stream.send_window -= data_len;
-            }
         }
 
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
-
-        // Stream registration is now handled by send_request_frames calls
-        // We only need to wait for response
+        // Wait for response
         self.read_response(stream_id).await
     }
 
-    /// Send request frames (HEADERS + optional DATA) and return stream ID.
-    /// Internal helper for both send_request and send_request_streaming.
-    pub async fn send_request_frames(&mut self, request: &Request<Bytes>) -> Result<u32> {
+    /// Send request headers and register stream.
+    /// Returns the assigned stream ID.
+    pub async fn send_headers(
+        &mut self,
+        request: &Request<Bytes>,
+        end_stream: bool,
+    ) -> Result<u32> {
         // Allocate stream ID
         let stream_id = self.next_stream_id;
         self.next_stream_id += 2; // Client uses odd stream IDs
@@ -487,8 +407,7 @@ where
         }
 
         // Register stream immediately so flow control checks work
-        let stream_state = if request.body().is_empty() {
-            // Will be updated if body present
+        let stream_state = if end_stream {
             StreamState::HalfClosedLocal
         } else {
             StreamState::Open
@@ -529,8 +448,6 @@ where
 
         // Check if headers exceed max frame size and need CONTINUATION frames
         let max_frame_size = self.peer_settings.max_frame_size as usize;
-        let body = request.body();
-        let end_stream = body.is_empty();
 
         if header_block.len() <= max_frame_size {
             // Single HEADERS frame with END_HEADERS flag
@@ -576,51 +493,70 @@ where
             }
         }
 
-        // Update stream state if END_STREAM was sent
-        if end_stream {
-            if let Some(stream) = self.streams.get_mut(&stream_id) {
-                stream.state = StreamState::HalfClosedLocal;
-            }
-        }
-
-        // Send DATA frame if there's a body
-        if !body.is_empty() {
-            // Check send-side flow control
-            let data_len = body.len() as i32;
-            if self.conn_send_window < data_len {
-                return Err(Error::HttpProtocol(
-                    "Connection send window exhausted".into(),
-                ));
-            }
-            if let Some(stream) = self.streams.get(&stream_id) {
-                if stream.send_window < data_len {
-                    return Err(Error::HttpProtocol("Stream send window exhausted".into()));
-                }
-            }
-
-            let data_frame = DataFrame::new(stream_id, body.clone()).end_stream(true);
-            self.stream
-                .write_all(&data_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send DATA: {}", e)))?;
-
-            // Decrement send windows
-            self.conn_send_window -= data_len;
-            if let Some(stream) = self.streams.get_mut(&stream_id) {
-                stream.send_window -= data_len;
-                stream.state = StreamState::HalfClosedLocal;
-            }
-        } else {
-            // No body, we already set HalfClosedLocal in registration if body was empty
-            // H2Connection operates on Bytes.
-        }
-
         self.stream
             .flush()
             .await
             .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
 
         Ok(stream_id)
+    }
+
+    /// Send a DATA frame with flow control checks.
+    /// Returns the number of bytes sent. If 0 and data was not empty, it means blocked by flow control.
+    pub async fn send_data(
+        &mut self,
+        stream_id: u32,
+        data: &[u8],
+        end_stream: bool,
+    ) -> Result<usize> {
+        if data.is_empty() && !end_stream {
+            return Ok(0);
+        }
+
+        // Check available window
+        let available_conn = self.conn_send_window;
+        let available_stream = if let Some(stream) = self.streams.get(&stream_id) {
+            stream.send_window
+        } else {
+            return Err(Error::HttpProtocol("Stream not found for DATA".into()));
+        };
+
+        let available = available_conn.min(available_stream);
+
+        if available <= 0 {
+            // Window exhausted
+            return Ok(0);
+        }
+
+        // Calculate how much we can send
+        let max_frame = self.peer_settings.max_frame_size as i32;
+        let to_send_len = (data.len() as i32).min(available).min(max_frame);
+
+        let chunk = Bytes::copy_from_slice(&data[..to_send_len as usize]);
+        let is_last = end_stream && to_send_len as usize == data.len();
+
+        let data_frame = DataFrame::new(stream_id, chunk).end_stream(is_last);
+
+        self.stream
+            .write_all(&data_frame.serialize())
+            .await
+            .map_err(|e| Error::HttpProtocol(format!("Failed to send DATA: {}", e)))?;
+
+        self.stream
+            .flush()
+            .await
+            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
+
+        // Decrement windows
+        self.conn_send_window -= to_send_len;
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.send_window -= to_send_len;
+            if is_last {
+                stream.state = StreamState::HalfClosedLocal;
+            }
+        }
+
+        Ok(to_send_len as usize)
     }
 
     /// Read the next frame from the connection.
@@ -757,8 +693,21 @@ where
                     Err(Error::HttpProtocol("Invalid RST_STREAM frame".into()))
                 }
             }
+            FrameType::PushPromise => {
+                // RFC 9113 8.4: PUSH_PROMISE frames MUST NOT be sent if SETTINGS_ENABLE_PUSH is set to 0.
+                // For robustness and testing, refuse the push promise with RST_STREAM rather than
+                // terminating the connection.
+                if let Ok(pp) = PushPromiseFrame::parse(header.stream_id, header.flags, payload) {
+                    Ok(ControlAction::RefusePush(
+                        header.stream_id,
+                        pp.promised_stream_id,
+                    ))
+                } else {
+                    Err(Error::HttpProtocol("Invalid PUSH_PROMISE frame".into()))
+                }
+            }
             _ => {
-                // Ignore Priority, PushPromise for now, or already handled
+                // Ignore Priority or already handled
                 Ok(ControlAction::None)
             }
         }
@@ -802,7 +751,28 @@ where
         Error,
     > {
         // Send request frames (HEADERS with END_STREAM if no body)
-        let stream_id = self.send_request_frames(&request).await?;
+        let body = request.body();
+        let end_stream = body.is_empty();
+        let stream_id = self.send_headers(&request, end_stream).await?;
+
+        // For streaming requests, any initial body in the request object must be sent
+        // before establishing the streaming channel. In typical streaming usage, the request
+        // body is empty and subsequent data arrives via a channel (handled separately).
+        // This method establishes the stream and sends the initial request including any body.
+        if !end_stream {
+            // Send the initial request body if present.
+            // The request body is sent immediately; subsequent streaming data is handled
+            // via the channel returned to the caller.
+            let initial_body = request.body();
+            if !initial_body.is_empty() {
+                let sent = self.send_data(stream_id, initial_body, true).await?;
+                if sent < initial_body.len() {
+                    return Err(Error::HttpProtocol(
+                        "Flow control blocked initial body in streaming request".into(),
+                    ));
+                }
+            }
+        }
 
         // Create channel for streaming body chunks (32-buffer for backpressure)
         let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, H2Error>>(32);
@@ -821,8 +791,9 @@ where
         let (status, headers) = self.read_response_headers(stream_id).await?;
 
         // Build response with empty body (actual body comes through rx channel)
-        // Note: The caller must call read_streaming_frames() in a loop to process DATA frames
-        // and send them through the channel. This allows non-blocking header return.
+        // The caller must call read_streaming_frames() in a loop to process DATA frames
+        // and forward them through the channel. This design allows non-blocking return
+        // of response headers while body data streams asynchronously.
         let mut response_builder = Response::builder().status(status);
         for (name, value) in headers {
             response_builder = response_builder.header(name, value);
@@ -923,7 +894,7 @@ where
 
                     // Now get mutable access to send through channel
                     let should_end = if let Some(stream) = self.streams.get_mut(&stream_id) {
-                        // Use stream.id to verify we're processing the right stream
+                        // Verify stream ID matches to ensure correct stream processing
                         if stream.id != stream_id {
                             return Err(Error::HttpProtocol("Stream ID mismatch".into()));
                         }
@@ -979,18 +950,31 @@ where
                         // RFC 9113 Section 5.1: RST_STREAM transitions stream to Closed
                         stream.state = StreamState::Closed;
                         if let Some(tx) = stream.streaming_tx.take() {
-                            let _ = tx
+                            if tx
                                 .send(Err(Error::HttpProtocol(format!(
                                     "Stream reset by server: {:?}",
                                     rst.error_code
                                 ))))
-                                .await;
+                                .await
+                                .is_err()
+                            {
+                                tracing::debug!(
+                                    "Streaming channel closed while notifying stream reset"
+                                );
+                            }
                         }
                         if let Some(tx) = stream.response_tx.take() {
-                            let _ = tx.send(Err(Error::HttpProtocol(format!(
-                                "Stream reset by server: {:?}",
-                                rst.error_code
-                            ))));
+                            if tx
+                                .send(Err(Error::HttpProtocol(format!(
+                                    "Stream reset by server: {:?}",
+                                    rst.error_code
+                                ))))
+                                .is_err()
+                            {
+                                tracing::debug!(
+                                    "Response channel closed while notifying stream reset"
+                                );
+                            }
                         }
                     }
                     self.streams.remove(&stream_id);
@@ -1000,8 +984,8 @@ where
                 }
             }
             FrameType::Priority => {
-                // RFC 9113 Section 6.3: PRIORITY frames can be sent on any stream
-                // Parse and validate (but we don't use priority information currently)
+                // RFC 9113 Section 6.3: PRIORITY frames can be sent on any stream.
+                // Parse and validate the frame, though priority information is not currently used.
                 if let Err(e) = PriorityFrame::parse(header.stream_id, payload.clone()) {
                     return Err(Error::HttpProtocol(format!(
                         "Invalid PRIORITY frame: {}",
@@ -1011,14 +995,14 @@ where
                 Ok(true) // Continue reading
             }
             FrameType::PushPromise => {
-                // RFC 9113 Section 6.6: PUSH_PROMISE frames are only sent by servers
-                // As a client, we should not receive these if ENABLE_PUSH is disabled
+                // RFC 9113 Section 6.6: PUSH_PROMISE frames are only sent by servers.
+                // As a client, these should not be received if ENABLE_PUSH is disabled.
                 if !self.peer_settings.enable_push {
                     return Err(Error::HttpProtocol(
                         "PROTOCOL_ERROR: Received PUSH_PROMISE but ENABLE_PUSH is disabled".into(),
                     ));
                 }
-                // Parse and validate (but we don't support server push currently)
+                // Parse and validate the frame. Server push is not currently supported.
                 if let Err(e) =
                     PushPromiseFrame::parse(header.stream_id, header.flags, payload.clone())
                 {
@@ -1027,7 +1011,7 @@ where
                         e
                     )));
                 }
-                // Server push is not supported, so we ignore the frame
+                // Server push is not supported; the frame is ignored
                 Ok(true) // Continue reading
             }
             _ => {
@@ -1618,7 +1602,8 @@ where
 
     /// Read one complete frame from the connection and process connection-level frames.
     /// Returns Ok(true) if more frames may be coming, Ok(false) if GOAWAY received.
-    /// Note: Does NOT process stream-level frames (HEADERS, DATA, CONTINUATION) - those are handled by caller.
+    /// Processes only connection-level control frames (SETTINGS, WINDOW_UPDATE, etc.).
+    /// Stream-level frames (HEADERS, DATA, CONTINUATION) are handled by the caller.
     pub async fn read_one_frame_dispatch(&mut self) -> Result<bool> {
         // Read frame header
         while self.read_buf.len() < FRAME_HEADER_SIZE {
@@ -1755,5 +1740,31 @@ where
         }
 
         Ok(())
+    }
+
+    /// Send RST_STREAM frame.
+    pub async fn send_rst_stream(&mut self, stream_id: u32, error_code: ErrorCode) -> Result<()> {
+        let frame = RstStreamFrame::new(stream_id, error_code);
+        self.stream
+            .write_all(&frame.serialize())
+            .await
+            .map_err(|e| Error::HttpProtocol(format!("Failed to send RST_STREAM: {}", e)))?;
+        self.stream
+            .flush()
+            .await
+            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))
+    }
+
+    /// Send GOAWAY frame.
+    pub async fn send_goaway(&mut self, last_stream_id: u32, error_code: ErrorCode) -> Result<()> {
+        let frame = GoAwayFrame::new(last_stream_id, error_code);
+        self.stream
+            .write_all(&frame.serialize())
+            .await
+            .map_err(|e| Error::HttpProtocol(format!("Failed to send GOAWAY: {}", e)))?;
+        self.stream
+            .flush()
+            .await
+            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))
     }
 }

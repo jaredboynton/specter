@@ -34,11 +34,12 @@ repos:
         stages: [pre-push]
         always_run: false
 
-      # Pre-push: run tests
+      # Pre-push: run tests with nextest
       # Ensures code passes all tests before pushing
-      - id: cargo-test
-        name: cargo test
-        entry: bash -c 'set -e; cargo test --all-features'
+      # Uses nextest for faster parallel execution and better output
+      - id: cargo-nextest
+        name: cargo nextest run
+        entry: bash -c 'set -e; cargo nextest run --all-features --profile pre-push'
         language: system
         types: [rust]
         pass_filenames: false

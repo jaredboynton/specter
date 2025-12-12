@@ -5,7 +5,7 @@ use super::tls::TlsFingerprint;
 
 /// Browser fingerprint profile for impersonation.
 ///
-/// Note: Both Chrome 110+ and Firefox 133+ randomize TLS extension order,
+/// Both Chrome 110+ and Firefox 133+ randomize TLS extension order,
 /// making static JA3 fingerprints unreliable. Modern fingerprint detection
 /// systems use JA4 which sorts extensions alphabetically for stable fingerprints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

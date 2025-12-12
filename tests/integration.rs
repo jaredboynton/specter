@@ -11,7 +11,7 @@ async fn test_mixed_protocols() {
 
     // Test that protocol selection works correctly
     // TODO: Implement with mock servers for both protocols
-    println!("Mixed protocol test - requires mock servers");
+    tracing::info!("Mixed protocol test - requires mock servers");
 }
 
 /// Test connection failure handling
@@ -20,7 +20,7 @@ async fn test_mixed_protocols() {
 async fn test_connection_failure() {
     // Test that pool cleanup works when connection fails
     // TODO: Implement with server that closes connections
-    println!("Connection failure test - requires failure simulation");
+    tracing::info!("Connection failure test - requires failure simulation");
 }
 
 /// Test concurrent clients don't interfere
@@ -32,5 +32,5 @@ async fn test_concurrent_clients() {
 
     // Verify clients have separate connection pools
     // TODO: Add instrumentation to verify pool isolation
-    println!("Concurrent clients test - requires pool instrumentation");
+    tracing::info!("Concurrent clients test - requires pool instrumentation");
 }

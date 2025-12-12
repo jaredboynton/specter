@@ -65,7 +65,7 @@ impl TcpFingerprint {
 /// Configure a TCP socket with fingerprint settings.
 ///
 /// Uses socket2 crate for cross-platform socket options.
-/// Note: Some options may not be available on all platforms.
+/// Some TCP options may not be available or configurable on all platforms.
 pub fn configure_tcp_socket(socket: &socket2::Socket, fp: &TcpFingerprint) -> io::Result<()> {
     // Set receive buffer size (influences window size)
     socket.set_recv_buffer_size(fp.window_size as usize)?;
@@ -76,7 +76,7 @@ pub fn configure_tcp_socket(socket: &socket2::Socket, fp: &TcpFingerprint) -> io
     // Set TTL for IPv4 packets
     socket.set_ttl(fp.ttl as u32)?;
 
-    // Note: MSS is typically negotiated during TCP handshake and cannot be
+    // MSS (Maximum Segment Size) is negotiated during TCP handshake and cannot be
     // directly set via socket options. The OS handles MSS negotiation based
     // on MTU discovery.
 

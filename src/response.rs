@@ -5,7 +5,7 @@ use bytes::Bytes;
 use std::io::Read;
 
 /// HTTP response with explicit decompression.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Response {
     pub status: u16,
     pub headers: Vec<String>,

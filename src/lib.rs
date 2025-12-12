@@ -6,6 +6,8 @@
 //! TLS fingerprinting (JA3/JA4) across all protocols.
 
 // Core modules
+pub mod auth;
+pub mod cache;
 pub mod cookie;
 pub mod error;
 pub mod headers;
