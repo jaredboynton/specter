@@ -5,10 +5,13 @@
 //! to be multiplexed without blocking each other.
 
 use bytes::{Bytes, BytesMut};
+use http::{Method, Uri};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing;
+
+pub type StreamingHeadersResult = Result<(u16, Vec<(String, String)>)>;
 
 use crate::error::{Error, Result};
 use crate::transport::h2::connection::{
@@ -28,14 +31,13 @@ pub enum DriverCommand {
         body: Option<bytes::Bytes>,
         response_tx: oneshot::Sender<Result<StreamResponse>>,
     },
-    /// Send a streaming request
+    /// Send a request with a streaming body
     SendStreamingRequest {
-        method: http::Method,
-        uri: http::Uri,
+        method: Method,
+        uri: Uri,
         headers: Vec<(String, String)>,
-        body: Option<bytes::Bytes>,
-        headers_tx: oneshot::Sender<Result<(u16, Vec<(String, String)>)>>,
-        body_rx: mpsc::Receiver<std::result::Result<bytes::Bytes, H2Error>>,
+        body_tx: mpsc::Sender<Result<Bytes>>,
+        headers_tx: oneshot::Sender<StreamingHeadersResult>,
     },
 }
 
