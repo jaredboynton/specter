@@ -2,7 +2,7 @@
 //!
 //! https://www.rfc-editor.org/rfc/rfc6265
 
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 use specter::cookie::{Cookie, CookieJar, SameSite};
 
 #[test]
@@ -167,7 +167,7 @@ fn test_public_suffix_rejection_rfc6265_section_5_3() {
     // But `Cookie::from_set_cookie_header` might allow it, and `CookieJar::store` might check.
     // Let's check strict adherence.
 
-    let c = Cookie::from_set_cookie_header("a=b; Domain=co.uk", url);
+    let _c = Cookie::from_set_cookie_header("a=b; Domain=co.uk", url);
     // Depending on implementation, this might return Ok() but have a flag, or be rejected.
     // If strict RFC, user agent should reject.
 

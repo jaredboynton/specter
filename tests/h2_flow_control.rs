@@ -92,12 +92,12 @@ async fn test_large_upload_flow_control() {
                     // We expect silence now (client blocked)
                     // Wait a bit to verify no more data comes
                     let result = timeout(Duration::from_millis(100), conn.read_frame()).await;
-                    if result.is_ok() {
+                    if let Ok(inner_result) = result {
                         // If we got a frame, it SHOULD NOT be Data.
                         // It could be something else (like Priority).
                         // But for this test, we assume silence or non-data.
                         // If we got DATA, then flow control is broken.
-                        let (_, t, _, _, _) = result.unwrap().unwrap();
+                        let (_, t, _, _, _) = inner_result.unwrap();
                         assert_ne!(t, 0x00, "Received DATA when window exhausted!");
                     }
 

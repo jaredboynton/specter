@@ -4,7 +4,6 @@
 //! https://www.rfc-editor.org/rfc/rfc9110
 
 use http::Method;
-use specter::response::Response;
 use specter::transport::h1::H1Connection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

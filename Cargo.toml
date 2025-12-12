@@ -44,7 +44,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 getrandom = "0.3"
 psl = "2"
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 base64 = "0.22.1"
 hex = "0.4"
 
@@ -55,3 +55,8 @@ hex = "0.4"
 
 # Make this crate standalone (not part of parent workspace)
 [workspace]
+
+# Note: Windows-specific crates (windows-sys, windows-targets, etc.) appear in Cargo.lock
+# as transitive dependencies from tokio, quiche, etc., but they are platform-specific
+# and will only be compiled when building for Windows targets. On macOS/Linux, they
+# are automatically excluded from the build.

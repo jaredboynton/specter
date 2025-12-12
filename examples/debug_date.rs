@@ -1,4 +1,4 @@
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 
 fn parse_cookie_date(date_str: &str) -> Option<chrono::DateTime<Utc>> {
     const FORMATS: &[&str] = &[

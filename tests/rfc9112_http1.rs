@@ -80,7 +80,7 @@ async fn test_request_framing_chunked() {
         Box::pin(async move {
             // Read request
             let mut buf = [0u8; 1024];
-            socket.read(&mut buf).await.unwrap();
+            let _ = socket.read(&mut buf).await.unwrap();
 
             // Send Chunked Response
             // 5\r\nHello\r\n0\r\n\r\n
@@ -113,7 +113,7 @@ async fn test_response_header_folding_rejection() {
     // Receivers MAY accept or reject. Ideally reject or replace with SP.
     let url = start_test_server(|mut socket| Box::pin(async move {
         let mut buf = [0u8; 1024];
-        socket.read(&mut buf).await.unwrap();
+        let _ = socket.read(&mut buf).await.unwrap();
 
         // Response with folded header
         // Header: value\r\n continuation

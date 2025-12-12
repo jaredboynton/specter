@@ -2,7 +2,6 @@
 //!
 //! https://www.rfc-editor.org/rfc/rfc7541
 
-use bytes::BytesMut;
 use specter::transport::h2::{HpackDecoder, HpackEncoder};
 
 #[test]

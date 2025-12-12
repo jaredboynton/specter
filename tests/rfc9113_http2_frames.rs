@@ -4,7 +4,7 @@
 //!
 //! Tests serialization and deserialization of all frame types.
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use specter::transport::h2::{
     ErrorCode, FrameHeader, FrameType, GoAwayFrame, PingFrame, RstStreamFrame, SettingsFrame,
     SettingsId, WindowUpdateFrame,

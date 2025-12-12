@@ -3,7 +3,6 @@
 //! https://www.rfc-editor.org/rfc/rfc3986
 
 use http::Uri;
-use specter::transport::h1_h2::Client;
 
 // Helper to access private methods if needed?
 // Client::get_origin is private.

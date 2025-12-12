@@ -74,7 +74,7 @@ pub fn configure_tcp_socket(socket: &socket2::Socket, fp: &TcpFingerprint) -> io
     socket.set_send_buffer_size(fp.window_size as usize)?;
 
     // Set TTL for IPv4 packets
-    socket.set_ttl(fp.ttl as u32)?;
+    socket.set_ttl_v4(fp.ttl as u32)?;
 
     // MSS (Maximum Segment Size) is negotiated during TCP handshake and cannot be
     // directly set via socket options. The OS handles MSS negotiation based
