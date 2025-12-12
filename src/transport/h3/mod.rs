@@ -69,7 +69,7 @@ impl H3Client {
             .collect();
 
         // Convert body
-        let body_bytes = body.map(|v| bytes::Bytes::from(v));
+        let body_bytes = body.map(bytes::Bytes::from);
 
         let uri: http::Uri = url
             .parse()

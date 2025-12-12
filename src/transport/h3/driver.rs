@@ -129,13 +129,8 @@ impl H3Driver {
                                 Err(_) => {}
                             }
                             // Flush close packet
-                            loop {
-                                match self.conn.send(&mut out) {
-                                    Ok((len, _)) => {
-                                        let _ = self.socket.send_to(&out[..len], self.peer_addr).await;
-                                    }
-                                    Err(_) => break,
-                                }
+                            while let Ok((len, _)) = self.conn.send(&mut out) {
+                                let _ = self.socket.send_to(&out[..len], self.peer_addr).await;
                             }
                             return Ok(());
                         }
