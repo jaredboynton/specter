@@ -1,9 +1,9 @@
 [package]
 name = "specter"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
-description = "HTTP client with full TLS/HTTP2 fingerprint control"
+description = "HTTP client with full TLS, HTTP/2, and HTTP/3 fingerprint control"
 repository = "https://github.com/jaredboynton/specter"
 keywords = ["http", "http3", "fingerprint", "tls", "boringssl"]
 categories = ["network-programming", "web-programming::http-client"]
@@ -52,6 +52,7 @@ hex = "0.4"
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
+rcgen = "0.14.5"
 
 # Make this crate standalone (not part of parent workspace)
 [workspace]
@@ -60,3 +61,24 @@ hex = "0.4"
 # as transitive dependencies from tokio, quiche, etc., but they are platform-specific
 # and will only be compiled when building for Windows targets. On macOS/Linux, they
 # are automatically excluded from the build.
+
+# Build profiles optimized for M4 Max (16 cores, 128GB RAM)
+[profile.dev]
+# Development: fast compilation, minimal optimization
+opt-level = 0
+debug = true
+incremental = true
+codegen-units = 16  # Parallel codegen for faster builds on 16-core machine
+
+[profile.release]
+# Release: maximum optimization with reasonable compile time
+opt-level = 3
+lto = "thin"  # Thin LTO balances optimization and compile time
+codegen-units = 1  # Single unit for better optimization
+debug = false
+panic = "abort"  # Smaller binary size
+
+[profile.bench]
+# Benchmark profile: same as release but with debug symbols for profiling
+inherits = "release"
+debug = true

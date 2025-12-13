@@ -8,7 +8,7 @@ Specter implements HTTP/1.1, HTTP/2, and HTTP/3 with the same protocol fingerpri
 
 ```toml
 [dependencies]
-specter = "0.1"
+specter = "1.0"
 ```
 
 ## Usage
@@ -192,9 +192,7 @@ pre-commit run --all-files
 
 ## Versioning & Stability
 
-- The crate follows SemVer. While we are `<1.0`, minor releases (`0.x`) may still tweak the public API as we harden the fingerprinting surface.
-- Chrome-fingerprint updates are tagged (`Chrome142`, `Chrome143`, …) so you can pin to the exact browser release you validated against.
-- Once we tag `1.0`, API breaking changes will require a major version bump while fingerprint profile additions remain additive.
+- We follow SemVer. API breaking changes will require a major version bump while fingerprint profile additions remain additive.
 
 ## Responsible Use
 

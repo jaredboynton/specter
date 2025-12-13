@@ -1,6 +1,7 @@
+use boring::ssl::SslAcceptor;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tracing;
@@ -32,6 +33,12 @@ impl MockHttpServer {
         format!("http://127.0.0.1:{}", self.port)
     }
 
+    /// Get the base URL for this server (HTTPS).
+    #[allow(dead_code)]
+    pub fn url_tls(&self) -> String {
+        format!("https://127.0.0.1:{}", self.port)
+    }
+
     /// Start the server in a background task.
     /// The server will handle keep-alive connections and process multiple requests on the same socket.
     #[allow(dead_code)]
@@ -42,6 +49,35 @@ impl MockHttpServer {
                     Ok((stream, _)) => {
                         // Spawn a task to handle each connection
                         tokio::spawn(handle_connection(stream));
+                    }
+                    Err(e) => {
+                        tracing::error!("Accept error: {}", e);
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
+    /// Start the server with TLS support.
+    #[allow(dead_code)]
+    pub fn start_tls(self, acceptor: SslAcceptor) -> tokio::task::JoinHandle<()> {
+        let acceptor = Arc::new(acceptor);
+        tokio::spawn(async move {
+            loop {
+                match self.listener.accept().await {
+                    Ok((stream, _)) => {
+                        let acceptor = acceptor.clone();
+                        tokio::spawn(async move {
+                            match tokio_boring::accept(&acceptor, stream).await {
+                                Ok(tls_stream) => {
+                                    handle_connection(tls_stream).await;
+                                }
+                                Err(e) => {
+                                    tracing::error!("TLS Accept error: {}", e);
+                                }
+                            }
+                        });
                     }
                     Err(e) => {
                         tracing::error!("Accept error: {}", e);
@@ -92,7 +128,10 @@ impl MockHttpServer {
 
 /// Handle a single connection, processing multiple requests if keep-alive is enabled.
 #[allow(dead_code)]
-async fn handle_connection(mut stream: TcpStream) {
+async fn handle_connection<S>(mut stream: S)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     loop {
         // Read request with timeout to detect connection close
         let mut buf = [0u8; 8192];

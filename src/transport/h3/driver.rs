@@ -88,12 +88,27 @@ impl H3Driver {
     }
 
     pub async fn drive(mut self) -> Result<()> {
+        let result = self.drive_loop().await;
+
+        // Propagate error to all pending streams
+        if let Err(ref e) = result {
+            tracing::error!("H3 Driver error: {}", e);
+            for (_, mut stream) in self.streams.drain() {
+                if let Some(tx) = stream.response_tx.take() {
+                    let _ = tx.send(Err(Error::Quic(format!("Driver error: {}", e))));
+                }
+            }
+        }
+
+        result
+    }
+
+    async fn drive_loop(&mut self) -> Result<()> {
         let mut buf = vec![0u8; 65535];
         let mut out = vec![0u8; 1350];
 
         loop {
             // 1. Process sending any pending packets first (egress)
-            // quiche acts as state machine, we must flush generated packets
             loop {
                 match self.conn.send(&mut out) {
                     Ok((len, _)) => {
@@ -111,7 +126,6 @@ impl H3Driver {
             }
 
             // 2. Select: Recv Packet OR Command OR Timeout
-            // quiche::Connection::timeout() tells us how long until next timer event
             let timeout_duration = self.conn.timeout().unwrap_or(Duration::from_secs(60));
 
             tokio::select! {
@@ -120,15 +134,11 @@ impl H3Driver {
                     match cmd {
                         Some(c) => self.handle_command(c).await?,
                         None => {
-                            // Driver dropped (all handles closed)
-                            // Graceful shutdown? sending GOAWAY?
-                            // For now just exit
                             match self.conn.close(true, 0x00, b"Client shutdown") {
                                 Ok(_) => {},
                                 Err(quiche::Error::Done) => {},
                                 Err(_) => {}
                             }
-                            // Flush close packet
                             while let Ok((len, _)) = self.conn.send(&mut out) {
                                 let _ = self.socket.send_to(&out[..len], self.peer_addr).await;
                             }
@@ -145,10 +155,11 @@ impl H3Driver {
                                 let info = quiche::RecvInfo {
                                     from,
                                     to: self.socket.local_addr().unwrap(),
+                                    // to: self.socket.local_addr().unwrap(), // Need to handle unchecked?
+                                    // The original code unwrapped, presumably safe if bound.
                                 };
                                 match self.conn.recv(&mut buf[..len], info) {
                                     Ok(_) => {
-                                        // Process H3 events after receiving QUIC data
                                         self.process_h3_events()?;
                                     }
                                     Err(quiche::Error::Done) => {},
@@ -166,6 +177,17 @@ impl H3Driver {
                 _ = sleep(timeout_duration) => {
                     self.conn.on_timeout();
                 }
+            }
+
+            // Check for connection closure
+            if self.conn.is_closed() {
+                tracing::info!("H3 Driver: Connection closed");
+                for (_id, mut stream) in self.streams.drain() {
+                    if let Some(tx) = stream.response_tx.take() {
+                        let _ = tx.send(Err(Error::Connection("Connection closed".into())));
+                    }
+                }
+                return Ok(());
             }
         }
     }
