@@ -23,12 +23,11 @@ fn test_h3_client_configuration_rfc9114() {
 }
 
 // Additional tests for Alt-Svc parsing (RFC 7838) which is crucial for H3 discovery.
-use specter::pool::alt_svc::AltSvcEntry;
 
 #[test]
 fn test_altsvc_parsing_rfc7838() {
     // h3=":443"; ma=2592000
-    let header = "h3=\":443\"; ma=2592000";
+    let _header = "h3=\":443\"; ma=2592000";
     // Assuming AltSvcEntry has a parse method or similar logic in AltSvcCache.
     // Checking AltSvcCache outline: parse_and_store.
     // Checking internal parse logic if exposed?

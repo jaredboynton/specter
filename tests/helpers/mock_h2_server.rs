@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 
 /// A mock HTTP/2 server for testing edge cases and protocol violations.
 /// Allows scripting specific frame sequences to test client robustness.
+#[allow(dead_code)]
 pub struct MockH2Server {
     listener: TcpListener,
     port: u16,
@@ -13,6 +14,7 @@ pub struct MockH2Server {
 
 impl MockH2Server {
     /// Create a new mock H2 server bound to a random port.
+    #[allow(dead_code)]
     pub async fn new() -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -20,17 +22,20 @@ impl MockH2Server {
     }
 
     /// Get the base URL for this server.
+    #[allow(dead_code)]
     pub fn url(&self) -> String {
         format!("https://127.0.0.1:{}", self.port)
     }
 
     /// Get the port this server is listening on.
+    #[allow(dead_code)]
     pub fn port(&self) -> u16 {
         self.port
     }
 
     /// Start the server with a custom handler function.
     /// The handler receives the connection and can send/receive raw frames.
+    #[allow(dead_code)]
     pub fn start<F, Fut>(self, handler: F) -> tokio::task::JoinHandle<()>
     where
         F: Fn(MockH2Connection) -> Fut + Send + Sync + 'static,
@@ -38,25 +43,22 @@ impl MockH2Server {
     {
         let handler = Arc::new(handler);
         tokio::spawn(async move {
-            loop {
-                match self.listener.accept().await {
-                    Ok((stream, _)) => {
-                        let handler_clone = Arc::clone(&handler);
-                        tokio::spawn(async move {
-                            let conn = MockH2Connection::new(stream);
-                            handler_clone(conn).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = self.listener.accept().await {
+                let handler_clone = Arc::clone(&handler);
+                tokio::spawn(async move {
+                    let conn = MockH2Connection::new(stream);
+                    handler_clone(conn).await;
+                });
             }
         })
     }
 }
 
 /// Represents a single HTTP/2 connection for frame-level control.
+#[allow(dead_code)]
 pub struct MockH2Connection {
     stream: Arc<Mutex<TcpStream>>,
+    #[allow(dead_code)]
     buffer: Arc<Mutex<BytesMut>>,
 }
 
@@ -69,6 +71,7 @@ impl MockH2Connection {
     }
 
     /// Read the HTTP/2 connection preface (24 bytes).
+    #[allow(dead_code)]
     pub async fn read_preface(&self) -> std::io::Result<()> {
         let mut stream = self.stream.lock().await;
         let mut preface = [0u8; 24];
@@ -104,6 +107,7 @@ impl MockH2Connection {
     }
 
     /// Read frame payload of given length.
+    #[allow(dead_code)]
     pub async fn read_payload(&self, length: u32) -> std::io::Result<Bytes> {
         let mut stream = self.stream.lock().await;
         let mut payload = vec![0u8; length as usize];
@@ -112,6 +116,7 @@ impl MockH2Connection {
     }
 
     /// Read the next complete frame from the client.
+    #[allow(dead_code)]
     pub async fn read_frame(&self) -> std::io::Result<(u32, u8, u8, u32, Bytes)> {
         let (length, frame_type, flags, stream_id) = self.read_frame_header().await?;
         let payload = if length > 0 {
@@ -154,6 +159,7 @@ impl MockH2Connection {
     }
 
     /// Send SETTINGS frame (frame type 0x04).
+    #[allow(dead_code)]
     pub async fn send_settings(&self, settings: &[(u16, u32)]) -> std::io::Result<()> {
         let mut payload = Vec::new();
         for (id, value) in settings {
@@ -164,17 +170,20 @@ impl MockH2Connection {
     }
 
     /// Send SETTINGS ACK.
+    #[allow(dead_code)]
     pub async fn send_settings_ack(&self) -> std::io::Result<()> {
         self.send_frame(0x04, 0x01, 0, &[]).await
     }
 
     /// Send WINDOW_UPDATE frame (frame type 0x08).
+    #[allow(dead_code)]
     pub async fn send_window_update(&self, stream_id: u32, increment: u32) -> std::io::Result<()> {
         let payload = (increment & 0x7FFFFFFF).to_be_bytes();
         self.send_frame(0x08, 0x00, stream_id, &payload).await
     }
 
     /// Send HEADERS frame (frame type 0x01).
+    #[allow(dead_code)]
     pub async fn send_headers(
         &self,
         stream_id: u32,
@@ -193,6 +202,7 @@ impl MockH2Connection {
     }
 
     /// Send DATA frame (frame type 0x00).
+    #[allow(dead_code)]
     pub async fn send_data(
         &self,
         stream_id: u32,
@@ -204,12 +214,14 @@ impl MockH2Connection {
     }
 
     /// Send RST_STREAM frame (frame type 0x03).
+    #[allow(dead_code)]
     pub async fn send_rst_stream(&self, stream_id: u32, error_code: u32) -> std::io::Result<()> {
         let payload = error_code.to_be_bytes();
         self.send_frame(0x03, 0x00, stream_id, &payload).await
     }
 
     /// Send GOAWAY frame (frame type 0x07).
+    #[allow(dead_code)]
     pub async fn send_goaway(&self, last_stream_id: u32, error_code: u32) -> std::io::Result<()> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&(last_stream_id & 0x7FFFFFFF).to_be_bytes());
@@ -218,6 +230,7 @@ impl MockH2Connection {
     }
 
     /// Send PUSH_PROMISE frame (frame type 0x05).
+    #[allow(dead_code)]
     pub async fn send_push_promise(
         &self,
         stream_id: u32,

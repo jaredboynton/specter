@@ -10,6 +10,7 @@ use tokio::time::timeout;
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};
 
+#[allow(dead_code)]
 async fn perform_handshake(conn: &MockH2Connection) -> std::io::Result<()> {
     conn.read_preface().await?;
     let (_, frame_type, _, _, _) = conn.read_frame().await?;
@@ -39,17 +40,14 @@ async fn test_push_promise_when_disabled() {
         tracing::info!("Server: Handshake start");
         conn.read_preface().await.unwrap();
 
-        let mut stream_id = 0;
-
         // Handshake Loop
-        loop {
+        let stream_id = loop {
             let (len, frame_type, flags, sid, _) = conn.read_frame().await.unwrap();
             tracing::info!("Server: RX Type={} Flags={} Len={}", frame_type, flags, len);
 
             if frame_type == 0x01 {
                 // HEADERS
-                stream_id = sid;
-                break;
+                break sid;
             } else if frame_type == 0x04 && flags & 0x01 == 0 {
                 // Settings (Client)
                 conn.send_settings(&[(0x03, 100), (0x04, 65535)])
@@ -57,7 +55,7 @@ async fn test_push_promise_when_disabled() {
                     .unwrap();
                 conn.send_settings_ack().await.unwrap();
             }
-        }
+        };
 
         tracing::info!("Server: Stream {} HEADERS received", stream_id);
 

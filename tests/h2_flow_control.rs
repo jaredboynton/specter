@@ -10,6 +10,7 @@ use tokio::time::timeout;
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};
 
+#[allow(dead_code)]
 async fn perform_handshake(conn: &MockH2Connection) -> std::io::Result<()> {
     conn.read_preface().await?;
     let (_, frame_type, _, _, _) = conn.read_frame().await?;
@@ -68,7 +69,7 @@ async fn test_large_upload_flow_control() {
         let mut window_update_sent = false;
 
         loop {
-            let (len, frame_type, flags, sid, payload) = conn.read_frame().await.unwrap();
+            let (len, frame_type, flags, sid, _payload) = conn.read_frame().await.unwrap();
             tracing::info!(
                 "Server: received Type={} Flags={} Len={} ID={}",
                 frame_type,

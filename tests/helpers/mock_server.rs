@@ -13,6 +13,7 @@ pub struct MockHttpServer {
 
 impl MockHttpServer {
     /// Create a new mock server bound to a random port.
+    #[allow(dead_code)]
     pub async fn new() -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -26,6 +27,7 @@ impl MockHttpServer {
     }
 
     /// Get the base URL for this server.
+    #[allow(dead_code)]
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
@@ -51,6 +53,7 @@ impl MockHttpServer {
     }
 
     /// Start the server and handle a specific number of requests, then shutdown.
+    #[allow(dead_code)]
     pub fn start_with_request_limit(self, max_requests: usize) -> tokio::task::JoinHandle<()> {
         let listener = self.listener;
         tokio::spawn(async move {
@@ -150,6 +153,7 @@ async fn handle_connection(mut stream: TcpStream) {
 }
 
 /// Handle a connection with a shared request counter.
+#[allow(dead_code)]
 async fn handle_connection_with_shared_counter(
     mut stream: TcpStream,
     request_count: Arc<tokio::sync::Mutex<usize>>,
