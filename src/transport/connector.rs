@@ -1,6 +1,7 @@
 //! BoringSSL TLS connector.
 
 use boring::ssl::{SslConnector, SslMethod, SslSessionCacheMode, SslVersion};
+use boring::x509::X509;
 use http::Uri;
 use std::io;
 use std::io::Read;
@@ -108,6 +109,7 @@ unsafe extern "C" fn decompress_zlib_cert(
 pub struct BoringConnector {
     tls_config: Option<TlsFingerprint>,
     tcp_fingerprint: Option<TcpFingerprint>,
+    root_certs: Vec<Vec<u8>>,
 }
 
 impl BoringConnector {
@@ -116,6 +118,7 @@ impl BoringConnector {
         Self {
             tls_config: None,
             tcp_fingerprint: None,
+            root_certs: Vec::new(),
         }
     }
 
@@ -124,6 +127,7 @@ impl BoringConnector {
         Self {
             tls_config: Some(fp),
             tcp_fingerprint: None,
+            root_certs: Vec::new(),
         }
     }
 
@@ -132,6 +136,7 @@ impl BoringConnector {
         Self {
             tls_config: Some(tls_fp),
             tcp_fingerprint: Some(tcp_fp),
+            root_certs: Vec::new(),
         }
     }
 
@@ -141,9 +146,26 @@ impl BoringConnector {
         self
     }
 
+    /// Add custom root certificates (DER or PEM).
+    pub fn with_root_certificates(mut self, certs: Vec<Vec<u8>>) -> Self {
+        self.root_certs = certs;
+        self
+    }
+
     fn configure_ssl(&self, _domain: &str) -> Result<SslConnector, Error> {
         let mut builder = SslConnector::builder(SslMethod::tls_client())
             .map_err(|e| Error::Tls(format!("Failed to create SSL connector: {}", e)))?;
+
+        // Add custom root certs
+        for cert_bytes in &self.root_certs {
+            if let Ok(cert) = X509::from_der(cert_bytes) {
+                let _ = builder.cert_store_mut().add_cert(cert);
+            } else if let Ok(cert) = X509::from_pem(cert_bytes) {
+                let _ = builder.cert_store_mut().add_cert(cert);
+            } else {
+                // Ignore invalid certs or log warning
+            }
+        }
 
         if let Some(fp) = &self.tls_config {
             // Set cipher list from fingerprint

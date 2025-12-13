@@ -1,7 +1,8 @@
+use boring::ssl::SslAcceptor;
 use bytes::{Bytes, BytesMut};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 /// A mock HTTP/2 server for testing edge cases and protocol violations.
@@ -24,6 +25,12 @@ impl MockH2Server {
     /// Get the base URL for this server.
     #[allow(dead_code)]
     pub fn url(&self) -> String {
+        format!("https://127.0.0.1:{}", self.port)
+    }
+
+    /// Get the base URL for this server (HTTPS).
+    #[allow(dead_code)]
+    pub fn url_tls(&self) -> String {
         format!("https://127.0.0.1:{}", self.port)
     }
 
@@ -52,20 +59,57 @@ impl MockH2Server {
             }
         })
     }
+
+    /// Start the server with TLS support.
+    #[allow(dead_code)]
+    pub fn start_tls<F, Fut>(self, acceptor: SslAcceptor, handler: F) -> tokio::task::JoinHandle<()>
+    where
+        F: Fn(MockH2Connection) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let handler = Arc::new(handler);
+        let acceptor = Arc::new(acceptor);
+
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = self.listener.accept().await {
+                let handler_clone = Arc::clone(&handler);
+                let acceptor_clone = acceptor.clone();
+                tokio::spawn(async move {
+                    match tokio_boring::accept(&acceptor_clone, stream).await {
+                        Ok(tls_stream) => {
+                            let conn = MockH2Connection::new(tls_stream);
+                            handler_clone(conn).await;
+                        }
+                        Err(_e) => {
+                            // Handshake failure or expected error
+                        }
+                    }
+                });
+            }
+        })
+    }
 }
 
 /// Represents a single HTTP/2 connection for frame-level control.
 #[allow(dead_code)]
 pub struct MockH2Connection {
-    stream: Arc<Mutex<TcpStream>>,
+    // Boxed stream to allow TcpStream or TlsStream
+    stream: Arc<Mutex<Box<dyn AsyncReadWrite + Send>>>,
     #[allow(dead_code)]
     buffer: Arc<Mutex<BytesMut>>,
 }
 
+// Helper trait for Box
+trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Unpin> AsyncReadWrite for T {}
+
 impl MockH2Connection {
-    fn new(stream: TcpStream) -> Self {
+    fn new<S>(stream: S) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         Self {
-            stream: Arc::new(Mutex::new(stream)),
+            stream: Arc::new(Mutex::new(Box::new(stream))),
             buffer: Arc::new(Mutex::new(BytesMut::with_capacity(8192))),
         }
     }

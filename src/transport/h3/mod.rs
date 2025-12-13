@@ -21,6 +21,7 @@ use crate::response::Response;
 #[derive(Debug, Clone)]
 pub struct H3Client {
     tls_fingerprint: Option<TlsFingerprint>,
+    verify_peer: bool,
     // In future: connection pool
 }
 
@@ -34,13 +35,21 @@ impl H3Client {
     pub fn new() -> Self {
         Self {
             tls_fingerprint: None,
+            verify_peer: true,
         }
     }
 
     pub fn with_fingerprint(fp: TlsFingerprint) -> Self {
         Self {
             tls_fingerprint: Some(fp),
+            verify_peer: true,
         }
+    }
+
+    /// Disable server certificate verification (for testing)
+    pub fn danger_accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.verify_peer = !accept;
+        self
     }
 
     /// Send a request.
@@ -90,6 +99,9 @@ impl H3Client {
 
             let mut ssl_ctx_builder = SslContextBuilder::new(SslMethod::tls_client())
                 .map_err(|e| Error::Tls(format!("Failed to create SSL context: {}", e)))?;
+
+            // Load system default root certificates
+            let _ = ssl_ctx_builder.set_default_verify_paths();
 
             // TLS 1.3 cipher suites (TLS_AES_128_GCM_SHA256, etc.) are not configurable
             // as they are determined by the QUIC implementation.
@@ -168,6 +180,8 @@ impl H3Client {
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
         config.set_disable_active_migration(true);
+
+        config.verify_peer(self.verify_peer);
 
         Ok(config)
     }

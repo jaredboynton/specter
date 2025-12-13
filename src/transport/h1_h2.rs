@@ -72,6 +72,7 @@ pub struct ClientBuilder {
     prefer_http2: bool,
     h3_upgrade_enabled: bool,
     http2_prior_knowledge: bool,
+    root_certs: Vec<Vec<u8>>,
 }
 
 impl Client {
@@ -699,6 +700,7 @@ impl ClientBuilder {
 
             h3_upgrade_enabled: true, // Enable by default
             http2_prior_knowledge: false,
+            root_certs: Vec::new(),
         }
     }
 
@@ -754,11 +756,18 @@ impl ClientBuilder {
         self
     }
 
+    /// Add a custom root certificate (DER or PEM) to the trust store.
+    pub fn add_root_certificate(mut self, cert: Vec<u8>) -> Self {
+        self.root_certs.push(cert);
+        self
+    }
+
     /// Build the client.
     pub fn build(self) -> Result<Client> {
         // Create connector with TLS fingerprint
         let tls_fingerprint = self.fingerprint.tls_fingerprint();
-        let connector = BoringConnector::with_fingerprint(tls_fingerprint.clone());
+        let connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
+            .with_root_certificates(self.root_certs);
 
         // Create H3 client with same TLS fingerprint
         let h3_client = H3Client::with_fingerprint(tls_fingerprint);
