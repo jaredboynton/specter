@@ -696,7 +696,7 @@ impl ClientBuilder {
             http2_settings: None,
             pseudo_order: PseudoHeaderOrder::Chrome,
             timeout: None,
-            prefer_http2: false,
+            prefer_http2: true, // HTTP/2 preferred by default (falls back to HTTP/1.1 if not supported)
 
             h3_upgrade_enabled: true, // Enable by default
             http2_prior_knowledge: false,
