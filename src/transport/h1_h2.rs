@@ -231,16 +231,16 @@ impl<'a> RequestBuilder<'a> {
             host.to_string()
         };
 
+        // Build URI with scheme and authority for HTTP/2
+        // Note: http::Request::builder() doesn't accept pseudo-headers via .header()
+        // The :method, :scheme, :authority, :path pseudo-headers are set implicitly
+        // via .method() and .uri() - the URI must include scheme+authority for HTTP/2
+        let full_uri = format!("https://{}{}", authority, path);
         let mut request_builder = http::Request::builder()
             .method(self.method.clone())
-            .uri(path);
+            .uri(&full_uri);
 
-        // Add pseudo headers
-        request_builder = request_builder
-            .header(":authority", &authority)
-            .header(":scheme", "https");
-
-        // Add custom headers
+        // Add custom headers (pseudo-headers are derived from method/uri)
         for (key, value) in &self.headers {
             request_builder = request_builder.header(key.as_str(), value.as_str());
         }
