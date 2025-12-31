@@ -20,6 +20,7 @@ use crate::fingerprint::{http2::Http2Settings, FingerprintProfile};
 use crate::pool::alt_svc::AltSvcCache;
 use crate::pool::multiplexer::{ConnectionPool, PoolKey};
 use crate::response::Response;
+use crate::timeouts::Timeouts;
 use crate::transport::connector::{BoringConnector, MaybeHttpsStream};
 use crate::transport::h1::H1Connection;
 use crate::transport::h2::{H2Connection, H2PooledConnection, PseudoHeaderOrder};
@@ -46,7 +47,8 @@ pub struct Client {
     http2_settings: Http2Settings,
     pseudo_order: PseudoHeaderOrder,
     default_version: HttpVersion,
-    timeout: Option<Duration>,
+    /// Timeout configuration
+    timeouts: Timeouts,
     /// Whether to opportunistically try HTTP/3 when Alt-Svc indicates support
     h3_upgrade_enabled: bool,
     /// Force HTTP/2 prior knowledge (H2C) for cleartext connections
@@ -68,7 +70,7 @@ pub struct ClientBuilder {
     fingerprint: FingerprintProfile,
     http2_settings: Option<Http2Settings>,
     pseudo_order: PseudoHeaderOrder,
-    timeout: Option<Duration>,
+    timeouts: Timeouts,
     prefer_http2: bool,
     h3_upgrade_enabled: bool,
     http2_prior_knowledge: bool,
@@ -199,7 +201,15 @@ impl<'a> RequestBuilder<'a> {
         let _pool_key = Self::make_pool_key(&uri);
 
         // For HTTP/2 streaming, we need direct connection access (no pooling for streaming)
-        let stream = self.client.connector.connect(&uri).await?;
+        // Apply connect timeout to TCP + TLS handshake
+        let connect_fut = self.client.connector.connect(&uri);
+        let stream = if let Some(connect_timeout) = self.client.timeouts.connect {
+            tokio_timeout(connect_timeout, connect_fut)
+                .await
+                .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+        } else {
+            connect_fut.await?
+        };
 
         // Ensure ALPN negotiated h2
         let alpn = stream.alpn_protocol();
@@ -210,13 +220,19 @@ impl<'a> RequestBuilder<'a> {
             )));
         }
 
-        // Create H2 connection
-        let mut h2_conn = H2Connection::connect(
+        // Create H2 connection (part of connect phase)
+        let h2_connect_fut = H2Connection::connect(
             stream,
             self.client.http2_settings.clone(),
             self.client.pseudo_order,
-        )
-        .await?;
+        );
+        let mut h2_conn = if let Some(connect_timeout) = self.client.timeouts.connect {
+            tokio_timeout(connect_timeout, h2_connect_fut)
+                .await
+                .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+        } else {
+            h2_connect_fut.await?
+        };
 
         // Build HTTP request
         let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
@@ -250,8 +266,15 @@ impl<'a> RequestBuilder<'a> {
             .body(body)
             .map_err(|e| Error::HttpProtocol(format!("Failed to build request: {}", e)))?;
 
-        // Send streaming request
-        let (response, rx) = h2_conn.send_request_streaming(request).await?;
+        // Send streaming request with TTFB timeout
+        let send_fut = h2_conn.send_request_streaming(request);
+        let (response, rx) = if let Some(ttfb_timeout) = self.client.timeouts.ttfb {
+            tokio_timeout(ttfb_timeout, send_fut)
+                .await
+                .map_err(|_| Error::TtfbTimeout(ttfb_timeout))??
+        } else {
+            send_fut.await?
+        };
 
         // Spawn task to read streaming frames
         tokio::spawn(async move {
@@ -370,10 +393,11 @@ impl<'a> RequestBuilder<'a> {
             self.body.clone(),
         );
 
-        let response = if let Some(timeout_duration) = self.client.timeout {
-            tokio_timeout(timeout_duration, fut)
+        // Apply total timeout for HTTP/3 (includes connect + request + response)
+        let response = if let Some(total_timeout) = self.client.timeouts.total {
+            tokio_timeout(total_timeout, fut)
                 .await
-                .map_err(|_| Error::Timeout("HTTP/3 request timed out".into()))??
+                .map_err(|_| Error::TotalTimeout(total_timeout))??
         } else {
             fut.await?
         };
@@ -452,7 +476,15 @@ impl<'a> RequestBuilder<'a> {
             }
 
             // No pooled connection or it failed - create new one
-            let stream = self.client.connector.connect(&uri).await?;
+            // Apply connect timeout
+            let connect_fut = self.client.connector.connect(&uri);
+            let stream = if let Some(connect_timeout) = self.client.timeouts.connect {
+                tokio_timeout(connect_timeout, connect_fut)
+                    .await
+                    .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+            } else {
+                connect_fut.await?
+            };
 
             // Verify ALPN negotiated h2
             let use_http2 = if self.client.http2_prior_knowledge && !stream.alpn_protocol().is_h2()
@@ -481,7 +513,7 @@ impl<'a> RequestBuilder<'a> {
                     pool.insert(pool_key, pooled_conn.clone());
                 }
 
-                // Send request
+                // Send request with TTFB timeout
                 let fut = pooled_conn.send_request(
                     self.method,
                     &uri,
@@ -489,10 +521,10 @@ impl<'a> RequestBuilder<'a> {
                     self.body.map(Bytes::from),
                 );
 
-                let response = if let Some(timeout_duration) = self.client.timeout {
-                    tokio_timeout(timeout_duration, fut)
+                let response = if let Some(ttfb_timeout) = self.client.timeouts.ttfb {
+                    tokio_timeout(ttfb_timeout, fut)
                         .await
-                        .map_err(|_| Error::Timeout("Request timed out".into()))?
+                        .map_err(|_| Error::TtfbTimeout(ttfb_timeout))?
                 } else {
                     fut.await
                 }?;
@@ -510,7 +542,15 @@ impl<'a> RequestBuilder<'a> {
         }
 
         // HTTP/1.1 path (with connection pooling)
-        let stream = self.client.connector.connect(&uri).await?;
+        // Apply connect timeout
+        let connect_fut = self.client.connector.connect(&uri);
+        let stream = if let Some(connect_timeout) = self.client.timeouts.connect {
+            tokio_timeout(connect_timeout, connect_fut)
+                .await
+                .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+        } else {
+            connect_fut.await?
+        };
 
         // Check if server negotiated HTTP/2 via ALPN - if so, we must use HTTP/2
         // even though we preferred HTTP/1.1 (server choice takes precedence)
@@ -539,6 +579,7 @@ impl<'a> RequestBuilder<'a> {
                 pool.insert(pool_key, pooled_conn.clone());
             }
 
+            // Send request with TTFB timeout
             let fut = pooled_conn.send_request(
                 self.method,
                 &uri,
@@ -546,10 +587,10 @@ impl<'a> RequestBuilder<'a> {
                 self.body.map(Bytes::from),
             );
 
-            if let Some(timeout_duration) = self.client.timeout {
-                tokio_timeout(timeout_duration, fut)
+            if let Some(ttfb_timeout) = self.client.timeouts.ttfb {
+                tokio_timeout(ttfb_timeout, fut)
                     .await
-                    .map_err(|_| Error::Timeout("Request timed out".into()))?
+                    .map_err(|_| Error::TtfbTimeout(ttfb_timeout))?
             } else {
                 fut.await
             }?
@@ -567,7 +608,15 @@ impl<'a> RequestBuilder<'a> {
                 stream
             } else {
                 tracing::debug!("H1: Creating new connection for {:?}", pool_key);
-                self.client.connector.connect(&uri).await?
+                // Apply connect timeout
+                let connect_fut = self.client.connector.connect(&uri);
+                if let Some(connect_timeout) = self.client.timeouts.connect {
+                    tokio_timeout(connect_timeout, connect_fut)
+                        .await
+                        .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+                } else {
+                    connect_fut.await?
+                }
             };
 
             // Send request - retry with new connection if pooled connection fails
@@ -581,10 +630,11 @@ impl<'a> RequestBuilder<'a> {
                     self.body.clone().map(Bytes::from),
                 );
 
-                let request_result = if let Some(timeout_duration) = self.client.timeout {
-                    tokio_timeout(timeout_duration, fut)
+                // Apply TTFB timeout for HTTP/1.1 request
+                let request_result = if let Some(ttfb_timeout) = self.client.timeouts.ttfb {
+                    tokio_timeout(ttfb_timeout, fut)
                         .await
-                        .map_err(|_| Error::Timeout("Request timed out".into()))?
+                        .map_err(|_| Error::TtfbTimeout(ttfb_timeout))?
                 } else {
                     fut.await
                 };
@@ -606,8 +656,15 @@ impl<'a> RequestBuilder<'a> {
                                 pool_key,
                                 e
                             );
-                            // Try again with a fresh connection
-                            stream = self.client.connector.connect(&uri).await?;
+                            // Try again with a fresh connection (with connect timeout)
+                            let connect_fut = self.client.connector.connect(&uri);
+                            stream = if let Some(connect_timeout) = self.client.timeouts.connect {
+                                tokio_timeout(connect_timeout, connect_fut)
+                                    .await
+                                    .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+                            } else {
+                                connect_fut.await?
+                            };
                             used_pooled = false; // Mark that we're no longer using a pooled connection
                             continue;
                         } else {
@@ -690,14 +747,16 @@ impl<'a> RequestBuilder<'a> {
 
 impl ClientBuilder {
     /// Create a new client builder with default settings.
+    ///
+    /// By default, no timeouts are set. Use `timeouts()`, `api_timeouts()`,
+    /// or `streaming_timeouts()` to configure timeouts.
     pub fn new() -> Self {
         Self {
             fingerprint: FingerprintProfile::default(),
             http2_settings: None,
             pseudo_order: PseudoHeaderOrder::Chrome,
-            timeout: None,
+            timeouts: Timeouts::default(),
             prefer_http2: true, // HTTP/2 preferred by default (falls back to HTTP/1.1 if not supported)
-
             h3_upgrade_enabled: true, // Enable by default
             http2_prior_knowledge: false,
             root_certs: Vec::new(),
@@ -722,9 +781,77 @@ impl ClientBuilder {
         self
     }
 
-    /// Set request timeout.
+    /// Set complete timeout configuration.
+    ///
+    /// See [`Timeouts`] for available presets and individual timeout types.
+    pub fn timeouts(mut self, timeouts: Timeouts) -> Self {
+        self.timeouts = timeouts;
+        self
+    }
+
+    /// Use API-optimized timeout defaults.
+    ///
+    /// Equivalent to `timeouts(Timeouts::api_defaults())`.
+    pub fn api_timeouts(mut self) -> Self {
+        self.timeouts = Timeouts::api_defaults();
+        self
+    }
+
+    /// Use streaming-optimized timeout defaults.
+    ///
+    /// Equivalent to `timeouts(Timeouts::streaming_defaults())`.
+    /// Best for SSE, chunked downloads, and other streaming responses.
+    pub fn streaming_timeouts(mut self) -> Self {
+        self.timeouts = Timeouts::streaming_defaults();
+        self
+    }
+
+    /// Set total request timeout (backward compatibility).
+    ///
+    /// This sets only the total deadline. For more granular control,
+    /// use `timeouts()` or individual timeout setters.
+    #[deprecated(
+        since = "1.0.2",
+        note = "Use `timeouts()` or `total_timeout()` instead"
+    )]
     pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
+        self.timeouts.total = Some(timeout);
+        self
+    }
+
+    /// Set total request deadline timeout.
+    pub fn total_timeout(mut self, timeout: Duration) -> Self {
+        self.timeouts.total = Some(timeout);
+        self
+    }
+
+    /// Set connect timeout (TCP + TLS handshake).
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.timeouts.connect = Some(timeout);
+        self
+    }
+
+    /// Set TTFB (time-to-first-byte) timeout.
+    pub fn ttfb_timeout(mut self, timeout: Duration) -> Self {
+        self.timeouts.ttfb = Some(timeout);
+        self
+    }
+
+    /// Set read idle timeout (resets on each chunk received).
+    pub fn read_timeout(mut self, timeout: Duration) -> Self {
+        self.timeouts.read_idle = Some(timeout);
+        self
+    }
+
+    /// Set write idle timeout (resets on each chunk sent).
+    pub fn write_timeout(mut self, timeout: Duration) -> Self {
+        self.timeouts.write_idle = Some(timeout);
+        self
+    }
+
+    /// Set pool acquire timeout.
+    pub fn pool_acquire_timeout(mut self, timeout: Duration) -> Self {
+        self.timeouts.pool_acquire = Some(timeout);
         self
     }
 
@@ -791,8 +918,7 @@ impl ClientBuilder {
             http2_settings,
             pseudo_order: self.pseudo_order,
             default_version,
-            timeout: self.timeout,
-
+            timeouts: self.timeouts,
             h3_upgrade_enabled: self.h3_upgrade_enabled,
             http2_prior_knowledge: self.http2_prior_knowledge,
         })

@@ -12,6 +12,7 @@ pub mod cookie;
 pub mod error;
 pub mod headers;
 pub mod response;
+pub mod timeouts;
 pub mod version;
 
 // Fingerprinting
@@ -29,6 +30,7 @@ pub use error::{Error, Result};
 pub use fingerprint::{FingerprintProfile, PriorityTree};
 pub use headers::OrderedHeaders;
 pub use response::Response;
+pub use timeouts::{recv_with_idle_timeout, Timeouts};
 pub use version::HttpVersion;
 
 // Transport re-exports

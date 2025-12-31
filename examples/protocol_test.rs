@@ -17,7 +17,7 @@
 
 use specter::headers::chrome_142_headers;
 use specter::{ClientBuilder, FingerprintProfile, HttpVersion};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::info;
 
 #[derive(Debug)]
@@ -281,7 +281,7 @@ async fn test_http1_explicit(url: &str, _verbose: bool) -> TestResult {
 
     let client = match ClientBuilder::new()
         .fingerprint(FingerprintProfile::Chrome142)
-        .timeout(Duration::from_secs(30))
+        .api_timeouts()
         .build()
     {
         Ok(c) => c,
@@ -319,7 +319,7 @@ async fn test_http2_explicit(url: &str, _verbose: bool) -> TestResult {
     let client = match ClientBuilder::new()
         .fingerprint(FingerprintProfile::Chrome142)
         .prefer_http2(true)
-        .timeout(Duration::from_secs(30))
+        .api_timeouts()
         .build()
     {
         Ok(c) => c,
@@ -360,7 +360,7 @@ async fn test_http2_auto_upgrade(url: &str, _verbose: bool) -> TestResult {
     let client = match ClientBuilder::new()
         .fingerprint(FingerprintProfile::Chrome142)
         .prefer_http2(false) // Prefer H1, but should upgrade if server selects H2
-        .timeout(Duration::from_secs(30))
+        .api_timeouts()
         .build()
     {
         Ok(c) => c,
@@ -395,7 +395,7 @@ async fn test_http2_pooling(url: &str, _verbose: bool) -> TestResult {
     let client = match ClientBuilder::new()
         .fingerprint(FingerprintProfile::Chrome142)
         .prefer_http2(true)
-        .timeout(Duration::from_secs(30))
+        .api_timeouts()
         .build()
     {
         Ok(c) => c,
@@ -443,7 +443,7 @@ async fn test_http3_explicit(url: &str, _verbose: bool) -> TestResult {
 
     let client = match ClientBuilder::new()
         .fingerprint(FingerprintProfile::Chrome142)
-        .timeout(Duration::from_secs(30))
+        .api_timeouts()
         .build()
     {
         Ok(c) => c,
@@ -487,7 +487,7 @@ async fn test_connection_header_filtering(url: &str, _verbose: bool) -> TestResu
     let client = match ClientBuilder::new()
         .fingerprint(FingerprintProfile::Chrome142)
         .prefer_http2(true)
-        .timeout(Duration::from_secs(30))
+        .api_timeouts()
         .build()
     {
         Ok(c) => c,
@@ -546,7 +546,7 @@ async fn test_post_request(base_url: &str, _verbose: bool) -> TestResult {
     let client = match ClientBuilder::new()
         .fingerprint(FingerprintProfile::Chrome142)
         .prefer_http2(true)
-        .timeout(Duration::from_secs(30))
+        .api_timeouts()
         .build()
     {
         Ok(c) => c,

@@ -48,9 +48,33 @@ pub enum Error {
     #[error("Missing required: {0}")]
     Missing(String),
 
-    /// Timeout error.
+    /// Generic timeout error.
     #[error("Operation timed out: {0}")]
     Timeout(String),
+
+    /// Connect timeout (TCP + TLS handshake).
+    #[error("Connect timeout after {0:?}")]
+    ConnectTimeout(std::time::Duration),
+
+    /// TTFB (time-to-first-byte) timeout.
+    #[error("TTFB timeout after {0:?} - server did not respond with headers")]
+    TtfbTimeout(std::time::Duration),
+
+    /// Read idle timeout (no data received within duration).
+    #[error("Read idle timeout after {0:?} - stream may be hung")]
+    ReadIdleTimeout(std::time::Duration),
+
+    /// Write idle timeout (could not send data within duration).
+    #[error("Write idle timeout after {0:?}")]
+    WriteIdleTimeout(std::time::Duration),
+
+    /// Total request deadline exceeded.
+    #[error("Total request deadline exceeded after {0:?}")]
+    TotalTimeout(std::time::Duration),
+
+    /// Pool acquire timeout (no connection available).
+    #[error("Pool acquire timeout after {0:?} - no connections available")]
+    PoolAcquireTimeout(std::time::Duration),
 
     /// Connection error.
     #[error("Connection error: {0}")]
