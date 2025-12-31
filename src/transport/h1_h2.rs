@@ -542,14 +542,27 @@ impl<'a> RequestBuilder<'a> {
         }
 
         // HTTP/1.1 path (with connection pooling)
-        // Apply connect timeout
-        let connect_fut = self.client.connector.connect(&uri);
-        let stream = if let Some(connect_timeout) = self.client.timeouts.connect {
-            tokio_timeout(connect_timeout, connect_fut)
-                .await
-                .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+        let pool_key = Self::make_pool_key(&uri);
+
+        // Try to get a pooled connection first
+        let mut stream_opt = self.client.h1_pool.get_h1(&pool_key).await;
+        let mut used_pooled = stream_opt.is_some();
+
+        // If no pooled connection, create a new one
+        let mut stream = if let Some(pooled_stream) = stream_opt.take() {
+            tracing::debug!("H1: Reusing pooled connection for {:?}", pool_key);
+            pooled_stream
         } else {
-            connect_fut.await?
+            tracing::debug!("H1: Creating new connection for {:?}", pool_key);
+            // Apply connect timeout
+            let connect_fut = self.client.connector.connect(&uri);
+            if let Some(connect_timeout) = self.client.timeouts.connect {
+                tokio_timeout(connect_timeout, connect_fut)
+                    .await
+                    .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+            } else {
+                connect_fut.await?
+            }
         };
 
         // Check if server negotiated HTTP/2 via ALPN - if so, we must use HTTP/2
@@ -573,7 +586,6 @@ impl<'a> RequestBuilder<'a> {
             let pooled_conn = H2PooledConnection::new(h2_conn);
 
             // Store in pool for reuse
-            let pool_key = Self::make_pool_key(&uri);
             {
                 let mut pool = self.client.h2_pool.write().await;
                 pool.insert(pool_key, pooled_conn.clone());
@@ -595,29 +607,7 @@ impl<'a> RequestBuilder<'a> {
                 fut.await
             }?
         } else {
-            // HTTP/1.1 as expected - use connection pooling
-            let pool_key = Self::make_pool_key(&uri);
-
-            // Try to get a pooled connection
-            let mut stream_opt = self.client.h1_pool.get_h1(&pool_key).await;
-            let mut used_pooled = stream_opt.is_some();
-
-            // If no pooled connection, create a new one
-            let mut stream = if let Some(stream) = stream_opt.take() {
-                tracing::debug!("H1: Reusing pooled connection for {:?}", pool_key);
-                stream
-            } else {
-                tracing::debug!("H1: Creating new connection for {:?}", pool_key);
-                // Apply connect timeout
-                let connect_fut = self.client.connector.connect(&uri);
-                if let Some(connect_timeout) = self.client.timeouts.connect {
-                    tokio_timeout(connect_timeout, connect_fut)
-                        .await
-                        .map_err(|_| Error::ConnectTimeout(connect_timeout))??
-                } else {
-                    connect_fut.await?
-                }
-            };
+            // HTTP/1.1 - use the stream we already connected (or got from pool)
 
             // Send request - retry with new connection if pooled connection fails
             let result = loop {
