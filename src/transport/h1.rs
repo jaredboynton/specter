@@ -212,8 +212,21 @@ impl H1Connection {
         } else if let Some(len) = content_length {
             self.read_fixed_body(body_start, len).await?
         } else {
-            // No Content-Length and not chunked - response may be empty or use connection-close
-            Bytes::from(body_start.to_vec())
+            // No Content-Length and not chunked:
+            // Per RFC 7230 §3.3.3, the message body is delimited by connection close.
+            // Read until EOF to get the full body.
+            let mut body = body_start.to_vec();
+            let mut read_buf = vec![0u8; 8192];
+            loop {
+                let n = self.stream.read(&mut read_buf).await.map_err(|e| {
+                    Error::HttpProtocol(format!("Failed to read body (close-delimited): {}", e))
+                })?;
+                if n == 0 {
+                    break;
+                }
+                body.extend_from_slice(&read_buf[..n]);
+            }
+            Bytes::from(body)
         };
 
         Ok(Response::new(status, response_headers, body, version))
