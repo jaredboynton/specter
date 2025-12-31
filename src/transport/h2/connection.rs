@@ -771,8 +771,13 @@ where
             if !initial_body.is_empty() {
                 let mut offset = 0;
                 let body_len = initial_body.len();
-                let mut retry_count = 0;
-                const MAX_FLOW_CONTROL_RETRIES: u32 = 100;
+
+                // Use time-based deadline instead of retry count.
+                // The server may take time to send WINDOW_UPDATE frames, especially
+                // for large request bodies that exceed the initial 64KB window.
+                const FLOW_CONTROL_TIMEOUT_SECS: u64 = 30;
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(FLOW_CONTROL_TIMEOUT_SECS);
 
                 while offset < body_len {
                     let remaining = &initial_body[offset..];
@@ -782,35 +787,45 @@ where
 
                     if sent > 0 {
                         offset += sent;
-                        retry_count = 0; // Reset retry count on progress
                     } else {
                         // Flow control window exhausted - read frames to get WINDOW_UPDATE
-                        retry_count += 1;
-                        if retry_count > MAX_FLOW_CONTROL_RETRIES {
-                            return Err(Error::HttpProtocol(
-                                "Flow control blocked: no WINDOW_UPDATE received after retries"
-                                    .into(),
-                            ));
+                        if std::time::Instant::now() > deadline {
+                            return Err(Error::HttpProtocol(format!(
+                                "Flow control blocked: no WINDOW_UPDATE received within {}s timeout (body size: {} bytes, sent: {} bytes, conn_send_window: {})",
+                                FLOW_CONTROL_TIMEOUT_SECS, body_len, offset, self.conn_send_window
+                            )));
                         }
 
-                        // Read and process one frame (may be SETTINGS, WINDOW_UPDATE, etc.)
-                        let (header, payload) = self.read_next_frame().await?;
-
-                        // Handle control frames (SETTINGS, WINDOW_UPDATE, PING, etc.)
-                        match self.handle_control_frame(&header, payload.clone()).await? {
-                            ControlAction::GoAway(_) => {
-                                return Err(Error::HttpProtocol(
-                                    "GOAWAY received while sending request body".into(),
-                                ));
+                        // Read and process one frame with a short timeout.
+                        // Use tokio timeout to avoid blocking indefinitely if no frames arrive.
+                        let read_timeout = std::time::Duration::from_millis(100);
+                        match tokio::time::timeout(read_timeout, self.read_next_frame()).await {
+                            Ok(Ok((header, payload))) => {
+                                // Handle control frames (SETTINGS, WINDOW_UPDATE, PING, etc.)
+                                match self.handle_control_frame(&header, payload.clone()).await? {
+                                    ControlAction::GoAway(_) => {
+                                        return Err(Error::HttpProtocol(
+                                            "GOAWAY received while sending request body".into(),
+                                        ));
+                                    }
+                                    ControlAction::RstStream(sid, code) if sid == stream_id => {
+                                        return Err(Error::HttpProtocol(format!(
+                                            "Stream reset while sending body: {:?}",
+                                            code
+                                        )));
+                                    }
+                                    _ => {
+                                        // WINDOW_UPDATE or other frame processed, continue sending
+                                    }
+                                }
                             }
-                            ControlAction::RstStream(sid, code) if sid == stream_id => {
-                                return Err(Error::HttpProtocol(format!(
-                                    "Stream reset while sending body: {:?}",
-                                    code
-                                )));
+                            Ok(Err(e)) => {
+                                // Read error
+                                return Err(e);
                             }
-                            _ => {
-                                // WINDOW_UPDATE processed, continue sending
+                            Err(_) => {
+                                // Timeout - no frame available yet, continue waiting
+                                // This prevents tight-looping when server hasn't sent frames yet
                             }
                         }
                     }
