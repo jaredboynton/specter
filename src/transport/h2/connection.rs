@@ -763,13 +763,57 @@ where
             // Send the initial request body if present.
             // The request body is sent immediately; subsequent streaming data is handled
             // via the channel returned to the caller.
+            //
+            // Flow control handling: Large request bodies may exceed the initial window size.
+            // We handle this by sending in chunks, reading incoming frames (to process
+            // WINDOW_UPDATE and SETTINGS), and continuing until all data is sent.
             let initial_body = request.body();
             if !initial_body.is_empty() {
-                let sent = self.send_data(stream_id, initial_body, true).await?;
-                if sent < initial_body.len() {
-                    return Err(Error::HttpProtocol(
-                        "Flow control blocked initial body in streaming request".into(),
-                    ));
+                let mut offset = 0;
+                let body_len = initial_body.len();
+                let mut retry_count = 0;
+                const MAX_FLOW_CONTROL_RETRIES: u32 = 100;
+
+                while offset < body_len {
+                    let remaining = &initial_body[offset..];
+                    // Pass end_stream=true; send_data only sets END_STREAM flag when
+                    // it sends all remaining data in one frame
+                    let sent = self.send_data(stream_id, remaining, true).await?;
+
+                    if sent > 0 {
+                        offset += sent;
+                        retry_count = 0; // Reset retry count on progress
+                    } else {
+                        // Flow control window exhausted - read frames to get WINDOW_UPDATE
+                        retry_count += 1;
+                        if retry_count > MAX_FLOW_CONTROL_RETRIES {
+                            return Err(Error::HttpProtocol(
+                                "Flow control blocked: no WINDOW_UPDATE received after retries"
+                                    .into(),
+                            ));
+                        }
+
+                        // Read and process one frame (may be SETTINGS, WINDOW_UPDATE, etc.)
+                        let (header, payload) = self.read_next_frame().await?;
+
+                        // Handle control frames (SETTINGS, WINDOW_UPDATE, PING, etc.)
+                        match self.handle_control_frame(&header, payload.clone()).await? {
+                            ControlAction::GoAway(_) => {
+                                return Err(Error::HttpProtocol(
+                                    "GOAWAY received while sending request body".into(),
+                                ));
+                            }
+                            ControlAction::RstStream(sid, code) if sid == stream_id => {
+                                return Err(Error::HttpProtocol(format!(
+                                    "Stream reset while sending body: {:?}",
+                                    code
+                                )));
+                            }
+                            _ => {
+                                // WINDOW_UPDATE processed, continue sending
+                            }
+                        }
+                    }
                 }
             }
         }
