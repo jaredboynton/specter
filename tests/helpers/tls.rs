@@ -3,6 +3,7 @@ use boring::ssl::{SslAcceptor, SslAcceptorBuilder, SslMethod};
 use boring::x509::X509;
 
 /// Generate a self-signed certificate for 127.0.0.1 and return SslAcceptorBuilder + CA cert bytes.
+#[allow(dead_code)]
 pub fn generate_cert_bundle() -> (SslAcceptorBuilder, Vec<u8>) {
     let subject_alt_names = vec!["127.0.0.1".to_string(), "localhost".to_string()];
 

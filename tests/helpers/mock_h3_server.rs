@@ -6,6 +6,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 
 // Self-signed certificate for testing
+#[allow(dead_code)]
 const CERT_PEM: &str = "-----BEGIN CERTIFICATE-----
 MIICWjCCAcKgAwIBAgIBAzANBgkqhkiG9w0BAQsFADAoMSYwJAYDVQQDDB1xdWlj
 aGUgc2VsZi1zaWduZWQgY2VydGlmaWNhdGUwHhcNMjAwMTAxMDAwMDAwWhcNMzAw
@@ -30,6 +31,7 @@ E/2N+t2tZFxByJg+gN+XfP6Z7Q/X6Z7Q/X6Z7Q/X6Z7Q/X6Z7Q/X6Z7Q/X6Z7Q/X
 // Actually, simpler: write temp files.
 
 /// A mock HTTP/3 server for testing.
+#[allow(dead_code)]
 pub struct MockH3Server {
     socket: Arc<UdpSocket>,
     port: u16,
@@ -322,12 +324,14 @@ impl MockH3Server {
     }
 }
 
+#[allow(dead_code)]
 enum MockCommand {
     SendFrame { stream_id: u64, payload: Vec<u8> },
     SendBytes { stream_id: u64, bytes: Vec<u8> },
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum MockEvent {
     Data {
         stream_id: u64,
@@ -336,6 +340,7 @@ pub enum MockEvent {
     },
 }
 
+#[allow(dead_code)]
 pub struct MockH3Connection {
     cmd_tx: mpsc::Sender<MockCommand>,
     evt_rx: Arc<Mutex<mpsc::Receiver<MockEvent>>>,
@@ -373,6 +378,7 @@ impl MockH3Connection {
     }
 }
 
+#[allow(dead_code)]
 fn encode_varint(buf: &mut Vec<u8>, val: u64) {
     if val <= 63 {
         buf.push(val as u8);

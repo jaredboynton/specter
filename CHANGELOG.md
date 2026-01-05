@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-01-05
+
+### Added
+- **TLS Certificate Verification Control**:
+    - Added `danger_accept_invalid_certs(bool)` to `ClientBuilder` for skipping TLS verification (testing only).
+    - Added `localhost_allows_invalid_certs(bool)` to `ClientBuilder` - enabled by default.
+    - Localhost connections (`localhost`, `127.0.0.1`, `::1`) now automatically skip TLS certificate verification, making local development with self-signed certificates (e.g., mkcert) seamless.
+    - Added `danger_accept_invalid_certs(bool)` to `BoringConnector` for low-level control.
+
 ## [1.0.0] - 2025-12-12
 
 ### Added

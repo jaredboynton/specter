@@ -110,6 +110,8 @@ pub struct BoringConnector {
     tls_config: Option<TlsFingerprint>,
     tcp_fingerprint: Option<TcpFingerprint>,
     root_certs: Vec<Vec<u8>>,
+    /// Skip TLS certificate verification (DANGEROUS - for testing only)
+    danger_accept_invalid_certs: bool,
 }
 
 impl BoringConnector {
@@ -119,6 +121,7 @@ impl BoringConnector {
             tls_config: None,
             tcp_fingerprint: None,
             root_certs: Vec::new(),
+            danger_accept_invalid_certs: false,
         }
     }
 
@@ -128,6 +131,7 @@ impl BoringConnector {
             tls_config: Some(fp),
             tcp_fingerprint: None,
             root_certs: Vec::new(),
+            danger_accept_invalid_certs: false,
         }
     }
 
@@ -137,6 +141,7 @@ impl BoringConnector {
             tls_config: Some(tls_fp),
             tcp_fingerprint: Some(tcp_fp),
             root_certs: Vec::new(),
+            danger_accept_invalid_certs: false,
         }
     }
 
@@ -152,9 +157,24 @@ impl BoringConnector {
         self
     }
 
+    /// Skip TLS certificate verification.
+    ///
+    /// # Safety
+    /// This is DANGEROUS and should only be used for testing with localhost
+    /// or other trusted local development environments. Never use in production.
+    pub fn danger_accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.danger_accept_invalid_certs = accept;
+        self
+    }
+
     fn configure_ssl(&self, _domain: &str) -> Result<SslConnector, Error> {
         let mut builder = SslConnector::builder(SslMethod::tls_client())
             .map_err(|e| Error::Tls(format!("Failed to create SSL connector: {}", e)))?;
+
+        // Skip certificate verification if danger_accept_invalid_certs is enabled
+        if self.danger_accept_invalid_certs {
+            builder.set_verify(boring::ssl::SslVerifyMode::NONE);
+        }
 
         // Add custom root certs
         for cert_bytes in &self.root_certs {

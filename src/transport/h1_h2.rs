@@ -38,6 +38,8 @@ use crate::version::HttpVersion;
 #[derive(Clone)]
 pub struct Client {
     connector: BoringConnector,
+    /// Connector with TLS verification disabled (for localhost)
+    insecure_connector: BoringConnector,
     h3_client: H3Client,
     alt_svc_cache: Arc<AltSvcCache>,
     /// HTTP/2 connection pool for multiplexing
@@ -53,6 +55,10 @@ pub struct Client {
     h3_upgrade_enabled: bool,
     /// Force HTTP/2 prior knowledge (H2C) for cleartext connections
     http2_prior_knowledge: bool,
+    /// Skip TLS verification for all connections
+    danger_accept_invalid_certs: bool,
+    /// Skip TLS verification for localhost connections only
+    localhost_allows_invalid_certs: bool,
 }
 
 /// Builder for HTTP requests.
@@ -75,6 +81,10 @@ pub struct ClientBuilder {
     h3_upgrade_enabled: bool,
     http2_prior_knowledge: bool,
     root_certs: Vec<Vec<u8>>,
+    /// Skip TLS certificate verification (DANGEROUS - for testing only)
+    danger_accept_invalid_certs: bool,
+    /// Automatically skip TLS verification for localhost connections
+    localhost_allows_invalid_certs: bool,
 }
 
 impl Client {
@@ -147,6 +157,30 @@ impl Client {
     pub fn alt_svc_cache(&self) -> &Arc<AltSvcCache> {
         &self.alt_svc_cache
     }
+
+    /// Check if a host is localhost (localhost, 127.0.0.1, ::1)
+    fn is_localhost(host: &str) -> bool {
+        host == "localhost" || host == "127.0.0.1" || host == "::1"
+    }
+
+    /// Get the appropriate connector for a URI (uses insecure connector for localhost if enabled)
+    fn connector_for_uri(&self, uri: &Uri) -> &BoringConnector {
+        // Always use insecure connector if danger_accept_invalid_certs is globally enabled
+        if self.danger_accept_invalid_certs {
+            return &self.insecure_connector;
+        }
+
+        // Use insecure connector for localhost if localhost_allows_invalid_certs is enabled
+        if self.localhost_allows_invalid_certs {
+            if let Some(host) = uri.host() {
+                if Self::is_localhost(host) {
+                    return &self.insecure_connector;
+                }
+            }
+        }
+
+        &self.connector
+    }
 }
 
 impl<'a> RequestBuilder<'a> {
@@ -202,7 +236,8 @@ impl<'a> RequestBuilder<'a> {
 
         // For HTTP/2 streaming, we need direct connection access (no pooling for streaming)
         // Apply connect timeout to TCP + TLS handshake
-        let connect_fut = self.client.connector.connect(&uri);
+        let connector = self.client.connector_for_uri(&uri);
+        let connect_fut = connector.connect(&uri);
         let stream = if let Some(connect_timeout) = self.client.timeouts.connect {
             tokio_timeout(connect_timeout, connect_fut)
                 .await
@@ -477,7 +512,8 @@ impl<'a> RequestBuilder<'a> {
 
             // No pooled connection or it failed - create new one
             // Apply connect timeout
-            let connect_fut = self.client.connector.connect(&uri);
+            let connector = self.client.connector_for_uri(&uri);
+            let connect_fut = connector.connect(&uri);
             let stream = if let Some(connect_timeout) = self.client.timeouts.connect {
                 tokio_timeout(connect_timeout, connect_fut)
                     .await
@@ -555,7 +591,8 @@ impl<'a> RequestBuilder<'a> {
         } else {
             tracing::debug!("H1: Creating new connection for {:?}", pool_key);
             // Apply connect timeout
-            let connect_fut = self.client.connector.connect(&uri);
+            let connector = self.client.connector_for_uri(&uri);
+            let connect_fut = connector.connect(&uri);
             if let Some(connect_timeout) = self.client.timeouts.connect {
                 tokio_timeout(connect_timeout, connect_fut)
                     .await
@@ -647,7 +684,8 @@ impl<'a> RequestBuilder<'a> {
                                 e
                             );
                             // Try again with a fresh connection (with connect timeout)
-                            let connect_fut = self.client.connector.connect(&uri);
+                            let connector = self.client.connector_for_uri(&uri);
+                            let connect_fut = connector.connect(&uri);
                             stream = if let Some(connect_timeout) = self.client.timeouts.connect {
                                 tokio_timeout(connect_timeout, connect_fut)
                                     .await
@@ -740,6 +778,10 @@ impl ClientBuilder {
     ///
     /// By default, no timeouts are set. Use `timeouts()`, `api_timeouts()`,
     /// or `streaming_timeouts()` to configure timeouts.
+    ///
+    /// Localhost connections automatically skip TLS certificate verification
+    /// by default, making local development easier. Use `localhost_allows_invalid_certs(false)`
+    /// to disable this behavior.
     pub fn new() -> Self {
         Self {
             fingerprint: FingerprintProfile::default(),
@@ -750,6 +792,8 @@ impl ClientBuilder {
             h3_upgrade_enabled: true, // Enable by default
             http2_prior_knowledge: false,
             root_certs: Vec::new(),
+            danger_accept_invalid_certs: false,
+            localhost_allows_invalid_certs: true, // Enable by default for easier local dev
         }
     }
 
@@ -879,12 +923,44 @@ impl ClientBuilder {
         self
     }
 
+    /// Skip TLS certificate verification for all connections.
+    ///
+    /// # Safety
+    /// This is DANGEROUS and should only be used for testing.
+    /// Prefer `localhost_allows_invalid_certs(true)` for local development.
+    pub fn danger_accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.danger_accept_invalid_certs = accept;
+        self
+    }
+
+    /// Automatically skip TLS certificate verification for localhost connections.
+    ///
+    /// When enabled (default), connections to `localhost`, `127.0.0.1`, or `::1`
+    /// will skip TLS certificate verification, making local development with
+    /// self-signed certificates seamless.
+    ///
+    /// This is safe because localhost traffic never leaves the machine.
+    pub fn localhost_allows_invalid_certs(mut self, allow: bool) -> Self {
+        self.localhost_allows_invalid_certs = allow;
+        self
+    }
+
     /// Build the client.
     pub fn build(self) -> Result<Client> {
         // Create connector with TLS fingerprint
         let tls_fingerprint = self.fingerprint.tls_fingerprint();
-        let connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
-            .with_root_certificates(self.root_certs);
+        let mut connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
+            .with_root_certificates(self.root_certs.clone());
+
+        // Apply global danger_accept_invalid_certs if set
+        if self.danger_accept_invalid_certs {
+            connector = connector.danger_accept_invalid_certs(true);
+        }
+
+        // Create insecure connector for localhost (always skips TLS verification)
+        let insecure_connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
+            .with_root_certificates(self.root_certs)
+            .danger_accept_invalid_certs(true);
 
         // Create H3 client with same TLS fingerprint
         let h3_client = H3Client::with_fingerprint(tls_fingerprint);
@@ -901,6 +977,7 @@ impl ClientBuilder {
 
         Ok(Client {
             connector,
+            insecure_connector,
             h3_client,
             alt_svc_cache: Arc::new(AltSvcCache::new()),
             h2_pool: Arc::new(RwLock::new(HashMap::new())),
@@ -911,6 +988,8 @@ impl ClientBuilder {
             timeouts: self.timeouts,
             h3_upgrade_enabled: self.h3_upgrade_enabled,
             http2_prior_knowledge: self.http2_prior_knowledge,
+            danger_accept_invalid_certs: self.danger_accept_invalid_certs,
+            localhost_allows_invalid_certs: self.localhost_allows_invalid_certs,
         })
     }
 }
