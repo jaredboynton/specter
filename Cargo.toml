@@ -1,6 +1,6 @@
 [package]
 name = "specter"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 license = "MIT"
 description = "HTTP client with full TLS, HTTP/2, and HTTP/3 fingerprint control"
@@ -32,6 +32,9 @@ tokio = { version = "1", features = ["net", "time", "sync", "rt-multi-thread", "
 flate2 = "1"
 brotli = "8"
 zstd = "0.13"
+
+# Platform root certificates (loads from OS cert store at runtime)
+rustls-native-certs = "0.8"
 
 # Utilities
 bytes = "1"

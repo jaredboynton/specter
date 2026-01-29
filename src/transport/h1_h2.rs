@@ -81,6 +81,8 @@ pub struct ClientBuilder {
     h3_upgrade_enabled: bool,
     http2_prior_knowledge: bool,
     root_certs: Vec<Vec<u8>>,
+    /// Load root certificates from the OS certificate store at runtime
+    use_platform_roots: bool,
     /// Skip TLS certificate verification (DANGEROUS - for testing only)
     danger_accept_invalid_certs: bool,
     /// Automatically skip TLS verification for localhost connections
@@ -792,6 +794,7 @@ impl ClientBuilder {
             h3_upgrade_enabled: true, // Enable by default
             http2_prior_knowledge: false,
             root_certs: Vec::new(),
+            use_platform_roots: false,
             danger_accept_invalid_certs: false,
             localhost_allows_invalid_certs: true, // Enable by default for easier local dev
         }
@@ -923,6 +926,21 @@ impl ClientBuilder {
         self
     }
 
+    /// Load root certificates from the operating system's certificate store.
+    ///
+    /// This is REQUIRED for cross-compiled builds (e.g., building for Windows from macOS)
+    /// because BoringSSL's default certificate store is empty when cross-compiling.
+    ///
+    /// On Windows, this loads certificates from the Windows Certificate Store (schannel).
+    /// On macOS, this loads from the Keychain.
+    /// On Linux, this loads from common certificate locations (/etc/ssl/certs, etc.).
+    ///
+    /// The `SSL_CERT_FILE` environment variable can override the certificate source.
+    pub fn with_platform_roots(mut self, enabled: bool) -> Self {
+        self.use_platform_roots = enabled;
+        self
+    }
+
     /// Skip TLS certificate verification for all connections.
     ///
     /// # Safety
@@ -950,7 +968,8 @@ impl ClientBuilder {
         // Create connector with TLS fingerprint
         let tls_fingerprint = self.fingerprint.tls_fingerprint();
         let mut connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
-            .with_root_certificates(self.root_certs.clone());
+            .with_root_certificates(self.root_certs.clone())
+            .with_platform_roots(self.use_platform_roots);
 
         // Apply global danger_accept_invalid_certs if set
         if self.danger_accept_invalid_certs {
@@ -960,6 +979,7 @@ impl ClientBuilder {
         // Create insecure connector for localhost (always skips TLS verification)
         let insecure_connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
             .with_root_certificates(self.root_certs)
+            .with_platform_roots(self.use_platform_roots)
             .danger_accept_invalid_certs(true);
 
         // Create H3 client with same TLS fingerprint

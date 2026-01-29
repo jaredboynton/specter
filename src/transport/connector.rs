@@ -110,17 +110,24 @@ pub struct BoringConnector {
     tls_config: Option<TlsFingerprint>,
     tcp_fingerprint: Option<TcpFingerprint>,
     root_certs: Vec<Vec<u8>>,
+    /// Load root certificates from the OS certificate store at runtime
+    use_platform_roots: bool,
     /// Skip TLS certificate verification (DANGEROUS - for testing only)
     danger_accept_invalid_certs: bool,
 }
 
 impl BoringConnector {
     /// Create a new connector with default TLS configuration.
+    ///
+    /// Note: By default, this does NOT load platform root certificates.
+    /// Use `with_platform_roots(true)` to enable automatic loading of OS root CAs,
+    /// which is required for cross-compiled builds (e.g., Windows builds from macOS).
     pub fn new() -> Self {
         Self {
             tls_config: None,
             tcp_fingerprint: None,
             root_certs: Vec::new(),
+            use_platform_roots: false,
             danger_accept_invalid_certs: false,
         }
     }
@@ -131,6 +138,7 @@ impl BoringConnector {
             tls_config: Some(fp),
             tcp_fingerprint: None,
             root_certs: Vec::new(),
+            use_platform_roots: false,
             danger_accept_invalid_certs: false,
         }
     }
@@ -141,6 +149,7 @@ impl BoringConnector {
             tls_config: Some(tls_fp),
             tcp_fingerprint: Some(tcp_fp),
             root_certs: Vec::new(),
+            use_platform_roots: false,
             danger_accept_invalid_certs: false,
         }
     }
@@ -154,6 +163,21 @@ impl BoringConnector {
     /// Add custom root certificates (DER or PEM).
     pub fn with_root_certificates(mut self, certs: Vec<Vec<u8>>) -> Self {
         self.root_certs = certs;
+        self
+    }
+
+    /// Load root certificates from the operating system's certificate store.
+    ///
+    /// This is REQUIRED for cross-compiled builds (e.g., building for Windows from macOS)
+    /// because BoringSSL's default certificate store is empty when cross-compiling.
+    ///
+    /// On Windows, this loads certificates from the Windows Certificate Store (schannel).
+    /// On macOS, this loads from the Keychain.
+    /// On Linux, this loads from common certificate locations (/etc/ssl/certs, etc.).
+    ///
+    /// The `SSL_CERT_FILE` environment variable can override the certificate source.
+    pub fn with_platform_roots(mut self, enabled: bool) -> Self {
+        self.use_platform_roots = enabled;
         self
     }
 
@@ -176,7 +200,29 @@ impl BoringConnector {
             builder.set_verify(boring::ssl::SslVerifyMode::NONE);
         }
 
-        // Add custom root certs
+        // Load platform root certificates if enabled
+        // This is required for cross-compiled builds where BoringSSL can't find system certs
+        if self.use_platform_roots {
+            let result = rustls_native_certs::load_native_certs();
+
+            // Log any errors encountered while loading certificates
+            for err in &result.errors {
+                tracing::warn!("Error loading platform certificate: {}", err);
+            }
+
+            // Add successfully loaded certificates to the trust store
+            let mut loaded = 0;
+            for cert_der in result.certs {
+                if let Ok(x509) = X509::from_der(cert_der.as_ref()) {
+                    if builder.cert_store_mut().add_cert(x509).is_ok() {
+                        loaded += 1;
+                    }
+                }
+            }
+            tracing::debug!("Loaded {} platform root certificates", loaded);
+        }
+
+        // Add custom root certs (in addition to platform roots)
         for cert_bytes in &self.root_certs {
             if let Ok(cert) = X509::from_der(cert_bytes) {
                 let _ = builder.cert_store_mut().add_cert(cert);
