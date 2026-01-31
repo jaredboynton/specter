@@ -123,10 +123,14 @@ jobs:
           Write-Host "INCLUDE: $env:INCLUDE"
           Write-Host "LIB: $env:LIB"
           Get-Command cl -ErrorAction SilentlyContinue | Select-Object Source
+          Get-Command cmake -ErrorAction SilentlyContinue | Select-Object Source
+          Get-Command ninja -ErrorAction SilentlyContinue | Select-Object Source
 
           cd bindings/node
           npm run build
         env:
+          # Use Ninja generator for cmake (faster and more reliable than VS generator)
+          CMAKE_GENERATOR: Ninja
           # Enable verbose cmake output for debugging
           CMAKE_VERBOSE_MAKEFILE: 'ON'
           CARGO_BUILD_JOBS: '2'
