@@ -89,19 +89,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # Install tools - cmake adds itself to PATH with this flag
-          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-          choco install nasm golang strawberryperl -y
-
-          # Add tools to GITHUB_PATH for subsequent steps
+          # Install NASM (required for BoringSSL assembly)
+          choco install nasm -y
           echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
-          echo "C:\Strawberry\perl\bin" >> $env:GITHUB_PATH
-          echo "C:\Strawberry\c\bin" >> $env:GITHUB_PATH
 
-          # Refresh PATH and verify tools
-          $env:PATH = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-          $env:PATH = "C:\Program Files\NASM;$env:PATH"
-
+          # Verify tools (cmake, go, perl are pre-installed on windows-latest)
           Write-Host "=== Verifying tools ==="
           cmake --version
           nasm -v
@@ -126,12 +118,18 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # Verify MSVC environment is set up
+          Write-Host "=== MSVC Environment ==="
+          Write-Host "INCLUDE: $env:INCLUDE"
+          Write-Host "LIB: $env:LIB"
+          Get-Command cl -ErrorAction SilentlyContinue | Select-Object Source
+
           cd bindings/node
           npm run build
         env:
-          # Force MSVC compiler for boring-sys
-          CC: cl
-          CXX: cl
+          # Enable verbose cmake output for debugging
+          CMAKE_VERBOSE_MAKEFILE: 'ON'
+          CARGO_BUILD_JOBS: '2'
 
       - name: Build (cross-compile with zig)
         if: matrix.settings.cross
