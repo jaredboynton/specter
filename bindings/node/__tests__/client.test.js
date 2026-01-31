@@ -285,6 +285,21 @@ describe('Async Requests', () => {
     expect(response.status).toBe(200);
   }, 30000);
 
+  test('HEAD request', async () => {
+    const response = await client.head('https://httpbin.org/get').send();
+    expect(response.status).toBe(200);
+  }, 30000);
+
+  test('OPTIONS request', async () => {
+    const response = await client.options('https://httpbin.org/anything').send();
+    expect(response.status).toBe(200);
+  }, 30000);
+
+  test('arbitrary method request', async () => {
+    const response = await client.request('PURGE', 'https://httpbin.org/anything').send();
+    expect(response.status).toBe(200);
+  }, 30000);
+
   test('response properties', async () => {
     const response = await client.get('https://httpbin.org/get').send();
     expect(typeof response.status).toBe('number');

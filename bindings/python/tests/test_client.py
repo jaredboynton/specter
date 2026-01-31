@@ -339,6 +339,27 @@ class TestAsyncRequests:
         response = await request.send()
         assert response.status == 200
 
+    async def test_head_request(self):
+        """Test HEAD request."""
+        builder = specter.Client.builder()
+        client = builder.build()
+        response = await client.head("https://httpbin.org/get").send()
+        assert response.status == 200
+
+    async def test_options_request(self):
+        """Test OPTIONS request."""
+        builder = specter.Client.builder()
+        client = builder.build()
+        response = await client.options("https://httpbin.org/anything").send()
+        assert response.status == 200
+
+    async def test_arbitrary_method_request(self):
+        """Test arbitrary method request."""
+        builder = specter.Client.builder()
+        client = builder.build()
+        response = await client.request("PURGE", "https://httpbin.org/anything").send()
+        assert response.status == 200
+
     async def test_response_properties(self):
         """Test response properties."""
         builder = specter.Client.builder()
