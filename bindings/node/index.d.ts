@@ -159,3 +159,5 @@ export function timeoutsApiDefaults(): Timeouts;
 
 /** Sensible defaults for streaming responses. */
 export function timeoutsStreamingDefaults(): Timeouts;
+
+export {};
