@@ -106,6 +106,14 @@ jobs:
       - name: Build (cross-compile with zig)
         if: matrix.settings.cross
         run: |
+          # Get zig's lib directory for sysroot paths
+          ZIG_LIB=$(zig env | grep lib_dir | sed 's/.*"\([^"]*\)".*/\1/')
+          echo "ZIG_LIB=$ZIG_LIB"
+
+          # Set bindgen clang args with zig's sysroot for the target
+          export BINDGEN_EXTRA_CLANG_ARGS="--target=${{ matrix.settings.zig_target }} --sysroot=$ZIG_LIB/libc -isystem $ZIG_LIB/libc/include/${{ matrix.settings.zig_target }} -isystem $ZIG_LIB/libc/include/any-linux-any"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=$BINDGEN_EXTRA_CLANG_ARGS"
+
           cd bindings/node
           ${{ matrix.settings.build }}
         env:
@@ -117,6 +125,8 @@ jobs:
           AR_${{ matrix.settings.target }}: zig ar
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ github.workspace }}/.github/scripts/zig-cc-aarch64-linux-gnu
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: ${{ github.workspace }}/.github/scripts/zig-cc-x86_64-linux-musl
+          # For musl builds, use compiler-builtins instead of libgcc_s
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C link-self-contained=yes
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
