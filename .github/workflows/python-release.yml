@@ -63,6 +63,10 @@ jobs:
         target: [x64, x86]
     steps:
       - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          choco install cmake nasm -y
+          echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
