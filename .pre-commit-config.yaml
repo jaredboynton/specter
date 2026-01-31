@@ -24,10 +24,22 @@ repos:
         always_run: false
 
       # Pre-push: linting with strict warnings
-      # Fails if clippy finds issues (user must fix manually)
+      # Auto-fixes issues and re-stages changed files
       - id: cargo-clippy
         name: cargo clippy (strict)
-        entry: bash -c 'set -e; cargo clippy --all-features --all-targets -- -D warnings -A dead_code'
+        entry: >
+          bash -c '
+          set -e;
+          if cargo clippy --all-features --all-targets --fix --allow-staged --allow-dirty -- -D warnings -A dead_code 2>/dev/null; then
+            if ! git diff --cached --quiet || ! git diff --quiet; then
+              git add -u;
+              if git rev-parse --verify HEAD >/dev/null 2>&1; then
+                git commit --amend --no-edit --no-verify 2>/dev/null || true;
+              fi;
+            fi;
+          fi;
+          cargo clippy --all-features --all-targets -- -D warnings -A dead_code
+          '
         language: system
         types: [rust]
         pass_filenames: false
