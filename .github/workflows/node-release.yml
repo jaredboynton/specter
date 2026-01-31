@@ -109,6 +109,37 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: '10.13'
 
+      # Debug: SSH into Windows runner to investigate boring-sys build
+      - name: Setup tmate session (Windows debug)
+        if: runner.os == 'Windows'
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+        timeout-minutes: 15
+
+      - name: Debug environment (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          echo "=== CMAKE_GENERATOR ==="
+          echo $env:CMAKE_GENERATOR
+          echo "=== which cmake ==="
+          Get-Command cmake | Select-Object Source
+          echo "=== cmake version ==="
+          cmake --version
+          echo "=== which ninja ==="
+          Get-Command ninja -ErrorAction SilentlyContinue | Select-Object Source
+          echo "=== NASM ==="
+          Get-Command nasm | Select-Object Source
+          nasm -v
+          echo "=== Perl ==="
+          Get-Command perl | Select-Object Source
+          perl -v | Select-String -Pattern "version"
+          echo "=== Visual Studio ==="
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+        shell: pwsh
+        env:
+          CMAKE_GENERATOR: Visual Studio 17 2022
+
       - name: Build (native - Windows)
         if: runner.os == 'Windows'
         run: |
@@ -118,6 +149,8 @@ jobs:
           # Force Visual Studio generator - boring-sys expects libs in build/Release/
           # Ninja would put them in build/ causing "could not find native static library ssl"
           CMAKE_GENERATOR: Visual Studio 17 2022
+          # Verbose cargo output to see cmake invocation
+          CARGO_LOG: cargo::core::compiler::fingerprint=info
 
       - name: Build (cross-compile with zig)
         if: matrix.settings.cross
