@@ -13,12 +13,12 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  # Native builds - these work reliably
+  build-native:
     strategy:
       fail-fast: false
       matrix:
         settings:
-          # Native builds (no cross-compilation needed)
           - host: macos-14
             target: aarch64-apple-darwin
             build: npm run build
@@ -31,15 +31,6 @@ jobs:
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             build: npm run build
-          # Cross-compilation using cargo-zigbuild via napi --cross-compile
-          - host: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            build: npm run build -- --target aarch64-unknown-linux-gnu --cross-compile
-            cross: true
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            build: npm run build -- --target x86_64-unknown-linux-musl --cross-compile
-            cross: true
     name: Build ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -62,18 +53,6 @@ jobs:
           cd bindings/node
           npm install
 
-      # Install zig for cross-compilation builds
-      - name: Install Zig
-        if: matrix.settings.cross
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.13.0
-
-      - name: Install cargo-zigbuild
-        if: matrix.settings.cross
-        run: cargo install cargo-zigbuild
-
-      # All Linux builds need cmake + clang for bindgen
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -97,6 +76,69 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
+          path: bindings/node/*.node
+          if-no-files-found: error
+
+  # Docker-based builds for cross-compilation targets
+  # boring-sys requires native compilation due to CMake + Go + assembly complexity
+  build-linux-arm64:
+    name: Build aarch64-unknown-linux-gnu (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build in ARM64 container
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD":/workspace -w /workspace \
+            node:20-bookworm bash -c "
+              set -ex
+              apt-get update
+              apt-get install -y cmake clang libclang-dev curl build-essential pkg-config
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+              . ~/.cargo/env
+              cd bindings/node
+              npm install
+              npm run build
+            "
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-aarch64-unknown-linux-gnu
+          path: bindings/node/*.node
+          if-no-files-found: error
+
+  build-linux-musl:
+    name: Build x86_64-unknown-linux-musl (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in Alpine container
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace -w /workspace \
+            node:20-alpine sh -c "
+              set -ex
+              apk add --no-cache cmake clang clang-dev llvm-dev musl-dev linux-headers perl go curl build-base pkgconfig
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+              . ~/.cargo/env
+              rustup target add x86_64-unknown-linux-musl
+              cd bindings/node
+              npm install
+              npm run build -- --target x86_64-unknown-linux-musl
+            "
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-x86_64-unknown-linux-musl
           path: bindings/node/*.node
           if-no-files-found: error
 
@@ -138,7 +180,7 @@ jobs:
 
   publish:
     name: Publish to npm
-    needs: [build, test]
+    needs: [build-native, build-linux-arm64, build-linux-musl, test]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
