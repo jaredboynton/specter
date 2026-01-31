@@ -85,14 +85,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake clang libclang-dev
 
-      # Windows: Install NASM (required for BoringSSL assembly)
+      # Windows: Install NASM + Perl (required for BoringSSL build from source)
       # NOTE: Do NOT use ilammy/msvc-dev-cmd or set CMAKE_GENERATOR - cmake-rs auto-detects
       # Visual Studio correctly and these overrides break boring-sys's expected output paths
-      - name: Install NASM (Windows)
+      - name: Install build tools (Windows)
         if: runner.os == 'Windows'
-        uses: crazy-max/ghaction-chocolatey@v3
-        with:
-          args: install nasm
+        run: |
+          choco install -y nasm strawberryperl
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+          echo "C:\Strawberry\perl\bin" >> $env:GITHUB_PATH
+        shell: pwsh
 
       - name: Build (native - Unix)
         if: ${{ !matrix.settings.cross && runner.os != 'Windows' }}
