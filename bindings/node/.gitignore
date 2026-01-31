@@ -5,3 +5,4 @@ package-lock.json
 # Build artifacts
 *.node
 *.tar.gz
+index.gen.d.ts

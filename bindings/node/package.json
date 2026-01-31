@@ -20,7 +20,7 @@
     "*.node"
   ],
   "scripts": {
-    "build": "napi build --platform --release --dts false",
+    "build": "napi build --platform --release --dts index.gen.d.ts",
     "build:debug": "napi build --platform",
     "prepublishOnly": "napi prepublish -t npm",
     "artifacts": "napi artifacts",
