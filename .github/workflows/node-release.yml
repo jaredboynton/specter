@@ -38,12 +38,6 @@ jobs:
             cross: true
             zig_target: aarch64-linux-gnu
             libc_impl: glibc
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            build: npm run build -- --target x86_64-unknown-linux-musl
-            cross: true
-            zig_target: x86_64-linux-musl
-            libc_impl: musl
     name: Build ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -94,8 +88,9 @@ jobs:
       - name: Install build tools (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install cmake nasm -y
+          choco install cmake nasm golang strawberryperl -y
           echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build (native)
         if: ${{ !matrix.settings.cross }}
@@ -132,14 +127,48 @@ jobs:
           CXX_${{ matrix.settings.target }}: ${{ github.workspace }}/.github/scripts/zig-cxx-${{ matrix.settings.zig_target }}
           AR_${{ matrix.settings.target }}: zig ar
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ github.workspace }}/.github/scripts/zig-cc-aarch64-linux-gnu
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: ${{ github.workspace }}/.github/scripts/zig-cc-x86_64-linux-musl
-          # For musl builds, use compiler-builtins instead of libgcc_s
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C link-self-contained=yes
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
+          path: bindings/node/*.node
+          if-no-files-found: error
+
+  build-musl:
+    name: Build x86_64-unknown-linux-musl
+    runs-on: ubuntu-latest
+    container:
+      image: messense/rust-musl-cross:x86_64-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        run: |
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          apt-get install -y nodejs
+
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y cmake clang libclang-dev perl golang
+
+      - name: Install dependencies
+        run: |
+          cd bindings/node
+          npm install
+
+      - name: Build
+        run: |
+          cd bindings/node
+          npm run build -- --target x86_64-unknown-linux-musl
+        env:
+          CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-x86_64-unknown-linux-musl
           path: bindings/node/*.node
           if-no-files-found: error
 
@@ -181,7 +210,7 @@ jobs:
 
   publish:
     name: Publish to npm
-    needs: [build, test]
+    needs: [build, build-musl, test]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:

@@ -2,9 +2,9 @@
  * Tests for Specter Node.js bindings.
  */
 
-const { 
-  Client, 
-  FingerprintProfile, 
+const {
+  clientBuilder,
+  FingerprintProfile,
   HttpVersion,
   CookieJar,
   RequestBuilder,
@@ -14,68 +14,68 @@ const {
 
 describe('ClientBuilder', () => {
   test('builder creation', () => {
-    const builder = Client.builder();
+    const builder = clientBuilder();
     expect(builder).toBeDefined();
   });
 
   test('build client', () => {
-    const client = Client.builder().build();
+    const client = clientBuilder().build();
     expect(client).toBeDefined();
   });
 
   test('fingerprint chrome', () => {
-    const client = Client.builder()
+    const client = clientBuilder()
       .fingerprint(FingerprintProfile.Chrome142)
       .build();
     expect(client).toBeDefined();
   });
 
   test('fingerprint firefox', () => {
-    const client = Client.builder()
+    const client = clientBuilder()
       .fingerprint(FingerprintProfile.Firefox133)
       .build();
     expect(client).toBeDefined();
   });
 
   test('fingerprint none', () => {
-    const client = Client.builder()
+    const client = clientBuilder()
       .fingerprint(FingerprintProfile.None)
       .build();
     expect(client).toBeDefined();
   });
 
   test('prefer http2', () => {
-    const client = Client.builder()
+    const client = clientBuilder()
       .preferHttp2(true)
       .build();
     expect(client).toBeDefined();
   });
 
   test('h3 upgrade', () => {
-    const client = Client.builder()
+    const client = clientBuilder()
       .h3Upgrade(true)
       .build();
     expect(client).toBeDefined();
   });
 
   test('api timeouts', () => {
-    const client = Client.builder().apiTimeouts().build();
+    const client = clientBuilder().apiTimeouts().build();
     expect(client).toBeDefined();
   });
 
   test('streaming timeouts', () => {
-    const client = Client.builder().streamingTimeouts().build();
+    const client = clientBuilder().streamingTimeouts().build();
     expect(client).toBeDefined();
   });
 
   test('custom timeouts', () => {
     const timeouts = timeoutsApiDefaults();
-    const client = Client.builder().timeouts(timeouts).build();
+    const client = clientBuilder().timeouts(timeouts).build();
     expect(client).toBeDefined();
   });
 
   test('individual timeouts', () => {
-    const client = Client.builder()
+    const client = clientBuilder()
       .totalTimeout(30.0)
       .connectTimeout(5.0)
       .ttfbTimeout(10.0)
@@ -85,14 +85,14 @@ describe('ClientBuilder', () => {
   });
 
   test('localhost invalid certs', () => {
-    const client = Client.builder()
+    const client = clientBuilder()
       .localhostAllowsInvalidCerts(true)
       .build();
     expect(client).toBeDefined();
   });
 
   test('platform roots', () => {
-    const client = Client.builder()
+    const client = clientBuilder()
       .withPlatformRoots(true)
       .build();
     expect(client).toBeDefined();
@@ -103,7 +103,7 @@ describe('RequestBuilder', () => {
   let client;
 
   beforeEach(() => {
-    client = Client.builder().build();
+    client = clientBuilder().build();
   });
 
   test('request builder creation', () => {
@@ -224,7 +224,7 @@ describe('Async Requests', () => {
   let client;
 
   beforeEach(() => {
-    client = Client.builder().build();
+    client = clientBuilder().build();
   });
 
   test('basic GET request', async () => {
