@@ -113,16 +113,16 @@ impl Timeouts {
     }
 }
 
+/// Create a new client builder.
+#[napi]
+pub fn client_builder() -> ClientBuilder {
+    ClientBuilder {
+        inner: Some(RustClient::builder()),
+    }
+}
+
 #[napi]
 impl Client {
-    /// Create a new client builder.
-    #[napi(factory)]
-    pub fn builder() -> ClientBuilder {
-        ClientBuilder {
-            inner: Some(RustClient::builder()),
-        }
-    }
-
     /// Create a GET request builder.
     #[napi]
     pub fn get(&self, url: String) -> RequestBuilder {

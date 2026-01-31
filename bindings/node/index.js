@@ -88,5 +88,6 @@ module.exports.CookieJar = binding.CookieJar;
 module.exports.FingerprintProfile = binding.FingerprintProfile;
 module.exports.HttpVersion = binding.HttpVersion;
 module.exports.Timeouts = binding.Timeouts;
+module.exports.clientBuilder = binding.clientBuilder;
 module.exports.timeoutsApiDefaults = binding.timeoutsApiDefaults;
 module.exports.timeoutsStreamingDefaults = binding.timeoutsStreamingDefaults;

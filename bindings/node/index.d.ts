@@ -125,8 +125,6 @@ export class ClientBuilder {
 
 /** HTTP client with TLS/HTTP2/HTTP3 fingerprint control. */
 export class Client {
-  /** Create a new client builder */
-  static builder(): ClientBuilder;
   /** Create a GET request builder */
   get(url: string): RequestBuilder;
   /** Create a POST request builder */
@@ -153,6 +151,9 @@ export class CookieJar {
   /** Check if the cookie jar is empty */
   get isEmpty(): boolean;
 }
+
+/** Create a new client builder */
+export function clientBuilder(): ClientBuilder;
 
 /** Sensible defaults for normal API calls. */
 export function timeoutsApiDefaults(): Timeouts;
