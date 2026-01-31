@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-01-31
+
+### Added
+- **RequestBuilder API** (Python & Node.js):
+    - New `RequestBuilder` class for constructing HTTP requests with headers and body.
+    - `client.get/post/put/delete/patch/head/options(url)` methods return `RequestBuilder`.
+    - `client.request(method, url)` for arbitrary HTTP methods (e.g., PURGE, COPY).
+    - `request.header(key, value)` - add single header.
+    - `request.headers([...])` - set all headers.
+    - `request.body(bytes)` - set raw body.
+    - `request.json(string)` - set JSON body with Content-Type header.
+    - `request.form(string)` - set form body with Content-Type header.
+    - `request.send()` - execute request and return Response.
+
+### Changed
+- **Documentation**: Updated README files with correct `.send()` calls and RequestBuilder examples.
+- **TypeScript**: Fixed module export in `index.d.ts`.
+
 ## [1.1.0] - 2026-01-31
 
 ### Added
