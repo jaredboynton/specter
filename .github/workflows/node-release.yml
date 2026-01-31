@@ -123,17 +123,17 @@ jobs:
           Write-Host "INCLUDE: $env:INCLUDE"
           Write-Host "LIB: $env:LIB"
           Get-Command cl -ErrorAction SilentlyContinue | Select-Object Source
-          Get-Command cmake -ErrorAction SilentlyContinue | Select-Object Source
-          Get-Command ninja -ErrorAction SilentlyContinue | Select-Object Source
 
           cd bindings/node
           npm run build
         env:
-          # Use Ninja generator for cmake (faster and more reliable than VS generator)
-          CMAKE_GENERATOR: Ninja
-          # Enable verbose cmake output for debugging
-          CMAKE_VERBOSE_MAKEFILE: 'ON'
-          CARGO_BUILD_JOBS: '2'
+          # CRITICAL: boring-sys expects MSVC config subfolders (build/ssl/Release/ssl.lib)
+          # Visual Studio generator creates these subfolders; Ninja single-config does NOT
+          # This mismatch causes "could not find native static library ssl" errors
+          CMAKE_GENERATOR: Visual Studio 17 2022
+          CMAKE_GENERATOR_PLATFORM: x64
+          # Parallel cmake builds
+          CMAKE_BUILD_PARALLEL_LEVEL: '4'
 
       - name: Build (cross-compile with zig)
         if: matrix.settings.cross
