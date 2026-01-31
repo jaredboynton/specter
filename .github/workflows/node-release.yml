@@ -37,11 +37,13 @@ jobs:
             build: npm run build -- --target aarch64-unknown-linux-gnu
             cross: true
             zig_target: aarch64-linux-gnu
+            libc_impl: glibc
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
             build: npm run build -- --target x86_64-unknown-linux-musl
             cross: true
             zig_target: x86_64-linux-musl
+            libc_impl: musl
     name: Build ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -111,7 +113,13 @@ jobs:
           echo "ZIG_LIB=$ZIG_LIB"
 
           # Set bindgen clang args with zig's sysroot for the target
-          export BINDGEN_EXTRA_CLANG_ARGS="--target=${{ matrix.settings.zig_target }} --sysroot=$ZIG_LIB/libc -isystem $ZIG_LIB/libc/include/${{ matrix.settings.zig_target }} -isystem $ZIG_LIB/libc/include/any-linux-any"
+          # Include paths: target-specific, generic linux, generic libc, and libc implementation
+          BINDGEN_ARGS="--target=${{ matrix.settings.zig_target }}"
+          BINDGEN_ARGS="$BINDGEN_ARGS -isystem $ZIG_LIB/libc/include/${{ matrix.settings.zig_target }}"
+          BINDGEN_ARGS="$BINDGEN_ARGS -isystem $ZIG_LIB/libc/include/any-linux-any"
+          BINDGEN_ARGS="$BINDGEN_ARGS -isystem $ZIG_LIB/libc/include/generic-${{ matrix.settings.libc_impl }}"
+          BINDGEN_ARGS="$BINDGEN_ARGS -isystem $ZIG_LIB/libc/${{ matrix.settings.libc_impl }}/include"
+          export BINDGEN_EXTRA_CLANG_ARGS="$BINDGEN_ARGS"
           echo "BINDGEN_EXTRA_CLANG_ARGS=$BINDGEN_EXTRA_CLANG_ARGS"
 
           cd bindings/node
