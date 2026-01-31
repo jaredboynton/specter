@@ -33,20 +33,57 @@ const path = require('path');
 // Try to load the native binding
 let nativeBinding;
 
-const platforms = [
-  ['darwin', 'arm64'],
-  ['darwin', 'x64'],
-  ['linux', 'arm64'],
-  ['linux', 'x64'],
-  ['win32', 'arm64'],
-  ['win32', 'x64'],
-];
+// Platform to binary name mapping based on napi-rs naming convention
+// Format: specter.{os}-{arch}[-{libc}].node
+const platformBinaries = {
+  'darwin-arm64': 'specter.darwin-arm64.node',
+  'darwin-x64': 'specter.darwin-x64.node',
+  'linux-arm64-gnu': 'specter.linux-arm64-gnu.node',
+  'linux-x64-gnu': 'specter.linux-x64-gnu.node',
+  'linux-x64-musl': 'specter.linux-x64-musl.node',
+  'win32-x64-msvc': 'specter.win32-x64-msvc.node',
+};
+
+function getPlatformKey() {
+  const platform = process.platform;
+  const arch = process.arch;
+
+  if (platform === 'darwin') {
+    return `darwin-${arch}`;
+  }
+  if (platform === 'win32') {
+    return `win32-${arch}-msvc`;
+  }
+  if (platform === 'linux') {
+    // Check if we're on musl by looking at the libc
+    const isMusl = (() => {
+      try {
+        const { execSync } = require('child_process');
+        return execSync('ldd --version 2>&1').toString().includes('musl');
+      } catch {
+        return false;
+      }
+    })();
+    return `linux-${arch}-${isMusl ? 'musl' : 'gnu'}`;
+  }
+  return null;
+}
 
 function loadNativeBinding() {
-  // First try to load from prebuilt
-  for (const [platform, arch] of platforms) {
+  // Try platform-specific binary first
+  const platformKey = getPlatformKey();
+  if (platformKey && platformBinaries[platformKey]) {
     try {
-      const binaryName = `specter.${platform}-${arch}.node`;
+      nativeBinding = require(`./${platformBinaries[platformKey]}`);
+      return nativeBinding;
+    } catch (e) {
+      // Continue to fallback
+    }
+  }
+
+  // Try all known binaries
+  for (const binaryName of Object.values(platformBinaries)) {
+    try {
       nativeBinding = require(`./${binaryName}`);
       return nativeBinding;
     } catch (e) {
