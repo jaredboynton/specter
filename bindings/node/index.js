@@ -5,11 +5,11 @@
  * fingerprint control for browser impersonation.
  *
  * @example
- * const { Client, FingerprintProfile } = require('@specter/client');
+ * const { clientBuilder, FingerprintProfile } = require('@specter/client');
  *
  * async function main() {
  *   // Create a client with default settings
- *   const client = Client.builder().build();
+ *   const client = clientBuilder().build();
  *
  *   // Simple GET request
  *   const response = await client.get('https://httpbin.org/get').send();
