@@ -18,6 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         settings:
+          # Native builds (no cross-compilation needed)
           - host: macos-14
             target: aarch64-apple-darwin
             build: npm run build
@@ -27,15 +28,18 @@ jobs:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             build: npm run build
-          - host: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            build: npm run build -- --target aarch64-unknown-linux-gnu
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            build: npm run build -- --target x86_64-unknown-linux-musl
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             build: npm run build
+          # Cross-compilation using cargo-zigbuild via napi --cross-compile
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build: npm run build -- --target aarch64-unknown-linux-gnu --cross-compile
+            cross: true
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build: npm run build -- --target x86_64-unknown-linux-musl --cross-compile
+            cross: true
     name: Build ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -58,31 +62,23 @@ jobs:
           cd bindings/node
           npm install
 
+      # Install zig for cross-compilation builds
+      - name: Install Zig
+        if: matrix.settings.cross
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: matrix.settings.cross
+        run: cargo install cargo-zigbuild
+
+      # All Linux builds need cmake + clang for bindgen
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake clang libclang-dev
-
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.settings.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu clang libclang-dev
-          # Rust cc crate and linker settings (target-specific, won't break bindgen)
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
-          # boring-sys specific: tell it to cross-compile BoringSSL
-          echo "BORING_BSSL_SYSROOT=/usr/aarch64-linux-gnu" >> $GITHUB_ENV
-          # Use cargo-zigbuild approach: set AR for the target
-          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> $GITHUB_ENV
-
-      - name: Install cross-compilation tools (Linux MUSL)
-        if: matrix.settings.target == 'x86_64-unknown-linux-musl'
-        run: |
-          sudo apt-get install -y musl-tools musl-dev clang libclang-dev
-          echo "CC=musl-gcc" >> $GITHUB_ENV
-          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> $GITHUB_ENV
 
       - name: Install build tools (Windows)
         if: runner.os == 'Windows'
