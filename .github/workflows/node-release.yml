@@ -13,7 +13,54 @@ permissions:
   contents: read
 
 jobs:
+  # Build BoringSSL once on Windows and cache it for reuse
+  build-boringssl-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache BoringSSL
+        id: cache-boringssl
+        uses: actions/cache@v4
+        with:
+          path: C:\boringssl-prebuilt
+          key: boringssl-windows-${{ hashFiles('Cargo.lock') }}-v1
+
+      - name: Install build tools
+        if: steps.cache-boringssl.outputs.cache-hit != 'true'
+        run: |
+          choco install -y cmake nasm strawberryperl
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+        shell: pwsh
+
+      - name: Build BoringSSL
+        if: steps.cache-boringssl.outputs.cache-hit != 'true'
+        run: |
+          # Clone BoringSSL at the version boring-sys 4.19 expects
+          git clone --depth 1 https://boringssl.googlesource.com/boringssl C:\boringssl-src
+          cd C:\boringssl-src
+
+          # Build with Visual Studio generator
+          cmake -B build -G "Visual Studio 17 2022" -A x64
+          cmake --build build --config Release --parallel 4
+
+          # Copy outputs to prebuilt location
+          mkdir C:\boringssl-prebuilt\lib
+          mkdir C:\boringssl-prebuilt\include
+          xcopy /E /I include C:\boringssl-prebuilt\include
+          copy build\ssl\Release\ssl.lib C:\boringssl-prebuilt\lib\
+          copy build\crypto\Release\crypto.lib C:\boringssl-prebuilt\lib\
+        shell: pwsh
+
+      - name: Upload BoringSSL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boringssl-windows-prebuilt
+          path: C:\boringssl-prebuilt
+          retention-days: 7
+
   build:
+    needs: build-boringssl-windows
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +89,14 @@ jobs:
     runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v4
+
+      # Download prebuilt BoringSSL for Windows builds
+      - name: Download BoringSSL (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/download-artifact@v4
+        with:
+          name: boringssl-windows-prebuilt
+          path: C:\boringssl-prebuilt
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -85,14 +140,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake clang libclang-dev
 
-      # Windows: Install NASM + Perl (required for BoringSSL build from source)
-      - name: Install build tools (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          choco install -y nasm strawberryperl
-          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
-          echo "C:\Strawberry\perl\bin" >> $env:GITHUB_PATH
-        shell: pwsh
 
       - name: Build (native - Unix)
         if: ${{ !matrix.settings.cross && runner.os != 'Windows' }}
@@ -109,8 +156,10 @@ jobs:
           npm run build
         shell: pwsh
         env:
-          # Explicit target dir prevents cmake-rs path mismatch with boring-sys
-          CARGO_TARGET_DIR: D:\a\specter\specter\target
+          # Use prebuilt BoringSSL - avoids cmake-rs path bugs and speeds up build
+          BORING_BSSL_PATH: C:\boringssl-prebuilt
+          BORING_BSSL_INCLUDE_PATH: C:\boringssl-prebuilt\include
+          QUICHE_BSSL_PATH: C:\boringssl-prebuilt
 
       - name: Build (cross-compile with zig)
         if: matrix.settings.cross
