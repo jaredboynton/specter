@@ -106,20 +106,11 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cd bindings/node
-          # Build with explicit target dir to prevent cmake-rs path mismatch
-          $env:CARGO_TARGET_DIR = "D:\a\specter\specter\target"
-          cargo build --release -vv 2>&1 | Tee-Object -FilePath build.log
-          # If cargo succeeds, run the actual napi build
           npm run build
         shell: pwsh
-
-      - name: Upload Windows build log
-        if: runner.os == 'Windows' && always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-build-log
-          path: bindings/node/build.log
-          if-no-files-found: ignore
+        env:
+          # Explicit target dir prevents cmake-rs path mismatch with boring-sys
+          CARGO_TARGET_DIR: D:\a\specter\specter\target
 
       - name: Build (cross-compile with zig)
         if: matrix.settings.cross
