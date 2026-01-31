@@ -88,10 +88,18 @@ jobs:
       - name: Install build tools (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install cmake nasm golang strawberryperl -y
+          choco install cmake nasm golang strawberryperl ninja -y
+          # Add all tools to PATH
+          echo "C:\Program Files\CMake\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           echo "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           echo "C:\ProgramData\chocolatey\lib\golang\tools\go\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # Verify tools
+          cmake --version
+          nasm -v
+          go version
+          perl --version
+          ninja --version
 
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
@@ -104,6 +112,8 @@ jobs:
           ${{ matrix.settings.build }}
         env:
           MACOSX_DEPLOYMENT_TARGET: '10.13'
+          # Windows: Use Ninja generator for cmake (more reliable than VS generator)
+          CMAKE_GENERATOR: ${{ runner.os == 'Windows' && 'Ninja' || '' }}
 
       - name: Build (cross-compile with zig)
         if: matrix.settings.cross
