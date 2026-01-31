@@ -26,8 +26,8 @@ jobs:
           args: --release --out dist -m bindings/python/Cargo.toml
           manylinux: auto
           before-script-linux: |
-            # Install cmake for BoringSSL
-            apt-get update && apt-get install -y cmake
+            # Install cmake and clang for BoringSSL (bindgen needs libclang)
+            yum install -y cmake clang llvm-devel || apt-get update && apt-get install -y cmake clang libclang-dev
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -47,8 +47,8 @@ jobs:
           args: --release --out dist -m bindings/python/Cargo.toml
           manylinux: musllinux_1_2
           before-script-linux: |
-            # Install cmake for BoringSSL
-            apk add cmake
+            # Install cmake and clang for BoringSSL (bindgen needs libclang)
+            apk add cmake clang-dev llvm-dev
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -113,7 +113,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake
+          sudo apt-get install -y cmake clang libclang-dev
       - uses: PyO3/maturin-action@v1
         with:
           command: develop
