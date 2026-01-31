@@ -106,7 +106,8 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cd bindings/node
-          # Verbose build to see cmake output
+          # Build with explicit target dir to prevent cmake-rs path mismatch
+          $env:CARGO_TARGET_DIR = "D:\a\specter\specter\target"
           cargo build --release -vv 2>&1 | Tee-Object -FilePath build.log
           # If cargo succeeds, run the actual napi build
           npm run build
