@@ -28,7 +28,7 @@ jobs:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             build: npm run build
-          - host: windows-latest
+          - host: windows-2022
             target: x86_64-pc-windows-msvc
             build: npm run build
           # Cross-compilation with zig wrapper scripts (handles boring-sys/cmake)
@@ -85,26 +85,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake clang libclang-dev
 
-      - name: Install build tools (Windows)
+      # Windows: Install NASM (required for BoringSSL assembly)
+      # NOTE: Do NOT use ilammy/msvc-dev-cmd or set CMAKE_GENERATOR - cmake-rs auto-detects
+      # Visual Studio correctly and these overrides break boring-sys's expected output paths
+      - name: Install NASM (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Install NASM (required for BoringSSL assembly)
-          choco install nasm -y
-          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
-
-          # Verify tools (cmake, go, perl are pre-installed on windows-latest)
-          Write-Host "=== Verifying tools ==="
-          cmake --version
-          nasm -v
-          go version
-          perl --version
-
-      - name: Setup MSVC (Windows)
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: crazy-max/ghaction-chocolatey@v3
         with:
-          arch: x64
+          args: install nasm
 
       - name: Build (native - Unix)
         if: ${{ !matrix.settings.cross && runner.os != 'Windows' }}
@@ -116,24 +104,9 @@ jobs:
 
       - name: Build (native - Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
         run: |
-          # Verify MSVC environment is set up
-          Write-Host "=== MSVC Environment ==="
-          Write-Host "INCLUDE: $env:INCLUDE"
-          Write-Host "LIB: $env:LIB"
-          Get-Command cl -ErrorAction SilentlyContinue | Select-Object Source
-
           cd bindings/node
           npm run build
-        env:
-          # CRITICAL: boring-sys expects MSVC config subfolders (build/ssl/Release/ssl.lib)
-          # Visual Studio generator creates these subfolders; Ninja single-config does NOT
-          # This mismatch causes "could not find native static library ssl" errors
-          CMAKE_GENERATOR: Visual Studio 17 2022
-          CMAKE_GENERATOR_PLATFORM: x64
-          # Parallel cmake builds
-          CMAKE_BUILD_PARALLEL_LEVEL: '4'
 
       - name: Build (cross-compile with zig)
         if: matrix.settings.cross
