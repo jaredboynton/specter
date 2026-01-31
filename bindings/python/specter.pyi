@@ -12,9 +12,17 @@ Example:
     ...     builder = specter.Client.builder()
     ...     builder.fingerprint(specter.FingerprintProfile.Chrome142)
     ...     client = builder.build()
-    ...     response = await client.get("https://httpbin.org/get")
+    ...     
+    ...     # Simple GET request
+    ...     response = await client.get("https://httpbin.org/get").send()
     ...     print(response.status)
-    ...     print(await response.text())
+    ...     
+    ...     # POST with JSON body
+    ...     response = await (client.post("https://httpbin.org/post")
+    ...         .header("X-Custom-Header", "value")
+    ...         .json('{"key": "value"}')
+    ...         .send())
+    ...     print(await response.json())
     ...
     >>> asyncio.run(main())
 """
@@ -130,6 +138,42 @@ class ClientBuilder:
         """Build the client."""
         ...
 
+class RequestBuilder:
+    """Builder for HTTP requests.
+    
+    Allows setting headers and body before sending the request.
+    
+    Example:
+        >>> request = client.post("https://api.example.com/data")
+        >>> request.header("Authorization", "Bearer token")
+        >>> request.json('{"name": "test"}')
+        >>> response = await request.send()
+    """
+    
+    def header(self, key: str, value: str) -> None:
+        """Add a header to the request."""
+        ...
+    
+    def headers(self, headers: List[Tuple[str, str]]) -> None:
+        """Set all headers (replaces existing headers)."""
+        ...
+    
+    def body(self, body: bytes) -> None:
+        """Set the request body as bytes."""
+        ...
+    
+    def json(self, json_str: str) -> None:
+        """Set the request body as JSON string and add Content-Type header."""
+        ...
+    
+    def form(self, form_str: str) -> None:
+        """Set the request body as form data and add Content-Type header."""
+        ...
+    
+    async def send(self) -> "Response":
+        """Send the request and return the response."""
+        ...
+
 class Client:
     """HTTP client with TLS/HTTP2/HTTP3 fingerprint control."""
     
@@ -138,20 +182,32 @@ class Client:
         """Create a new client builder."""
         ...
     
-    async def get(self, url: str) -> "Response":
-        """Make a GET request."""
+    def get(self, url: str) -> RequestBuilder:
+        """Create a GET request builder."""
         ...
     
-    async def post(self, url: str) -> "Response":
-        """Make a POST request."""
+    def post(self, url: str) -> RequestBuilder:
+        """Create a POST request builder."""
         ...
     
-    async def put(self, url: str) -> "Response":
-        """Make a PUT request."""
+    def put(self, url: str) -> RequestBuilder:
+        """Create a PUT request builder."""
         ...
     
-    async def delete(self, url: str) -> "Response":
-        """Make a DELETE request."""
+    def delete(self, url: str) -> RequestBuilder:
+        """Create a DELETE request builder."""
+        ...
+    
+    def patch(self, url: str) -> RequestBuilder:
+        """Create a PATCH request builder."""
+        ...
+    
+    def head(self, url: str) -> RequestBuilder:
+        """Create a HEAD request builder."""
+        ...
+    
+    def options(self, url: str) -> RequestBuilder:
+        """Create an OPTIONS request builder."""
         ...
 
 class Response:

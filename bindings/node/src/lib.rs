@@ -27,6 +27,16 @@ pub struct ClientBuilder {
     inner: Option<RustClientBuilder>,
 }
 
+/// Node.js wrapper for HTTP Request Builder.
+#[napi]
+pub struct RequestBuilder {
+    client: RustClient,
+    url: String,
+    method: String,
+    headers: Vec<(String, String)>,
+    body: Option<Vec<u8>>,
+}
+
 /// Node.js wrapper for HTTP Response.
 #[napi]
 pub struct Response {
@@ -113,31 +123,198 @@ impl Client {
         }
     }
 
-    /// Make a GET request.
+    /// Create a GET request builder.
     #[napi]
-    pub async fn get(&self, url: String) -> Result<Response> {
-        let resp = self.inner.get(&url).send().await.map_err(to_napi_err)?;
-        Ok(Response { inner: resp })
+    pub fn get(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.inner.clone(),
+            url,
+            method: "GET".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
     }
 
-    /// Make a POST request.
+    /// Create a POST request builder.
     #[napi]
-    pub async fn post(&self, url: String) -> Result<Response> {
-        let resp = self.inner.post(&url).send().await.map_err(to_napi_err)?;
-        Ok(Response { inner: resp })
+    pub fn post(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.inner.clone(),
+            url,
+            method: "POST".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
     }
 
-    /// Make a PUT request.
+    /// Create a PUT request builder.
     #[napi]
-    pub async fn put(&self, url: String) -> Result<Response> {
-        let resp = self.inner.put(&url).send().await.map_err(to_napi_err)?;
-        Ok(Response { inner: resp })
+    pub fn put(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.inner.clone(),
+            url,
+            method: "PUT".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
     }
 
-    /// Make a DELETE request.
+    /// Create a DELETE request builder.
     #[napi]
-    pub async fn delete(&self, url: String) -> Result<Response> {
-        let resp = self.inner.delete(&url).send().await.map_err(to_napi_err)?;
+    pub fn delete(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.inner.clone(),
+            url,
+            method: "DELETE".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// Create a PATCH request builder.
+    #[napi]
+    pub fn patch(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.inner.clone(),
+            url,
+            method: "PATCH".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// Create a HEAD request builder.
+    #[napi]
+    pub fn head(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.inner.clone(),
+            url,
+            method: "HEAD".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// Create an OPTIONS request builder.
+    #[napi]
+    pub fn options(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.inner.clone(),
+            url,
+            method: "OPTIONS".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+}
+
+#[napi]
+impl RequestBuilder {
+    /// Add a header to the request.
+    #[napi]
+    pub fn header(&mut self, key: String, value: String) -> &Self {
+        self.headers.push((key, value));
+        self
+    }
+
+    /// Set all headers (replaces existing headers).
+    #[napi]
+    pub fn headers(&mut self, headers: Vec<Vec<String>>) -> Result<&Self> {
+        self.headers = headers
+            .into_iter()
+            .map(|pair| {
+                if pair.len() != 2 {
+                    Err(Error::new(
+                        Status::InvalidArg,
+                        "Each header must be a [key, value] pair",
+                    ))
+                } else {
+                    Ok((pair[0].clone(), pair[1].clone()))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self)
+    }
+
+    /// Set the request body as bytes.
+    #[napi]
+    pub fn body(&mut self, body: Buffer) -> &Self {
+        self.body = Some(body.to_vec());
+        self
+    }
+
+    /// Set the request body as a JSON string.
+    #[napi]
+    pub fn json(&mut self, json_str: String) -> &Self {
+        self.body = Some(json_str.into_bytes());
+        // Set Content-Type to application/json if not already set
+        if !self
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
+            self.headers
+                .push(("Content-Type".to_string(), "application/json".to_string()));
+        }
+        self
+    }
+
+    /// Set the request body as form data.
+    #[napi]
+    pub fn form(&mut self, form_str: String) -> &Self {
+        self.body = Some(form_str.into_bytes());
+        // Set Content-Type to application/x-www-form-urlencoded if not already set
+        if !self
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
+            self.headers.push((
+                "Content-Type".to_string(),
+                "application/x-www-form-urlencoded".to_string(),
+            ));
+        }
+        self
+    }
+
+    /// Send the request and return the response.
+    #[napi]
+    pub async fn send(&self) -> Result<Response> {
+        let client = self.client.clone();
+        let url = self.url.clone();
+        let method = self.method.clone();
+        let headers = self.headers.clone();
+        let body = self.body.clone();
+
+        // Build the request using the appropriate method
+        let mut req_builder = match method.as_str() {
+            "GET" => client.get(&url),
+            "POST" => client.post(&url),
+            "PUT" => client.put(&url),
+            "DELETE" => client.delete(&url),
+            "PATCH" => client.request(::http::Method::PATCH, &url),
+            "HEAD" => client.request(::http::Method::HEAD, &url),
+            "OPTIONS" => client.request(::http::Method::OPTIONS, &url),
+            _ => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!("Invalid HTTP method: {}", method),
+                ))
+            }
+        };
+
+        // Add headers
+        for (key, value) in headers {
+            req_builder = req_builder.header(key, value);
+        }
+
+        // Add body if present
+        if let Some(body_data) = body {
+            req_builder = req_builder.body(body_data);
+        }
+
+        // Send the request
+        let resp = req_builder.send().await.map_err(to_napi_err)?;
         Ok(Response { inner: resp })
     }
 }

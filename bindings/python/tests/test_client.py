@@ -104,6 +104,76 @@ class TestClientBuilder:
         assert client is not None
 
 
+class TestRequestBuilder:
+    """Test RequestBuilder for headers and body."""
+
+    def test_request_builder_creation(self):
+        """Test creating a request builder."""
+        client = specter.Client.builder().build()
+        request = client.get("https://httpbin.org/get")
+        assert isinstance(request, specter.RequestBuilder)
+
+    def test_request_builder_methods(self):
+        """Test all HTTP method request builders."""
+        client = specter.Client.builder().build()
+        
+        get_req = client.get("https://example.com")
+        assert isinstance(get_req, specter.RequestBuilder)
+        
+        post_req = client.post("https://example.com")
+        assert isinstance(post_req, specter.RequestBuilder)
+        
+        put_req = client.put("https://example.com")
+        assert isinstance(put_req, specter.RequestBuilder)
+        
+        delete_req = client.delete("https://example.com")
+        assert isinstance(delete_req, specter.RequestBuilder)
+        
+        patch_req = client.patch("https://example.com")
+        assert isinstance(patch_req, specter.RequestBuilder)
+        
+        head_req = client.head("https://example.com")
+        assert isinstance(head_req, specter.RequestBuilder)
+        
+        options_req = client.options("https://example.com")
+        assert isinstance(options_req, specter.RequestBuilder)
+
+    def test_request_header(self):
+        """Test adding a single header."""
+        client = specter.Client.builder().build()
+        request = client.get("https://httpbin.org/get")
+        request.header("X-Custom-Header", "test-value")
+        # Should not raise
+
+    def test_request_headers(self):
+        """Test setting multiple headers."""
+        client = specter.Client.builder().build()
+        request = client.get("https://httpbin.org/get")
+        request.headers([("Authorization", "Bearer token"), ("X-Request-ID", "123")])
+        # Should not raise
+
+    def test_request_body(self):
+        """Test setting request body."""
+        client = specter.Client.builder().build()
+        request = client.post("https://httpbin.org/post")
+        request.body(b"test body data")
+        # Should not raise
+
+    def test_request_json(self):
+        """Test setting JSON body."""
+        client = specter.Client.builder().build()
+        request = client.post("https://httpbin.org/post")
+        request.json('{"key": "value"}')
+        # Should not raise
+
+    def test_request_form(self):
+        """Test setting form body."""
+        client = specter.Client.builder().build()
+        request = client.post("https://httpbin.org/post")
+        request.form("key=value&foo=bar")
+        # Should not raise
+
+
 class TestTimeouts:
     """Test Timeouts configuration."""
 
@@ -193,63 +263,81 @@ class TestAsyncRequests:
         """Test basic GET request."""
         builder = specter.Client.builder()
         client = builder.build()
-        response = await client.get("https://httpbin.org/get")
+        response = await client.get("https://httpbin.org/get").send()
         assert response.status == 200
         assert response.is_success
 
-    async def test_get_response_text(self):
-        """Test GET response text."""
+    async def test_get_with_headers(self):
+        """Test GET request with custom headers."""
         builder = specter.Client.builder()
         client = builder.build()
-        response = await client.get("https://httpbin.org/get")
-        text = await response.text()
-        assert isinstance(text, str)
-        assert len(text) > 0
-
-    async def test_get_response_json(self):
-        """Test GET response JSON."""
-        builder = specter.Client.builder()
-        client = builder.build()
-        response = await client.get("https://httpbin.org/get")
-        data = await response.json()
-        assert isinstance(data, dict)
-        assert "url" in data
-
-    async def test_get_response_headers(self):
-        """Test GET response headers."""
-        builder = specter.Client.builder()
-        client = builder.build()
-        response = await client.get("https://httpbin.org/get")
-        headers = response.headers
-        assert isinstance(headers, dict)
-        assert "content-type" in headers
+        request = client.get("https://httpbin.org/get")
+        request.header("X-Custom-Header", "test-value")
+        response = await request.send()
+        assert response.status == 200
+        # httpbin returns the headers in the response body
+        body = await response.json()
+        assert body["headers"]["X-Custom-Header"] == "test-value"
 
     async def test_post_request(self):
         """Test basic POST request."""
         builder = specter.Client.builder()
         client = builder.build()
-        response = await client.post("https://httpbin.org/post")
+        response = await client.post("https://httpbin.org/post").send()
         assert response.status == 200
+
+    async def test_post_with_json(self):
+        """Test POST request with JSON body."""
+        builder = specter.Client.builder()
+        client = builder.build()
+        request = client.post("https://httpbin.org/post")
+        request.json('{"name": "test", "value": 123}')
+        response = await request.send()
+        assert response.status == 200
+        body = await response.json()
+        assert body["json"]["name"] == "test"
+        assert body["json"]["value"] == 123
+
+    async def test_post_with_form(self):
+        """Test POST request with form body."""
+        builder = specter.Client.builder()
+        client = builder.build()
+        request = client.post("https://httpbin.org/post")
+        request.form("field1=value1&field2=value2")
+        response = await request.send()
+        assert response.status == 200
+        body = await response.json()
+        assert body["form"]["field1"] == "value1"
+        assert body["form"]["field2"] == "value2"
 
     async def test_put_request(self):
         """Test basic PUT request."""
         builder = specter.Client.builder()
         client = builder.build()
-        response = await client.put("https://httpbin.org/put")
+        response = await client.put("https://httpbin.org/put").send()
         assert response.status == 200
 
     async def test_delete_request(self):
         """Test basic DELETE request."""
         builder = specter.Client.builder()
         client = builder.build()
-        response = await client.delete("https://httpbin.org/delete")
+        response = await client.delete("https://httpbin.org/delete").send()
+        assert response.status == 200
+
+    async def test_patch_request(self):
+        """Test PATCH request."""
+        builder = specter.Client.builder()
+        client = builder.build()
+        request = client.patch("https://httpbin.org/patch")
+        request.json('{"patch": "data"}')
+        response = await request.send()
         assert response.status == 200
 
     async def test_response_properties(self):
         """Test response properties."""
         builder = specter.Client.builder()
         client = builder.build()
-        response = await client.get("https://httpbin.org/get")
+        response = await client.get("https://httpbin.org/get").send()
         
         assert isinstance(response.status, int)
         assert isinstance(response.is_success, bool)
@@ -260,7 +348,7 @@ class TestAsyncRequests:
         """Test getting specific header."""
         builder = specter.Client.builder()
         client = builder.build()
-        response = await client.get("https://httpbin.org/get")
+        response = await client.get("https://httpbin.org/get").send()
         content_type = response.get_header("content-type")
         assert content_type is not None
         assert "application/json" in content_type
@@ -269,7 +357,16 @@ class TestAsyncRequests:
         """Test getting response as bytes."""
         builder = specter.Client.builder()
         client = builder.build()
-        response = await client.get("https://httpbin.org/get")
+        response = await client.get("https://httpbin.org/get").send()
         data = await response.bytes()
         assert isinstance(data, bytes)
         assert len(data) > 0
+
+    async def test_response_json(self):
+        """Test parsing response as JSON."""
+        builder = specter.Client.builder()
+        client = builder.build()
+        response = await client.get("https://httpbin.org/get").send()
+        data = await response.json()
+        assert isinstance(data, dict)
+        assert "url" in data

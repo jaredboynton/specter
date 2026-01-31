@@ -29,6 +29,16 @@ pub struct ClientBuilder {
     inner: RustClientBuilder,
 }
 
+/// Python wrapper for HTTP Request Builder.
+#[pyclass]
+pub struct RequestBuilder {
+    client: Client,
+    url: String,
+    method: String,
+    headers: Vec<(String, String)>,
+    body: Option<Vec<u8>>,
+}
+
 /// Python wrapper for HTTP Response.
 #[pyclass]
 pub struct Response {
@@ -105,45 +115,189 @@ impl Client {
         }
     }
 
-    /// Make a GET request.
-    fn get<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = self.inner.clone();
-        future_into_py(py, async move {
-            let resp = client.get(&url).send().await.map_err(to_py_err)?;
-            Ok(Response { inner: resp })
-        })
+    /// Create a GET request builder.
+    fn get(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.clone(),
+            url,
+            method: "GET".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
     }
 
-    /// Make a POST request.
-    fn post<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = self.inner.clone();
-        future_into_py(py, async move {
-            let resp = client.post(&url).send().await.map_err(to_py_err)?;
-            Ok(Response { inner: resp })
-        })
+    /// Create a POST request builder.
+    fn post(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.clone(),
+            url,
+            method: "POST".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
     }
 
-    /// Make a PUT request.
-    fn put<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = self.inner.clone();
-        future_into_py(py, async move {
-            let resp = client.put(&url).send().await.map_err(to_py_err)?;
-            Ok(Response { inner: resp })
-        })
+    /// Create a PUT request builder.
+    fn put(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.clone(),
+            url,
+            method: "PUT".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
     }
 
-    /// Make a DELETE request.
-    fn delete<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
-        let client = self.inner.clone();
-        future_into_py(py, async move {
-            let resp = client.delete(&url).send().await.map_err(to_py_err)?;
-            Ok(Response { inner: resp })
-        })
+    /// Create a DELETE request builder.
+    fn delete(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.clone(),
+            url,
+            method: "DELETE".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// Create a PATCH request builder.
+    fn patch(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.clone(),
+            url,
+            method: "PATCH".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// Create a HEAD request builder.
+    fn head(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.clone(),
+            url,
+            method: "HEAD".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// Create an OPTIONS request builder.
+    fn options(&self, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.clone(),
+            url,
+            method: "OPTIONS".to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
     }
 
     /// Get the response string representation.
     fn __repr__(&self) -> String {
         "<specter.Client>".to_string()
+    }
+}
+
+#[pymethods]
+impl RequestBuilder {
+    /// Add a header to the request.
+    fn header(&mut self, key: String, value: String) -> PyResult<()> {
+        self.headers.push((key, value));
+        Ok(())
+    }
+
+    /// Set all headers (replaces existing headers).
+    fn headers(&mut self, headers: Vec<(String, String)>) -> PyResult<()> {
+        self.headers = headers;
+        Ok(())
+    }
+
+    /// Set the request body as bytes.
+    fn body(&mut self, body: &[u8]) -> PyResult<()> {
+        self.body = Some(body.to_vec());
+        Ok(())
+    }
+
+    /// Set the request body as a JSON string.
+    fn json(&mut self, json_str: &str) -> PyResult<()> {
+        self.body = Some(json_str.as_bytes().to_vec());
+        // Set Content-Type to application/json if not already set
+        if !self
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
+            self.headers
+                .push(("Content-Type".to_string(), "application/json".to_string()));
+        }
+        Ok(())
+    }
+
+    /// Set the request body as form data.
+    fn form(&mut self, form_str: &str) -> PyResult<()> {
+        self.body = Some(form_str.as_bytes().to_vec());
+        // Set Content-Type to application/x-www-form-urlencoded if not already set
+        if !self
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
+            self.headers.push((
+                "Content-Type".to_string(),
+                "application/x-www-form-urlencoded".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Send the request and return the response.
+    fn send<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.inner.clone();
+        let url = self.url.clone();
+        let method = self.method.clone();
+        let headers = self.headers.clone();
+        let body = self.body.clone();
+
+        future_into_py(py, async move {
+            // Build the request using the appropriate method
+            let mut req_builder = match method.as_str() {
+                "GET" => client.get(&url),
+                "POST" => client.post(&url),
+                "PUT" => client.put(&url),
+                "DELETE" => client.delete(&url),
+                "PATCH" => client.request(::http::Method::PATCH, &url),
+                "HEAD" => client.request(::http::Method::HEAD, &url),
+                "OPTIONS" => client.request(::http::Method::OPTIONS, &url),
+                _ => client.request(
+                    ::http::Method::from_bytes(method.as_bytes()).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Invalid method: {}",
+                            e
+                        ))
+                    })?,
+                    &url,
+                ),
+            };
+
+            // Add headers
+            for (key, value) in headers {
+                req_builder = req_builder.header(key, value);
+            }
+
+            // Add body if present
+            if let Some(body_data) = body {
+                req_builder = req_builder.body(body_data);
+            }
+
+            // Send the request
+            let resp = req_builder.send().await.map_err(to_py_err)?;
+            Ok(Response { inner: resp })
+        })
+    }
+
+    /// Get the string representation.
+    fn __repr__(&self) -> String {
+        format!("<specter.RequestBuilder {} {}>", self.method, self.url)
     }
 }
 
@@ -540,6 +694,7 @@ fn to_py_err(e: RustError) -> PyErr {
 pub fn specter(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Client>()?;
     m.add_class::<ClientBuilder>()?;
+    m.add_class::<RequestBuilder>()?;
     m.add_class::<Response>()?;
     m.add_class::<CookieJar>()?;
     m.add_class::<FingerprintProfile>()?;

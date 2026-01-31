@@ -45,6 +45,22 @@ export interface Timeouts {
   poolAcquire?: number;
 }
 
+/** HTTP request builder for setting headers and body. */
+export class RequestBuilder {
+  /** Add a header to the request. Returns this for chaining. */
+  header(key: string, value: string): this;
+  /** Set all headers (replaces existing headers). Returns this for chaining. */
+  headers(headers: string[][]): this;
+  /** Set the request body as bytes. Returns this for chaining. */
+  body(body: Buffer): this;
+  /** Set the request body as JSON string and add Content-Type header. Returns this for chaining. */
+  json(jsonStr: string): this;
+  /** Set the request body as form data and add Content-Type header. Returns this for chaining. */
+  form(formStr: string): this;
+  /** Send the request and return the response. */
+  send(): Promise<Response>;
+}
+
 /** HTTP response with decompression support. */
 export class Response {
   /** HTTP status code */
@@ -111,14 +127,20 @@ export class ClientBuilder {
 export class Client {
   /** Create a new client builder */
   static builder(): ClientBuilder;
-  /** Make a GET request */
-  get(url: string): Promise<Response>;
-  /** Make a POST request */
-  post(url: string): Promise<Response>;
-  /** Make a PUT request */
-  put(url: string): Promise<Response>;
-  /** Make a DELETE request */
-  delete(url: string): Promise<Response>;
+  /** Create a GET request builder */
+  get(url: string): RequestBuilder;
+  /** Create a POST request builder */
+  post(url: string): RequestBuilder;
+  /** Create a PUT request builder */
+  put(url: string): RequestBuilder;
+  /** Create a DELETE request builder */
+  delete(url: string): RequestBuilder;
+  /** Create a PATCH request builder */
+  patch(url: string): RequestBuilder;
+  /** Create a HEAD request builder */
+  head(url: string): RequestBuilder;
+  /** Create an OPTIONS request builder */
+  options(url: string): RequestBuilder;
 }
 
 /** Cookie jar for manual cookie management. */

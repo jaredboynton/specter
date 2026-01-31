@@ -11,10 +11,17 @@
  *   // Create a client with default settings
  *   const client = Client.builder().build();
  *
- *   // Make a GET request
- *   const response = await client.get('https://httpbin.org/get');
+ *   // Simple GET request
+ *   const response = await client.get('https://httpbin.org/get').send();
  *   console.log(`Status: ${response.status}`);
- *   console.log(await response.text());
+ *   console.log(response.text());
+ *
+ *   // POST with JSON body
+ *   const response2 = await client.post('https://api.example.com/data')
+ *     .header('Authorization', 'Bearer token')
+ *     .json(JSON.stringify({ name: 'test' }))
+ *     .send();
+ *   console.log(JSON.parse(response2.json()));
  * }
  *
  * main();
@@ -75,6 +82,7 @@ const binding = loadNativeBinding();
 // Export the native types
 module.exports.Client = binding.Client;
 module.exports.ClientBuilder = binding.ClientBuilder;
+module.exports.RequestBuilder = binding.RequestBuilder;
 module.exports.Response = binding.Response;
 module.exports.CookieJar = binding.CookieJar;
 module.exports.FingerprintProfile = binding.FingerprintProfile;
