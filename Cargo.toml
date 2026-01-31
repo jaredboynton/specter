@@ -1,6 +1,6 @@
 [package]
 name = "specter"
-version = "1.0.5"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 description = "HTTP client with full TLS, HTTP/2, and HTTP/3 fingerprint control"
@@ -57,8 +57,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 rcgen = "0.14.5"
 
-# Make this crate standalone (not part of parent workspace)
 [workspace]
+members = [".", "bindings/python", "bindings/node"]
+resolver = "2"
 
 # Note: Windows-specific crates (windows-sys, windows-targets, etc.) appear in Cargo.lock
 # as transitive dependencies from tokio, quiche, etc., but they are platform-specific

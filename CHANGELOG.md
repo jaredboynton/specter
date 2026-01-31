@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-01-31
+
+### Added
+- **Python Bindings**:
+    - New `specter` Python package with full async/await support.
+    - Exposed `Client`, `ClientBuilder`, `Response`, `CookieJar`, `FingerprintProfile`, `HttpVersion`, `Timeouts`.
+    - Browser fingerprinting support: `Chrome142`, `Firefox133`, `None`.
+    - HTTP methods: `get()`, `post()`, `put()`, `delete()`.
+    - Timeout configuration with `api_defaults()` and `streaming_defaults()` presets.
+    - Type stubs (`.pyi`) for IDE support.
+    - Published to PyPI with pre-built wheels for Linux, macOS, and Windows.
+
+- **Node.js Bindings**:
+    - New `@specter/client` npm package with native async/Promise support.
+    - Exposed `Client`, `ClientBuilder`, `Response`, `CookieJar`, `FingerprintProfile`, `HttpVersion`, `Timeouts`.
+    - Same feature set as Python bindings.
+    - TypeScript definitions included.
+    - Published to npm with pre-built binaries for multiple platforms.
+
+- **CI/CD Workflows**:
+    - Added `python-release.yml` for automated wheel building and PyPI publishing.
+    - Added `node-release.yml` for automated native module building and npm publishing.
+    - Cross-platform builds: Linux (x86_64, aarch64, musl), macOS (x86_64, arm64), Windows (x64).
+
 ## [1.0.4] - 2026-01-05
 
 ### Added

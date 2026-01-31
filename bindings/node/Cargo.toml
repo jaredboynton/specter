@@ -1,0 +1,21 @@
+[package]
+name = "specter-node"
+version = "1.1.0"
+edition = "2021"
+license = "MIT"
+description = "Node.js bindings for Specter HTTP client"
+repository = "https://github.com/jaredboynton/specter"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+specter = { path = "../.." }
+napi = { version = "2", features = ["async", "tokio_rt", "napi9"] }
+napi-derive = "2"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+bytes = "1"
+serde_json = "1"
+
+[build-dependencies]
+napi-build = "2"
