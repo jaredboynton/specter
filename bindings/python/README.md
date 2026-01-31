@@ -28,7 +28,7 @@ async def main():
     client = specter.Client.builder().build()
     
     # Make a GET request
-    response = await client.get("https://httpbin.org/get")
+    response = await client.get("https://httpbin.org/get").send()
     print(f"Status: {response.status}")
     print(await response.text())
 
@@ -78,22 +78,34 @@ import specter
 client = specter.Client.builder().build()
 
 # GET
-response = await client.get("https://api.example.com/items")
+response = await client.get("https://api.example.com/items").send()
 
 # POST
-response = await client.post("https://api.example.com/items")
+response = await client.post("https://api.example.com/items").send()
 
 # PUT
-response = await client.put("https://api.example.com/items/1")
+response = await client.put("https://api.example.com/items/1").send()
 
 # DELETE
-response = await client.delete("https://api.example.com/items/1")
+response = await client.delete("https://api.example.com/items/1").send()
+
+# PATCH
+response = await client.patch("https://api.example.com/items/1").send()
+
+# HEAD
+response = await client.head("https://api.example.com/items/1").send()
+
+# OPTIONS
+response = await client.options("https://api.example.com/items").send()
+
+# Arbitrary method
+response = await client.request("PURGE", "https://api.example.com/cache").send()
 ```
 
 ## Response Handling
 
 ```python
-response = await client.get("https://api.example.com/data")
+response = await client.get("https://api.example.com/data").send()
 
 # Status code
 print(response.status)
@@ -106,6 +118,21 @@ print(response.get_header("content-type"))
 print(await response.text())      # Decompressed text
 print(await response.json())      # Parsed JSON
 data = await response.bytes()     # Raw bytes
+
+## Request Builder
+
+```python
+import specter
+
+client = specter.Client.builder().build()
+
+response = await (client.post("https://api.example.com/items")
+    .header("Authorization", "Bearer token")
+    .json('{"name": "example"}')
+    .send())
+
+print(response.status)
+```
 
 # Response metadata
 print(response.http_version)      # "HTTP/2", "HTTP/1.1", etc.

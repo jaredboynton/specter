@@ -192,6 +192,17 @@ impl Client {
         }
     }
 
+    /// Create a request builder for an arbitrary HTTP method.
+    fn request(&self, method: String, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.clone(),
+            url,
+            method,
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
     /// Get the response string representation.
     fn __repr__(&self) -> String {
         "<specter.Client>".to_string()

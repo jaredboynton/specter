@@ -138,6 +138,12 @@ class TestRequestBuilder:
         options_req = client.options("https://example.com")
         assert isinstance(options_req, specter.RequestBuilder)
 
+    def test_request_arbitrary_method(self):
+        """Test arbitrary HTTP method request builder."""
+        client = specter.Client.builder().build()
+        request = client.request("PURGE", "https://example.com/cache")
+        assert isinstance(request, specter.RequestBuilder)
+
     def test_request_header(self):
         """Test adding a single header."""
         client = specter.Client.builder().build()

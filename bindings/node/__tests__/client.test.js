@@ -122,6 +122,11 @@ describe('RequestBuilder', () => {
     expect(client.options('https://example.com')).toBeInstanceOf(RequestBuilder);
   });
 
+  test('arbitrary HTTP method request builder', () => {
+    const request = client.request('PURGE', 'https://example.com/cache');
+    expect(request).toBeInstanceOf(RequestBuilder);
+  });
+
   test('header method returns this for chaining', () => {
     const request = client.get('https://httpbin.org/get');
     const result = request.header('X-Custom-Header', 'value');

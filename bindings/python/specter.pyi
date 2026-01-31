@@ -209,6 +209,10 @@ class Client:
     def options(self, url: str) -> RequestBuilder:
         """Create an OPTIONS request builder."""
         ...
+    
+    def request(self, method: str, url: str) -> RequestBuilder:
+        """Create a request builder for an arbitrary HTTP method."""
+        ...
 
 class Response:
     """HTTP response with decompression support."""

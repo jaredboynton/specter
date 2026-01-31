@@ -141,6 +141,8 @@ export class Client {
   head(url: string): RequestBuilder;
   /** Create an OPTIONS request builder */
   options(url: string): RequestBuilder;
+  /** Create a request builder for an arbitrary HTTP method */
+  request(method: string, url: string): RequestBuilder;
 }
 
 /** Cookie jar for manual cookie management. */

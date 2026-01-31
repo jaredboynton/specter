@@ -27,7 +27,7 @@ async function main() {
   const client = Client.builder().build();
   
   // Make a GET request
-  const response = await client.get('https://httpbin.org/get');
+  const response = await client.get('https://httpbin.org/get').send();
   console.log(`Status: ${response.status}`);
   console.log(await response.text());
 }
@@ -79,22 +79,34 @@ const { Client } = require('@specter/client');
 const client = Client.builder().build();
 
 // GET
-const response = await client.get('https://api.example.com/items');
+const response = await client.get('https://api.example.com/items').send();
 
 // POST
-const response = await client.post('https://api.example.com/items');
+const response = await client.post('https://api.example.com/items').send();
 
 // PUT
-const response = await client.put('https://api.example.com/items/1');
+const response = await client.put('https://api.example.com/items/1').send();
 
 // DELETE
-const response = await client.delete('https://api.example.com/items/1');
+const response = await client.delete('https://api.example.com/items/1').send();
+
+// PATCH
+const response = await client.patch('https://api.example.com/items/1').send();
+
+// HEAD
+const response = await client.head('https://api.example.com/items/1').send();
+
+// OPTIONS
+const response = await client.options('https://api.example.com/items').send();
+
+// Arbitrary method
+const response = await client.request('PURGE', 'https://api.example.com/cache').send();
 ```
 
 ## Response Handling
 
 ```javascript
-const response = await client.get('https://api.example.com/data');
+const response = await client.get('https://api.example.com/data').send();
 
 // Status code
 console.log(response.status);
@@ -105,12 +117,28 @@ console.log(response.getHeader('content-type'));
 
 // Body
 console.log(response.text());      // Decompressed text
-console.log(response.json());      // Parsed JSON
+console.log(response.json());      // JSON string (use JSON.parse)
 const data = response.bytes();     // Buffer
 
 // Response metadata
 console.log(response.httpVersion); // "HTTP/2", "HTTP/1.1", etc.
 console.log(response.isSuccess);   // true for 2xx status
+
+## Request Builder
+
+```javascript
+const { Client } = require('@specter/client');
+
+const client = Client.builder().build();
+
+const response = await client
+  .post('https://api.example.com/items')
+  .header('Authorization', 'Bearer token')
+  .json(JSON.stringify({ name: 'example' }))
+  .send();
+
+console.log(response.status);
+```
 ```
 
 ## Development

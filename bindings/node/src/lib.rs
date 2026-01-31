@@ -206,6 +206,18 @@ impl Client {
             body: None,
         }
     }
+
+    /// Create a request builder for an arbitrary HTTP method.
+    #[napi]
+    pub fn request(&self, method: String, url: String) -> RequestBuilder {
+        RequestBuilder {
+            client: self.inner.clone(),
+            url,
+            method,
+            headers: Vec::new(),
+            body: None,
+        }
+    }
 }
 
 #[napi]
