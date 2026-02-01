@@ -1,0 +1,94 @@
+name: BoringSSL Prebuilt Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., boringssl-prebuilt-v1)'
+        required: true
+        default: 'boringssl-prebuilt-v1'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package prebuilt BoringSSL
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify libraries exist
+        run: |
+          echo "Checking for prebuilt libraries..."
+          ls -la lib/boringssl/
+          
+          # Verify all expected targets
+          for target in aarch64-apple-darwin x86_64-apple-darwin \
+                        x86_64-unknown-linux-gnu x86_64-unknown-linux-musl \
+                        aarch64-unknown-linux-gnu \
+                        x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            if [[ -d "lib/boringssl/$target" ]]; then
+              echo "✓ $target"
+              ls -lh "lib/boringssl/$target/"
+            else
+              echo "✗ $target (missing)"
+            fi
+          done
+
+      - name: Package archives
+        run: |
+          cd lib/boringssl
+          
+          # Create per-target archives
+          for target in */; do
+            target=${target%/}
+            [[ "$target" == "include" ]] && continue
+            
+            echo "Packaging $target..."
+            tar -czf "boringssl-${target}.tar.gz" include/ "$target/"
+            
+            # Also create zip for Windows
+            if [[ "$target" == *windows* ]]; then
+              zip -r "boringssl-${target}.zip" include/ "$target/"
+            fi
+          done
+          
+          # Create all-in-one archive
+          tar -czf boringssl-all-targets.tar.gz include/ */
+          
+          ls -lh *.tar.gz *.zip 2>/dev/null || true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: BoringSSL Prebuilt Libraries ${{ inputs.version }}
+          body: |
+            Prebuilt BoringSSL static libraries for use with `boring-sys` crate.
+            
+            ## Targets
+            - `aarch64-apple-darwin` - macOS ARM64 (Apple Silicon)
+            - `x86_64-apple-darwin` - macOS x86_64
+            - `x86_64-unknown-linux-gnu` - Linux x86_64 (glibc)
+            - `x86_64-unknown-linux-musl` - Linux x86_64 (musl)
+            - `aarch64-unknown-linux-gnu` - Linux ARM64 (glibc)
+            - `x86_64-pc-windows-msvc` - Windows x86_64
+            - `aarch64-pc-windows-msvc` - Windows ARM64
+            
+            ## Usage
+            
+            Download the archive for your target and set environment variables:
+            
+            ```bash
+            export BORING_BSSL_PATH=/path/to/boringssl/<target>
+            export BORING_BSSL_INCLUDE_PATH=/path/to/boringssl/include
+            cargo build
+            ```
+            
+            Or download `boringssl-all-targets.tar.gz` for all platforms.
+          files: |
+            lib/boringssl/*.tar.gz
+            lib/boringssl/*.zip
+          draft: false
+          prerelease: false
