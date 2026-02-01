@@ -75,8 +75,8 @@ jobs:
       - name: Setup zig wrapper scripts
         if: matrix.settings.cross
         run: |
-          chmod +x .github/scripts/zig-cc-${{ matrix.settings.zig_target }}
-          chmod +x .github/scripts/zig-cxx-${{ matrix.settings.zig_target }}
+          chmod +x scripts/zig-cc-${{ matrix.settings.zig_target }}
+          chmod +x scripts/zig-cxx-${{ matrix.settings.zig_target }}
 
       # All Linux builds need cmake + clang for bindgen
       - name: Install build tools (Linux)
@@ -130,12 +130,12 @@ jobs:
           # Use prebuilt BoringSSL from repo
           BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.settings.target }}
           # Use wrapper scripts that translate --target flag for cmake/boring-sys
-          CC: ${{ github.workspace }}/.github/scripts/zig-cc-${{ matrix.settings.zig_target }}
-          CXX: ${{ github.workspace }}/.github/scripts/zig-cxx-${{ matrix.settings.zig_target }}
-          CC_${{ matrix.settings.target }}: ${{ github.workspace }}/.github/scripts/zig-cc-${{ matrix.settings.zig_target }}
-          CXX_${{ matrix.settings.target }}: ${{ github.workspace }}/.github/scripts/zig-cxx-${{ matrix.settings.zig_target }}
+          CC: ${{ github.workspace }}/scripts/zig-cc-${{ matrix.settings.zig_target }}
+          CXX: ${{ github.workspace }}/scripts/zig-cxx-${{ matrix.settings.zig_target }}
+          CC_${{ matrix.settings.target }}: ${{ github.workspace }}/scripts/zig-cc-${{ matrix.settings.zig_target }}
+          CXX_${{ matrix.settings.target }}: ${{ github.workspace }}/scripts/zig-cxx-${{ matrix.settings.zig_target }}
           AR_${{ matrix.settings.target }}: zig ar
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ github.workspace }}/.github/scripts/zig-cc-aarch64-linux-gnu
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ github.workspace }}/scripts/zig-cc-aarch64-linux-gnu
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

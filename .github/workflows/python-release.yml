@@ -29,9 +29,8 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist -m bindings/python/Cargo.toml
           manylinux: manylinux_2_28
-          # Use prebuilt BoringSSL from repo
-          env: |
-            BORING_BSSL_PATH=/home/runner/work/specter/specter/lib/boringssl/${{ matrix.target }}-unknown-linux-gnu
+          # Use prebuilt BoringSSL from repo (path is /io inside Docker container)
+          docker-options: -e BORING_BSSL_PATH=/io/lib/boringssl/${{ matrix.target }}-unknown-linux-gnu
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -54,9 +53,8 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist -m bindings/python/Cargo.toml
           manylinux: musllinux_1_2
-          # Use prebuilt BoringSSL from repo (only x86_64-musl available, aarch64 falls back to build)
-          env: |
-            BORING_BSSL_PATH=/home/runner/work/specter/specter/lib/boringssl/${{ matrix.target }}-unknown-linux-musl
+          # Use prebuilt BoringSSL from repo (path is /io inside Docker container)
+          docker-options: -e BORING_BSSL_PATH=/io/lib/boringssl/${{ matrix.target }}-unknown-linux-musl
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
