@@ -60,7 +60,8 @@ pub enum FingerprintProfile {
     /// Firefox 133 on macOS
     Firefox133,
     /// No fingerprinting - use default TLS settings
-    None,
+    /// Note: Named NoFingerprint instead of None because None is a reserved keyword in Python
+    NoFingerprint,
 }
 
 /// HTTP version preference.
@@ -319,7 +320,7 @@ impl ClientBuilder {
         let rust_profile = match profile {
             FingerprintProfile::Chrome142 => RustFingerprintProfile::Chrome142,
             FingerprintProfile::Firefox133 => RustFingerprintProfile::Firefox133,
-            FingerprintProfile::None => RustFingerprintProfile::None,
+            FingerprintProfile::NoFingerprint => RustFingerprintProfile::None,
         };
         // Since RustClientBuilder is not Clone, we need to take ownership
         // We use std::mem::replace to work around this
