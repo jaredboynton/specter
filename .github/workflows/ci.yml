@@ -115,3 +115,5 @@ jobs:
 
       - name: Build
         run: cargo xwin build --release --target ${{ matrix.target }} --lib
+        env:
+          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.target }}

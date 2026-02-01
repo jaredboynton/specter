@@ -36,7 +36,7 @@ class TestClientBuilder:
     def test_fingerprint_none(self):
         """Test setting no fingerprint."""
         builder = specter.Client.builder()
-        builder.fingerprint(specter.FingerprintProfile.None)
+        builder.fingerprint(specter.FingerprintProfile.NoFingerprint)
         client = builder.build()
         assert client is not None
 
@@ -221,9 +221,9 @@ class TestFingerprintProfile:
         """Test Firefox133 profile exists."""
         assert specter.FingerprintProfile.Firefox133 is not None
 
-    def test_none_exists(self):
-        """Test None profile exists."""
-        assert specter.FingerprintProfile.None is not None
+    def test_nofingerprint_exists(self):
+        """Test NoFingerprint profile exists."""
+        assert specter.FingerprintProfile.NoFingerprint is not None
 
 
 class TestHttpVersion:
