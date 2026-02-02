@@ -94,15 +94,29 @@ jobs:
           just zigbuild ${{ matrix.target }}
 
   build-windows:
-    name: Build Windows (x86_64)
-    runs-on: windows-latest
+    name: Build Windows (${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install LLVM
+        run: brew install llvm
+
+      - name: Install cargo-xwin
+        run: cargo install cargo-xwin
 
       - name: Build
-        run: cargo build --release --lib
+        run: cargo xwin build --release --target ${{ matrix.target }} --lib
         env:
-          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/x86_64-pc-windows-msvc
+          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.target }}
+          PATH: /opt/homebrew/opt/llvm/bin:$PATH
