@@ -6,6 +6,7 @@ use bytes::Bytes;
 use http::Method;
 use specter::cache::{CacheStatus, HttpCache};
 use specter::response::Response;
+use specter::Headers;
 
 #[test]
 fn test_cache_no_store_rfc9111_section_5_2_2_3() {
@@ -14,7 +15,7 @@ fn test_cache_no_store_rfc9111_section_5_2_2_3() {
 
     let response = Response::new(
         200,
-        vec!["Cache-Control: no-store".to_string()],
+        Headers::from(vec![("Cache-Control".to_string(), "no-store".to_string())]),
         Bytes::from("secret"),
         "HTTP/1.1".to_string(),
     );
@@ -36,7 +37,10 @@ fn test_cache_hit_rfc9111() {
 
     let response = Response::new(
         200,
-        vec!["Cache-Control: max-age=3600".to_string()],
+        Headers::from(vec![(
+            "Cache-Control".to_string(),
+            "max-age=3600".to_string(),
+        )]),
         Bytes::from("data"),
         "HTTP/1.1".to_string(),
     );
@@ -58,10 +62,10 @@ fn test_cache_revalidation_etag() {
     // Stored response with ETag
     let response = Response::new(
         200,
-        vec![
-            "Cache-Control: max-age=1".to_string(), // Expire quickly
-            "ETag: \"12345\"".to_string(),
-        ],
+        Headers::from(vec![
+            ("Cache-Control".to_string(), "max-age=1".to_string()), // Expire quickly
+            ("ETag".to_string(), "\"12345\"".to_string()),
+        ]),
         Bytes::from("data"),
         "HTTP/1.1".to_string(),
     );

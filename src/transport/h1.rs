@@ -8,6 +8,7 @@ use http::{Method, Uri};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::{Error, Result};
+use crate::headers::Headers;
 use crate::response::Response;
 use crate::transport::connector::MaybeHttpsStream;
 
@@ -270,12 +271,18 @@ impl H1Connection {
         let version = format!("HTTP/1.{}", response.version.unwrap_or(1));
 
         // Collect headers
-        let response_headers: Vec<String> = response
+        let response_headers: Vec<(String, String)> = response
             .headers
             .iter()
             .filter(|h| !h.name.is_empty())
-            .map(|h| format!("{}: {}", h.name, String::from_utf8_lossy(h.value)))
+            .map(|h| {
+                (
+                    h.name.to_string(),
+                    String::from_utf8_lossy(h.value).to_string(),
+                )
+            })
             .collect();
+        let response_headers = Headers::from(response_headers);
 
         // Check Connection header for close directive
         if let Some(conn) = find_header_value(&response_headers, "connection") {
@@ -511,15 +518,8 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
 }
 
 /// Find a header value by name (case-insensitive).
-fn find_header_value<'a>(headers: &'a [String], name: &str) -> Option<&'a str> {
-    for header in headers {
-        if let Some((hname, hvalue)) = header.split_once(": ") {
-            if hname.eq_ignore_ascii_case(name) {
-                return Some(hvalue);
-            }
-        }
-    }
-    None
+fn find_header_value<'a>(headers: &'a Headers, name: &str) -> Option<&'a str> {
+    headers.get(name)
 }
 
 /// Parse a chunk size from the buffer, returning (size, end_of_line_position).
@@ -640,10 +640,10 @@ mod tests {
 
     #[test]
     fn test_find_header_value() {
-        let headers = vec![
-            "Content-Type: text/html".to_string(),
-            "Content-Length: 100".to_string(),
-        ];
+        let headers = Headers::from(vec![
+            ("Content-Type".to_string(), "text/html".to_string()),
+            ("Content-Length".to_string(), "100".to_string()),
+        ]);
         assert_eq!(
             find_header_value(&headers, "content-type"),
             Some("text/html")

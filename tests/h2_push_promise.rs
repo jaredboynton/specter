@@ -137,7 +137,7 @@ async fn test_push_promise_when_disabled() {
         .http2_prior_knowledge(true)
         .build()
         .unwrap();
-    let result = timeout(Duration::from_secs(2), client.get(&url).send()).await;
+    let result = timeout(Duration::from_secs(2), client.get(url.as_str()).send()).await;
 
     assert!(result.is_ok(), "Request timed out");
     let response = result.unwrap();

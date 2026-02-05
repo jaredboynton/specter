@@ -113,7 +113,7 @@ async fn test_data_on_closed_stream() {
         .build()
         .unwrap();
 
-    let result = timeout(Duration::from_secs(2), client.get(&url).send()).await;
+    let result = timeout(Duration::from_secs(2), client.get(url.as_str()).send()).await;
 
     // Request should succeed (we got a valid response before the violation)
     assert!(result.is_ok(), "Request timed out");
@@ -166,7 +166,7 @@ async fn test_server_initiated_stream_even_id() {
         .http2_prior_knowledge(true)
         .build()
         .unwrap();
-    let result = timeout(Duration::from_secs(2), client.get(&url).send()).await;
+    let result = timeout(Duration::from_secs(2), client.get(url.as_str()).send()).await;
 
     assert!(result.is_ok());
     assert!(result.unwrap().is_ok());

@@ -28,9 +28,9 @@ async fn test_http11_basic_request() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.body().as_ref(), b"Hello");
 }
 
@@ -46,8 +46,8 @@ async fn test_http11_connection_reuse() {
 
     // Multiple requests should reuse the connection
     for _ in 0..3 {
-        let resp = client.get(&url).send().await.unwrap();
-        assert_eq!(resp.status, 200);
+        let resp = client.get(url.as_str()).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
     }
 }
 
@@ -77,9 +77,9 @@ async fn test_204_no_content_has_no_body() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 204);
+    assert_eq!(resp.status().as_u16(), 204);
     // Body should be empty even though Content-Length says 100
     assert!(resp.body().is_empty());
 
@@ -105,9 +105,9 @@ async fn test_304_not_modified_has_no_body() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 304);
+    assert_eq!(resp.status().as_u16(), 304);
     assert!(resp.body().is_empty());
 
     let _ = server_task.await;
@@ -131,9 +131,9 @@ async fn test_chunked_transfer_encoding() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.body().as_ref(), b"hello");
 
     let _ = server_task.await;
@@ -159,9 +159,9 @@ async fn test_chunked_case_insensitive() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.body().as_ref(), b"hello");
 
     let _ = server_task.await;
@@ -187,9 +187,9 @@ async fn test_transfer_encoding_overrides_content_length() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     // Should use chunked encoding, not Content-Length
     assert_eq!(resp.body().as_ref(), b"hello");
 
@@ -215,9 +215,9 @@ async fn test_chunked_with_trailers() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.body().as_ref(), b"hello");
 
     let _ = server_task.await;
@@ -241,9 +241,9 @@ async fn test_chunked_multiple_chunks() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.body().as_ref(), b"hello world");
 
     let _ = server_task.await;
@@ -268,9 +268,9 @@ async fn test_content_length_exact() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.body().as_ref(), b"hello world");
 
     let _ = server_task.await;
@@ -294,9 +294,9 @@ async fn test_content_length_zero() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     assert!(resp.body().is_empty());
 
     let _ = server_task.await;
@@ -322,10 +322,10 @@ async fn test_1xx_responses_skipped() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
     // Should skip 100 Continue and return 200
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.body().as_ref(), b"hello");
 
     let _ = server_task.await;
@@ -352,9 +352,9 @@ async fn test_close_delimited_body() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.body().as_ref(), b"This body is close-delimited");
 
     let _ = server_task.await;

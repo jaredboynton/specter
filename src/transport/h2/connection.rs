@@ -1367,11 +1367,7 @@ where
         if let Some(stream) = self.streams.remove(&stream_id) {
             let response = SpecterResponse::new(
                 status,
-                stream
-                    .response_headers
-                    .iter()
-                    .map(|(n, v)| format!("{}: {}", n, v))
-                    .collect(),
+                crate::headers::Headers::from(stream.response_headers),
                 stream.response_data.freeze(),
                 "HTTP/2".to_string(),
             );

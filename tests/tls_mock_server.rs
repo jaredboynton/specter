@@ -34,9 +34,9 @@ async fn test_h1_tls() {
         .unwrap();
 
     // Send request
-    let resp = client.get(&url).send().await.unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
 
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.http_version(), "HTTP/1.1");
     let body = resp.text().unwrap();
     assert!(body.contains("Hello"));
@@ -110,12 +110,12 @@ async fn test_h2_tls() {
         .unwrap();
 
     // Send request (ensure we use https)
-    let result = timeout(Duration::from_secs(2), client.get(&url).send()).await;
+    let result = timeout(Duration::from_secs(2), client.get(url.as_str()).send()).await;
 
     assert!(result.is_ok(), "Request timed out");
     let resp = result.unwrap().unwrap();
 
-    assert_eq!(resp.status, 200);
+    assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.http_version(), "HTTP/2");
     assert_eq!(resp.text().unwrap(), "Hello");
 }

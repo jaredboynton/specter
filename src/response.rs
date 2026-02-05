@@ -1,21 +1,24 @@
 //! HTTP response handling with explicit decompression.
 
 use crate::error::{Error, Result};
+use crate::headers::Headers;
 use bytes::Bytes;
+use http::StatusCode;
 use std::io::Read;
+use url::Url;
 
 /// HTTP response with explicit decompression.
 #[derive(Debug, Clone)]
 pub struct Response {
-    pub status: u16,
-    pub headers: Vec<String>,
+    pub(crate) status: u16,
+    headers: Headers,
     body: Bytes,
     http_version: String,
-    pub effective_url: Option<String>,
+    effective_url: Option<Url>,
 }
 
 impl Response {
-    pub fn new(status: u16, headers: Vec<String>, body: Bytes, http_version: String) -> Self {
+    pub fn new(status: u16, headers: Headers, body: Bytes, http_version: String) -> Self {
         Self {
             status,
             headers,
@@ -27,20 +30,47 @@ impl Response {
 
     /// Set the effective URL (the URL that was actually requested).
     /// This is used by the redirect engine to track the current URL.
-    pub fn with_url(mut self, url: impl Into<String>) -> Self {
-        self.effective_url = Some(url.into());
+    pub fn with_url(mut self, url: Url) -> Self {
+        self.effective_url = Some(url);
         self
     }
 
     pub fn http_version(&self) -> &str {
         &self.http_version
     }
+
+    pub fn status(&self) -> StatusCode {
+        StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+
+    pub fn status_code(&self) -> u16 {
+        self.status
+    }
+
+    pub fn headers(&self) -> &Headers {
+        &self.headers
+    }
+
+    pub fn url(&self) -> Option<&Url> {
+        self.effective_url.as_ref()
+    }
+
     pub fn body(&self) -> &Bytes {
         &self.body
     }
+
+    pub fn bytes_raw(&self) -> Bytes {
+        self.body.clone()
+    }
+
     pub fn into_body(self) -> Bytes {
         self.body
     }
+
+    pub fn bytes(&self) -> Result<Bytes> {
+        self.decoded_body()
+    }
+
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
     }
@@ -52,30 +82,11 @@ impl Response {
     }
 
     pub fn get_header(&self, name: &str) -> Option<&str> {
-        let name_lower = name.to_lowercase();
-        for header in &self.headers {
-            if let Some((key, value)) = header.split_once(':') {
-                if key.trim().to_lowercase() == name_lower {
-                    return Some(value.trim());
-                }
-            }
-        }
-        None
+        self.headers.get(name)
     }
 
     pub fn get_headers(&self, name: &str) -> Vec<&str> {
-        let name_lower = name.to_lowercase();
-        self.headers
-            .iter()
-            .filter_map(|h| {
-                let (key, value) = h.split_once(':')?;
-                if key.trim().to_lowercase() == name_lower {
-                    Some(value.trim())
-                } else {
-                    None
-                }
-            })
-            .collect()
+        self.headers.get_all(name)
     }
 
     pub fn content_type(&self) -> Option<&str> {
@@ -143,6 +154,32 @@ impl Response {
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
         let text = self.text()?;
         serde_json::from_str(&text).map_err(Error::from)
+    }
+
+    pub fn error_for_status(self) -> Result<Self> {
+        if self.status().is_client_error() || self.status().is_server_error() {
+            let message = self
+                .status()
+                .canonical_reason()
+                .unwrap_or("HTTP error")
+                .to_string();
+            Err(Error::http_status(self.status, message))
+        } else {
+            Ok(self)
+        }
+    }
+
+    pub fn error_for_status_ref(&self) -> Result<&Self> {
+        if self.status().is_client_error() || self.status().is_server_error() {
+            let message = self
+                .status()
+                .canonical_reason()
+                .unwrap_or("HTTP error")
+                .to_string();
+            Err(Error::http_status(self.status, message))
+        } else {
+            Ok(self)
+        }
     }
 }
 

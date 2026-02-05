@@ -35,7 +35,7 @@ async fn test_h2_multiplexing_performance() {
         tasks.push(tokio::spawn(async move {
             let req_start = Instant::now();
             let result = client_clone
-                .get(&url_clone)
+                .get(url_clone.as_str())
                 .header("User-Agent", "specter-test/0.1")
                 .send()
                 .await;
@@ -57,15 +57,15 @@ async fn test_h2_multiplexing_performance() {
         let res = task.await.unwrap();
         let task_wait = task_start.elapsed();
         let resp = res.unwrap_or_else(|_| panic!("Request {} failed", i + 1));
-        if resp.status != 200 {
+        if resp.status().as_u16() != 200 {
             tracing::warn!(
                 "Request {} failed with status {}. Body: {:?}",
                 i + 1,
-                resp.status,
+                resp.status().as_u16(),
                 resp.text()
             );
         }
-        assert_eq!(resp.status, 200);
+        assert_eq!(resp.status().as_u16(), 200);
         completion_times.push((i + 1, task_wait));
     }
 

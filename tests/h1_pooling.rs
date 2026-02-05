@@ -17,13 +17,21 @@ async fn test_h1_connection_reuse() {
     let client = Client::builder().prefer_http2(false).build().unwrap();
 
     // Request 1
-    let resp1 = client.get(&url).send().await.expect("Request 1 failed");
-    assert_eq!(resp1.status, 200);
+    let resp1 = client
+        .get(url.as_str())
+        .send()
+        .await
+        .expect("Request 1 failed");
+    assert_eq!(resp1.status().as_u16(), 200);
     assert_eq!(resp1.text().unwrap(), "Hello");
 
     // Request 2 - should reuse the same connection
-    let resp2 = client.get(&url).send().await.expect("Request 2 failed");
-    assert_eq!(resp2.status, 200);
+    let resp2 = client
+        .get(url.as_str())
+        .send()
+        .await
+        .expect("Request 2 failed");
+    assert_eq!(resp2.status().as_u16(), 200);
     assert_eq!(resp2.text().unwrap(), "Hello");
 }
 
@@ -39,8 +47,12 @@ async fn test_h1_connection_expiration() {
     let client = Client::builder().prefer_http2(false).build().unwrap();
 
     // Request 1
-    let resp1 = client.get(&url).send().await.expect("Request 1 failed");
-    assert_eq!(resp1.status, 200);
+    let resp1 = client
+        .get(url.as_str())
+        .send()
+        .await
+        .expect("Request 1 failed");
+    assert_eq!(resp1.status().as_u16(), 200);
 
     // Wait longer than connection pool idle timeout (30s default)
     // For testing, we'll just verify the connection pool works
@@ -48,8 +60,12 @@ async fn test_h1_connection_expiration() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Request 2 - should still work (connection may or may not be reused depending on timing)
-    let resp2 = client.get(&url).send().await.expect("Request 2 failed");
-    assert_eq!(resp2.status, 200);
+    let resp2 = client
+        .get(url.as_str())
+        .send()
+        .await
+        .expect("Request 2 failed");
+    assert_eq!(resp2.status().as_u16(), 200);
 }
 
 #[tokio::test]
@@ -66,11 +82,11 @@ async fn test_h1_multiple_sequential_requests() {
     // Make 5 sequential requests
     for i in 0..5 {
         let resp = client
-            .get(&url)
+            .get(url.as_str())
             .send()
             .await
             .unwrap_or_else(|_| panic!("Request {} failed", i + 1));
-        assert_eq!(resp.status, 200);
+        assert_eq!(resp.status().as_u16(), 200);
         assert_eq!(resp.text().unwrap(), "Hello");
     }
 }

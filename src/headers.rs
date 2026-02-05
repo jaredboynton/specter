@@ -3,6 +3,7 @@
 //! Current implementation: Chrome 142 (Dec 2025)
 
 use crate::cookie::CookieJar;
+use http::HeaderMap;
 
 /// Chrome 142 browser headers for page navigation.
 pub fn chrome_142_headers() -> Vec<(&'static str, &'static str)> {
@@ -75,41 +76,32 @@ pub fn chrome_142_form_headers() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Add Cookie header from jar.
-pub fn with_cookies(
-    base: Vec<(&'static str, &'static str)>,
-    url: &str,
-    jar: &CookieJar,
-) -> Vec<(String, String)> {
-    let mut headers: Vec<(String, String)> = base
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+pub fn with_cookies(base: impl Into<Headers>, url: &str, jar: &CookieJar) -> Headers {
+    let mut headers: Headers = base.into();
+    headers.remove("cookie");
     if let Some(cookie_header) = jar.build_cookie_header(url) {
-        headers.push(("Cookie".to_string(), cookie_header));
+        headers.append("Cookie", cookie_header);
     }
     headers
 }
 
 /// Add Origin header.
-pub fn with_origin(mut headers: Vec<(String, String)>, origin: &str) -> Vec<(String, String)> {
-    headers.retain(|(k, _)| k.to_lowercase() != "origin");
-    headers.push(("Origin".to_string(), origin.to_string()));
+pub fn with_origin(mut headers: Headers, origin: &str) -> Headers {
+    headers.remove("origin");
+    headers.append("Origin", origin.to_string());
     headers
 }
 
 /// Add Referer header.
-pub fn with_referer(mut headers: Vec<(String, String)>, referer: &str) -> Vec<(String, String)> {
-    headers.retain(|(k, _)| k.to_lowercase() != "referer");
-    headers.push(("Referer".to_string(), referer.to_string()));
+pub fn with_referer(mut headers: Headers, referer: &str) -> Headers {
+    headers.remove("referer");
+    headers.append("Referer", referer.to_string());
     headers
 }
 
 /// Convert owned headers to references.
-pub fn headers_as_refs(headers: &[(String, String)]) -> Vec<(&str, &str)> {
-    headers
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect()
+pub fn headers_as_refs(headers: &Headers) -> Vec<(&str, &str)> {
+    headers.as_refs()
 }
 
 /// Convert static headers to owned.
@@ -118,6 +110,154 @@ pub fn headers_to_owned(headers: Vec<(&'static str, &'static str)>) -> Vec<(Stri
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
+}
+
+/// Ordered headers for requests and responses.
+///
+/// This preserves insertion order for fingerprinting while providing
+/// convenient lookup and mutation helpers.
+#[derive(Debug, Clone, Default)]
+pub struct Headers {
+    headers: Vec<(String, String)>,
+}
+
+impl Headers {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_vec(headers: Vec<(String, String)>) -> Self {
+        Self { headers }
+    }
+
+    pub fn from_static(headers: Vec<(&'static str, &'static str)>) -> Self {
+        Self {
+            headers: headers
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.headers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty()
+    }
+
+    pub fn insert(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        let name = name.into();
+        let name_lower = name.to_ascii_lowercase();
+        self.headers
+            .retain(|(k, _)| k.to_ascii_lowercase() != name_lower);
+        self.headers.push((name, value.into()));
+    }
+
+    pub fn append(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.headers.push((name.into(), value.into()));
+    }
+
+    pub fn remove(&mut self, name: &str) -> Option<Vec<String>> {
+        let name_lower = name.to_ascii_lowercase();
+        let mut removed = Vec::new();
+        self.headers.retain(|(k, v)| {
+            if k.to_ascii_lowercase() == name_lower {
+                removed.push(v.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if removed.is_empty() {
+            None
+        } else {
+            Some(removed)
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&str> {
+        let name_lower = name.to_ascii_lowercase();
+        self.headers.iter().find_map(|(k, v)| {
+            if k.to_ascii_lowercase() == name_lower {
+                Some(v.as_str())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn get_all(&self, name: &str) -> Vec<&str> {
+        let name_lower = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .filter_map(|(k, v)| {
+                if k.to_ascii_lowercase() == name_lower {
+                    Some(v.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    pub fn iter_ordered(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.iter()
+    }
+
+    pub fn extend(&mut self, other: Headers) {
+        self.headers.extend(other.headers);
+    }
+
+    pub fn as_slice(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    pub fn as_refs(&self) -> Vec<(&str, &str)> {
+        self.headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+
+    pub fn to_vec(&self) -> Vec<(String, String)> {
+        self.headers.clone()
+    }
+}
+
+impl From<Vec<(String, String)>> for Headers {
+    fn from(value: Vec<(String, String)>) -> Self {
+        Headers::from_vec(value)
+    }
+}
+
+impl From<Vec<(&'static str, &'static str)>> for Headers {
+    fn from(value: Vec<(&'static str, &'static str)>) -> Self {
+        Headers::from_static(value)
+    }
+}
+
+impl From<HeaderMap> for Headers {
+    fn from(map: HeaderMap) -> Self {
+        let mut headers = Vec::new();
+        for (name, value) in map.iter() {
+            let value = value
+                .to_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| String::from_utf8_lossy(value.as_bytes()).into_owned());
+            headers.push((name.as_str().to_string(), value));
+        }
+        Headers { headers }
+    }
 }
 
 /// Ordered headers with JA4H fingerprint calculation.

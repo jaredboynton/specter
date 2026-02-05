@@ -267,7 +267,10 @@ async fn test_h2_fingerprint() -> Result<()> {
 
                     match h2_conn.send_request(Method::GET, &uri, headers, None).await {
                         Ok(response) => {
-                            info!("      [PASS] HTTP/2 request succeeded: {}", response.status);
+                            info!(
+                                "      [PASS] HTTP/2 request succeeded: {}",
+                                response.status()
+                            );
 
                             // Parse response to check fingerprint
                             let body = String::from_utf8_lossy(response.body());
@@ -344,17 +347,21 @@ async fn test_h3_fingerprint() -> Result<()> {
             "GET",
             vec![
                 (
-                    "user-agent",
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                    "user-agent".to_string(),
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                        .to_string(),
                 ),
-                ("accept", "*/*"),
+                ("accept".to_string(), "*/*".to_string()),
             ],
             None,
         )
         .await
     {
         Ok(response) => {
-            info!("      [PASS] HTTP/3 request succeeded: {}", response.status);
+            info!(
+                "      [PASS] HTTP/3 request succeeded: {}",
+                response.status()
+            );
             info!("      [PASS] Protocol: {}", response.http_version());
 
             let body = String::from_utf8_lossy(response.body());
@@ -389,17 +396,18 @@ async fn test_h3_fingerprint() -> Result<()> {
             "GET",
             vec![
                 (
-                    "user-agent",
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                    "user-agent".to_string(),
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                        .to_string(),
                 ),
-                ("accept", "text/html"),
+                ("accept".to_string(), "text/html".to_string()),
             ],
             None,
         )
         .await
     {
         Ok(response) => {
-            info!("      [PASS] quic.tech response: {}", response.status);
+            info!("      [PASS] quic.tech response: {}", response.status());
             if response.http_version() == "HTTP/3" {
                 info!("      [PASS] HTTP/3 confirmed");
             }
@@ -555,7 +563,10 @@ async fn test_firefox_h2_fingerprint() -> Result<()> {
 
                     match h2_conn.send_request(Method::GET, &uri, headers, None).await {
                         Ok(response) => {
-                            info!("      [PASS] HTTP/2 request succeeded: {}", response.status);
+                            info!(
+                                "      [PASS] HTTP/2 request succeeded: {}",
+                                response.status()
+                            );
 
                             // Parse response to check fingerprint
                             let body = String::from_utf8_lossy(response.body());
@@ -701,7 +712,7 @@ async fn test_browserleaks() -> Result<()> {
 
                     match h2_conn.send_request(Method::GET, &uri, headers, None).await {
                         Ok(response) => {
-                            info!("      [PASS] Response: {}", response.status);
+                            info!("      [PASS] Response: {}", response.status());
 
                             let body = String::from_utf8_lossy(response.body());
 
@@ -803,7 +814,7 @@ async fn test_scrapfly() -> Result<()> {
 
                     match h2_conn.send_request(Method::GET, &uri, headers, None).await {
                         Ok(response) => {
-                            info!("      [PASS] Response: {}", response.status);
+                            info!("      [PASS] Response: {}", response.status());
 
                             let body = String::from_utf8_lossy(response.body());
 

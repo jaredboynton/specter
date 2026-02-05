@@ -301,7 +301,7 @@ async fn test_http1_explicit(url: &str, _verbose: bool) -> TestResult {
         Ok(response) => {
             let duration = start.elapsed().as_millis() as u64;
             let protocol = response.http_version();
-            let status = response.status;
+            let status = response.status().as_u16();
             let body_len = response.body().len();
 
             // Server may upgrade to HTTP/2 via ALPN - that's valid behavior
@@ -339,7 +339,7 @@ async fn test_http2_explicit(url: &str, _verbose: bool) -> TestResult {
         Ok(response) => {
             let duration = start.elapsed().as_millis() as u64;
             let protocol = response.http_version();
-            let status = response.status;
+            let status = response.status().as_u16();
             let body_len = response.body().len();
 
             if protocol != "HTTP/2" {
@@ -377,7 +377,7 @@ async fn test_http2_auto_upgrade(url: &str, _verbose: bool) -> TestResult {
         Ok(response) => {
             let duration = start.elapsed().as_millis() as u64;
             let protocol = response.http_version();
-            let status = response.status;
+            let status = response.status().as_u16();
             let body_len = response.body().len();
 
             // Most servers will select H2 - this test validates the auto-upgrade works
@@ -467,7 +467,7 @@ async fn test_http3_explicit(url: &str, _verbose: bool) -> TestResult {
         Ok(response) => {
             let duration = start.elapsed().as_millis() as u64;
             let protocol = response.http_version();
-            let status = response.status;
+            let status = response.status().as_u16();
             let body_len = response.body().len();
 
             if protocol != "HTTP/3" {
@@ -515,7 +515,7 @@ async fn test_connection_header_filtering(url: &str, _verbose: bool) -> TestResu
         Ok(response) => {
             let duration = start.elapsed().as_millis() as u64;
             let protocol = response.http_version();
-            let status = response.status;
+            let status = response.status().as_u16();
             let body_len = response.body().len();
 
             TestResult::success(name, protocol, status, duration, body_len)
@@ -561,7 +561,7 @@ async fn test_post_request(base_url: &str, _verbose: bool) -> TestResult {
     let start = Instant::now();
 
     match client
-        .post(&url)
+        .post(url.as_str())
         .headers(headers)
         .body(body.as_bytes().to_vec())
         .version(HttpVersion::Http2)
@@ -571,7 +571,7 @@ async fn test_post_request(base_url: &str, _verbose: bool) -> TestResult {
         Ok(response) => {
             let duration = start.elapsed().as_millis() as u64;
             let protocol = response.http_version();
-            let status = response.status;
+            let status = response.status().as_u16();
             let body_len = response.body().len();
 
             // Accept various success codes (200, 201, 301, 302, 405, etc.)

@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::error::{Error, Result};
+use crate::headers::Headers;
 use crate::response::Response;
 use crate::transport::h3::driver::DriverCommand;
 
@@ -59,11 +60,7 @@ impl H3Handle {
         // Convert StreamResponse to Response
         Ok(Response::new(
             stream_response.status,
-            stream_response
-                .headers
-                .iter()
-                .map(|(n, v)| format!("{}: {}", n, v))
-                .collect(),
+            Headers::from(stream_response.headers),
             stream_response.body,
             "HTTP/3".to_string(),
         ))

@@ -84,7 +84,7 @@ async fn test_oversized_frame() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let client = Client::builder().prefer_http2(true).build().unwrap();
-    let result = timeout(Duration::from_secs(2), client.get(&url).send()).await;
+    let result = timeout(Duration::from_secs(2), client.get(url.as_str()).send()).await;
 
     // Request will likely fail or timeout due to protocol error
     // We're just verifying the client doesn't panic
@@ -145,7 +145,7 @@ async fn test_zero_length_headers_frame() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let client = Client::builder().prefer_http2(true).build().unwrap();
-    let result = timeout(Duration::from_secs(2), client.get(&url).send()).await;
+    let result = timeout(Duration::from_secs(2), client.get(url.as_str()).send()).await;
 
     // Request should fail
     if let Ok(Ok(_)) = result {
