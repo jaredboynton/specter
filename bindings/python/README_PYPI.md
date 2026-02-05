@@ -5,7 +5,7 @@ Python bindings for the Specter HTTP client - an HTTP client that accurately rep
 ## Installation
 
 ```bash
-pip install specter
+pip install specters
 ```
 
 ## Features
