@@ -60,7 +60,7 @@ impl H3Client {
         &self,
         url: &str,
         method: &str,
-        headers: Vec<(&str, &str)>,
+        headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
     ) -> Result<Response> {
         let (_host, _port, _path) = parse_url_host(url)?;
@@ -70,12 +70,6 @@ impl H3Client {
 
         let config = self.create_quic_config()?;
         let handle = H3Connection::connect(url, config).await?;
-
-        // Convert headers
-        let headers_string: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
 
         // Convert body
         let body_bytes = body.map(bytes::Bytes::from);
@@ -88,7 +82,7 @@ impl H3Client {
             .map_err(|_| Error::HttpProtocol("Invalid Method".into()))?;
 
         handle
-            .send_request(method_http, &uri, headers_string, body_bytes)
+            .send_request(method_http, &uri, headers, body_bytes)
             .await
     }
 

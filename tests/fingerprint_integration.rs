@@ -84,7 +84,7 @@ async fn test_http2_fingerprint_matches_chrome() {
         .await
         .expect("HTTP/2 request should succeed");
 
-    assert_eq!(response.status, 200, "Should get 200 OK");
+    assert_eq!(response.status().as_u16(), 200, "Should get 200 OK");
 
     // Parse response JSON
     let body = String::from_utf8_lossy(response.body());
@@ -248,7 +248,8 @@ async fn test_browserleaks_passes() {
         .expect("browserleaks.com should accept our fingerprint");
 
     assert_eq!(
-        response.status, 200,
+        response.status().as_u16(),
+        200,
         "browserleaks.com should return 200 OK"
     );
 
@@ -284,17 +285,18 @@ async fn test_http3_fingerprint_works() {
             "GET",
             vec![
                 (
-                    "user-agent",
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                    "user-agent".to_string(),
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                        .to_string(),
                 ),
-                ("accept", "*/*"),
+                ("accept".to_string(), "*/*".to_string()),
             ],
             None,
         )
         .await
         .expect("HTTP/3 request should succeed");
 
-    assert_eq!(response.status, 200);
+    assert_eq!(response.status().as_u16(), 200);
     assert_eq!(response.http_version(), "HTTP/3");
 
     // Verify trace shows http/3
@@ -408,7 +410,7 @@ async fn test_firefox_http2_fingerprint_matches() {
         .await
         .expect("HTTP/2 request should succeed");
 
-    assert_eq!(response.status, 200, "Should get 200 OK");
+    assert_eq!(response.status().as_u16(), 200, "Should get 200 OK");
 
     // Parse response JSON
     let body = String::from_utf8_lossy(response.body());
@@ -544,7 +546,8 @@ async fn test_firefox_browserleaks_passes() {
         .expect("browserleaks.com should accept Firefox fingerprint");
 
     assert_eq!(
-        response.status, 200,
+        response.status().as_u16(),
+        200,
         "browserleaks.com should return 200 OK"
     );
 
@@ -595,7 +598,7 @@ async fn test_priority_frames_in_akamai() {
         .await
         .expect("HTTP/2 request should succeed");
 
-    assert_eq!(response.status, 200);
+    assert_eq!(response.status().as_u16(), 200);
 
     // Parse response JSON
     let body = String::from_utf8_lossy(response.body());

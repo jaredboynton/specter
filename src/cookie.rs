@@ -11,6 +11,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use url::Url;
 
 use crate::error::{Error, Result};
+use crate::headers::Headers;
 
 /// SameSite attribute for cookies (RFC 6265bis).
 ///
@@ -430,12 +431,9 @@ impl CookieJar {
         )
     }
 
-    pub fn store_from_headers(&mut self, headers: &[String], request_url: &str) {
-        for header in headers {
-            if let Some(value) = header
-                .strip_prefix("Set-Cookie:")
-                .or_else(|| header.strip_prefix("set-cookie:"))
-            {
+    pub fn store_from_headers(&mut self, headers: &Headers, request_url: &str) {
+        for (name, value) in headers.iter() {
+            if name.eq_ignore_ascii_case("set-cookie") {
                 if let Ok(cookie) = Cookie::from_set_cookie_header(value.trim(), request_url) {
                     self.store(cookie);
                 }

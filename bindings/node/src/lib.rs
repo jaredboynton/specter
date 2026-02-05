@@ -300,13 +300,13 @@ impl RequestBuilder {
 
         // Build the request using the appropriate method
         let mut req_builder = match method.as_str() {
-            "GET" => client.get(&url),
-            "POST" => client.post(&url),
-            "PUT" => client.put(&url),
-            "DELETE" => client.delete(&url),
-            "PATCH" => client.request(::http::Method::PATCH, &url),
-            "HEAD" => client.request(::http::Method::HEAD, &url),
-            "OPTIONS" => client.request(::http::Method::OPTIONS, &url),
+            "GET" => client.get(url.as_str()),
+            "POST" => client.post(url.as_str()),
+            "PUT" => client.put(url.as_str()),
+            "DELETE" => client.delete(url.as_str()),
+            "PATCH" => client.request(::http::Method::PATCH, url.as_str()),
+            "HEAD" => client.request(::http::Method::HEAD, url.as_str()),
+            "OPTIONS" => client.request(::http::Method::OPTIONS, url.as_str()),
             _ => {
                 return Err(Error::new(
                     Status::InvalidArg,
@@ -474,24 +474,22 @@ impl Response {
     /// Get the HTTP status code.
     #[napi(getter)]
     pub fn status(&self) -> u16 {
-        self.inner.status
+        self.inner.status().as_u16()
     }
 
     /// Get the response headers as an object.
     #[napi(getter)]
     pub fn headers(&self) -> HashMap<String, String> {
         let mut map = HashMap::new();
-        for header in &self.inner.headers {
-            if let Some((key, value)) = header.split_once(':') {
-                let key = key.trim().to_string();
-                let value = value.trim().to_string();
-                // Handle multiple values for the same header by joining with comma
-                map.entry(key)
-                    .and_modify(|v: &mut String| {
-                        *v = format!("{}, {}", v, value);
-                    })
-                    .or_insert(value);
-            }
+        for (key, value) in self.inner.headers().iter() {
+            let key = key.to_string();
+            let value = value.to_string();
+            // Handle multiple values for the same header by joining with comma
+            map.entry(key)
+                .and_modify(|v: &mut String| {
+                    *v = format!("{}, {}", v, value);
+                })
+                .or_insert(value);
         }
         map
     }
@@ -500,13 +498,9 @@ impl Response {
     #[napi]
     pub fn headers_list(&self) -> Vec<Vec<String>> {
         self.inner
-            .headers
+            .headers()
             .iter()
-            .filter_map(|header| {
-                header
-                    .split_once(':')
-                    .map(|(key, value)| vec![key.trim().to_string(), value.trim().to_string()])
-            })
+            .map(|(key, value)| vec![key.to_string(), value.to_string()])
             .collect()
     }
 
@@ -545,7 +539,7 @@ impl Response {
     /// Get the effective URL (after redirects).
     #[napi(getter)]
     pub fn effective_url(&self) -> Option<String> {
-        self.inner.effective_url.clone()
+        self.inner.url().map(|url| url.to_string())
     }
 
     /// Check if the response status is successful (2xx).

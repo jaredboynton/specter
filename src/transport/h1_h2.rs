@@ -7,18 +7,24 @@
 //!
 //! Supports automatic HTTP/3 upgrade via Alt-Svc header caching.
 
+use base64::Engine;
 use bytes::Bytes;
 use http::{Method, Uri};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::timeout as tokio_timeout;
+use url::Url;
 
+use crate::cookie::CookieJar;
 use crate::error::{Error, Result};
 use crate::fingerprint::{http2::Http2Settings, FingerprintProfile};
+use crate::headers::Headers;
 use crate::pool::alt_svc::AltSvcCache;
 use crate::pool::multiplexer::{ConnectionPool, PoolKey};
+use crate::request::{Body, IntoUrl, RedirectPolicy, Request};
 use crate::response::Response;
 use crate::timeouts::Timeouts;
 use crate::transport::connector::{BoringConnector, MaybeHttpsStream};
@@ -59,16 +65,24 @@ pub struct Client {
     danger_accept_invalid_certs: bool,
     /// Skip TLS verification for localhost connections only
     localhost_allows_invalid_certs: bool,
+    /// Default headers applied to every request
+    default_headers: Headers,
+    /// Redirect policy
+    redirect_policy: RedirectPolicy,
+    /// Optional cookie store
+    cookie_store: Option<Arc<RwLock<CookieJar>>>,
 }
 
 /// Builder for HTTP requests.
 pub struct RequestBuilder<'a> {
     client: &'a Client,
-    uri: String,
+    url: Option<Url>,
     method: Method,
-    headers: Vec<(String, String)>,
-    body: Option<Vec<u8>>,
+    headers: Headers,
+    body: Body,
     version: Option<HttpVersion>,
+    timeout: Option<Duration>,
+    error: Option<Error>,
 }
 
 /// Builder for creating HTTP clients.
@@ -87,72 +101,58 @@ pub struct ClientBuilder {
     danger_accept_invalid_certs: bool,
     /// Automatically skip TLS verification for localhost connections
     localhost_allows_invalid_certs: bool,
+    /// Default headers applied to every request
+    default_headers: Headers,
+    /// Redirect policy
+    redirect_policy: RedirectPolicy,
+    /// Optional cookie store
+    cookie_store: Option<Arc<RwLock<CookieJar>>>,
 }
 
 impl Client {
+    /// Create a new client with default settings.
+    pub fn new() -> Result<Self> {
+        ClientBuilder::new().build()
+    }
+
     /// Create a new client builder.
     pub fn builder() -> ClientBuilder {
         ClientBuilder::new()
     }
 
     /// Create a GET request builder.
-    pub fn get(&self, url: impl Into<String>) -> RequestBuilder<'_> {
-        RequestBuilder {
-            client: self,
-            uri: url.into(),
-            method: Method::GET,
-            headers: Vec::new(),
-            body: None,
-            version: None,
-        }
+    pub fn get(&self, url: impl IntoUrl) -> RequestBuilder<'_> {
+        RequestBuilder::new(self, Method::GET, url)
     }
 
     /// Create a POST request builder.
-    pub fn post(&self, url: impl Into<String>) -> RequestBuilder<'_> {
-        RequestBuilder {
-            client: self,
-            uri: url.into(),
-            method: Method::POST,
-            headers: Vec::new(),
-            body: None,
-            version: None,
-        }
+    pub fn post(&self, url: impl IntoUrl) -> RequestBuilder<'_> {
+        RequestBuilder::new(self, Method::POST, url)
     }
 
     /// Create a PUT request builder.
-    pub fn put(&self, url: impl Into<String>) -> RequestBuilder<'_> {
-        RequestBuilder {
-            client: self,
-            uri: url.into(),
-            method: Method::PUT,
-            headers: Vec::new(),
-            body: None,
-            version: None,
-        }
+    pub fn put(&self, url: impl IntoUrl) -> RequestBuilder<'_> {
+        RequestBuilder::new(self, Method::PUT, url)
     }
 
     /// Create a DELETE request builder.
-    pub fn delete(&self, url: impl Into<String>) -> RequestBuilder<'_> {
-        RequestBuilder {
-            client: self,
-            uri: url.into(),
-            method: Method::DELETE,
-            headers: Vec::new(),
-            body: None,
-            version: None,
-        }
+    pub fn delete(&self, url: impl IntoUrl) -> RequestBuilder<'_> {
+        RequestBuilder::new(self, Method::DELETE, url)
+    }
+
+    /// Create a HEAD request builder.
+    pub fn head(&self, url: impl IntoUrl) -> RequestBuilder<'_> {
+        RequestBuilder::new(self, Method::HEAD, url)
+    }
+
+    /// Create a PATCH request builder.
+    pub fn patch(&self, url: impl IntoUrl) -> RequestBuilder<'_> {
+        RequestBuilder::new(self, Method::PATCH, url)
     }
 
     /// Create a custom method request builder.
-    pub fn request(&self, method: Method, url: impl Into<String>) -> RequestBuilder<'_> {
-        RequestBuilder {
-            client: self,
-            uri: url.into(),
-            method,
-            headers: Vec::new(),
-            body: None,
-            version: None,
-        }
+    pub fn request(&self, method: Method, url: impl IntoUrl) -> RequestBuilder<'_> {
+        RequestBuilder::new(self, method, url)
     }
 
     /// Get the Alt-Svc cache for manual inspection or manipulation.
@@ -186,21 +186,153 @@ impl Client {
 }
 
 impl<'a> RequestBuilder<'a> {
+    fn new(client: &'a Client, method: Method, url: impl IntoUrl) -> Self {
+        let mut error = None;
+        let url = match url.into_url() {
+            Ok(url) => Some(url),
+            Err(err) => {
+                error = Some(err);
+                None
+            }
+        };
+
+        Self {
+            client,
+            url,
+            method,
+            headers: client.default_headers.clone(),
+            body: Body::Empty,
+            version: None,
+            timeout: None,
+            error,
+        }
+    }
+
+    fn set_error(&mut self, error: Error) {
+        if self.error.is_none() {
+            self.error = Some(error);
+        }
+    }
+
+    fn ensure_content_type(&mut self, value: &str) {
+        if !self.headers.contains("content-type") {
+            self.headers.insert("Content-Type", value.to_string());
+        }
+    }
+
     /// Add a header to the request.
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.push((key.into(), value.into()));
+        self.headers.insert(key, value);
+        self
+    }
+
+    /// Append a header without replacing existing values.
+    pub fn header_append(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.append(key, value);
         self
     }
 
     /// Set all headers (replaces existing headers).
-    pub fn headers(mut self, headers: Vec<(String, String)>) -> Self {
-        self.headers = headers;
+    pub fn headers(mut self, headers: impl Into<Headers>) -> Self {
+        self.headers = headers.into();
         self
     }
 
     /// Set the request body.
-    pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
-        self.body = Some(body.into());
+    pub fn body(mut self, body: impl Into<Body>) -> Self {
+        self.body = body.into();
+        self
+    }
+
+    /// Add URL query parameters.
+    pub fn query<T: Serialize + ?Sized>(mut self, query: &T) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+
+        let url = match self.url.as_mut() {
+            Some(url) => url,
+            None => return self,
+        };
+
+        match serde_urlencoded::to_string(query) {
+            Ok(encoded) => {
+                if !encoded.is_empty() {
+                    let merged = match url.query() {
+                        Some(existing) if !existing.is_empty() => {
+                            format!("{}&{}", existing, encoded)
+                        }
+                        _ => encoded,
+                    };
+                    url.set_query(Some(&merged));
+                }
+            }
+            Err(err) => self.set_error(err.into()),
+        }
+
+        self
+    }
+
+    /// Set a JSON body.
+    pub fn json<T: Serialize + ?Sized>(mut self, json: &T) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+
+        match serde_json::to_vec(json) {
+            Ok(bytes) => {
+                self.body = Body::Json(bytes);
+                self.ensure_content_type("application/json");
+            }
+            Err(err) => self.set_error(err.into()),
+        }
+
+        self
+    }
+
+    /// Set a form-encoded body.
+    pub fn form<T: Serialize + ?Sized>(mut self, form: &T) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+
+        match serde_urlencoded::to_string(form) {
+            Ok(encoded) => {
+                self.body = Body::Form(encoded);
+                self.ensure_content_type("application/x-www-form-urlencoded");
+            }
+            Err(err) => self.set_error(err.into()),
+        }
+
+        self
+    }
+
+    /// Set a bearer token for Authorization header.
+    pub fn bearer_auth(mut self, token: impl AsRef<str>) -> Self {
+        self.headers
+            .insert("Authorization", format!("Bearer {}", token.as_ref()));
+        self
+    }
+
+    /// Set basic auth for Authorization header.
+    pub fn basic_auth<P: AsRef<str>>(
+        mut self,
+        username: impl AsRef<str>,
+        password: Option<P>,
+    ) -> Self {
+        let creds = match password {
+            Some(p) => format!("{}:{}", username.as_ref(), p.as_ref()),
+            None => format!("{}:", username.as_ref()),
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
+        self.headers
+            .insert("Authorization", format!("Basic {}", encoded));
+        self
+    }
+
+    /// Set per-request total timeout.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
 
@@ -208,6 +340,31 @@ impl<'a> RequestBuilder<'a> {
     pub fn version(mut self, version: HttpVersion) -> Self {
         self.version = Some(version);
         self
+    }
+
+    /// Build a request without sending it.
+    pub fn build(self) -> Result<Request> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+
+        let url = self.url.ok_or_else(|| Error::missing("url"))?;
+
+        Ok(Request {
+            method: self.method,
+            url,
+            headers: self.headers,
+            body: self.body,
+            version: self.version,
+            timeout: self.timeout,
+        })
+    }
+
+    /// Send the request and return the response.
+    pub async fn send(self) -> Result<Response> {
+        let client = self.client.clone();
+        let request = self.build()?;
+        client.execute(request).await
     }
 
     /// Send the request and return the response with streaming body.
@@ -219,7 +376,25 @@ impl<'a> RequestBuilder<'a> {
         Response,
         tokio::sync::mpsc::Receiver<std::result::Result<Bytes, crate::transport::h2::H2Error>>,
     )> {
-        let version = self.version.unwrap_or(self.client.default_version);
+        let client = self.client.clone();
+        let request = self.build()?;
+        let mut timeouts = client.timeouts.clone();
+        if let Some(total) = request.timeout {
+            timeouts.total = Some(total);
+        }
+        let mut headers = request.headers.clone();
+
+        if let Some(jar) = &client.cookie_store {
+            if !headers.contains("cookie") {
+                if let Some(cookie_header) =
+                    jar.read().await.build_cookie_header(request.url.as_str())
+                {
+                    headers.insert("Cookie", cookie_header);
+                }
+            }
+        }
+
+        let version = request.version.unwrap_or(client.default_version);
 
         // Only HTTP/2 supports streaming currently
         if !matches!(version, HttpVersion::Http2 | HttpVersion::Auto) {
@@ -229,18 +404,17 @@ impl<'a> RequestBuilder<'a> {
         }
 
         // Parse URI
-        let uri: Uri = self
-            .uri
+        let uri: Uri = request
+            .url
+            .as_str()
             .parse()
             .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
 
-        let _pool_key = Self::make_pool_key(&uri);
-
         // For HTTP/2 streaming, we need direct connection access (no pooling for streaming)
         // Apply connect timeout to TCP + TLS handshake
-        let connector = self.client.connector_for_uri(&uri);
+        let connector = client.connector_for_uri(&uri);
         let connect_fut = connector.connect(&uri);
-        let stream = if let Some(connect_timeout) = self.client.timeouts.connect {
+        let stream = if let Some(connect_timeout) = timeouts.connect {
             tokio_timeout(connect_timeout, connect_fut)
                 .await
                 .map_err(|_| Error::ConnectTimeout(connect_timeout))??
@@ -258,12 +432,9 @@ impl<'a> RequestBuilder<'a> {
         }
 
         // Create H2 connection (part of connect phase)
-        let h2_connect_fut = H2Connection::connect(
-            stream,
-            self.client.http2_settings.clone(),
-            self.client.pseudo_order,
-        );
-        let mut h2_conn = if let Some(connect_timeout) = self.client.timeouts.connect {
+        let h2_connect_fut =
+            H2Connection::connect(stream, client.http2_settings.clone(), client.pseudo_order);
+        let mut h2_conn = if let Some(connect_timeout) = timeouts.connect {
             tokio_timeout(connect_timeout, h2_connect_fut)
                 .await
                 .map_err(|_| Error::ConnectTimeout(connect_timeout))??
@@ -272,9 +443,17 @@ impl<'a> RequestBuilder<'a> {
         };
 
         // Build HTTP request
-        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-        let host = uri.host().unwrap_or("localhost");
-        let authority = if let Some(port) = uri.port_u16() {
+        let mut path = request.url.path().to_string();
+        if path.is_empty() {
+            path = "/".to_string();
+        }
+        if let Some(query) = request.url.query() {
+            path.push('?');
+            path.push_str(query);
+        }
+
+        let host = request.url.host_str().unwrap_or("localhost");
+        let authority = if let Some(port) = request.url.port_or_known_default() {
             if port == 443 {
                 host.to_string()
             } else {
@@ -285,27 +464,24 @@ impl<'a> RequestBuilder<'a> {
         };
 
         // Build URI with scheme and authority for HTTP/2
-        // Note: http::Request::builder() doesn't accept pseudo-headers via .header()
-        // The :method, :scheme, :authority, :path pseudo-headers are set implicitly
-        // via .method() and .uri() - the URI must include scheme+authority for HTTP/2
         let full_uri = format!("https://{}{}", authority, path);
         let mut request_builder = http::Request::builder()
-            .method(self.method.clone())
+            .method(request.method.clone())
             .uri(&full_uri);
 
         // Add custom headers (pseudo-headers are derived from method/uri)
-        for (key, value) in &self.headers {
-            request_builder = request_builder.header(key.as_str(), value.as_str());
+        for (key, value) in headers.iter() {
+            request_builder = request_builder.header(key, value);
         }
 
-        let body = self.body.map(Bytes::from).unwrap_or_default();
-        let request = request_builder
+        let body = request.body.clone().into_bytes()?;
+        let http_request = request_builder
             .body(body)
             .map_err(|e| Error::HttpProtocol(format!("Failed to build request: {}", e)))?;
 
         // Send streaming request with TTFB timeout
-        let send_fut = h2_conn.send_request_streaming(request);
-        let (response, rx) = if let Some(ttfb_timeout) = self.client.timeouts.ttfb {
+        let send_fut = h2_conn.send_request_streaming(http_request);
+        let (response, rx) = if let Some(ttfb_timeout) = timeouts.ttfb {
             tokio_timeout(ttfb_timeout, send_fut)
                 .await
                 .map_err(|_| Error::TtfbTimeout(ttfb_timeout))??
@@ -329,34 +505,95 @@ impl<'a> RequestBuilder<'a> {
 
         // Convert http::Response to our Response type
         let status = response.status().as_u16();
-        let headers: Vec<String> = response
+        let headers = response
             .headers()
             .iter()
-            .map(|(k, v)| format!("{}: {}", k.as_str(), v.to_str().unwrap_or("")))
-            .collect();
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect::<Vec<(String, String)>>();
 
         let our_response = crate::response::Response::new(
             status,
-            headers,
+            Headers::from(headers),
             Bytes::new(), // Body comes through rx
             "HTTP/2".to_string(),
         );
 
-        Ok((our_response.with_url(self.uri.clone()), rx))
+        let request_url = request.url.clone();
+        let our_response = our_response.with_url(request_url.clone());
+
+        if let Some(jar) = &client.cookie_store {
+            jar.write()
+                .await
+                .store_from_headers(our_response.headers(), request_url.as_str());
+        }
+
+        Ok((our_response, rx))
+    }
+}
+
+impl Client {
+    /// Execute a built request with client policy (redirects, cookies, etc.).
+    pub async fn execute(&self, mut request: Request) -> Result<Response> {
+        let policy = self.redirect_policy.clone();
+        let mut redirects = 0u32;
+
+        loop {
+            let mut headers = request.headers.clone();
+            let cookie_injected = self.apply_cookie_header(&request, &mut headers).await;
+            request.headers = headers;
+
+            let mut timeouts = self.timeouts.clone();
+            if let Some(total) = request.timeout {
+                timeouts.total = Some(total);
+            }
+
+            let response = self.execute_once(&request, &timeouts).await?;
+
+            self.store_cookies(&response, &request.url).await;
+
+            if matches!(policy, RedirectPolicy::None) || !response.is_redirect() {
+                return Ok(response);
+            }
+
+            let location = match response.redirect_url() {
+                Some(value) => value,
+                None => return Ok(response),
+            };
+
+            if let RedirectPolicy::Limited(limit) = policy {
+                if redirects >= limit {
+                    return Err(Error::RedirectLimit { count: limit });
+                }
+            }
+
+            let next_url = request.url.join(location).map_err(Error::from)?;
+            let mut next_request = self.redirect_request(&request, &response, next_url);
+
+            if cookie_injected {
+                next_request.headers.remove("cookie");
+            }
+
+            request = next_request;
+            redirects += 1;
+        }
     }
 
-    /// Send the request and return the response.
-    pub async fn send(self) -> Result<Response> {
-        let version = self.version.unwrap_or(self.client.default_version);
+    async fn execute_once(&self, request: &Request, timeouts: &Timeouts) -> Result<Response> {
+        let version = request.version.unwrap_or(self.default_version);
 
         // HTTP/3 only - go directly to H3
         if matches!(version, HttpVersion::Http3Only) {
-            return self.send_h3().await;
+            return self
+                .send_h3_for_url(request, request.url.clone(), timeouts)
+                .await;
         }
 
         // HTTP/3 preferred - try H3 first, fall back to H1/H2
         if matches!(version, HttpVersion::Http3) {
-            match self.send_h3_inner().await {
+            match self
+                .send_h3_for_url(request, request.url.clone(), timeouts)
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     tracing::debug!("HTTP/3 failed, falling back to HTTP/1.1 or HTTP/2: {}", e);
@@ -366,41 +603,28 @@ impl<'a> RequestBuilder<'a> {
         }
 
         // Auto mode - check Alt-Svc cache for HTTP/3 upgrade opportunity
-        if matches!(version, HttpVersion::Auto) && self.client.h3_upgrade_enabled {
-            let origin = self.get_origin();
-            if let Some(alt_svc) = self.client.alt_svc_cache.get_h3_alternative(&origin).await {
+        if matches!(version, HttpVersion::Auto) && self.h3_upgrade_enabled {
+            let origin = Self::origin_for_url(&request.url);
+            if let Some(alt_svc) = self.alt_svc_cache.get_h3_alternative(&origin).await {
                 tracing::debug!(
                     "Alt-Svc indicates HTTP/3 support for {}, attempting upgrade",
                     origin
                 );
 
-                // Try HTTP/3 to the alternative endpoint
-                let h3_url = if let Some(ref host) = alt_svc.host {
-                    // Different host
-                    format!("https://{}:{}{}", host, alt_svc.port, self.get_path())
-                } else {
-                    // Same host, different port (or same port)
-                    self.uri.clone()
-                };
+                let mut h3_url = request.url.clone();
+                let _ = h3_url.set_scheme("https");
+                if let Some(ref host) = alt_svc.host {
+                    h3_url
+                        .set_host(Some(host))
+                        .map_err(|_| Error::HttpProtocol("Invalid Alt-Svc host".into()))?;
+                }
+                let _ = h3_url.set_port(Some(alt_svc.port));
 
                 match self
-                    .client
-                    .h3_client
-                    .send_request(
-                        &h3_url,
-                        self.method.as_str(),
-                        self.headers
-                            .iter()
-                            .map(|(k, v)| (k.as_str(), v.as_str()))
-                            .collect(),
-                        self.body.clone(),
-                    )
+                    .send_h3_for_url(request, h3_url.clone(), timeouts)
                     .await
                 {
-                    Ok(response) => {
-                        let resp: Response = response;
-                        return Ok(resp.with_url(h3_url));
-                    }
+                    Ok(response) => return Ok(response.with_url(h3_url)),
                     Err(e) => {
                         tracing::debug!("HTTP/3 upgrade failed, using HTTP/1.1 or HTTP/2: {}", e);
                         // Fall through to H1/H2
@@ -410,28 +634,30 @@ impl<'a> RequestBuilder<'a> {
         }
 
         // HTTP/1.1 or HTTP/2 via TCP+TLS
-        self.send_h1_h2(version).await
+        self.send_h1_h2(request, version, timeouts).await
     }
 
-    /// Send via HTTP/3 only (no fallback).
-    async fn send_h3(self) -> Result<Response> {
-        self.send_h3_inner().await
-    }
+    async fn send_h3_for_url(
+        &self,
+        request: &Request,
+        url: Url,
+        timeouts: &Timeouts,
+    ) -> Result<Response> {
+        let body = if request.body.is_empty() {
+            None
+        } else {
+            Some(request.body.clone().into_bytes()?.to_vec())
+        };
 
-    /// Internal HTTP/3 send.
-    async fn send_h3_inner(&self) -> Result<Response> {
-        let fut = self.client.h3_client.send_request(
-            &self.uri,
-            self.method.as_str(),
-            self.headers
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect(),
-            self.body.clone(),
+        let fut = self.h3_client.send_request(
+            url.as_str(),
+            request.method.as_str(),
+            request.headers.to_vec(),
+            body,
         );
 
         // Apply total timeout for HTTP/3 (includes connect + request + response)
-        let response = if let Some(total_timeout) = self.client.timeouts.total {
+        let response = if let Some(total_timeout) = timeouts.total {
             tokio_timeout(total_timeout, fut)
                 .await
                 .map_err(|_| Error::TotalTimeout(total_timeout))??
@@ -439,21 +665,22 @@ impl<'a> RequestBuilder<'a> {
             fut.await?
         };
 
-        // Set effective_url so redirect engines can track the current URL
-        Ok(response.with_url(self.uri.clone()))
+        Ok(response.with_url(url))
     }
 
-    /// Send via HTTP/1.1 or HTTP/2.
-    ///
-    /// HTTP/2 connections are pooled and multiplexed - subsequent requests to the
-    /// same host:port reuse the existing connection instead of creating a new one.
-    async fn send_h1_h2(self, version: HttpVersion) -> Result<Response> {
+    async fn send_h1_h2(
+        &self,
+        request: &Request,
+        version: HttpVersion,
+        timeouts: &Timeouts,
+    ) -> Result<Response> {
         // Save the original URL for effective_url tracking
-        let request_url = self.uri.clone();
+        let request_url = request.url.clone();
 
         // Parse URI
-        let uri: Uri = self
-            .uri
+        let uri: Uri = request
+            .url
+            .as_str()
             .parse()
             .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
 
@@ -464,13 +691,20 @@ impl<'a> RequestBuilder<'a> {
             HttpVersion::Http3 | HttpVersion::Http3Only => {
                 return Err(Error::HttpProtocol("HTTP/3 should use send_h3".into()));
             }
-            HttpVersion::Auto => matches!(self.client.default_version, HttpVersion::Http2),
+            HttpVersion::Auto => matches!(self.default_version, HttpVersion::Http2),
         };
 
         // Extract values needed after potential moves
-        let h3_upgrade_enabled = self.client.h3_upgrade_enabled;
-        let alt_svc_cache = self.client.alt_svc_cache.clone();
-        let origin = self.get_origin();
+        let h3_upgrade_enabled = self.h3_upgrade_enabled;
+        let alt_svc_cache = self.alt_svc_cache.clone();
+        let origin = Self::origin_for_url(&request.url);
+
+        let headers_vec = request.headers.to_vec();
+        let body_bytes = if request.body.is_empty() {
+            None
+        } else {
+            Some(request.body.clone().into_bytes()?)
+        };
 
         // For HTTP/2, try to use pooled connection first
         if prefer_http2 {
@@ -478,7 +712,7 @@ impl<'a> RequestBuilder<'a> {
 
             // Check for existing pooled connection
             let pooled = {
-                let pool = self.client.h2_pool.read().await;
+                let pool = self.h2_pool.read().await;
                 pool.get(&pool_key).cloned()
             };
 
@@ -486,10 +720,10 @@ impl<'a> RequestBuilder<'a> {
                 // Try to use pooled connection
                 let result = conn
                     .send_request(
-                        self.method.clone(),
+                        request.method.clone(),
                         &uri,
-                        self.headers.clone(),
-                        self.body.clone().map(Bytes::from),
+                        headers_vec.clone(),
+                        body_bytes.clone(),
                     )
                     .await;
 
@@ -506,7 +740,7 @@ impl<'a> RequestBuilder<'a> {
                     Err(e) => {
                         // Connection failed - remove from pool and create new one
                         tracing::debug!("Pooled HTTP/2 connection failed, creating new: {}", e);
-                        let mut pool = self.client.h2_pool.write().await;
+                        let mut pool = self.h2_pool.write().await;
                         pool.remove(&pool_key);
                     }
                 }
@@ -514,9 +748,9 @@ impl<'a> RequestBuilder<'a> {
 
             // No pooled connection or it failed - create new one
             // Apply connect timeout
-            let connector = self.client.connector_for_uri(&uri);
+            let connector = self.connector_for_uri(&uri);
             let connect_fut = connector.connect(&uri);
-            let stream = if let Some(connect_timeout) = self.client.timeouts.connect {
+            let stream = if let Some(connect_timeout) = timeouts.connect {
                 tokio_timeout(connect_timeout, connect_fut)
                     .await
                     .map_err(|_| Error::ConnectTimeout(connect_timeout))??
@@ -525,8 +759,7 @@ impl<'a> RequestBuilder<'a> {
             };
 
             // Verify ALPN negotiated h2
-            let use_http2 = if self.client.http2_prior_knowledge && !stream.alpn_protocol().is_h2()
-            {
+            let use_http2 = if self.http2_prior_knowledge && !stream.alpn_protocol().is_h2() {
                 // For Prior Knowledge, we use H2 if strictly requested, even if no ALPN (e.g. cleartext)
                 true
             } else if let MaybeHttpsStream::Https(ref ssl_stream) = stream {
@@ -537,29 +770,26 @@ impl<'a> RequestBuilder<'a> {
 
             if use_http2 {
                 // Create HTTP/2 connection and pool it
-                let h2_conn = H2Connection::connect(
-                    stream,
-                    self.client.http2_settings.clone(),
-                    self.client.pseudo_order,
-                )
-                .await?;
+                let h2_conn =
+                    H2Connection::connect(stream, self.http2_settings.clone(), self.pseudo_order)
+                        .await?;
                 let pooled_conn = H2PooledConnection::new(h2_conn);
 
                 // Store in pool
                 {
-                    let mut pool = self.client.h2_pool.write().await;
+                    let mut pool = self.h2_pool.write().await;
                     pool.insert(pool_key, pooled_conn.clone());
                 }
 
                 // Send request with TTFB timeout
                 let fut = pooled_conn.send_request(
-                    self.method,
+                    request.method.clone(),
                     &uri,
-                    self.headers,
-                    self.body.map(Bytes::from),
+                    headers_vec.clone(),
+                    body_bytes.clone(),
                 );
 
-                let response = if let Some(ttfb_timeout) = self.client.timeouts.ttfb {
+                let response = if let Some(ttfb_timeout) = timeouts.ttfb {
                     tokio_timeout(ttfb_timeout, fut)
                         .await
                         .map_err(|_| Error::TtfbTimeout(ttfb_timeout))?
@@ -583,7 +813,7 @@ impl<'a> RequestBuilder<'a> {
         let pool_key = Self::make_pool_key(&uri);
 
         // Try to get a pooled connection first
-        let mut stream_opt = self.client.h1_pool.get_h1(&pool_key).await;
+        let mut stream_opt = self.h1_pool.get_h1(&pool_key).await;
         let mut used_pooled = stream_opt.is_some();
 
         // If no pooled connection, create a new one
@@ -593,9 +823,9 @@ impl<'a> RequestBuilder<'a> {
         } else {
             tracing::debug!("H1: Creating new connection for {:?}", pool_key);
             // Apply connect timeout
-            let connector = self.client.connector_for_uri(&uri);
+            let connector = self.connector_for_uri(&uri);
             let connect_fut = connector.connect(&uri);
-            if let Some(connect_timeout) = self.client.timeouts.connect {
+            if let Some(connect_timeout) = timeouts.connect {
                 tokio_timeout(connect_timeout, connect_fut)
                     .await
                     .map_err(|_| Error::ConnectTimeout(connect_timeout))??
@@ -616,29 +846,26 @@ impl<'a> RequestBuilder<'a> {
             // Server negotiated HTTP/2 - we must speak HTTP/2 or they'll close connection
             tracing::debug!("Server selected h2 via ALPN, upgrading to HTTP/2");
 
-            let h2_conn = H2Connection::connect(
-                stream,
-                self.client.http2_settings.clone(),
-                self.client.pseudo_order,
-            )
-            .await?;
+            let h2_conn =
+                H2Connection::connect(stream, self.http2_settings.clone(), self.pseudo_order)
+                    .await?;
             let pooled_conn = H2PooledConnection::new(h2_conn);
 
             // Store in pool for reuse
             {
-                let mut pool = self.client.h2_pool.write().await;
+                let mut pool = self.h2_pool.write().await;
                 pool.insert(pool_key, pooled_conn.clone());
             }
 
             // Send request with TTFB timeout
             let fut = pooled_conn.send_request(
-                self.method,
+                request.method.clone(),
                 &uri,
-                self.headers,
-                self.body.map(Bytes::from),
+                headers_vec.clone(),
+                body_bytes.clone(),
             );
 
-            if let Some(ttfb_timeout) = self.client.timeouts.ttfb {
+            if let Some(ttfb_timeout) = timeouts.ttfb {
                 tokio_timeout(ttfb_timeout, fut)
                     .await
                     .map_err(|_| Error::TtfbTimeout(ttfb_timeout))?
@@ -653,14 +880,14 @@ impl<'a> RequestBuilder<'a> {
                 let stream_for_request = stream;
                 let fut = Self::do_send_http1(
                     stream_for_request,
-                    self.method.clone(),
+                    request.method.clone(),
                     &uri,
-                    self.headers.clone(),
-                    self.body.clone().map(Bytes::from),
+                    headers_vec.clone(),
+                    body_bytes.clone(),
                 );
 
                 // Apply TTFB timeout for HTTP/1.1 request
-                let request_result = if let Some(ttfb_timeout) = self.client.timeouts.ttfb {
+                let request_result = if let Some(ttfb_timeout) = timeouts.ttfb {
                     tokio_timeout(ttfb_timeout, fut)
                         .await
                         .map_err(|_| Error::TtfbTimeout(ttfb_timeout))?
@@ -671,10 +898,7 @@ impl<'a> RequestBuilder<'a> {
                 match request_result {
                     Ok((resp, returned_stream)) => {
                         // Success - return stream to pool for reuse
-                        self.client
-                            .h1_pool
-                            .put_h1(pool_key.clone(), returned_stream)
-                            .await;
+                        self.h1_pool.put_h1(pool_key.clone(), returned_stream).await;
                         break Ok(resp);
                     }
                     Err(e) => {
@@ -686,9 +910,9 @@ impl<'a> RequestBuilder<'a> {
                                 e
                             );
                             // Try again with a fresh connection (with connect timeout)
-                            let connector = self.client.connector_for_uri(&uri);
+                            let connector = self.connector_for_uri(&uri);
                             let connect_fut = connector.connect(&uri);
-                            stream = if let Some(connect_timeout) = self.client.timeouts.connect {
+                            stream = if let Some(connect_timeout) = timeouts.connect {
                                 tokio_timeout(connect_timeout, connect_fut)
                                     .await
                                     .map_err(|_| Error::ConnectTimeout(connect_timeout))??
@@ -723,6 +947,58 @@ impl<'a> RequestBuilder<'a> {
         Ok(response.with_url(request_url))
     }
 
+    fn redirect_request(&self, request: &Request, response: &Response, next_url: Url) -> Request {
+        let status = response.status().as_u16();
+        let mut method = request.method.clone();
+        let mut body = request.body.clone();
+        let mut headers = request.headers.clone();
+
+        let should_switch = status == 303
+            || ((status == 301 || status == 302) && !matches!(method, Method::GET | Method::HEAD));
+
+        if should_switch {
+            method = Method::GET;
+            body = Body::Empty;
+            headers.remove("content-length");
+            headers.remove("content-type");
+        }
+
+        if Self::is_cross_origin(&request.url, &next_url) {
+            headers.remove("authorization");
+        }
+
+        Request {
+            method,
+            url: next_url,
+            headers,
+            body,
+            version: request.version,
+            timeout: request.timeout,
+        }
+    }
+
+    async fn apply_cookie_header(&self, request: &Request, headers: &mut Headers) -> bool {
+        if let Some(jar) = &self.cookie_store {
+            if !headers.contains("cookie") {
+                if let Some(cookie_header) =
+                    jar.read().await.build_cookie_header(request.url.as_str())
+                {
+                    headers.insert("Cookie", cookie_header);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    async fn store_cookies(&self, response: &Response, url: &Url) {
+        if let Some(jar) = &self.cookie_store {
+            jar.write()
+                .await
+                .store_from_headers(response.headers(), url.as_str());
+        }
+    }
+
     /// Create a pool key from a URI.
     fn make_pool_key(uri: &Uri) -> PoolKey {
         let host = uri.host().unwrap_or("localhost").to_string();
@@ -744,34 +1020,25 @@ impl<'a> RequestBuilder<'a> {
         Ok((response, stream))
     }
 
-    /// Extract origin (scheme://host:port) from URI.
-    fn get_origin(&self) -> String {
-        if let Ok(uri) = self.uri.parse::<Uri>() {
-            let scheme = uri.scheme_str().unwrap_or("https");
-            let host = uri.host().unwrap_or("localhost");
-            let port = uri
-                .port_u16()
-                .unwrap_or(if scheme == "https" { 443 } else { 80 });
+    /// Extract origin (scheme://host:port) from URL.
+    fn origin_for_url(url: &Url) -> String {
+        let scheme = url.scheme();
+        let host = url.host_str().unwrap_or("localhost");
+        let port = url
+            .port_or_known_default()
+            .unwrap_or(if scheme == "https" { 443 } else { 80 });
 
-            if (scheme == "https" && port == 443) || (scheme == "http" && port == 80) {
-                format!("{}://{}", scheme, host)
-            } else {
-                format!("{}://{}:{}", scheme, host, port)
-            }
+        if (scheme == "https" && port == 443) || (scheme == "http" && port == 80) {
+            format!("{}://{}", scheme, host)
         } else {
-            self.uri.clone()
+            format!("{}://{}:{}", scheme, host, port)
         }
     }
 
-    /// Extract path from URI.
-    fn get_path(&self) -> String {
-        if let Ok(uri) = self.uri.parse::<Uri>() {
-            uri.path_and_query()
-                .map(|pq| pq.as_str().to_string())
-                .unwrap_or_else(|| "/".to_string())
-        } else {
-            "/".to_string()
-        }
+    fn is_cross_origin(a: &Url, b: &Url) -> bool {
+        a.scheme() != b.scheme()
+            || a.host_str() != b.host_str()
+            || a.port_or_known_default() != b.port_or_known_default()
     }
 }
 
@@ -797,6 +1064,9 @@ impl ClientBuilder {
             use_platform_roots: false,
             danger_accept_invalid_certs: false,
             localhost_allows_invalid_certs: true, // Enable by default for easier local dev
+            default_headers: Headers::new(),
+            redirect_policy: RedirectPolicy::None,
+            cookie_store: None,
         }
     }
 
@@ -889,6 +1159,46 @@ impl ClientBuilder {
     /// Set pool acquire timeout.
     pub fn pool_acquire_timeout(mut self, timeout: Duration) -> Self {
         self.timeouts.pool_acquire = Some(timeout);
+        self
+    }
+
+    /// Set default headers applied to every request.
+    pub fn default_headers(mut self, headers: impl Into<Headers>) -> Self {
+        self.default_headers = headers.into();
+        self
+    }
+
+    /// Add or replace a single default header.
+    pub fn default_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.default_headers.insert(name, value);
+        self
+    }
+
+    /// Convenience for setting the User-Agent default header.
+    pub fn user_agent(mut self, value: impl Into<String>) -> Self {
+        self.default_headers.insert("User-Agent", value.into());
+        self
+    }
+
+    /// Set redirect policy.
+    pub fn redirect_policy(mut self, policy: RedirectPolicy) -> Self {
+        self.redirect_policy = policy;
+        self
+    }
+
+    /// Enable or disable the cookie store.
+    pub fn cookie_store(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.cookie_store = Some(Arc::new(RwLock::new(CookieJar::new())));
+        } else {
+            self.cookie_store = None;
+        }
+        self
+    }
+
+    /// Provide a custom cookie jar to use for requests.
+    pub fn cookie_jar(mut self, jar: Arc<RwLock<CookieJar>>) -> Self {
+        self.cookie_store = Some(jar);
         self
     }
 
@@ -1010,6 +1320,9 @@ impl ClientBuilder {
             http2_prior_knowledge: self.http2_prior_knowledge,
             danger_accept_invalid_certs: self.danger_accept_invalid_certs,
             localhost_allows_invalid_certs: self.localhost_allows_invalid_certs,
+            default_headers: self.default_headers,
+            redirect_policy: self.redirect_policy,
+            cookie_store: self.cookie_store,
         })
     }
 }

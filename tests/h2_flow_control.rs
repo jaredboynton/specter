@@ -143,7 +143,12 @@ async fn test_large_upload_flow_control() {
         .http2_prior_knowledge(true)
         .build()
         .unwrap();
-    let res = client.post(&url).body(body_clone).send().await.unwrap();
+    let res = client
+        .post(url.as_str())
+        .body(body_clone)
+        .send()
+        .await
+        .unwrap();
 
     assert!(res.is_success());
 }

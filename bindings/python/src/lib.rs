@@ -273,13 +273,13 @@ impl RequestBuilder {
         future_into_py(py, async move {
             // Build the request using the appropriate method
             let mut req_builder = match method.as_str() {
-                "GET" => client.get(&url),
-                "POST" => client.post(&url),
-                "PUT" => client.put(&url),
-                "DELETE" => client.delete(&url),
-                "PATCH" => client.request(::http::Method::PATCH, &url),
-                "HEAD" => client.request(::http::Method::HEAD, &url),
-                "OPTIONS" => client.request(::http::Method::OPTIONS, &url),
+                "GET" => client.get(url.as_str()),
+                "POST" => client.post(url.as_str()),
+                "PUT" => client.put(url.as_str()),
+                "DELETE" => client.delete(url.as_str()),
+                "PATCH" => client.request(::http::Method::PATCH, url.as_str()),
+                "HEAD" => client.request(::http::Method::HEAD, url.as_str()),
+                "OPTIONS" => client.request(::http::Method::OPTIONS, url.as_str()),
                 _ => client.request(
                     ::http::Method::from_bytes(method.as_bytes()).map_err(|e| {
                         PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -287,7 +287,7 @@ impl RequestBuilder {
                             e
                         ))
                     })?,
-                    &url,
+                    url.as_str(),
                 ),
             };
 
@@ -433,24 +433,20 @@ impl Response {
     /// Get the HTTP status code.
     #[getter]
     fn status(&self) -> u16 {
-        self.inner.status
+        self.inner.status().as_u16()
     }
 
     /// Get the response headers as a dictionary.
     #[getter]
     fn headers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
-        for header in &self.inner.headers {
-            if let Some((key, value)) = header.split_once(':') {
-                let key = key.trim();
-                let value = value.trim();
-                // Handle multiple values for the same header
-                if let Some(existing) = dict.get_item(key)? {
-                    let existing_str: String = existing.extract()?;
-                    dict.set_item(key, format!("{}, {}", existing_str, value))?;
-                } else {
-                    dict.set_item(key, value)?;
-                }
+        for (key, value) in self.inner.headers().iter() {
+            // Handle multiple values for the same header
+            if let Some(existing) = dict.get_item(key)? {
+                let existing_str: String = existing.extract()?;
+                dict.set_item(key, format!("{}, {}", existing_str, value))?;
+            } else {
+                dict.set_item(key, value)?;
             }
         }
         Ok(dict)
@@ -459,11 +455,9 @@ impl Response {
     /// Get all headers as a list of tuples.
     fn headers_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let list = PyList::empty(py);
-        for header in &self.inner.headers {
-            if let Some((key, value)) = header.split_once(':') {
-                let tuple = (key.trim(), value.trim());
-                list.append(tuple)?;
-            }
+        for (key, value) in self.inner.headers().iter() {
+            let tuple = (key, value);
+            list.append(tuple)?;
         }
         Ok(list)
     }
@@ -481,15 +475,25 @@ impl Response {
     /// Get the response body as bytes.
     fn bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let bytes = self.inner.body().clone();
-        Ok(PyBytesWrapper(bytes).into_pyobject(py)?.into_any())
+        future_into_py(py, async move {
+            Python::with_gil(|py| {
+                let obj = PyBytesWrapper(bytes).into_pyobject(py)?;
+                Ok(obj.into_any().unbind())
+            })
+        })
     }
 
     /// Parse the response body as JSON.
     fn json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let text = self.inner.text().map_err(to_py_err)?;
-        // Use Python's json module to parse
-        let json_module = py.import("json")?;
-        json_module.getattr("loads")?.call1((text,))
+        future_into_py(py, async move {
+            Python::with_gil(|py| {
+                // Use Python's json module to parse
+                let json_module = py.import("json")?;
+                let obj = json_module.getattr("loads")?.call1((text,))?;
+                Ok(obj.unbind())
+            })
+        })
     }
 
     /// Get the HTTP version string.
@@ -501,7 +505,7 @@ impl Response {
     /// Get the effective URL (after redirects).
     #[getter]
     fn effective_url(&self) -> Option<String> {
-        self.inner.effective_url.clone()
+        self.inner.url().map(|url| url.to_string())
     }
 
     /// Check if the response status is successful (2xx).
@@ -530,7 +534,7 @@ impl Response {
 
     /// Get the string representation.
     fn __repr__(&self) -> String {
-        format!("<specter.Response status={}>", self.inner.status)
+        format!("<specter.Response status={}>", self.inner.status().as_u16())
     }
 }
 

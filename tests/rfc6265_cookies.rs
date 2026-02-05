@@ -4,6 +4,7 @@
 
 use chrono::{TimeZone, Utc};
 use specter::cookie::{Cookie, CookieJar, SameSite};
+use specter::Headers;
 
 #[test]
 fn test_secure_flag_enforcement_rfc6265_section_5_4() {
@@ -180,13 +181,11 @@ fn test_cookie_jar_rfc6265_section_5_4() {
     let mut jar = CookieJar::new();
     let url = "http://example.com/foo";
 
-    jar.store_from_headers(
-        &[
-            "Set-Cookie: SID=123; Path=/foo".to_string(),
-            "Set-Cookie: SID=456; Path=/".to_string(),
-        ],
-        url,
-    );
+    let headers = Headers::from(vec![
+        ("Set-Cookie".to_string(), "SID=123; Path=/foo".to_string()),
+        ("Set-Cookie".to_string(), "SID=456; Path=/".to_string()),
+    ]);
+    jar.store_from_headers(&headers, url);
 
     // Should retrieve most specific path first (RFC 5.4.2)
     assert!(

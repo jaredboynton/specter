@@ -8,6 +8,7 @@ use http::{Method, Uri};
 use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
+use crate::headers::Headers;
 use crate::response::Response;
 use crate::transport::h2::driver::DriverCommand;
 
@@ -59,11 +60,7 @@ impl H2Handle {
         // Convert StreamResponse to Response
         Ok(Response::new(
             stream_response.status,
-            stream_response
-                .headers
-                .iter()
-                .map(|(n, v)| format!("{}: {}", n, v))
-                .collect(),
+            Headers::from(stream_response.headers),
             stream_response.body,
             "HTTP/2".to_string(),
         ))

@@ -40,6 +40,10 @@ pub enum Error {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// URL encoding error.
+    #[error("URL encoding error: {0}")]
+    UrlEncode(#[from] serde_urlencoded::ser::Error),
+
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] io::Error),

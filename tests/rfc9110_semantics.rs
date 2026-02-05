@@ -102,7 +102,7 @@ async fn test_redirect_response_301() {
         .await
         .expect("Request failed");
 
-    assert_eq!(response.status, 301);
+    assert_eq!(response.status().as_u16(), 301);
     assert_eq!(response.get_header("location").unwrap(), "/target");
 }
 
@@ -132,7 +132,7 @@ async fn test_content_negotiation_accept_header() {
         .await
         .expect("Request failed");
 
-    assert_eq!(response.status, 200);
+    assert_eq!(response.status().as_u16(), 200);
     assert_eq!(
         response.get_header("content-type").unwrap(),
         "application/json"
@@ -165,5 +165,5 @@ async fn test_conditional_request_if_none_match() {
         .await
         .expect("Request failed");
 
-    assert_eq!(response.status, 304); // Not Modified
+    assert_eq!(response.status().as_u16(), 304); // Not Modified
 }

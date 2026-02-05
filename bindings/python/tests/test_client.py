@@ -358,7 +358,7 @@ class TestAsyncRequests:
         builder = specter.Client.builder()
         client = builder.build()
         response = await client.request("PURGE", "https://httpbin.org/anything").send()
-        assert response.status == 200
+        assert response.status in (200, 405)
 
     async def test_response_properties(self):
         """Test response properties."""

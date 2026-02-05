@@ -28,7 +28,7 @@ async fn main() -> Result<(), specter::Error> {
         .send()
         .await?;
 
-    println!("Status: {}", response.status);
+    println!("Status: {}", response.status());
     println!("Body: {}", response.text()?);
 
     Ok(())
@@ -73,7 +73,18 @@ let client = Client::builder()
 
 ### Redirects, retries, and cookies stay under your control
 
-Specter never follows redirects or stores cookies automatically. That is intentional so you can replay the exact browser flow the target expects. Use `CookieJar` plus the header helpers to implement whatever policy you need:
+Specter never follows redirects or stores cookies automatically by default. That is intentional so you can replay the exact browser flow the target expects. You can opt in:
+
+```rust
+use specter::RedirectPolicy;
+
+let client = Client::builder()
+    .redirect_policy(RedirectPolicy::Limited(10))
+    .cookie_store(true)
+    .build()?;
+```
+
+Use `CookieJar` plus the header helpers to implement whatever policy you need:
 
 ```rust
 use specter::{Client, CookieJar, FingerprintProfile, HttpVersion, Result};
@@ -98,7 +109,7 @@ async fn fetch_with_redirects() -> Result<()> {
             .send()
             .await?;
 
-        jar.store_from_headers(&response.headers, current.as_str());
+        jar.store_from_headers(response.headers(), current.as_str());
 
         if response.is_redirect() {
             if let Some(location) = response.redirect_url() {
@@ -107,7 +118,7 @@ async fn fetch_with_redirects() -> Result<()> {
             }
         }
 
-        println!("Reached {} with status {}", current, response.status);
+        println!("Reached {} with status {}", current, response.status());
         println!("Body: {}", response.text()?);
         break;
     }
@@ -116,7 +127,7 @@ async fn fetch_with_redirects() -> Result<()> {
 }
 ```
 
-Use `response.is_redirect()`/`response.redirect_url()` to drive your redirect engine, and `response.effective_url` if you need to report the final hop back to upstream logic.
+Use `response.is_redirect()`/`response.redirect_url()` to drive your redirect engine, and `response.url()` if you need to report the final hop back to upstream logic.
 
 ### Persist cookies between runs
 

@@ -71,7 +71,7 @@ async fn test_request_framing_content_length() {
         .unwrap();
 
     // Response status is a public field u16
-    assert_eq!(response.status, 200);
+    assert_eq!(response.status().as_u16(), 200);
 }
 
 #[tokio::test]
@@ -102,7 +102,7 @@ async fn test_request_framing_chunked() {
         .await
         .unwrap();
 
-    assert_eq!(response.status, 200);
+    assert_eq!(response.status().as_u16(), 200);
     // Verify body content
     assert_eq!(&response.body()[..], b"Hello");
 }
