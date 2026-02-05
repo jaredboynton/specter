@@ -140,5 +140,7 @@ jobs:
           cd bindings/node
           npm publish --access public --provenance
         env:
+          # OIDC token exchange - no NPM_TOKEN needed when Trusted Publishing is configured
+          # Configure at: https://www.npmjs.com/package/@specter/client/access
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
