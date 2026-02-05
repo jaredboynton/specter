@@ -22,7 +22,7 @@
   "scripts": {
     "build": "napi build --platform --release --dts index.gen.d.ts",
     "build:debug": "napi build --platform",
-    "prepublishOnly": "napi prepublish -t npm",
+    "prepublishOnly": "napi prepublish -t npm --no-gh-release",
     "artifacts": "napi artifacts",
     "test": "jest"
   },
