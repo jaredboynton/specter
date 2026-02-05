@@ -1,6 +1,6 @@
 [package]
 name = "specter"
-version = "1.4.1"
+version = "2.0.0"
 edition = "2021"
 license = "MIT"
 description = "HTTP client with full TLS, HTTP/2, and HTTP/3 fingerprint control"
