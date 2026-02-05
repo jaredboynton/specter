@@ -1,5 +1,5 @@
 {
-  "name": "@specter/client",
+  "name": "specters",
   "version": "2.0.0",
   "description": "Node.js bindings for Specter HTTP client with TLS/HTTP2/HTTP3 fingerprint control",
   "main": "index.js",
@@ -22,7 +22,7 @@
   "scripts": {
     "build": "napi build --platform --release --dts index.gen.d.ts",
     "build:debug": "napi build --platform",
-    "prepublishOnly": "napi prepublish -t npm",
+    "prepublishOnly": "napi prepublish -t npm --no-gh-release",
     "artifacts": "napi artifacts",
     "test": "jest"
   },
