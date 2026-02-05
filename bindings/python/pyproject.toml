@@ -3,7 +3,7 @@ requires = ["maturin>=1.8,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "specter"
+name = "specters"
 version = "2.0.0"
 description = "Python bindings for Specter HTTP client with TLS/HTTP2/HTTP3 fingerprint control"
 readme = "README_PYPI.md"
