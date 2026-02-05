@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-02-05
+
+### Added
+- **Rust API**: Reqwest-like request builders with `Request`, `Body`, `Headers`, `RedirectPolicy`, and `IntoUrl`.
+- **Response helpers**: Convenience accessors for status, headers, and body.
+
+### Changed
+- **BREAKING**: Rust client API is now reqwest-like; request builder usage replaces prior direct request patterns.
+- **BREAKING**: URL arguments now use `IntoUrl` (e.g., `&str` or `Url`), not `&String`.
+- **Bindings**: Node and Python APIs updated to match the new request builder flow.
+
 ## [1.3.0] - 2026-01-31
 
 ### Changed
