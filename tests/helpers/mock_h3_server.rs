@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use quiche::ConnectionId;
 use std::collections::HashMap;
 use std::net::SocketAddr;
