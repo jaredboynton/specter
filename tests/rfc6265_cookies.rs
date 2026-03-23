@@ -7,6 +7,17 @@ use specter::cookie::{Cookie, CookieJar, SameSite};
 use specter::Headers;
 
 #[test]
+fn test_cookie_domain_normalization() {
+    // Lowercase
+    let c = Cookie::new("name", "val", "EXAMPLE.COM");
+    assert_eq!(c.domain, "example.com");
+
+    // Trailing dot removal
+    let c = Cookie::new("name", "val", "example.com.");
+    assert_eq!(c.domain, "example.com");
+}
+
+#[test]
 fn test_secure_flag_enforcement_rfc6265_section_5_4() {
     let mut jar = CookieJar::new();
     let cookie = Cookie::new("secure_cookie", "val", "example.com").with_secure(true);
