@@ -10,11 +10,17 @@ use super::tls::TlsFingerprint;
 /// systems use JA4 which sorts extensions alphabetically for stable fingerprints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FingerprintProfile {
-    /// Chrome 142 on macOS - basic fingerprint (cipher suites, curves, sigalgs)
-    /// TLS extension order is randomized by Chrome, so this fingerprint
-    /// will not match real Chrome exactly.
-    #[default]
+    /// Chrome 142 on macOS
     Chrome142,
+    /// Chrome 143 on macOS
+    Chrome143,
+    /// Chrome 144 on macOS
+    Chrome144,
+    /// Chrome 145 on macOS
+    Chrome145,
+    /// Chrome 146 on macOS (current stable, March 2026)
+    #[default]
+    Chrome146,
     /// Firefox 133 on macOS - basic fingerprint (cipher suites, curves, sigalgs)
     /// TLS extension order is randomized by Firefox, so this fingerprint
     /// will not match real Firefox exactly. Firefox does NOT use GREASE.
@@ -30,6 +36,18 @@ impl FingerprintProfile {
             Self::Chrome142 => {
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
             }
+            Self::Chrome143 => {
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+            }
+            Self::Chrome144 => {
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+            }
+            Self::Chrome145 => {
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+            }
+            Self::Chrome146 => {
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+            }
             Self::Firefox133 => {
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"
             }
@@ -40,7 +58,11 @@ impl FingerprintProfile {
     /// Get the TLS fingerprint for this profile.
     pub fn tls_fingerprint(&self) -> TlsFingerprint {
         match self {
-            FingerprintProfile::Chrome142 => TlsFingerprint::chrome_142(),
+            FingerprintProfile::Chrome142
+            | FingerprintProfile::Chrome143
+            | FingerprintProfile::Chrome144
+            | FingerprintProfile::Chrome145
+            | FingerprintProfile::Chrome146 => TlsFingerprint::chrome(),
             FingerprintProfile::Firefox133 => TlsFingerprint::firefox_133(),
             FingerprintProfile::None => TlsFingerprint::default(),
         }
@@ -49,7 +71,11 @@ impl FingerprintProfile {
     /// Get the HTTP/2 settings for this profile.
     pub fn http2_settings(&self) -> Http2Settings {
         match self {
-            FingerprintProfile::Chrome142 => Http2Settings::default(),
+            FingerprintProfile::Chrome142
+            | FingerprintProfile::Chrome143
+            | FingerprintProfile::Chrome144
+            | FingerprintProfile::Chrome145
+            | FingerprintProfile::Chrome146 => Http2Settings::default(),
             FingerprintProfile::Firefox133 => Http2Settings::firefox(),
             FingerprintProfile::None => Http2Settings::default(),
         }
