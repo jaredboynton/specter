@@ -57,6 +57,14 @@ pub struct CookieJar {
 pub enum FingerprintProfile {
     /// Chrome 142 on macOS
     Chrome142,
+    /// Chrome 143 on macOS
+    Chrome143,
+    /// Chrome 144 on macOS
+    Chrome144,
+    /// Chrome 145 on macOS
+    Chrome145,
+    /// Chrome 146 on macOS (current stable)
+    Chrome146,
     /// Firefox 133 on macOS
     Firefox133,
     /// No fingerprinting - use default TLS settings
@@ -319,6 +327,10 @@ impl ClientBuilder {
     fn fingerprint(&mut self, profile: FingerprintProfile) -> PyResult<()> {
         let rust_profile = match profile {
             FingerprintProfile::Chrome142 => RustFingerprintProfile::Chrome142,
+            FingerprintProfile::Chrome143 => RustFingerprintProfile::Chrome143,
+            FingerprintProfile::Chrome144 => RustFingerprintProfile::Chrome144,
+            FingerprintProfile::Chrome145 => RustFingerprintProfile::Chrome145,
+            FingerprintProfile::Chrome146 => RustFingerprintProfile::Chrome146,
             FingerprintProfile::Firefox133 => RustFingerprintProfile::Firefox133,
             FingerprintProfile::NoFingerprint => RustFingerprintProfile::None,
         };

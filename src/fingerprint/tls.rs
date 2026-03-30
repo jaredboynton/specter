@@ -6,7 +6,7 @@
 //! signature algorithm, and curve ordering - but extension ordering may not
 //! match real browsers.
 //!
-//! Current implementation: Chrome 142 (Dec 2025)
+//! Current implementation: Chrome 142-146, Firefox 133
 //!
 //! ## Post-Quantum Cryptography (Kyber)
 //!
@@ -18,8 +18,9 @@
 //! To verify Kyber support, check if connections show "X25519Kyber768" in the key
 //! exchange algorithm when connecting to servers that support it (e.g., Google, Cloudflare).
 
-/// Chrome 142 cipher suites in exact order.
-pub const CHROME_142_CIPHER_SUITES: &[&str] = &[
+/// Chrome 142-146 cipher suites in exact order.
+/// Unchanged across Chrome 142 through 146.
+pub const CHROME_CIPHER_SUITES: &[&str] = &[
     "TLS_AES_128_GCM_SHA256",
     "TLS_AES_256_GCM_SHA384",
     "TLS_CHACHA20_POLY1305_SHA256",
@@ -37,8 +38,12 @@ pub const CHROME_142_CIPHER_SUITES: &[&str] = &[
     "TLS_RSA_WITH_AES_256_CBC_SHA",
 ];
 
-/// Chrome 142 signature algorithms.
-pub const CHROME_142_SIGNATURE_ALGORITHMS: &[&str] = &[
+/// Backwards-compatible alias for Chrome 142 cipher suites.
+pub const CHROME_142_CIPHER_SUITES: &[&str] = CHROME_CIPHER_SUITES;
+
+/// Chrome 142-146 signature algorithms.
+/// Unchanged across Chrome 142 through 146.
+pub const CHROME_SIGNATURE_ALGORITHMS: &[&str] = &[
     "ecdsa_secp256r1_sha256",
     "rsa_pss_rsae_sha256",
     "rsa_pkcs1_sha256",
@@ -49,12 +54,23 @@ pub const CHROME_142_SIGNATURE_ALGORITHMS: &[&str] = &[
     "rsa_pkcs1_sha512",
 ];
 
-/// Chrome 142 supported curves.
-pub const CHROME_142_CURVES: &[&str] = &["x25519", "P-256", "P-384"];
+/// Backwards-compatible alias for Chrome 142 signature algorithms.
+pub const CHROME_142_SIGNATURE_ALGORITHMS: &[&str] = CHROME_SIGNATURE_ALGORITHMS;
 
-/// Chrome 142 extension IDs in exact order.
-pub const CHROME_142_EXTENSION_IDS: &[u16] =
+/// Chrome 142-146 supported curves.
+/// Unchanged across Chrome 142 through 146.
+pub const CHROME_CURVES: &[&str] = &["x25519", "P-256", "P-384"];
+
+/// Backwards-compatible alias for Chrome 142 curves.
+pub const CHROME_142_CURVES: &[&str] = CHROME_CURVES;
+
+/// Chrome 142-146 extension IDs in exact order.
+/// Unchanged across Chrome 142 through 146.
+pub const CHROME_EXTENSION_IDS: &[u16] =
     &[0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43, 27, 21];
+
+/// Backwards-compatible alias for Chrome 142 extension IDs.
+pub const CHROME_142_EXTENSION_IDS: &[u16] = CHROME_EXTENSION_IDS;
 
 /// Firefox 133 cipher suites in exact order.
 /// Firefox prefers AES-GCM over ChaCha20 (unlike some mobile-optimized builds).
@@ -155,18 +171,44 @@ impl Default for TlsFingerprint {
 }
 
 impl TlsFingerprint {
+    /// Create a TLS fingerprint matching Chrome 142-146.
+    /// The TLS configuration is identical across these versions.
+    pub fn chrome() -> Self {
+        Self {
+            cipher_list: CHROME_CIPHER_SUITES.to_vec(),
+            sigalgs: CHROME_SIGNATURE_ALGORITHMS.to_vec(),
+            curves: CHROME_CURVES.to_vec(),
+            extensions: CHROME_EXTENSION_IDS.to_vec(),
+            extension_order: CHROME_EXTENSION_IDS.to_vec(),
+            grease: true,
+            cert_compression: CertCompression::Brotli,
+            enable_kyber: true,
+        }
+    }
+
     /// Create a TLS fingerprint for Chrome 142.
     pub fn chrome_142() -> Self {
-        Self {
-            cipher_list: CHROME_142_CIPHER_SUITES.to_vec(),
-            sigalgs: CHROME_142_SIGNATURE_ALGORITHMS.to_vec(),
-            curves: CHROME_142_CURVES.to_vec(),
-            extensions: CHROME_142_EXTENSION_IDS.to_vec(),
-            extension_order: CHROME_142_EXTENSION_IDS.to_vec(),
-            grease: true,
-            cert_compression: CertCompression::Brotli, // Chrome uses Brotli certificate compression
-            enable_kyber: true, // Chrome 124+ enables post-quantum Kyber by default
-        }
+        Self::chrome()
+    }
+
+    /// Create a TLS fingerprint for Chrome 143.
+    pub fn chrome_143() -> Self {
+        Self::chrome()
+    }
+
+    /// Create a TLS fingerprint for Chrome 144.
+    pub fn chrome_144() -> Self {
+        Self::chrome()
+    }
+
+    /// Create a TLS fingerprint for Chrome 145.
+    pub fn chrome_145() -> Self {
+        Self::chrome()
+    }
+
+    /// Create a TLS fingerprint for Chrome 146.
+    pub fn chrome_146() -> Self {
+        Self::chrome()
     }
 
     /// Create a TLS fingerprint for Firefox 133.

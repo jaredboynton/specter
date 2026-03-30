@@ -4,7 +4,9 @@ HTTP client that accurately replicates Chrome's TLS and HTTP/2 behavior, letting
 
 ## What This Is
 
-Specter implements HTTP/1.1, HTTP/2, and HTTP/3 with the same protocol fingerprints as Chrome. It's written in Rust with a custom HTTP/2 implementation built from RFC 9113 (we don't use hyper or the h2 crate). TLS uses BoringSSL - Chrome's actual TLS library. When you make requests with Specter, fingerprinting systems see the same signatures they'd see from Chrome 142. Validated against ScrapFly, Browserleaks, and tls.peet.ws.
+Specter implements HTTP/1.1, HTTP/2, and HTTP/3 with the same protocol fingerprints as Chrome. It's written in Rust with a custom HTTP/2 implementation built from RFC 9113 (we don't use hyper or the h2 crate). TLS uses BoringSSL - Chrome's actual TLS library. When you make requests with Specter, fingerprinting systems see the same signatures they'd see from a real Chrome browser. Validated against ScrapFly, Browserleaks, and tls.peet.ws.
+
+Supported Chrome fingerprints: **142, 143, 144, 145, 146** (current stable). Firefox 133 also supported.
 
 ```toml
 [dependencies]
@@ -21,7 +23,7 @@ use specter::{Client, FingerprintProfile};
 #[tokio::main]
 async fn main() -> Result<(), specter::Error> {
     let client = Client::builder()
-        .fingerprint(FingerprintProfile::Chrome142)
+        .fingerprint(FingerprintProfile::Chrome146)
         .build()?;
 
     let response = client.get("https://example.com")
@@ -56,7 +58,7 @@ use specter::transport::h2::PseudoHeaderOrder;
 use std::time::Duration;
 
 let client = Client::builder()
-    .fingerprint(FingerprintProfile::Chrome142)
+    .fingerprint(FingerprintProfile::Chrome146)
     .prefer_http2(true)          // advertise h2 first and reuse pooled connections
     .timeout(Duration::from_secs(30))
     .http2_settings(Http2Settings::default())
@@ -65,7 +67,7 @@ let client = Client::builder()
     .build()?;
 ```
 
-- `fingerprint(FingerprintProfile::Chrome142)` selects the TLS and HTTP/2 fingerprints that match shipping Chrome 142.
+- `fingerprint(FingerprintProfile::Chrome146)` selects the TLS and HTTP/2 fingerprints that match shipping Chrome 146. Other versions available: `Chrome142`, `Chrome143`, `Chrome144`, `Chrome145`.
 - `prefer_http2(true)` keeps HTTP/1.1 available through ALPN but defaults to pooled HTTP/2.
 - `timeout(...)` adds a global request timeout enforced across all transports.
 - `http2_settings(...)` / `pseudo_order(...)` let you override SETTINGS frames and pseudo header ordering when you need to mimic a different browser or experiment with fingerprints.
@@ -88,12 +90,12 @@ Use `CookieJar` plus the header helpers to implement whatever policy you need:
 
 ```rust
 use specter::{Client, CookieJar, FingerprintProfile, HttpVersion, Result};
-use specter::headers::{chrome_142_headers, with_cookies};
+use specter::headers::{chrome_146_headers, with_cookies};
 use url::Url;
 
 async fn fetch_with_redirects() -> Result<()> {
     let client = Client::builder()
-        .fingerprint(FingerprintProfile::Chrome142)
+        .fingerprint(FingerprintProfile::Chrome146)
         .prefer_http2(true)
         .build()?;
 
@@ -101,7 +103,7 @@ async fn fetch_with_redirects() -> Result<()> {
     let mut current = Url::parse("https://example.com/login").expect("valid URL");
 
     for _ in 0..5 {
-        let headers = with_cookies(chrome_142_headers(), current.as_str(), &jar);
+        let headers = with_cookies(chrome_146_headers(), current.as_str(), &jar);
 
         let response = client.get(current.as_str())
             .headers(headers)
@@ -142,7 +144,7 @@ jar.save_to_file("cookies.txt").await?;
 
 ### Header presets & origin helpers
 
-`specter::headers` ships Chrome 142 navigation, AJAX, and form presets plus helpers such as `with_origin`, `with_referer`, `with_cookies`, and `headers_to_owned`. Start from those presets, then add per-request headers so you never accidentally send forbidden connection-specific headers on HTTP/2/3.
+`specter::headers` ships Chrome 142-146 navigation, AJAX, and form presets plus helpers such as `with_origin`, `with_referer`, `with_cookies`, and `headers_to_owned`. Start from those presets, then add per-request headers so you never accidentally send forbidden connection-specific headers on HTTP/2/3.
 
 ### Response helpers
 
@@ -162,7 +164,7 @@ jar.save_to_file("cookies.txt").await?;
 
 **HTTP/3** - QUIC transport via quiche with TLS 1.3 fingerprinting.
 
-**TLS** - BoringSSL configured with Chrome 142 cipher suites, curves, and signature algorithms. BoringSSL does its own extension randomization (which matches Chrome's behavior for TLS 1.3).
+**TLS** - BoringSSL configured with Chrome cipher suites, curves, and signature algorithms. The TLS configuration is identical across Chrome 142-146. BoringSSL does its own extension randomization (which matches Chrome's behavior for TLS 1.3).
 
 **Control** - Nothing happens automatically. You manage redirects, cookies, headers, and retries explicitly (see the examples above for recommended patterns).
 
