@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.3] - 2026-04-24
+
+### Fixed
+- **Node.js npm packaging**: Switched the `specters` package to a platform-aware native binding layout. The root package now loads the matching optional native package instead of depending on a single bundled `.node` binary. The 2.1.3 npm packages support `darwin-arm64`, `darwin-x64`, `linux-arm64-gnu`, and `linux-x64-gnu`.
+- **Node.js release workflow**: Restored and updated the Node release workflow so GitHub Actions builds supported native targets, stages artifacts into per-platform npm packages, and publishes the root package with matching optional dependencies. `linux-x64-musl` is not published in this release because the current prebuilt musl BoringSSL archive cannot link into a Node addon.
+- **Version metadata**: Aligned Node binding package metadata with the current Specter release line.
+
+## [2.1.2] - 2026-03-30
+
 ### Added
 - **Chrome 143-146 fingerprint profiles**: Added browser fingerprint support for Chrome 143, 144, 145, and 146 (current stable). Each version has correct Sec-Ch-Ua brand strings derived from the Chromium GREASE algorithm, version-specific User-Agent strings, and full header presets (navigation, AJAX, form).
 - **Shared TLS constants**: TLS cipher suites, signature algorithms, curves, and extensions are identical across Chrome 142-146 and now use shared `CHROME_*` constants with backwards-compatible `CHROME_142_*` aliases.

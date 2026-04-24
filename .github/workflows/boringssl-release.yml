@@ -81,7 +81,7 @@ jobs:
             Download the archive for your target and set environment variables:
             
             ```bash
-            export BORING_BSSL_PATH=/path/to/boringssl/<target>
+            export BORING_BSSL_PATH=/path/to/boringssl/<target>/build
             export BORING_BSSL_INCLUDE_PATH=/path/to/boringssl/include
             cargo build
             ```

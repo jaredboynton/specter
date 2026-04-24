@@ -27,7 +27,7 @@
 #   - Cross-compilation: zig (Linux targets), cargo-xwin (Windows targets)
 #
 # In your build, set:
-#   export BORING_BSSL_PATH=$PWD/lib/boringssl/<target>
+#   export BORING_BSSL_PATH=$PWD/lib/boringssl/<target>/build
 
 set -euo pipefail
 
@@ -298,7 +298,7 @@ TARGETS:
     aarch64-pc-windows-msvc     Windows ARM64
 
 USAGE IN BUILD:
-    export BORING_BSSL_PATH=$PWD/lib/boringssl/<target>
+    export BORING_BSSL_PATH=$PWD/lib/boringssl/<target>/build
     cargo build --target <target>
 EOF
 }
@@ -343,7 +343,7 @@ main() {
     log "Libraries: $LIB_DIR/<target>/"
     log ""
     log "Usage:"
-    log "  export BORING_BSSL_PATH=\$PWD/lib/boringssl/<target>"
+    log "  export BORING_BSSL_PATH=\$PWD/lib/boringssl/<target>/build"
     log "  cargo build"
 }
 

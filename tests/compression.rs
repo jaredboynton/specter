@@ -14,7 +14,8 @@ use tokio::net::TcpListener;
 
 mod helpers;
 
-const TEST_BODY: &str = "Hello, compressed world! This is a test payload for verifying decompression.";
+const TEST_BODY: &str =
+    "Hello, compressed world! This is a test payload for verifying decompression.";
 
 /// Start a mock HTTP/1.1 server that returns a response with the given
 /// Content-Encoding header and pre-compressed body bytes.
@@ -63,8 +64,7 @@ fn gzip_compress(data: &[u8]) -> Vec<u8> {
 
 /// Compress bytes with deflate (zlib wrapper, which is what HTTP "deflate" means per RFC 7230).
 fn deflate_compress(data: &[u8]) -> Vec<u8> {
-    let mut encoder =
-        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(data).unwrap();
     encoder.finish().unwrap()
 }
@@ -95,7 +95,11 @@ async fn test_gzip_decompression() {
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
 
-    let resp = client.get(url.as_str()).send().await.expect("Request failed");
+    let resp = client
+        .get(url.as_str())
+        .send()
+        .await
+        .expect("Request failed");
 
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(
@@ -119,7 +123,11 @@ async fn test_deflate_decompression() {
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
 
-    let resp = client.get(url.as_str()).send().await.expect("Request failed");
+    let resp = client
+        .get(url.as_str())
+        .send()
+        .await
+        .expect("Request failed");
 
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.content_encoding(), Some("deflate"));
@@ -141,7 +149,11 @@ async fn test_brotli_decompression() {
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
 
-    let resp = client.get(url.as_str()).send().await.expect("Request failed");
+    let resp = client
+        .get(url.as_str())
+        .send()
+        .await
+        .expect("Request failed");
 
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.content_encoding(), Some("br"));
@@ -163,7 +175,11 @@ async fn test_zstd_decompression() {
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
 
-    let resp = client.get(url.as_str()).send().await.expect("Request failed");
+    let resp = client
+        .get(url.as_str())
+        .send()
+        .await
+        .expect("Request failed");
 
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.content_encoding(), Some("zstd"));
@@ -185,7 +201,11 @@ async fn test_identity_no_compression() {
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
 
-    let resp = client.get(url.as_str()).send().await.expect("Request failed");
+    let resp = client
+        .get(url.as_str())
+        .send()
+        .await
+        .expect("Request failed");
 
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.content_encoding(), Some("identity"));
@@ -205,7 +225,11 @@ async fn test_raw_bytes_vs_decoded() {
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
 
-    let resp = client.get(url.as_str()).send().await.expect("Request failed");
+    let resp = client
+        .get(url.as_str())
+        .send()
+        .await
+        .expect("Request failed");
 
     // Raw bytes should be the compressed form.
     let raw = resp.bytes_raw();

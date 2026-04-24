@@ -22,10 +22,7 @@ async fn test_connection_refused() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
 
-    let client = Client::builder()
-        .prefer_http2(false)
-        .build()
-        .unwrap();
+    let client = Client::builder().prefer_http2(false).build().unwrap();
 
     let url = format!("http://127.0.0.1:{}/test", port);
     let result = client.get(url.as_str()).send().await;
@@ -124,7 +121,8 @@ async fn test_connection_reset_partial_response() {
 
         // Send partial HTTP response: headers claim 1000 bytes but we send only a few
         // then abruptly close.
-        let partial = b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\nPartial";
+        let partial =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\nPartial";
         let _ = stream.write_all(partial).await;
         let _ = stream.flush().await;
 
@@ -135,10 +133,7 @@ async fn test_connection_reset_partial_response() {
     // Small delay so server is ready.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let client = Client::builder()
-        .prefer_http2(false)
-        .build()
-        .unwrap();
+    let client = Client::builder().prefer_http2(false).build().unwrap();
 
     let url = format!("http://127.0.0.1:{}/test", port);
     let result = client.get(url.as_str()).send().await;

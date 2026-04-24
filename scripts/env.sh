@@ -78,6 +78,7 @@ fi
 
 # Check if prebuilt libraries exist for this target
 TARGET_LIB_DIR="$LIB_DIR/$TARGET"
+TARGET_BUILD_DIR="$TARGET_LIB_DIR/build"
 INCLUDE_DIR="$LIB_DIR/include"
 
 # Check if directory exists AND contains library files
@@ -88,12 +89,18 @@ has_libs() {
     [[ -n "$(find "$dir" -maxdepth 1 \( -name '*.a' -o -name '*.lib' \) 2>/dev/null | head -1)" ]]
 }
 
-if ! has_libs "$TARGET_LIB_DIR"; then
+if has_libs "$TARGET_BUILD_DIR"; then
+    BORING_LINK_DIR="$TARGET_BUILD_DIR"
+elif has_libs "$TARGET_LIB_DIR"; then
+    BORING_LINK_DIR="$TARGET_LIB_DIR"
+else
     echo "Warning: No prebuilt BoringSSL for $TARGET" >&2
     echo "Available targets:" >&2
     for d in "$LIB_DIR"/*/; do
         [[ "$(basename "$d")" == "include" ]] && continue
-        has_libs "$d" && echo "  $(basename "$d")" >&2
+        if has_libs "$d/build" || has_libs "$d"; then
+            echo "  $(basename "$d")" >&2
+        fi
     done
     echo "" >&2
     echo "Build with: ./scripts/build-boringssl.sh $TARGET" >&2
@@ -107,7 +114,7 @@ if [[ ! -d "$INCLUDE_DIR" ]]; then
 fi
 
 # Export environment variables for boring-sys
-export BORING_BSSL_PATH="$TARGET_LIB_DIR"
+export BORING_BSSL_PATH="$BORING_LINK_DIR"
 export BORING_BSSL_INCLUDE_PATH="$INCLUDE_DIR"
 
 echo "BoringSSL configured for: $TARGET"
@@ -118,6 +125,6 @@ echo "  BORING_BSSL_INCLUDE_PATH=$BORING_BSSL_INCLUDE_PATH"
 case "$TARGET" in
     *-linux-gnu|*-linux-musl)
         # These help with cross-compilation from macOS
-        export "BORING_BSSL_PATH_${TARGET//-/_}"="$TARGET_LIB_DIR"
+        export "BORING_BSSL_PATH_${TARGET//-/_}"="$BORING_LINK_DIR"
         ;;
 esac

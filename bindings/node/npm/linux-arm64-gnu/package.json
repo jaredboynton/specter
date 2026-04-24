@@ -1,0 +1,38 @@
+{
+  "name": "specters-linux-arm64-gnu",
+  "version": "2.1.3",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "specter.linux-arm64-gnu.node",
+  "files": [
+    "specter.linux-arm64-gnu.node"
+  ],
+  "description": "Node.js bindings for Specter HTTP client with TLS/HTTP2/HTTP3 fingerprint control",
+  "keywords": [
+    "http",
+    "http3",
+    "fingerprint",
+    "tls",
+    "client",
+    "async",
+    "native"
+  ],
+  "author": "Jared Boynton",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jaredboynton/specter.git",
+    "directory": "bindings/node"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

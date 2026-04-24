@@ -3,120 +3,129 @@
  *
  * A high-performance async HTTP client with full TLS, HTTP/2, and HTTP/3
  * fingerprint control for browser impersonation.
- *
- * @example
- * const { clientBuilder, FingerprintProfile } = require('@specter/client');
- *
- * async function main() {
- *   // Create a client with default settings
- *   const client = clientBuilder().build();
- *
- *   // Simple GET request
- *   const response = await client.get('https://httpbin.org/get').send();
- *   console.log(`Status: ${response.status}`);
- *   console.log(response.text());
- *
- *   // POST with JSON body
- *   const response2 = await client.post('https://api.example.com/data')
- *     .header('Authorization', 'Bearer token')
- *     .json(JSON.stringify({ name: 'test' }))
- *     .send();
- *   console.log(JSON.parse(response2.json()));
- * }
- *
- * main();
  */
 
-const { loadBinding } = require('@napi-rs/wasm-runtime');
-const path = require('path');
+const { execSync } = require('node:child_process');
+const { readFileSync } = require('node:fs');
 
-// Try to load the native binding
-let nativeBinding;
+const PACKAGE_VERSION = '2.1.3';
 
-// Platform to binary name mapping based on napi-rs naming convention
-// Format: specter.{os}-{arch}[-{libc}].node
-const platformBinaries = {
-  'darwin-arm64': 'specter.darwin-arm64.node',
-  'darwin-x64': 'specter.darwin-x64.node',
-  'linux-arm64-gnu': 'specter.linux-arm64-gnu.node',
-  'linux-x64-gnu': 'specter.linux-x64-gnu.node',
-  'linux-x64-musl': 'specter.linux-x64-musl.node',
-  'win32-x64-msvc': 'specter.win32-x64-msvc.node',
+const targets = {
+  'darwin-x64': {
+    local: './specter.darwin-x64.node',
+    package: 'specters-darwin-x64',
+  },
+  'darwin-arm64': {
+    local: './specter.darwin-arm64.node',
+    package: 'specters-darwin-arm64',
+  },
+  'linux-x64-gnu': {
+    local: './specter.linux-x64-gnu.node',
+    package: 'specters-linux-x64-gnu',
+  },
+  'linux-arm64-gnu': {
+    local: './specter.linux-arm64-gnu.node',
+    package: 'specters-linux-arm64-gnu',
+  },
 };
 
-function getPlatformKey() {
-  const platform = process.platform;
-  const arch = process.arch;
+function isMusl() {
+  if (process.platform !== 'linux') {
+    return false;
+  }
 
-  if (platform === 'darwin') {
-    return `darwin-${arch}`;
+  const report = typeof process.report?.getReport === 'function'
+    ? process.report.getReport()
+    : null;
+
+  if (report?.header?.glibcVersionRuntime) {
+    return false;
   }
-  if (platform === 'win32') {
-    return `win32-${arch}-msvc`;
+
+  if (Array.isArray(report?.sharedObjects)) {
+    return report.sharedObjects.some((file) => file.includes('libc.musl-') || file.includes('ld-musl-'));
   }
-  if (platform === 'linux') {
-    // Check if we're on musl by looking at the libc
-    const isMusl = (() => {
-      try {
-        const { execSync } = require('child_process');
-        return execSync('ldd --version 2>&1').toString().includes('musl');
-      } catch {
-        return false;
-      }
-    })();
-    return `linux-${arch}-${isMusl ? 'musl' : 'gnu'}`;
+
+  try {
+    return readFileSync('/usr/bin/ldd', 'utf8').includes('musl');
+  } catch {
+    try {
+      return execSync('ldd --version', { encoding: 'utf8' }).includes('musl');
+    } catch {
+      return false;
+    }
   }
-  return null;
+}
+
+function targetKey() {
+  if (process.platform === 'darwin') {
+    return `darwin-${process.arch}`;
+  }
+
+  if (process.platform === 'linux') {
+    return `linux-${process.arch}-${isMusl() ? 'musl' : 'gnu'}`;
+  }
+
+  return `${process.platform}-${process.arch}`;
+}
+
+function versionCheck(packageName) {
+  if (!process.env.NAPI_RS_ENFORCE_VERSION_CHECK || process.env.NAPI_RS_ENFORCE_VERSION_CHECK === '0') {
+    return;
+  }
+
+  const packageVersion = require(`${packageName}/package.json`).version;
+  if (packageVersion !== PACKAGE_VERSION) {
+    throw new Error(
+      `Native binding package version mismatch for ${packageName}: expected ${PACKAGE_VERSION}, got ${packageVersion}. ` +
+      'Reinstall dependencies to refresh optional native packages.'
+    );
+  }
 }
 
 function loadNativeBinding() {
-  // Try platform-specific binary first
-  const platformKey = getPlatformKey();
-  if (platformKey && platformBinaries[platformKey]) {
+  const loadErrors = [];
+
+  if (process.env.NAPI_RS_NATIVE_LIBRARY_PATH) {
     try {
-      nativeBinding = require(`./${platformBinaries[platformKey]}`);
-      return nativeBinding;
-    } catch (e) {
-      // Continue to fallback
+      return require(process.env.NAPI_RS_NATIVE_LIBRARY_PATH);
+    } catch (error) {
+      loadErrors.push(error);
     }
   }
 
-  // Try all known binaries
-  for (const binaryName of Object.values(platformBinaries)) {
-    try {
-      nativeBinding = require(`./${binaryName}`);
-      return nativeBinding;
-    } catch (e) {
-      // Continue to next platform
-    }
+  const key = targetKey();
+  const target = targets[key];
+
+  if (!target) {
+    throw new Error(
+      `Unsupported Specter native target: ${key}. ` +
+      `Supported targets: ${Object.keys(targets).join(', ')}.`
+    );
   }
 
-  // Try loading from build directory
   try {
-    nativeBinding = require('./specter.node');
-    return nativeBinding;
-  } catch (e) {
-    // Fall through
+    return require(target.local);
+  } catch (error) {
+    loadErrors.push(error);
   }
 
-  // Try loading from target
   try {
-    nativeBinding = require('./build/Release/specter.node');
-    return nativeBinding;
-  } catch (e) {
-    // Fall through
+    versionCheck(target.package);
+    return require(target.package);
+  } catch (error) {
+    loadErrors.push(error);
   }
 
   throw new Error(
-    `Failed to load native binding for Specter. ` +
-    `Please ensure you've built the native module with "npm run build".`
+    `Failed to load Specter native binding for ${key}. ` +
+    `Expected optional package "${target.package}" or local binary "${target.local}".\n` +
+    loadErrors.map((error) => `- ${error.message}`).join('\n')
   );
 }
 
-// Load the binding
 const binding = loadNativeBinding();
 
-// Export the native types
 module.exports.Client = binding.Client;
 module.exports.ClientBuilder = binding.ClientBuilder;
 module.exports.RequestBuilder = binding.RequestBuilder;
