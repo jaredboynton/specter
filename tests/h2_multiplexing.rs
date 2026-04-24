@@ -45,9 +45,9 @@ async fn h2_handshake_and_serve(
                 if flags & 0x01 == 0 && !settings_sent {
                     // Client SETTINGS -- reply with our SETTINGS + ACK.
                     conn.send_settings(&[
-                        (0x01, 4096),   // HEADER_TABLE_SIZE
-                        (0x03, 100),    // MAX_CONCURRENT_STREAMS
-                        (0x04, 65535),  // INITIAL_WINDOW_SIZE
+                        (0x01, 4096),  // HEADER_TABLE_SIZE
+                        (0x03, 100),   // MAX_CONCURRENT_STREAMS
+                        (0x04, 65535), // INITIAL_WINDOW_SIZE
                     ])
                     .await
                     .unwrap();

@@ -65,7 +65,8 @@ zigbuild target="aarch64-unknown-linux-gnu":
     BSSL_PATH="$(pwd)/lib/boringssl/$TARGET"
     if [[ -d "$BSSL_PATH/build" ]]; then
         echo "Using prebuilt BoringSSL from $BSSL_PATH"
-        export BORING_BSSL_PATH="$BSSL_PATH"
+        export BORING_BSSL_PATH="$BSSL_PATH/build"
+        export BORING_BSSL_INCLUDE_PATH="$(pwd)/lib/boringssl/include"
     else
         echo "Warning: No prebuilt BoringSSL found at $BSSL_PATH"
         echo "BoringSSL will be built from source (slower)"
@@ -76,7 +77,7 @@ zigbuild target="aarch64-unknown-linux-gnu":
     export CXX="$WRAPPER_CXX"
     export CC_${TARGET//-/_}="$WRAPPER_CC"
     export CXX_${TARGET//-/_}="$WRAPPER_CXX"
-    export AR_${TARGET//-/_}="zig ar"
+    export AR_${TARGET//-/_}="ar"
     
     # CMAKE-specific (for boring-sys)
     export CMAKE_C_COMPILER_${TARGET//-/_}="$WRAPPER_CC"
@@ -107,7 +108,8 @@ build:
     BSSL_PATH="$(pwd)/lib/boringssl/$TARGET"
     if [[ -d "$BSSL_PATH/build" ]]; then
         echo "Using prebuilt BoringSSL from $BSSL_PATH"
-        export BORING_BSSL_PATH="$BSSL_PATH"
+        export BORING_BSSL_PATH="$BSSL_PATH/build"
+        export BORING_BSSL_INCLUDE_PATH="$(pwd)/lib/boringssl/include"
     fi
     
     cargo build --release
@@ -183,7 +185,8 @@ test:
     
     BSSL_PATH="$(pwd)/lib/boringssl/$TARGET"
     if [[ -d "$BSSL_PATH/build" ]]; then
-        export BORING_BSSL_PATH="$BSSL_PATH"
+        export BORING_BSSL_PATH="$BSSL_PATH/build"
+        export BORING_BSSL_INCLUDE_PATH="$(pwd)/lib/boringssl/include"
     fi
     
     cargo nextest run --all-features
@@ -202,7 +205,8 @@ test-cargo:
     
     BSSL_PATH="$(pwd)/lib/boringssl/$TARGET"
     if [[ -d "$BSSL_PATH/build" ]]; then
-        export BORING_BSSL_PATH="$BSSL_PATH"
+        export BORING_BSSL_PATH="$BSSL_PATH/build"
+        export BORING_BSSL_INCLUDE_PATH="$(pwd)/lib/boringssl/include"
     fi
     
     cargo test --all-features

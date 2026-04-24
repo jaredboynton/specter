@@ -20,10 +20,12 @@ jobs:
         settings:
           - host: macos-14
             target: aarch64-apple-darwin
-            build: npm run build
           - host: macos-14
             target: x86_64-apple-darwin
-            build: npm run build -- --target x86_64-apple-darwin
+          - host: macos-14
+            target: x86_64-unknown-linux-gnu
+          - host: macos-14
+            target: aarch64-unknown-linux-gnu
     name: Build ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -41,6 +43,16 @@ jobs:
         with:
           targets: ${{ matrix.settings.target }}
 
+      - name: Install Linux cross-compilation tools
+        if: contains(matrix.settings.target, 'unknown-linux')
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Install Zig
+        if: contains(matrix.settings.target, 'unknown-linux')
+        run: brew install zig
+
       - name: Install dependencies
         run: |
           cd bindings/node
@@ -48,12 +60,37 @@ jobs:
 
       - name: Build
         run: |
+          set -euo pipefail
+          TARGET="${{ matrix.settings.target }}"
           cd bindings/node
-          ${{ matrix.settings.build }}
+
+          if [[ "$TARGET" == *"unknown-linux"* ]]; then
+            chmod +x ../../scripts/zig-cc-* ../../scripts/zig-cxx-*
+
+            case "$TARGET" in
+              aarch64-unknown-linux-gnu)
+                export CC="$GITHUB_WORKSPACE/scripts/zig-cc-aarch64-linux-gnu"
+                export CXX="$GITHUB_WORKSPACE/scripts/zig-cxx-aarch64-linux-gnu"
+                ;;
+              x86_64-unknown-linux-gnu)
+                export CC="$GITHUB_WORKSPACE/scripts/zig-cc-x86_64-linux-gnu"
+                export CXX="$GITHUB_WORKSPACE/scripts/zig-cxx-x86_64-linux-gnu"
+                ;;
+            esac
+
+            export "CC_${TARGET//-/_}=$CC"
+            export "CXX_${TARGET//-/_}=$CXX"
+            export "AR_${TARGET//-/_}=ar"
+
+            npm run build -- --target "$TARGET" --cross-compile
+          elif [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
+            npm run build
+          else
+            npm run build -- --target "$TARGET"
+          fi
         env:
           MACOSX_DEPLOYMENT_TARGET: '10.13'
-          # Use prebuilt BoringSSL from repo
-          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.settings.target }}
+          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.settings.target }}/build
           BORING_BSSL_INCLUDE_PATH: ${{ github.workspace }}/lib/boringssl/include
 
       - name: Upload artifact
@@ -91,7 +128,8 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: '10.13'
           # Use prebuilt BoringSSL from repo
-          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/aarch64-apple-darwin
+          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/aarch64-apple-darwin/build
+          BORING_BSSL_INCLUDE_PATH: ${{ github.workspace }}/lib/boringssl/include
 
       - name: Test
         run: |
@@ -126,14 +164,12 @@ jobs:
           path: bindings/node/artifacts
           pattern: bindings-*
 
-      - name: Move artifacts
+      - name: Stage native packages
         run: |
           cd bindings/node
-          mkdir -p npm
-          for dir in artifacts/bindings-*/; do
-            cp "${dir}"*.node npm/ 2>/dev/null || true
-          done
-          ls -la npm/
+          npm run create:npm-dirs
+          npm run artifacts
+          find npm -maxdepth 2 -type f | sort
 
       - name: Publish
         run: |

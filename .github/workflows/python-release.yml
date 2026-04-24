@@ -26,7 +26,8 @@ jobs:
           args: --release --out dist -m bindings/python/Cargo.toml
         env:
           # Use prebuilt BoringSSL from repo
-          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.target }}
+          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.target }}/build
+          BORING_BSSL_INCLUDE_PATH: ${{ github.workspace }}/lib/boringssl/include
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -71,7 +72,8 @@ jobs:
           maturin develop --release -m bindings/python/Cargo.toml
         env:
           # Use prebuilt BoringSSL from repo
-          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/aarch64-apple-darwin
+          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/aarch64-apple-darwin/build
+          BORING_BSSL_INCLUDE_PATH: ${{ github.workspace }}/lib/boringssl/include
       - name: Run tests
         run: |
           . .venv/bin/activate

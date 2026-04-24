@@ -181,7 +181,7 @@ EXAMPLES:
     ./scripts/extract-boringssl.sh aarch64-apple-darwin x86_64-apple-darwin
 
 After extraction, set this env var when building with boring-sys:
-    export BORING_BSSL_PATH=$PWD/lib/boringssl/<target>
+    export BORING_BSSL_PATH=$PWD/lib/boringssl/<target>/build
 EOF
 }
 
@@ -255,7 +255,7 @@ main() {
     log "Headers:   $LIB_DIR/include/"
     log ""
     log "To use with boring-sys:"
-    log "  export BORING_BSSL_PATH=$LIB_DIR/<target>"
+    log "  export BORING_BSSL_PATH=$LIB_DIR/<target>/build"
 }
 
 main "$@"

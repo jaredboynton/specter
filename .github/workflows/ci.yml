@@ -41,10 +41,11 @@ jobs:
       - name: Configure prebuilt BoringSSL
         run: |
           if [[ "$(uname -m)" == "arm64" ]]; then
-            echo "BORING_BSSL_PATH=${{ github.workspace }}/lib/boringssl/aarch64-apple-darwin" >> $GITHUB_ENV
+            echo "BORING_BSSL_PATH=${{ github.workspace }}/lib/boringssl/aarch64-apple-darwin/build" >> $GITHUB_ENV
           else
-            echo "BORING_BSSL_PATH=${{ github.workspace }}/lib/boringssl/x86_64-apple-darwin" >> $GITHUB_ENV
+            echo "BORING_BSSL_PATH=${{ github.workspace }}/lib/boringssl/x86_64-apple-darwin/build" >> $GITHUB_ENV
           fi
+          echo "BORING_BSSL_INCLUDE_PATH=${{ github.workspace }}/lib/boringssl/include" >> $GITHUB_ENV
 
       - run: cargo fmt -- --check
       - run: cargo nextest run --all-features --profile ci
@@ -123,4 +124,5 @@ jobs:
       - name: Build
         run: cargo xwin build --release --target ${{ matrix.target }} --lib
         env:
-          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.target }}
+          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.target }}/build
+          BORING_BSSL_INCLUDE_PATH: ${{ github.workspace }}/lib/boringssl/include
