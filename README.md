@@ -1,6 +1,6 @@
 # Specter
 
-HTTP client that accurately replicates Chrome's TLS and HTTP/2 behavior, letting you automate browser workflows programmatically.
+HTTP client that accurately replicates Chrome's TLS and HTTP/2 behavior, letting you automate browser workflows programmatically. Supports SOCKS5 and HTTP CONNECT proxies with full fingerprint preservation across HTTP/1.1, HTTP/2, and HTTP/3 (QUIC).
 
 ## What This Is
 
@@ -72,6 +72,8 @@ let client = Client::builder()
 - `timeout(...)` adds a global request timeout enforced across all transports.
 - `http2_settings(...)` / `pseudo_order(...)` let you override SETTINGS frames and pseudo header ordering when you need to mimic a different browser or experiment with fingerprints.
 - `h3_upgrade(false)` disables Alt-Svc based HTTP/3 upgrades if you want deterministic TCP-only behavior.
+- `proxy(ProxyConfig::socks5("127.0.0.1", 1080))` routes all traffic through a SOCKS5 proxy. HTTP/3 uses UDP ASSOCIATE; H1/H2 use TCP CONNECT.
+- `proxy(ProxyConfig::http_connect("proxy.example.com", 8080))` routes H1/H2 traffic through an HTTP CONNECT tunnel.
 
 ### Redirects, retries, and cookies stay under your control
 
@@ -85,6 +87,59 @@ let client = Client::builder()
     .cookie_store(true)
     .build()?;
 ```
+
+### Proxy support
+
+Route all traffic through SOCKS5 or HTTP CONNECT proxies. TLS fingerprints are fully preserved because the TLS handshake happens *inside* the proxy tunnel.
+
+```rust
+use specter::{Client, FingerprintProfile, ProxyConfig};
+
+// SOCKS5 proxy (supports H1, H2, and H3 via UDP ASSOCIATE)
+let client = Client::builder()
+    .fingerprint(FingerprintProfile::Chrome146)
+    .proxy(ProxyConfig::socks5("127.0.0.1", 1080))
+    .build()?;
+
+// SOCKS5 with username/password auth
+let client = Client::builder()
+    .fingerprint(FingerprintProfile::Chrome146)
+    .proxy(ProxyConfig::socks5_with_auth("proxy.example.com", 1080, "user", "pass"))
+    .build()?;
+
+// HTTP CONNECT proxy (H1/H2 only — no UDP path for H3)
+let client = Client::builder()
+    .fingerprint(FingerprintProfile::Chrome146)
+    .proxy(ProxyConfig::http_connect("proxy.example.com", 8080))
+    .build()?;
+
+// HTTP CONNECT with auth
+let client = Client::builder()
+    .fingerprint(FingerprintProfile::Chrome146)
+    .proxy(ProxyConfig::http_connect_with_auth("proxy.example.com", 8080, "user", "pass"))
+    .build()?;
+```
+
+Once configured, every request goes through the proxy — no per-request setup needed:
+
+```rust
+// All of these use the proxy automatically
+let resp = client.get("https://example.com").send().await?;
+let resp = client.get("https://api.example.com/data")
+    .version(HttpVersion::Http3)  // SOCKS5: tunneled via UDP ASSOCIATE
+    .send().await?;
+```
+
+**How it works:**
+
+| Proxy type | HTTP/1.1 | HTTP/2 | HTTP/3 (QUIC) |
+|------------|----------|--------|----------------|
+| SOCKS5 | TCP CONNECT | TCP CONNECT | UDP ASSOCIATE |
+| HTTP CONNECT | CONNECT tunnel | CONNECT tunnel | Falls back to H2 |
+
+- DNS is always resolved on the proxy side (SOCKS5 domain address type) to prevent DNS leaks.
+- TLS fingerprints are not affected by the proxy because the TLS handshake happens after the tunnel is established.
+- Connection pooling is proxy-aware: connections through different proxies are never mixed.
 
 Use `CookieJar` plus the header helpers to implement whatever policy you need:
 
@@ -162,7 +217,7 @@ jar.save_to_file("cookies.txt").await?;
 - All headers properly lowercased per RFC 7540/9113
 - True multiplexing (concurrent requests on single connection, respecting `MAX_CONCURRENT_STREAMS`)
 
-**HTTP/3** - QUIC transport via quiche with TLS 1.3 fingerprinting.
+**HTTP/3** - QUIC transport via quiche with TLS 1.3 fingerprinting. Works through SOCKS5 proxies via RFC 1928 UDP ASSOCIATE.
 
 **TLS** - BoringSSL configured with Chrome cipher suites, curves, and signature algorithms. The TLS configuration is identical across Chrome 142-146. BoringSSL does its own extension randomization (which matches Chrome's behavior for TLS 1.3).
 
@@ -182,6 +237,9 @@ Local/CI checks:
 - `cargo run --example fingerprint_validation` hits ScrapFly, BrowserLeaks, tls.peet.ws, and Cloudflare to confirm TLS/HTTP/2/HTTP/3 fingerprints.
 - `cargo run --example protocol_test -- --verbose` walks through HTTP/1.1 preference, HTTP/2 pooling, HTTP/3 only, and connection header filtering. Pass `--target example.com` to test a custom origin.
 - `cargo clippy -p specter -- -D warnings` stays clean to make CI fail-fast on regressions.
+- `cargo run --example proxy_test -- --socks5 host:port --user USER --pass PASS` verifies proxy tunneling against IP detection APIs.
+- `cargo run --example proxy_browserleaks -- --socks5 host:port --user USER --pass PASS` checks TLS/H2 fingerprints through a SOCKS5 proxy.
+- `cargo run --example proxy_h3_test -- --socks5 host:port --user USER --pass PASS` tests HTTP/3 via SOCKS5 UDP ASSOCIATE.
 
 ## Development
 

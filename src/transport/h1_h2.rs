@@ -71,6 +71,8 @@ pub struct Client {
     redirect_policy: RedirectPolicy,
     /// Optional cookie store
     cookie_store: Option<Arc<RwLock<CookieJar>>>,
+    /// Optional proxy configuration
+    proxy: Option<crate::proxy::ProxyConfig>,
 }
 
 /// Builder for HTTP requests.
@@ -107,6 +109,8 @@ pub struct ClientBuilder {
     redirect_policy: RedirectPolicy,
     /// Optional cookie store
     cookie_store: Option<Arc<RwLock<CookieJar>>>,
+    /// Optional proxy configuration
+    proxy: Option<crate::proxy::ProxyConfig>,
 }
 
 impl Client {
@@ -708,7 +712,7 @@ impl Client {
 
         // For HTTP/2, try to use pooled connection first
         if prefer_http2 {
-            let pool_key = Self::make_pool_key(&uri);
+            let pool_key = self.make_pool_key(&uri);
 
             // Check for existing pooled connection
             let pooled = {
@@ -810,7 +814,7 @@ impl Client {
         }
 
         // HTTP/1.1 path (with connection pooling)
-        let pool_key = Self::make_pool_key(&uri);
+        let pool_key = self.make_pool_key(&uri);
 
         // Try to get a pooled connection first
         let mut stream_opt = self.h1_pool.get_h1(&pool_key).await;
@@ -1000,11 +1004,14 @@ impl Client {
     }
 
     /// Create a pool key from a URI.
-    fn make_pool_key(uri: &Uri) -> PoolKey {
+    fn make_pool_key(&self, uri: &Uri) -> PoolKey {
         let host = uri.host().unwrap_or("localhost").to_string();
         let is_https = uri.scheme_str() == Some("https");
         let port = uri.port_u16().unwrap_or(if is_https { 443 } else { 80 });
-        PoolKey::new(host, port, is_https)
+        match &self.proxy {
+            Some(proxy) => PoolKey::with_proxy(host, port, is_https, proxy.proxy_key()),
+            None => PoolKey::new(host, port, is_https),
+        }
     }
 
     async fn do_send_http1(
@@ -1067,6 +1074,7 @@ impl ClientBuilder {
             default_headers: Headers::new(),
             redirect_policy: RedirectPolicy::None,
             cookie_store: None,
+            proxy: None,
         }
     }
 
@@ -1202,6 +1210,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Set proxy configuration for all connections.
+    ///
+    /// Supports SOCKS5 and HTTP CONNECT proxies with optional authentication.
+    /// SOCKS5 proxies support HTTP/1.1, HTTP/2 (via TCP CONNECT) and HTTP/3 (via UDP ASSOCIATE).
+    /// HTTP CONNECT proxies only support HTTP/1.1 and HTTP/2.
+    pub fn proxy(mut self, proxy: crate::proxy::ProxyConfig) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
     /// Set HTTP/2 preference (for Auto version selection).
     pub fn prefer_http2(mut self, prefer: bool) -> Self {
         self.prefer_http2 = prefer;
@@ -1286,14 +1304,25 @@ impl ClientBuilder {
             connector = connector.danger_accept_invalid_certs(true);
         }
 
+        // Apply proxy configuration if set
+        if let Some(ref proxy) = self.proxy {
+            connector = connector.with_proxy(proxy.clone());
+        }
+
         // Create insecure connector for localhost (always skips TLS verification)
-        let insecure_connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
+        let mut insecure_connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
             .with_root_certificates(self.root_certs)
             .with_platform_roots(self.use_platform_roots)
             .danger_accept_invalid_certs(true);
+        if let Some(ref proxy) = self.proxy {
+            insecure_connector = insecure_connector.with_proxy(proxy.clone());
+        }
 
         // Create H3 client with same TLS fingerprint
-        let h3_client = H3Client::with_fingerprint(tls_fingerprint);
+        let mut h3_client = H3Client::with_fingerprint(tls_fingerprint);
+        if let Some(ref proxy) = self.proxy {
+            h3_client = h3_client.with_proxy(proxy.clone());
+        }
 
         // Use provided HTTP/2 settings or default from fingerprint
         let http2_settings = self.http2_settings.unwrap_or_default();
@@ -1323,6 +1352,7 @@ impl ClientBuilder {
             default_headers: self.default_headers,
             redirect_policy: self.redirect_policy,
             cookie_store: self.cookie_store,
+            proxy: self.proxy,
         })
     }
 }

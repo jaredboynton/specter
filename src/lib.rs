@@ -16,6 +16,9 @@ pub mod response;
 pub mod timeouts;
 pub mod version;
 
+// Proxy support
+pub mod proxy;
+
 // Fingerprinting
 pub mod fingerprint;
 
@@ -48,3 +51,6 @@ pub use transport::tcp::TcpFingerprint;
 // Pool re-exports
 pub use pool::alt_svc::{AltSvcCache, AltSvcEntry};
 pub use pool::multiplexer::{ConnectionPool, PoolEntry, PoolKey};
+
+// Proxy re-exports
+pub use proxy::{ProxyAuth, ProxyConfig};

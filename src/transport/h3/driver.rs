@@ -1,13 +1,12 @@
 //! HTTP/3 connection driver - background task that reads packets and routes them to streams.
 //!
-//! The driver owns the QUIC connection and UdpSocket.
+//! The driver owns the QUIC connection and routes packets through a QuicUdpTransport.
 
 use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::UdpSocket;
+use crate::proxy::udp_transport::QuicUdpTransport;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
@@ -64,7 +63,7 @@ pub struct H3Driver {
     command_rx: mpsc::Receiver<DriverCommand>,
     conn: quiche::Connection,
     h3_conn: quiche::h3::Connection,
-    socket: Arc<UdpSocket>,
+    transport: Box<dyn QuicUdpTransport>,
     peer_addr: SocketAddr,
     streams: HashMap<u64, DriverStreamState>,
 }
@@ -74,14 +73,14 @@ impl H3Driver {
         command_rx: mpsc::Receiver<DriverCommand>,
         conn: quiche::Connection,
         h3_conn: quiche::h3::Connection,
-        socket: Arc<UdpSocket>,
+        transport: Box<dyn QuicUdpTransport>,
         peer_addr: SocketAddr,
     ) -> Self {
         Self {
             command_rx,
             conn,
             h3_conn,
-            socket,
+            transport,
             peer_addr,
             streams: HashMap::new(),
         }
@@ -112,7 +111,7 @@ impl H3Driver {
             loop {
                 match self.conn.send(&mut out) {
                     Ok((len, _)) => {
-                        if let Err(e) = self.socket.send_to(&out[..len], self.peer_addr).await {
+                        if let Err(e) = self.transport.send_to_target(&out[..len], self.peer_addr).await {
                             tracing::error!("H3 socket send error: {}", e);
                             return Err(Error::Io(e));
                         }
@@ -140,7 +139,7 @@ impl H3Driver {
                                 Err(_) => {}
                             }
                             while let Ok((len, _)) = self.conn.send(&mut out) {
-                                let _ = self.socket.send_to(&out[..len], self.peer_addr).await;
+                                let _ = self.transport.send_to_target(&out[..len], self.peer_addr).await;
                             }
                             return Ok(());
                         }
@@ -148,24 +147,20 @@ impl H3Driver {
                 }
 
                 // Incoming Packet
-                res = self.socket.recv_from(&mut buf) => {
+                res = self.transport.recv_from_target(&mut buf) => {
                     match res {
-                        Ok((len, from)) => {
-                            if from == self.peer_addr {
-                                let info = quiche::RecvInfo {
-                                    from,
-                                    to: self.socket.local_addr().unwrap(),
-                                    // to: self.socket.local_addr().unwrap(), // Need to handle unchecked?
-                                    // The original code unwrapped, presumably safe if bound.
-                                };
-                                match self.conn.recv(&mut buf[..len], info) {
-                                    Ok(_) => {
-                                        self.process_h3_events()?;
-                                    }
-                                    Err(quiche::Error::Done) => {},
-                                    Err(e) => {
-                                        tracing::warn!("QUIC recv error: {}", e);
-                                    }
+                        Ok((len, _from)) => {
+                            let info = quiche::RecvInfo {
+                                from: self.peer_addr,
+                                to: self.transport.local_addr().unwrap(),
+                            };
+                            match self.conn.recv(&mut buf[..len], info) {
+                                Ok(_) => {
+                                    self.process_h3_events()?;
+                                }
+                                Err(quiche::Error::Done) => {},
+                                Err(e) => {
+                                    tracing::warn!("QUIC recv error: {}", e);
                                 }
                             }
                         }

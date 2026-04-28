@@ -21,6 +21,7 @@ pub struct PoolKey {
     pub host: String,
     pub port: u16,
     pub is_https: bool,
+    pub proxy_key: Option<String>,
 }
 
 impl PoolKey {
@@ -30,6 +31,17 @@ impl PoolKey {
             host,
             port,
             is_https,
+            proxy_key: None,
+        }
+    }
+
+    /// Create a new pool key for a proxied connection
+    pub fn with_proxy(host: String, port: u16, is_https: bool, proxy_key: String) -> Self {
+        Self {
+            host,
+            port,
+            is_https,
+            proxy_key: Some(proxy_key),
         }
     }
 }
