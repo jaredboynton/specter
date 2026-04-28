@@ -22,7 +22,7 @@ use crate::response::Response;
 pub struct H3Client {
     tls_fingerprint: Option<TlsFingerprint>,
     verify_peer: bool,
-    // In future: connection pool
+    proxy: Option<crate::proxy::ProxyConfig>,
 }
 
 impl Default for H3Client {
@@ -36,6 +36,7 @@ impl H3Client {
         Self {
             tls_fingerprint: None,
             verify_peer: true,
+            proxy: None,
         }
     }
 
@@ -43,12 +44,18 @@ impl H3Client {
         Self {
             tls_fingerprint: Some(fp),
             verify_peer: true,
+            proxy: None,
         }
     }
 
     /// Disable server certificate verification (for testing)
     pub fn danger_accept_invalid_certs(mut self, accept: bool) -> Self {
         self.verify_peer = !accept;
+        self
+    }
+
+    pub fn with_proxy(mut self, proxy: crate::proxy::ProxyConfig) -> Self {
+        self.proxy = Some(proxy);
         self
     }
 
@@ -69,7 +76,7 @@ impl H3Client {
         // Implementing full pooling inside H3Client is Phase 2.
 
         let config = self.create_quic_config()?;
-        let handle = H3Connection::connect(url, config).await?;
+        let handle = H3Connection::connect(url, config, self.proxy.as_ref()).await?;
 
         // Convert body
         let body_bytes = body.map(bytes::Bytes::from);

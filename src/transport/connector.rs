@@ -114,6 +114,8 @@ pub struct BoringConnector {
     use_platform_roots: bool,
     /// Skip TLS certificate verification (DANGEROUS - for testing only)
     danger_accept_invalid_certs: bool,
+    /// Optional proxy configuration for tunneling connections
+    proxy: Option<crate::proxy::ProxyConfig>,
 }
 
 impl BoringConnector {
@@ -129,6 +131,7 @@ impl BoringConnector {
             root_certs: Vec::new(),
             use_platform_roots: false,
             danger_accept_invalid_certs: false,
+            proxy: None,
         }
     }
 
@@ -140,6 +143,7 @@ impl BoringConnector {
             root_certs: Vec::new(),
             use_platform_roots: false,
             danger_accept_invalid_certs: false,
+            proxy: None,
         }
     }
 
@@ -151,7 +155,14 @@ impl BoringConnector {
             root_certs: Vec::new(),
             use_platform_roots: false,
             danger_accept_invalid_certs: false,
+            proxy: None,
         }
+    }
+
+    /// Set proxy configuration for tunneling connections.
+    pub fn with_proxy(mut self, proxy: crate::proxy::ProxyConfig) -> Self {
+        self.proxy = Some(proxy);
+        self
     }
 
     /// Set TCP fingerprint configuration.
@@ -465,10 +476,34 @@ impl BoringConnector {
                 80
             });
 
+        let tcp_stream = if let Some(ref proxy) = self.proxy {
+            self.connect_via_proxy(proxy, host, port).await?
+        } else {
+            self.connect_direct(host, port).await?
+        };
+
+        if uri.scheme_str() == Some("https") {
+            let ssl_connector = self.configure_ssl(host)?;
+
+            let ssl_config = ssl_connector
+                .configure()
+                .map_err(|e| Error::Tls(format!("Failed to configure SSL: {}", e)))?;
+
+            let ssl_stream = tokio_boring::connect(ssl_config, host, tcp_stream)
+                .await
+                .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
+
+            Ok(MaybeHttpsStream::Https(ssl_stream))
+        } else {
+            Ok(MaybeHttpsStream::Http(tcp_stream))
+        }
+    }
+
+    /// Establish a direct TCP connection, applying TCP fingerprint if configured.
+    async fn connect_direct(&self, host: &str, port: u16) -> Result<TcpStream, Error> {
         let addr = format!("{}:{}", host, port);
 
-        // Configure TCP socket options if fingerprint is provided
-        let tcp_stream = if let Some(ref tcp_fp) = self.tcp_fingerprint {
+        let tcp = if let Some(ref tcp_fp) = self.tcp_fingerprint {
             // Create socket2 socket, configure it, then connect and convert to tokio TcpStream
             use socket2::{Domain, Socket, Type};
             use std::net::SocketAddr;
@@ -528,20 +563,25 @@ impl BoringConnector {
                 .map_err(|e| Error::Connection(format!("Failed to connect to {}: {}", addr, e)))?
         };
 
-        if uri.scheme_str() == Some("https") {
-            let ssl_connector = self.configure_ssl(host)?;
+        Ok(tcp)
+    }
 
-            let ssl_config = ssl_connector
-                .configure()
-                .map_err(|e| Error::Tls(format!("Failed to configure SSL: {}", e)))?;
-
-            let ssl_stream = tokio_boring::connect(ssl_config, host, tcp_stream)
-                .await
-                .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
-
-            Ok(MaybeHttpsStream::Https(ssl_stream))
-        } else {
-            Ok(MaybeHttpsStream::Http(tcp_stream))
+    /// Establish a TCP connection through a proxy tunnel.
+    async fn connect_via_proxy(
+        &self,
+        proxy: &crate::proxy::ProxyConfig,
+        target_host: &str,
+        target_port: u16,
+    ) -> Result<TcpStream, Error> {
+        match proxy {
+            crate::proxy::ProxyConfig::Socks5 { host, port, auth } => {
+                crate::proxy::socks5::socks5_connect(host, *port, target_host, target_port, auth.as_ref())
+                    .await
+            }
+            crate::proxy::ProxyConfig::HttpConnect { host, port, auth } => {
+                crate::proxy::http_connect::http_connect(host, *port, target_host, target_port, auth.as_ref())
+                    .await
+            }
         }
     }
 }

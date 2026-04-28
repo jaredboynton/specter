@@ -92,6 +92,18 @@ pub enum Error {
     #[error("QUIC error: {0}")]
     Quic(String),
 
+    /// SOCKS5 proxy error.
+    #[error("SOCKS5 proxy error: {0}")]
+    Socks5(String),
+
+    /// HTTP CONNECT proxy error.
+    #[error("HTTP CONNECT proxy error: {0}")]
+    HttpConnectProxy(String),
+
+    /// Generic proxy error.
+    #[error("Proxy error: {0}")]
+    Proxy(String),
+
     /// HTTP/2 SETTINGS_TIMEOUT error (RFC 9113 Section 7).
     #[error("SETTINGS_TIMEOUT (0x04): No SETTINGS frame received within {0:?}")]
     SettingsTimeout(std::time::Duration),
@@ -139,5 +151,20 @@ impl Error {
     /// Create a QUIC error.
     pub fn quic(message: impl Into<String>) -> Self {
         Self::Quic(message.into())
+    }
+
+    /// Create a SOCKS5 proxy error.
+    pub fn socks5(message: impl Into<String>) -> Self {
+        Self::Socks5(message.into())
+    }
+
+    /// Create an HTTP CONNECT proxy error.
+    pub fn http_connect_proxy(message: impl Into<String>) -> Self {
+        Self::HttpConnectProxy(message.into())
+    }
+
+    /// Create a proxy error.
+    pub fn proxy(message: impl Into<String>) -> Self {
+        Self::Proxy(message.into())
     }
 }

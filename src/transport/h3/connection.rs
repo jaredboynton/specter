@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
+use crate::proxy::ProxyConfig;
+use crate::proxy::udp_transport::{QuicUdpTransport, DirectUdpTransport, Socks5UdpTransport};
 use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
@@ -18,7 +20,7 @@ pub struct H3Connection;
 impl H3Connection {
     /// Connect to an HTTP/3 server and return a handle.
     /// This spawns a background driver task.
-    pub async fn connect(url: &str, mut config: quiche::Config) -> Result<H3Handle> {
+    pub async fn connect(url: &str, mut config: quiche::Config, proxy: Option<&ProxyConfig>) -> Result<H3Handle> {
         let (host, port, _path) = parse_url(url)?;
 
         // Resolve peer
@@ -28,10 +30,29 @@ impl H3Connection {
             .next()
             .ok_or_else(|| Error::Connection("DNS/IP not found".into()))?;
 
-        // Bind local socket
-        let local_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let socket = UdpSocket::bind(local_addr).await.map_err(Error::Io)?;
-        let socket = Arc::new(socket);
+        // Create UDP transport (direct or via SOCKS5 relay)
+        let (transport, local_addr): (Box<dyn QuicUdpTransport>, SocketAddr) = match proxy {
+            Some(ProxyConfig::Socks5 { host: ph, port: pp, auth }) => {
+                let local_socket = UdpSocket::bind("0.0.0.0:0").await.map_err(Error::Io)?;
+                let local_udp_addr = local_socket.local_addr().map_err(Error::Io)?;
+                let local_socket = Arc::new(local_socket);
+
+                let association = crate::proxy::socks5::socks5_udp_associate(
+                    ph, *pp, local_udp_addr, auth.as_ref()
+                ).await?;
+
+                let addr = local_socket.local_addr().map_err(Error::Io)?;
+                let transport = Socks5UdpTransport::new(local_socket, association.relay_addr, association.control_tcp);
+                (Box::new(transport) as Box<dyn QuicUdpTransport>, addr)
+            }
+            _ => {
+                // Direct UDP (original behavior); also covers HttpConnect (no UDP path for H3)
+                let socket = UdpSocket::bind("0.0.0.0:0").await.map_err(Error::Io)?;
+                let addr = socket.local_addr().map_err(Error::Io)?;
+                let socket = Arc::new(socket);
+                (Box::new(DirectUdpTransport::new(socket)) as Box<dyn QuicUdpTransport>, addr)
+            }
+        };
 
         // Generate CID
         let mut scid = [0u8; 20];
@@ -42,7 +63,7 @@ impl H3Connection {
         let mut conn = quiche::connect(
             Some(&host),
             &scid,
-            socket.local_addr().unwrap(),
+            local_addr,
             peer_addr,
             &mut config,
         )
@@ -66,8 +87,8 @@ impl H3Connection {
             loop {
                 match conn.send(&mut out) {
                     Ok((len, _)) => {
-                        socket
-                            .send_to(&out[..len], peer_addr)
+                        transport
+                            .send_to_target(&out[..len], peer_addr)
                             .await
                             .map_err(Error::Io)?;
                     }
@@ -88,15 +109,13 @@ impl H3Connection {
                 .timeout()
                 .unwrap_or(std::time::Duration::from_millis(100));
             // Use small timeout for recv to allow sending keep-alives/re-transmits
-            match tokio::time::timeout(recv_timeout, socket.recv_from(&mut buf)).await {
+            match tokio::time::timeout(recv_timeout, transport.recv_from_target(&mut buf)).await {
                 Ok(Ok((len, from))) => {
-                    if from == peer_addr {
-                        let info = quiche::RecvInfo {
-                            from,
-                            to: socket.local_addr().unwrap(),
-                        };
-                        let _ = conn.recv(&mut buf[..len], info);
-                    }
+                    let info = quiche::RecvInfo {
+                        from,
+                        to: transport.local_addr().unwrap(),
+                    };
+                    let _ = conn.recv(&mut buf[..len], info);
                 }
                 Ok(Err(e)) => return Err(Error::Io(e)),
                 Err(_) => {
@@ -113,7 +132,7 @@ impl H3Connection {
 
         // Spawn Driver
         let (tx, rx) = mpsc::channel(32);
-        let driver = H3Driver::new(rx, conn, h3_conn, socket.clone(), peer_addr);
+        let driver = H3Driver::new(rx, conn, h3_conn, transport, peer_addr);
 
         tokio::spawn(async move {
             if let Err(e) = driver.drive().await {
