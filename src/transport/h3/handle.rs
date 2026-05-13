@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::headers::Headers;
 use crate::response::Response;
 use crate::transport::h3::driver::DriverCommand;
+use crate::transport::h3::H3Tunnel;
 
 /// HTTP/3 connection handle for sending requests
 #[derive(Clone)]
@@ -64,5 +65,27 @@ impl H3Handle {
             stream_response.body,
             "HTTP/3".to_string(),
         ))
+    }
+
+    /// Open an RFC 9220 WebSocket-over-HTTP/3 tunnel.
+    pub async fn open_websocket_tunnel(
+        &self,
+        uri: http::Uri,
+        headers: Vec<(String, String)>,
+    ) -> Result<H3Tunnel> {
+        let (response_tx, response_rx) = oneshot::channel();
+
+        self.command_tx
+            .send(DriverCommand::OpenWebSocketTunnel {
+                uri,
+                headers,
+                response_tx,
+            })
+            .await
+            .map_err(|_| Error::HttpProtocol("H3 Driver channel closed".into()))?;
+
+        response_rx
+            .await
+            .map_err(|_| Error::HttpProtocol("H3 tunnel response channel closed".into()))?
     }
 }

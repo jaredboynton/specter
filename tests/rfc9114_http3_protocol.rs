@@ -102,6 +102,7 @@ async fn test_h3_malformed_frame() {
             assert!(
                 msg.contains("261")
                     || msg.contains("frame unexpected")
+                    || msg.contains("FrameUnexpected")
                     || msg.contains("closed")
                     || msg.contains("channel closed")
                     || msg.contains("MissingSettings"),

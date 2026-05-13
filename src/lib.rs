@@ -39,9 +39,9 @@ pub use version::HttpVersion;
 // Transport re-exports
 pub use transport::connector::{AlpnProtocol, BoringConnector, MaybeHttpsStream};
 pub use transport::h1::H1Connection;
-pub use transport::h1_h2::{Client, ClientBuilder, RequestBuilder};
+pub use transport::h1_h2::{Client, ClientBuilder, RequestBuilder, WebSocketH3Builder};
 pub use transport::h2::{H2ClientBuilder, H2Connection, H2PooledConnection, PseudoHeaderOrder};
-pub use transport::h3::H3Client;
+pub use transport::h3::{H3Client, H3Tunnel, H3TunnelEvent};
 pub use transport::session::SessionCache;
 pub use transport::tcp::TcpFingerprint;
 

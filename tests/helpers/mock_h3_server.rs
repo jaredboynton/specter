@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use quiche::h3::NameValue;
 use quiche::ConnectionId;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -39,6 +40,7 @@ pub struct MockH3Server {
     port: u16,
     cert_path: String,
     key_path: String,
+    enable_extended_connect: bool,
 }
 
 impl MockH3Server {
@@ -76,11 +78,22 @@ impl MockH3Server {
             port,
             cert_path: cert_path.to_str().unwrap().to_string(),
             key_path: key_path.to_str().unwrap().to_string(),
+            enable_extended_connect: false,
         })
+    }
+
+    pub async fn new_with_extended_connect() -> std::io::Result<Self> {
+        let mut server = Self::new().await?;
+        server.enable_extended_connect = true;
+        Ok(server)
     }
 
     pub fn url(&self) -> String {
         format!("https://127.0.0.1:{}", self.port)
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     pub fn start<F, Fut>(self, handler: F) -> tokio::task::JoinHandle<()>
@@ -128,6 +141,7 @@ impl MockH3Server {
         // Clone paths for task
         let cert_path = self.cert_path.clone();
         let key_path = self.key_path.clone();
+        let enable_extended_connect = self.enable_extended_connect;
 
         loop {
             let (len, peer) = match socket.recv_from(&mut buf).await {
@@ -142,7 +156,13 @@ impl MockH3Server {
             let header = match quiche::Header::from_slice(&mut buf[..len], quiche::MAX_CONN_ID_LEN)
             {
                 Ok(h) => h,
-                Err(_) => continue, // Invalid packet
+                Err(_) if connections.len() == 1 => {
+                    if let Some(tx) = connections.values().next() {
+                        let _ = tx.send((packet, peer)).await;
+                    }
+                    continue;
+                }
+                Err(_) => continue,
             };
 
             let conn_id = header.dcid.clone();
@@ -150,7 +170,12 @@ impl MockH3Server {
             // If new connection
             if !connections.contains_key(&conn_id) {
                 if header.ty != quiche::Type::Initial {
-                    continue; // Must start with Initial
+                    if connections.len() == 1 {
+                        if let Some(tx) = connections.values().next() {
+                            let _ = tx.send((packet, peer)).await;
+                        }
+                    }
+                    continue;
                 }
 
                 if !quiche::version_is_supported(header.version) {
@@ -221,9 +246,6 @@ impl MockH3Server {
                         quiche::accept(&scid_clone, Some(&odcid), local_addr, peer, &mut config)
                             .unwrap();
 
-                    // Create HTTP/3 connection context (Client will wait for Settings)
-                    // Config unused for now as we don't init h3 connection
-                    let _h3_config = quiche::h3::Config::new().unwrap();
                     let mut h3_conn: Option<quiche::h3::Connection> = None;
 
                     let (cmd_tx, mut cmd_rx) = mpsc::channel(100);
@@ -253,26 +275,55 @@ impl MockH3Server {
                                         };
                                         match conn.recv(&mut packet.clone(), recv_info) {
                                             Ok(_) => {
+                                                if conn.is_established() && h3_conn.is_none() {
+                                                    let mut h3_config = quiche::h3::Config::new().unwrap();
+                                                    if enable_extended_connect {
+                                                        h3_config.enable_extended_connect(true);
+                                                    }
+                                                    match quiche::h3::Connection::with_transport(&mut conn, &h3_config) {
+                                                        Ok(h3) => h3_conn = Some(h3),
+                                                        Err(e) => {
+                                                            tracing::debug!("h3 init error: {}", e);
+                                                        }
+                                                    }
+                                                }
+
                                                 if conn.is_established() {
                                                     if let Some(h3) = h3_conn.as_mut() {
                                                         loop {
                                                             match h3.poll(&mut conn) {
                                                                 Ok((stream_id, quiche::h3::Event::Data)) => {
-                                                                    // We need to read the data manually or via h3?
-                                                                    // MockH3Server exposes RAW bytes usually.
-                                                                    // But if we use h3, we get decrypted h3 frames?
-                                                                    // Ideally, h3.poll() handles framing.
-                                                                    // But we want to simulate SERVER behavior.
-                                                                    // Let's use h3 just for handshake and settings.
-                                                                    // If we receive data, forward event.
                                                                     let mut body = vec![0u8; 1024];
-                                                                    if let Ok(n) = h3.recv_body(&mut conn, stream_id, &mut body) {
-                                                                        let _ = evt_tx.send(MockEvent::Data { stream_id, data: body[..n].to_vec(), fin: false }).await;
+                                                                    loop {
+                                                                        match h3.recv_body(&mut conn, stream_id, &mut body) {
+                                                                            Ok(n) if n > 0 => {
+                                                                                let _ = evt_tx.send(MockEvent::Data { stream_id, data: body[..n].to_vec(), fin: false }).await;
+                                                                            }
+                                                                            Ok(_) | Err(quiche::h3::Error::Done) => break,
+                                                                            Err(_) => break,
+                                                                        }
                                                                     }
                                                                 },
-                                                                Ok((_stream_id, quiche::h3::Event::Headers { .. })) => {
-                                                                     // Ignore headers for now or forward?
-                                                                      let _ = evt_tx.send(MockEvent::Data { stream_id: _stream_id, data: b"HEADERS".to_vec(), fin: false }).await;
+                                                                Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
+                                                                    let headers = list
+                                                                        .iter()
+                                                                        .map(|header| {
+                                                                            (
+                                                                                String::from_utf8_lossy(header.name()).into_owned(),
+                                                                                String::from_utf8_lossy(header.value()).into_owned(),
+                                                                            )
+                                                                        })
+                                                                        .collect();
+                                                                    let _ = evt_tx.send(MockEvent::Headers { stream_id, headers }).await;
+                                                                },
+                                                                Ok((stream_id, quiche::h3::Event::Finished)) => {
+                                                                    let _ = evt_tx.send(MockEvent::Finished { stream_id }).await;
+                                                                },
+                                                                Ok((stream_id, quiche::h3::Event::Reset(code))) => {
+                                                                    let _ = evt_tx.send(MockEvent::Reset { stream_id, code }).await;
+                                                                },
+                                                                Ok((id, quiche::h3::Event::GoAway)) => {
+                                                                    let _ = evt_tx.send(MockEvent::GoAway { id }).await;
                                                                 },
                                                                 Err(quiche::h3::Error::Done) => break,
                                                                 Err(_) => break,
@@ -301,6 +352,31 @@ impl MockH3Server {
                                     Some(MockCommand::SendBytes { stream_id, bytes }) => {
                                          let _ = conn.stream_send(stream_id, &bytes, false);
                                     }
+                                    Some(MockCommand::SendResponseHeaders { stream_id, headers, fin }) => {
+                                        if let Some(h3) = h3_conn.as_mut() {
+                                            let h3_headers = headers
+                                                .iter()
+                                                .map(|(name, value)| {
+                                                    quiche::h3::Header::new(name.as_bytes(), value.as_bytes())
+                                                })
+                                                .collect::<Vec<_>>();
+                                            if let Err(e) = h3.send_response(&mut conn, stream_id, &h3_headers, fin) {
+                                                tracing::debug!("mock h3 send_response error: {}", e);
+                                            }
+                                        }
+                                    }
+                                    Some(MockCommand::SendResponseData { stream_id, bytes, fin }) => {
+                                        if let Some(h3) = h3_conn.as_mut() {
+                                            if let Err(e) = h3.send_body(&mut conn, stream_id, &bytes, fin) {
+                                                tracing::debug!("mock h3 send_body error: {}", e);
+                                            }
+                                        }
+                                    }
+                                    Some(MockCommand::SendGoAway { id }) => {
+                                        if let Some(h3) = h3_conn.as_mut() {
+                                            let _ = h3.send_goaway(&mut conn, id);
+                                        }
+                                    }
                                     None => {
                                         let _ = conn.close(true, 0x00, b"done");
                                     },
@@ -321,6 +397,10 @@ impl MockH3Server {
 
             if let Some(tx) = connections.get(&conn_id) {
                 let _ = tx.send((packet, peer)).await;
+            } else if connections.len() == 1 {
+                if let Some(tx) = connections.values().next() {
+                    let _ = tx.send((packet, peer)).await;
+                }
             }
         }
     }
@@ -328,17 +408,50 @@ impl MockH3Server {
 
 #[allow(dead_code)]
 enum MockCommand {
-    SendFrame { stream_id: u64, payload: Vec<u8> },
-    SendBytes { stream_id: u64, bytes: Vec<u8> },
+    SendFrame {
+        stream_id: u64,
+        payload: Vec<u8>,
+    },
+    SendBytes {
+        stream_id: u64,
+        bytes: Vec<u8>,
+    },
+    SendResponseHeaders {
+        stream_id: u64,
+        headers: Vec<(String, String)>,
+        fin: bool,
+    },
+    SendResponseData {
+        stream_id: u64,
+        bytes: Vec<u8>,
+        fin: bool,
+    },
+    SendGoAway {
+        id: u64,
+    },
 }
 
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum MockEvent {
+    Headers {
+        stream_id: u64,
+        headers: Vec<(String, String)>,
+    },
     Data {
         stream_id: u64,
         data: Vec<u8>,
         fin: bool,
+    },
+    Finished {
+        stream_id: u64,
+    },
+    Reset {
+        stream_id: u64,
+        code: u64,
+    },
+    GoAway {
+        id: u64,
     },
 }
 
@@ -371,6 +484,45 @@ impl MockH3Connection {
         buf.extend_from_slice(payload);
 
         self.send_bytes(stream_id, &buf).await;
+    }
+
+    pub async fn send_response_headers(
+        &self,
+        stream_id: u64,
+        headers: Vec<(impl Into<String>, impl Into<String>)>,
+        fin: bool,
+    ) {
+        let headers = headers
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect();
+        let _ = self
+            .cmd_tx
+            .send(MockCommand::SendResponseHeaders {
+                stream_id,
+                headers,
+                fin,
+            })
+            .await;
+    }
+
+    pub async fn send_response_data(&self, stream_id: u64, bytes: &[u8], fin: bool) {
+        let _ = self
+            .cmd_tx
+            .send(MockCommand::SendResponseData {
+                stream_id,
+                bytes: bytes.to_vec(),
+                fin,
+            })
+            .await;
+    }
+
+    pub async fn finish_stream(&self, stream_id: u64) {
+        self.send_response_data(stream_id, &[], true).await;
+    }
+
+    pub async fn send_goaway(&self, id: u64) {
+        let _ = self.cmd_tx.send(MockCommand::SendGoAway { id }).await;
     }
 
     /// Read next event from the connection

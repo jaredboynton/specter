@@ -30,7 +30,7 @@ use crate::timeouts::Timeouts;
 use crate::transport::connector::{BoringConnector, MaybeHttpsStream};
 use crate::transport::h1::H1Connection;
 use crate::transport::h2::{H2Connection, H2PooledConnection, H2Tunnel, PseudoHeaderOrder};
-use crate::transport::h3::H3Client;
+use crate::transport::h3::{H3Client, H3Tunnel};
 use crate::version::HttpVersion;
 
 /// Unified HTTP client with HTTP/1.1, HTTP/2, and HTTP/3 support.
@@ -87,6 +87,14 @@ pub struct RequestBuilder<'a> {
 
 /// Builder for RFC 8441 WebSocket-over-HTTP/2 tunnels.
 pub struct WebSocketH2Builder<'a> {
+    client: &'a Client,
+    url: Option<Url>,
+    headers: Headers,
+    error: Option<Error>,
+}
+
+/// Builder for RFC 9220 WebSocket-over-HTTP/3 tunnels.
+pub struct WebSocketH3Builder<'a> {
     client: &'a Client,
     url: Option<Url>,
     headers: Headers,
@@ -166,6 +174,11 @@ impl Client {
     /// Create an RFC 8441 WebSocket-over-HTTP/2 tunnel builder.
     pub fn websocket_h2(&self, url: impl IntoUrl) -> WebSocketH2Builder<'_> {
         WebSocketH2Builder::new(self, url)
+    }
+
+    /// Create an RFC 9220 WebSocket-over-HTTP/3 tunnel builder.
+    pub fn websocket_h3(&self, url: impl IntoUrl) -> WebSocketH3Builder<'_> {
+        WebSocketH3Builder::new(self, url)
     }
 
     /// Get the Alt-Svc cache for manual inspection or manipulation.
@@ -316,6 +329,76 @@ impl<'a> WebSocketH2Builder<'a> {
         }
 
         pooled_conn.open_websocket_tunnel(uri, headers).await
+    }
+}
+
+impl<'a> WebSocketH3Builder<'a> {
+    fn new(client: &'a Client, url: impl IntoUrl) -> Self {
+        let mut error = None;
+        let url = match url.into_url() {
+            Ok(url) => Some(url),
+            Err(err) => {
+                error = Some(err);
+                None
+            }
+        };
+
+        Self {
+            client,
+            url,
+            headers: client.default_headers.clone(),
+            error,
+        }
+    }
+
+    /// Add a header to the RFC 9220 CONNECT request.
+    pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key, value);
+        self
+    }
+
+    /// Set all headers for the RFC 9220 CONNECT request.
+    pub fn headers(mut self, headers: impl Into<Headers>) -> Self {
+        self.headers = headers.into();
+        self
+    }
+
+    /// Open the RFC 9220 tunnel.
+    pub async fn open(self) -> Result<H3Tunnel> {
+        if let Some(err) = self.error {
+            return Err(err);
+        }
+
+        let url = self.url.ok_or_else(|| Error::missing("websocket URL"))?;
+        if url.scheme() != "wss" {
+            return Err(Error::WebSocketUnsupported(
+                "RFC 9220 WebSocket over HTTP/3 requires wss://".into(),
+            ));
+        }
+
+        let mut h3_url = url.clone();
+        h3_url
+            .set_scheme("https")
+            .map_err(|_| Error::WebSocketUnsupported("invalid WebSocket URL scheme".into()))?;
+
+        let mut h3_client = self.client.h3_client.clone();
+        if self.client.danger_accept_invalid_certs
+            || (self.client.localhost_allows_invalid_certs
+                && h3_url
+                    .host_str()
+                    .is_some_and(|host| Client::is_localhost(host)))
+        {
+            h3_client = h3_client.danger_accept_invalid_certs(true);
+        }
+
+        let fut = h3_client.open_websocket_tunnel(h3_url.as_str(), self.headers.to_vec());
+        if let Some(total_timeout) = self.client.timeouts.total {
+            tokio_timeout(total_timeout, fut)
+                .await
+                .map_err(|_| Error::TotalTimeout(total_timeout))?
+        } else {
+            fut.await
+        }
     }
 }
 
@@ -1427,7 +1510,10 @@ impl ClientBuilder {
             .danger_accept_invalid_certs(true);
 
         // Create H3 client with same TLS fingerprint
-        let h3_client = H3Client::with_fingerprint(tls_fingerprint);
+        let mut h3_client = H3Client::with_fingerprint(tls_fingerprint);
+        if self.danger_accept_invalid_certs {
+            h3_client = h3_client.danger_accept_invalid_certs(true);
+        }
 
         // Use provided HTTP/2 settings or default from fingerprint
         let http2_settings = self.http2_settings.unwrap_or_default();

@@ -3,10 +3,12 @@
 mod connection;
 mod driver;
 mod handle;
+mod tunnel;
 
 pub use connection::H3Connection;
 pub use driver::DriverCommand;
 pub use handle::H3Handle;
+pub use tunnel::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 
 // Re-implement H3Client using the new H3Connection/Handle architecture
 // to maintain API compatibility but gain multiplexing.
@@ -86,7 +88,22 @@ impl H3Client {
             .await
     }
 
-    fn create_quic_config(&self) -> Result<quiche::Config> {
+    /// Open a WebSocket-over-HTTP/3 tunnel using RFC 9220 Extended CONNECT.
+    pub async fn open_websocket_tunnel(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+    ) -> Result<H3Tunnel> {
+        let config = self.create_quic_config()?;
+        let handle = H3Connection::connect(url, config).await?;
+        let uri: http::Uri = url
+            .parse()
+            .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
+
+        handle.open_websocket_tunnel(uri, headers).await
+    }
+
+    pub(crate) fn create_quic_config(&self) -> Result<quiche::Config> {
         let mut config = if let Some(ref fp) = self.tls_fingerprint {
             // Use BoringSSL context builder for TLS fingerprinting
             use boring::ssl::{SslContextBuilder, SslMethod};

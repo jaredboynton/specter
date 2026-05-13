@@ -113,7 +113,7 @@ impl H3Connection {
 
         // Spawn Driver
         let (tx, rx) = mpsc::channel(32);
-        let driver = H3Driver::new(rx, conn, h3_conn, socket.clone(), peer_addr);
+        let driver = H3Driver::new(tx.clone(), rx, conn, h3_conn, socket.clone(), peer_addr);
 
         tokio::spawn(async move {
             if let Err(e) = driver.drive().await {
