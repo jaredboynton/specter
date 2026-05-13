@@ -15,6 +15,7 @@ use crate::response::Response as SpecterResponse;
 
 use super::frame::*;
 use super::hpack::{HpackDecoder, HpackEncoder, PseudoHeaderOrder};
+use super::hpack_impl::Encoder as RawHpackEncoder;
 
 /// Type alias for HTTP/2 errors (matches Error type).
 pub type H2Error = Error;
@@ -113,6 +114,9 @@ pub struct PeerSettings {
     pub initial_window_size: u32,
     pub max_frame_size: u32,
     pub max_header_list_size: u32,
+    pub received_settings: bool,
+    pub enable_connect_protocol: bool,
+    pub enable_connect_protocol_seen_true: bool,
 }
 
 impl Default for PeerSettings {
@@ -124,6 +128,9 @@ impl Default for PeerSettings {
             initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
             max_header_list_size: u32::MAX,
+            received_settings: false,
+            enable_connect_protocol: false,
+            enable_connect_protocol_seen_true: false,
         }
     }
 }
@@ -257,7 +264,9 @@ where
     }
 
     /// Apply peer's settings.
-    fn apply_peer_settings(&mut self, settings: &SettingsFrame) {
+    fn apply_peer_settings(&mut self, settings: &SettingsFrame) -> Result<()> {
+        self.peer_settings.received_settings = true;
+
         for (id, value) in &settings.settings {
             match *id {
                 0x1 => {
@@ -307,9 +316,260 @@ where
                     // MaxHeaderListSize
                     self.peer_settings.max_header_list_size = *value;
                 }
+                0x8 => {
+                    // RFC 8441 Section 3: SETTINGS_ENABLE_CONNECT_PROTOCOL.
+                    match *value {
+                        0 => {
+                            if self.peer_settings.enable_connect_protocol_seen_true {
+                                return Err(Error::HttpProtocol(
+                                    "PROTOCOL_ERROR: SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade from 1 to 0".into(),
+                                ));
+                            }
+                            self.peer_settings.enable_connect_protocol = false;
+                        }
+                        1 => {
+                            self.peer_settings.enable_connect_protocol = true;
+                            self.peer_settings.enable_connect_protocol_seen_true = true;
+                        }
+                        _ => {
+                            return Err(Error::HttpProtocol(format!(
+                                "PROTOCOL_ERROR: SETTINGS_ENABLE_CONNECT_PROTOCOL must be 0 or 1, got {}",
+                                value
+                            )));
+                        }
+                    }
+                }
                 _ => {} // Ignore unknown settings (including GREASE)
             }
         }
+
+        Ok(())
+    }
+
+    /// Open a raw RFC 8441 WebSocket tunnel over Extended CONNECT.
+    ///
+    /// This is an internal/raw primitive: it only performs the opening handshake
+    /// and returns the HTTP/2 stream ID after `:status = 200`.
+    pub async fn open_extended_connect_websocket(
+        &mut self,
+        uri: &Uri,
+        headers: Vec<(String, String)>,
+    ) -> Result<u32> {
+        let (stream_id, _end_stream) = self
+            .open_extended_connect_websocket_with_end_stream(uri, headers)
+            .await?;
+        Ok(stream_id)
+    }
+
+    /// Open a raw RFC 8441 WebSocket tunnel and report whether the response HEADERS ended it.
+    pub async fn open_extended_connect_websocket_with_end_stream(
+        &mut self,
+        uri: &Uri,
+        headers: Vec<(String, String)>,
+    ) -> Result<(u32, bool)> {
+        self.ensure_enable_connect_protocol().await?;
+
+        let stream_id = self.next_stream_id;
+        if stream_id == 0 || (stream_id & 0x1) == 0 {
+            return Err(Error::HttpProtocol(
+                "PROTOCOL_ERROR: Client stream ID must be odd and non-zero".into(),
+            ));
+        }
+        self.next_stream_id += 2;
+
+        let scheme = uri.scheme_str().unwrap_or("https");
+        let authority = uri.authority().map(|a| a.as_str()).unwrap_or("");
+        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+
+        let header_block =
+            Self::encode_extended_connect_websocket_headers(authority, scheme, path, &headers)?;
+        if header_block.is_empty() {
+            return Err(Error::HttpProtocol(
+                "PROTOCOL_ERROR: HEADERS frame header block cannot be empty".into(),
+            ));
+        }
+
+        self.streams.insert(
+            stream_id,
+            Stream {
+                id: stream_id,
+                state: StreamState::Open,
+                recv_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
+                send_window: self.peer_settings.initial_window_size as i32,
+                response_tx: None,
+                streaming_tx: None,
+                response_headers: Vec::new(),
+                response_data: BytesMut::new(),
+            },
+        );
+
+        let max_frame_size = self.peer_settings.max_frame_size as usize;
+        if header_block.len() <= max_frame_size {
+            let headers_frame = HeadersFrame::new(stream_id, header_block)
+                .end_stream(false)
+                .end_headers(true);
+
+            self.stream
+                .write_all(&headers_frame.serialize())
+                .await
+                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
+        } else {
+            let chunks: Vec<Bytes> = header_block
+                .chunks(max_frame_size)
+                .map(Bytes::copy_from_slice)
+                .collect();
+
+            let headers_frame = HeadersFrame::new(stream_id, chunks[0].clone())
+                .end_stream(false)
+                .end_headers(false);
+
+            self.stream
+                .write_all(&headers_frame.serialize())
+                .await
+                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
+
+            let num_chunks = chunks.len();
+            for (idx, chunk) in chunks.into_iter().skip(1).enumerate() {
+                let is_last = idx == num_chunks - 2;
+                let cont_frame = ContinuationFrame::new(stream_id, chunk, is_last);
+                self.stream
+                    .write_all(&cont_frame.serialize())
+                    .await
+                    .map_err(|e| {
+                        Error::HttpProtocol(format!("Failed to send CONTINUATION: {}", e))
+                    })?;
+            }
+        }
+
+        self.stream
+            .flush()
+            .await
+            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
+
+        let (status, _response_headers, end_stream) = self
+            .read_response_headers_with_end_stream(stream_id)
+            .await?;
+        if status == StatusCode::OK {
+            Ok((stream_id, end_stream))
+        } else {
+            self.streams.remove(&stream_id);
+            Err(Error::HttpProtocol(format!(
+                "WebSocket Extended CONNECT handshake failed with status {}",
+                status.as_u16()
+            )))
+        }
+    }
+
+    async fn ensure_enable_connect_protocol(&mut self) -> Result<()> {
+        while !self.peer_settings.received_settings {
+            let (header, payload) = self.read_next_frame().await?;
+            match header.frame_type {
+                FrameType::Settings => {
+                    self.handle_control_frame(&header, payload).await?;
+                }
+                FrameType::Ping | FrameType::WindowUpdate | FrameType::GoAway => {
+                    self.handle_control_frame(&header, payload).await?;
+                }
+                _ => {
+                    return Err(Error::HttpProtocol(
+                        "PROTOCOL_ERROR: expected peer SETTINGS before RFC 8441 CONNECT".into(),
+                    ));
+                }
+            }
+        }
+
+        if !self.peer_settings.enable_connect_protocol {
+            return Err(Error::HttpProtocol(
+                "SETTINGS_ENABLE_CONNECT_PROTOCOL was not enabled by peer".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn encode_extended_connect_websocket_headers(
+        authority: &str,
+        scheme: &str,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> Result<Bytes> {
+        if authority.is_empty() {
+            return Err(Error::HttpProtocol(
+                "PROTOCOL_ERROR: :authority pseudo-header cannot be empty".into(),
+            ));
+        }
+        if scheme.is_empty() {
+            return Err(Error::HttpProtocol(
+                "PROTOCOL_ERROR: :scheme pseudo-header cannot be empty".into(),
+            ));
+        }
+        if path.is_empty() {
+            return Err(Error::HttpProtocol(
+                "PROTOCOL_ERROR: :path pseudo-header cannot be empty".into(),
+            ));
+        }
+
+        let mut owned_headers: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (b":method".to_vec(), b"CONNECT".to_vec()),
+            (b":protocol".to_vec(), b"websocket".to_vec()),
+            (b":scheme".to_vec(), scheme.as_bytes().to_vec()),
+            (b":path".to_vec(), path.as_bytes().to_vec()),
+            (b":authority".to_vec(), authority.as_bytes().to_vec()),
+        ];
+
+        for (name, value) in headers {
+            if name.starts_with(':') {
+                return Err(Error::HttpProtocol(format!(
+                    "PROTOCOL_ERROR: user pseudo-header {} is not allowed",
+                    name
+                )));
+            }
+
+            if name.is_empty()
+                || name
+                    .as_bytes()
+                    .iter()
+                    .any(|&b| b < 0x21 || (b > 0x7E && b != 0x7F))
+            {
+                return Err(Error::HttpProtocol(
+                    "PROTOCOL_ERROR: invalid HTTP/2 header name".into(),
+                ));
+            }
+
+            let name_lower = name.to_lowercase();
+            if matches!(
+                name_lower.as_str(),
+                "connection"
+                    | "keep-alive"
+                    | "proxy-connection"
+                    | "transfer-encoding"
+                    | "upgrade"
+                    | "host"
+                    | "sec-websocket-key"
+                    | "sec-websocket-accept"
+                    | "sec-websocket-extensions"
+            ) {
+                return Err(Error::HttpProtocol(format!(
+                    "PROTOCOL_ERROR: forbidden RFC 8441 header {}",
+                    name_lower
+                )));
+            }
+
+            if name_lower == "te" && value.to_lowercase() != "trailers" {
+                return Err(Error::HttpProtocol(
+                    "PROTOCOL_ERROR: TE header is only allowed with value trailers".into(),
+                ));
+            }
+
+            owned_headers.push((name_lower.into_bytes(), value.as_bytes().to_vec()));
+        }
+
+        let header_refs: Vec<(&[u8], &[u8])> = owned_headers
+            .iter()
+            .map(|(name, value)| (name.as_slice(), value.as_slice()))
+            .collect();
+        let mut encoder = RawHpackEncoder::new();
+        Ok(Bytes::from(encoder.encode(&header_refs)))
     }
 
     /// Send an HTTP/2 request and receive the response.
@@ -513,6 +773,30 @@ where
             return Ok(0);
         }
 
+        if data.is_empty() && end_stream {
+            if !self.streams.contains_key(&stream_id) {
+                return Err(Error::HttpProtocol("Stream not found for DATA".into()));
+            }
+
+            let data_frame = DataFrame::new(stream_id, Bytes::new()).end_stream(true);
+
+            self.stream
+                .write_all(&data_frame.serialize())
+                .await
+                .map_err(|e| Error::HttpProtocol(format!("Failed to send DATA: {}", e)))?;
+
+            self.stream
+                .flush()
+                .await
+                .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
+
+            if let Some(stream) = self.streams.get_mut(&stream_id) {
+                stream.state = StreamState::HalfClosedLocal;
+            }
+
+            return Ok(0);
+        }
+
         // Check available window
         let available_conn = self.conn_send_window;
         let available_stream = if let Some(stream) = self.streams.get(&stream_id) {
@@ -624,7 +908,7 @@ where
                     // ACK received - fine
                 } else {
                     // Update settings
-                    self.apply_peer_settings(&settings);
+                    self.apply_peer_settings(&settings)?;
 
                     // Send ACK
                     let ack = SettingsFrame::ack();
@@ -1086,6 +1370,16 @@ where
         &mut self,
         stream_id: u32,
     ) -> Result<(StatusCode, Vec<(String, String)>)> {
+        let (status, headers, _end_stream) = self
+            .read_response_headers_with_end_stream(stream_id)
+            .await?;
+        Ok((status, headers))
+    }
+
+    async fn read_response_headers_with_end_stream(
+        &mut self,
+        stream_id: u32,
+    ) -> Result<(StatusCode, Vec<(String, String)>, bool)> {
         loop {
             // Read frame header
             while self.read_buf.len() < FRAME_HEADER_SIZE {
@@ -1138,9 +1432,10 @@ where
                     // As a client, we should only receive HEADERS frames on streams we initiated (odd IDs)
                     if header.stream_id == stream_id {
                         if (header.stream_id & 0x1) == 0 {
-                            return Err(Error::HttpProtocol(
-                                format!("PROTOCOL_ERROR: Received HEADERS frame on server-initiated stream {}", header.stream_id)
-                            ));
+                            return Err(Error::HttpProtocol(format!(
+                                "PROTOCOL_ERROR: Received HEADERS frame on server-initiated stream {}",
+                                header.stream_id
+                            )));
                         }
 
                         // Parse HEADERS frame using proper parse method (handles padding and priority)
@@ -1187,6 +1482,7 @@ where
                                     Error::HttpProtocol("Invalid status code".into())
                                 })?,
                                 real_headers,
+                                (header.flags & flags::END_STREAM) != 0,
                             ));
                         } else {
                             // Incomplete headers, expect CONTINUATION
@@ -1245,6 +1541,7 @@ where
                                         Error::HttpProtocol("Invalid status code".into())
                                     })?,
                                     real_headers,
+                                    false,
                                 ));
                             }
                         }
@@ -1473,6 +1770,11 @@ where
     /// Get the peer settings.
     pub fn peer_settings(&self) -> &PeerSettings {
         &self.peer_settings
+    }
+
+    /// Drop local bookkeeping for a stream that has fully closed outside normal response routing.
+    pub fn remove_stream(&mut self, stream_id: u32) {
+        self.streams.remove(&stream_id);
     }
 
     /// Get the settings.

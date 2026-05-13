@@ -29,7 +29,7 @@ use crate::response::Response;
 use crate::timeouts::Timeouts;
 use crate::transport::connector::{BoringConnector, MaybeHttpsStream};
 use crate::transport::h1::H1Connection;
-use crate::transport::h2::{H2Connection, H2PooledConnection, PseudoHeaderOrder};
+use crate::transport::h2::{H2Connection, H2PooledConnection, H2Tunnel, PseudoHeaderOrder};
 use crate::transport::h3::H3Client;
 use crate::version::HttpVersion;
 
@@ -82,6 +82,14 @@ pub struct RequestBuilder<'a> {
     body: Body,
     version: Option<HttpVersion>,
     timeout: Option<Duration>,
+    error: Option<Error>,
+}
+
+/// Builder for RFC 8441 WebSocket-over-HTTP/2 tunnels.
+pub struct WebSocketH2Builder<'a> {
+    client: &'a Client,
+    url: Option<Url>,
+    headers: Headers,
     error: Option<Error>,
 }
 
@@ -155,6 +163,11 @@ impl Client {
         RequestBuilder::new(self, method, url)
     }
 
+    /// Create an RFC 8441 WebSocket-over-HTTP/2 tunnel builder.
+    pub fn websocket_h2(&self, url: impl IntoUrl) -> WebSocketH2Builder<'_> {
+        WebSocketH2Builder::new(self, url)
+    }
+
     /// Get the Alt-Svc cache for manual inspection or manipulation.
     pub fn alt_svc_cache(&self) -> &Arc<AltSvcCache> {
         &self.alt_svc_cache
@@ -182,6 +195,127 @@ impl Client {
         }
 
         &self.connector
+    }
+}
+
+impl<'a> WebSocketH2Builder<'a> {
+    fn new(client: &'a Client, url: impl IntoUrl) -> Self {
+        let mut error = None;
+        let url = match url.into_url() {
+            Ok(url) => Some(url),
+            Err(err) => {
+                error = Some(err);
+                None
+            }
+        };
+
+        Self {
+            client,
+            url,
+            headers: client.default_headers.clone(),
+            error,
+        }
+    }
+
+    /// Add a header to the RFC 8441 CONNECT request.
+    pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key, value);
+        self
+    }
+
+    /// Set all headers for the RFC 8441 CONNECT request.
+    pub fn headers(mut self, headers: impl Into<Headers>) -> Self {
+        self.headers = headers.into();
+        self
+    }
+
+    /// Open the RFC 8441 tunnel.
+    pub async fn open(self) -> Result<H2Tunnel> {
+        if let Some(err) = self.error {
+            return Err(err);
+        }
+
+        let url = self.url.ok_or_else(|| Error::missing("websocket URL"))?;
+
+        let websocket_scheme = url.scheme();
+        let h2_scheme = match websocket_scheme {
+            "wss" => "https",
+            "ws" => {
+                if !self.client.http2_prior_knowledge {
+                    return Err(Error::WebSocketUnsupported(
+                        "ws:// RFC 8441 requires explicit HTTP/2 prior knowledge".into(),
+                    ));
+                }
+                "http"
+            }
+            other => {
+                return Err(Error::WebSocketUnsupported(format!(
+                    "RFC 8441 requires ws:// or wss:// URL, got {other}"
+                )));
+            }
+        };
+
+        let mut h2_url = url.clone();
+        h2_url
+            .set_scheme(h2_scheme)
+            .map_err(|_| Error::WebSocketUnsupported("invalid WebSocket URL scheme".into()))?;
+
+        let uri: Uri = h2_url
+            .as_str()
+            .parse()
+            .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
+
+        let headers = self.headers.to_vec();
+        let pool_key = Client::make_pool_key(&uri);
+
+        if let Some(conn) = {
+            let pool = self.client.h2_pool.read().await;
+            pool.get(&pool_key).cloned()
+        } {
+            match conn
+                .open_websocket_tunnel(uri.clone(), headers.clone())
+                .await
+            {
+                Ok(tunnel) => return Ok(tunnel),
+                Err(err) => {
+                    tracing::debug!("Pooled RFC 8441 tunnel open failed, reconnecting: {}", err);
+                    let mut pool = self.client.h2_pool.write().await;
+                    pool.remove(&pool_key);
+                }
+            }
+        }
+
+        let connector = self.client.connector_for_uri(&uri);
+        let stream = connector.connect(&uri).await?;
+
+        let use_http2 = if websocket_scheme == "ws" && self.client.http2_prior_knowledge {
+            true
+        } else if let MaybeHttpsStream::Https(ref ssl_stream) = stream {
+            ssl_stream.ssl().selected_alpn_protocol() == Some(b"h2")
+        } else {
+            false
+        };
+
+        if !use_http2 {
+            return Err(Error::WebSocketUnsupported(
+                "RFC 8441 WebSocket requires ALPN h2 or explicit HTTP/2 prior knowledge".into(),
+            ));
+        }
+
+        let h2_conn = H2Connection::connect(
+            stream,
+            self.client.http2_settings.clone(),
+            self.client.pseudo_order,
+        )
+        .await?;
+        let pooled_conn = H2PooledConnection::new(h2_conn);
+
+        {
+            let mut pool = self.client.h2_pool.write().await;
+            pool.insert(pool_key, pooled_conn.clone());
+        }
+
+        pooled_conn.open_websocket_tunnel(uri, headers).await
     }
 }
 

@@ -86,18 +86,22 @@ pub enum SettingsId {
     InitialWindowSize = 0x4,
     MaxFrameSize = 0x5,
     MaxHeaderListSize = 0x6,
+    EnableConnectProtocol = 0x8,
 }
 
-impl From<u16> for SettingsId {
-    fn from(v: u16) -> Self {
+impl TryFrom<u16> for SettingsId {
+    type Error = ();
+
+    fn try_from(v: u16) -> Result<Self, Self::Error> {
         match v {
-            0x1 => Self::HeaderTableSize,
-            0x2 => Self::EnablePush,
-            0x3 => Self::MaxConcurrentStreams,
-            0x4 => Self::InitialWindowSize,
-            0x5 => Self::MaxFrameSize,
-            0x6 => Self::MaxHeaderListSize,
-            _ => Self::HeaderTableSize, // Unknown settings are ignored per spec
+            0x1 => Ok(Self::HeaderTableSize),
+            0x2 => Ok(Self::EnablePush),
+            0x3 => Ok(Self::MaxConcurrentStreams),
+            0x4 => Ok(Self::InitialWindowSize),
+            0x5 => Ok(Self::MaxFrameSize),
+            0x6 => Ok(Self::MaxHeaderListSize),
+            0x8 => Ok(Self::EnableConnectProtocol),
+            _ => Err(()),
         }
     }
 }

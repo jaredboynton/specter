@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::headers::Headers;
 use crate::response::Response;
 use crate::transport::h2::driver::DriverCommand;
+use crate::transport::h2::tunnel::H2Tunnel;
 
 /// HTTP/2 connection handle for sending requests
 #[derive(Clone)]
@@ -64,5 +65,27 @@ impl H2Handle {
             stream_response.body,
             "HTTP/2".to_string(),
         ))
+    }
+
+    /// Open an RFC 8441 WebSocket tunnel through the background H2 driver.
+    pub async fn open_websocket_tunnel(
+        &self,
+        uri: Uri,
+        headers: Vec<(String, String)>,
+    ) -> Result<H2Tunnel> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        self.command_tx
+            .send(DriverCommand::OpenWebSocketTunnel {
+                uri,
+                headers,
+                response_tx,
+            })
+            .await
+            .map_err(|_| Error::HttpProtocol("Driver channel closed".into()))?;
+
+        response_rx
+            .await
+            .map_err(|_| Error::HttpProtocol("Tunnel response channel closed".into()))?
     }
 }

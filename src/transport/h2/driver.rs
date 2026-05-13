@@ -6,7 +6,7 @@
 
 use bytes::{Bytes, BytesMut};
 use http::{Method, Uri};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing;
@@ -18,6 +18,7 @@ use crate::transport::h2::connection::{
     ControlAction, H2Connection as RawH2Connection, StreamResponse,
 };
 use crate::transport::h2::frame::{flags, ErrorCode, FrameHeader, FrameType};
+use crate::transport::h2::tunnel::{H2Tunnel, H2TunnelEvent, H2TunnelOutbound};
 
 /// Command sent from handle to driver
 #[derive(Debug)]
@@ -38,6 +39,17 @@ pub enum DriverCommand {
         headers: Vec<(String, String)>,
         body_tx: mpsc::Sender<Result<Bytes>>,
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
+    },
+    /// Open an RFC 8441 WebSocket tunnel on a pooled HTTP/2 stream.
+    OpenWebSocketTunnel {
+        uri: Uri,
+        headers: Vec<(String, String)>,
+        response_tx: oneshot::Sender<Result<H2Tunnel>>,
+    },
+    /// Queue outbound DATA for an open RFC 8441 tunnel.
+    SendTunnelData {
+        stream_id: u32,
+        outbound: H2TunnelOutbound,
     },
 }
 
@@ -70,14 +82,23 @@ impl DriverStreamState {
     }
 }
 
+struct DriverTunnelState {
+    inbound_tx: mpsc::Sender<Result<H2TunnelEvent>>,
+    pending_outbound: VecDeque<H2TunnelOutbound>,
+}
+
 /// HTTP/2 connection driver that runs in a background task
 pub struct H2Driver<S> {
     /// Channel for receiving commands from handles
     command_rx: mpsc::Receiver<DriverCommand>,
+    /// Sender back into the driver command queue, used by tunnel outbound forwarders.
+    command_tx: mpsc::Sender<DriverCommand>,
     /// Raw H2 connection (owned by driver)
     connection: RawH2Connection<S>,
     /// Per-stream state for routing responses
     streams: HashMap<u32, DriverStreamState>,
+    /// Per-stream state for open RFC 8441 tunnels.
+    tunnels: HashMap<u32, DriverTunnelState>,
     /// Queue for pending requests when max streams reached
     pending_requests: std::collections::VecDeque<DriverCommand>,
 }
@@ -87,11 +108,17 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
     /// Create a new driver from an established connection
-    pub fn new(connection: RawH2Connection<S>, command_rx: mpsc::Receiver<DriverCommand>) -> Self {
+    pub fn new(
+        connection: RawH2Connection<S>,
+        command_tx: mpsc::Sender<DriverCommand>,
+        command_rx: mpsc::Receiver<DriverCommand>,
+    ) -> Self {
         Self {
             command_rx,
+            command_tx,
             connection,
             streams: HashMap::new(),
+            tunnels: HashMap::new(),
             pending_requests: std::collections::VecDeque::new(),
         }
     }
@@ -104,6 +131,7 @@ where
 
             // Try to flush any pending data (flow control)
             self.flush_pending_data().await?;
+            self.flush_tunnel_data().await?;
 
             tokio::select! {
                 // Handle incoming commands (send requests)
@@ -116,6 +144,12 @@ where
                                 }
                                 DriverCommand::SendStreamingRequest { .. } => {
                                     tracing::warn!("Streaming requests not yet implemented in driver");
+                                }
+                                DriverCommand::OpenWebSocketTunnel { uri, headers, response_tx } => {
+                                    self.handle_open_websocket_tunnel(uri, headers, response_tx).await?;
+                                 }
+                                DriverCommand::SendTunnelData { stream_id, outbound } => {
+                                    self.queue_tunnel_outbound(stream_id, outbound).await?;
                                 }
                              }
                         }
@@ -151,9 +185,7 @@ where
 
     /// Handle SendRequest command
     async fn handle_send_request(&mut self, cmd: DriverCommand) -> Result<()> {
-        let max_streams = self.connection.peer_settings().max_concurrent_streams;
-
-        if self.streams.len() >= max_streams as usize {
+        if !self.has_available_stream_slot() {
             // Queue request
             self.pending_requests.push_back(cmd);
         } else {
@@ -165,16 +197,44 @@ where
 
     /// Process pending requests if slots available
     async fn process_pending_requests(&mut self) -> Result<()> {
-        let max_streams = self.connection.peer_settings().max_concurrent_streams;
-
-        while self.streams.len() < max_streams as usize {
+        while self.has_available_stream_slot() {
             if let Some(cmd) = self.pending_requests.pop_front() {
-                self.send_request_internal(cmd).await?;
+                match cmd {
+                    DriverCommand::SendRequest { .. } => {
+                        self.send_request_internal(cmd).await?;
+                    }
+                    DriverCommand::OpenWebSocketTunnel {
+                        uri,
+                        headers,
+                        response_tx,
+                    } => {
+                        self.open_websocket_tunnel_internal(uri, headers, response_tx)
+                            .await?;
+                    }
+                    DriverCommand::SendStreamingRequest { .. } => {
+                        tracing::warn!("Streaming requests not yet implemented in driver");
+                    }
+                    DriverCommand::SendTunnelData {
+                        stream_id,
+                        outbound,
+                    } => {
+                        self.queue_tunnel_outbound(stream_id, outbound).await?;
+                    }
+                }
             } else {
                 break;
             }
         }
         Ok(())
+    }
+
+    fn active_stream_count(&self) -> usize {
+        self.streams.len() + self.tunnels.len()
+    }
+
+    fn has_available_stream_slot(&self) -> bool {
+        let max_streams = self.connection.peer_settings().max_concurrent_streams as usize;
+        self.active_stream_count() < max_streams
     }
 
     /// Internal helper to send request
@@ -235,6 +295,99 @@ where
         Ok(())
     }
 
+    async fn handle_open_websocket_tunnel(
+        &mut self,
+        uri: Uri,
+        headers: Vec<(String, String)>,
+        response_tx: oneshot::Sender<Result<H2Tunnel>>,
+    ) -> Result<()> {
+        if !self.has_available_stream_slot() {
+            self.pending_requests
+                .push_back(DriverCommand::OpenWebSocketTunnel {
+                    uri,
+                    headers,
+                    response_tx,
+                });
+            return Ok(());
+        }
+
+        self.open_websocket_tunnel_internal(uri, headers, response_tx)
+            .await
+    }
+
+    async fn open_websocket_tunnel_internal(
+        &mut self,
+        uri: Uri,
+        headers: Vec<(String, String)>,
+        response_tx: oneshot::Sender<Result<H2Tunnel>>,
+    ) -> Result<()> {
+        match self
+            .connection
+            .open_extended_connect_websocket_with_end_stream(&uri, headers)
+            .await
+        {
+            Ok((stream_id, end_stream)) => {
+                let (outbound_tx, outbound_rx) = mpsc::channel(32);
+                let (inbound_tx, inbound_rx) = mpsc::channel(32);
+                if end_stream {
+                    let _ = inbound_tx.send(Ok(H2TunnelEvent::EndStream)).await;
+                    self.connection.remove_stream(stream_id);
+                } else {
+                    let command_tx = self.command_tx.clone();
+                    tokio::spawn(async move {
+                        let mut outbound_rx = outbound_rx;
+                        while let Some(outbound) = outbound_rx.recv().await {
+                            if command_tx
+                                .send(DriverCommand::SendTunnelData {
+                                    stream_id,
+                                    outbound,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                    self.tunnels.insert(
+                        stream_id,
+                        DriverTunnelState {
+                            inbound_tx,
+                            pending_outbound: VecDeque::new(),
+                        },
+                    );
+                }
+
+                if response_tx
+                    .send(Ok(H2Tunnel::new(outbound_tx, inbound_rx)))
+                    .is_err()
+                {
+                    tracing::debug!("Tunnel response channel closed after open");
+                    self.tunnels.remove(&stream_id);
+                }
+            }
+            Err(e) => {
+                if response_tx.send(Err(e)).is_err() {
+                    tracing::debug!("Tunnel response channel closed while sending open error");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn queue_tunnel_outbound(
+        &mut self,
+        stream_id: u32,
+        outbound: H2TunnelOutbound,
+    ) -> Result<()> {
+        if let Some(tunnel) = self.tunnels.get_mut(&stream_id) {
+            tunnel.pending_outbound.push_back(outbound);
+            self.flush_tunnel_data().await?;
+        }
+
+        Ok(())
+    }
+
     /// Iterate all active streams and try to send pending body data
     async fn flush_pending_data(&mut self) -> Result<()> {
         // Collect IDs to avoid borrow conflict
@@ -287,6 +440,51 @@ where
         Ok(())
     }
 
+    async fn flush_tunnel_data(&mut self) -> Result<()> {
+        let stream_ids: Vec<u32> = self.tunnels.keys().copied().collect();
+
+        for stream_id in stream_ids {
+            loop {
+                let outbound = match self
+                    .tunnels
+                    .get_mut(&stream_id)
+                    .and_then(|tunnel| tunnel.pending_outbound.pop_front())
+                {
+                    Some(outbound) => outbound,
+                    None => break,
+                };
+
+                let sent = self
+                    .connection
+                    .send_data(stream_id, &outbound.bytes, outbound.end_stream)
+                    .await?;
+
+                if outbound.bytes.is_empty() {
+                    continue;
+                }
+
+                if sent == 0 {
+                    if let Some(tunnel) = self.tunnels.get_mut(&stream_id) {
+                        tunnel.pending_outbound.push_front(outbound);
+                    }
+                    break;
+                }
+
+                if sent < outbound.bytes.len() {
+                    if let Some(tunnel) = self.tunnels.get_mut(&stream_id) {
+                        tunnel.pending_outbound.push_front(H2TunnelOutbound {
+                            bytes: outbound.bytes.slice(sent..),
+                            end_stream: outbound.end_stream,
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Handle a single frame
     async fn handle_frame(&mut self, header: FrameHeader, mut payload: Bytes) -> Result<()> {
         // 1. Check control frames that modify connection state
@@ -296,6 +494,12 @@ where
             .await?
         {
             ControlAction::RstStream(sid, code) => {
+                if let Some(tunnel) = self.tunnels.remove(&sid) {
+                    let _ = tunnel
+                        .inbound_tx
+                        .send(Ok(H2TunnelEvent::Reset(format!("{:?}", code))))
+                        .await;
+                }
                 // Notify stream of reset
                 if let Some(mut stream) = self.streams.remove(&sid) {
                     if let Some(tx) = stream.response_tx.take() {
@@ -315,6 +519,19 @@ where
                 return Ok(());
             }
             ControlAction::GoAway(last_sid) => {
+                let tunnel_ids: Vec<u32> = self.tunnels.keys().copied().collect();
+                for sid in tunnel_ids {
+                    if sid > last_sid {
+                        if let Some(tunnel) = self.tunnels.remove(&sid) {
+                            let _ = tunnel
+                                .inbound_tx
+                                .send(Ok(H2TunnelEvent::GoAway {
+                                    last_stream_id: last_sid,
+                                }))
+                                .await;
+                        }
+                    }
+                }
                 // Close all streams > last_sid
                 let sids: Vec<u32> = self.streams.keys().cloned().collect();
                 for sid in sids {
@@ -422,6 +639,17 @@ where
                     .process_inbound_data_frame(stream_id, header.flags, payload)
                     .await?;
 
+                if let Some(tunnel) = self.tunnels.get_mut(&stream_id) {
+                    if !data.is_empty() {
+                        let _ = tunnel.inbound_tx.send(Ok(H2TunnelEvent::Data(data))).await;
+                    }
+                    if end_stream {
+                        let _ = tunnel.inbound_tx.send(Ok(H2TunnelEvent::EndStream)).await;
+                        self.tunnels.remove(&stream_id);
+                    }
+                    return Ok(());
+                }
+
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
                     stream.body.extend_from_slice(&data);
 
@@ -435,6 +663,7 @@ where
                 // which updates the connection/stream window in self.connection.
                 // Flush any pending data that was previously blocked by flow control.
                 self.flush_pending_data().await?;
+                self.flush_tunnel_data().await?;
             }
             _ => {} // Other frames handled by handle_control_frame (or ignored)
         }

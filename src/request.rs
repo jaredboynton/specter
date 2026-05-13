@@ -37,6 +37,12 @@ impl IntoUrl for String {
     }
 }
 
+impl IntoUrl for &String {
+    fn into_url(self) -> Result<Url> {
+        Url::parse(self).map_err(Error::from)
+    }
+}
+
 impl IntoUrl for http::Uri {
     fn into_url(self) -> Result<Url> {
         Url::parse(&self.to_string()).map_err(Error::from)

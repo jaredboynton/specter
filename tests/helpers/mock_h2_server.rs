@@ -1,5 +1,6 @@
 use boring::ssl::SslAcceptor;
 use bytes::{Bytes, BytesMut};
+use specter::transport::h2::HpackDecoder;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -99,6 +100,51 @@ pub struct MockH2Connection {
     buffer: Arc<Mutex<BytesMut>>,
 }
 
+/// A decoded HEADERS frame received by the mock server.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct DecodedHeadersFrame {
+    pub flags: u8,
+    pub stream_id: u32,
+    pub headers: Vec<(String, String)>,
+}
+
+#[allow(dead_code)]
+impl DecodedHeadersFrame {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    pub fn has_header(&self, name: &str) -> bool {
+        self.header(name).is_some()
+    }
+
+    pub fn assert_rfc8441_websocket_connect(&self, authority: &str, scheme: &str, path: &str) {
+        assert_eq!(self.header(":method"), Some("CONNECT"));
+        assert_eq!(self.header(":protocol"), Some("websocket"));
+        assert_eq!(self.header(":scheme"), Some(scheme));
+        assert_eq!(self.header(":path"), Some(path));
+        assert_eq!(self.header(":authority"), Some(authority));
+
+        for forbidden in [
+            "connection",
+            "upgrade",
+            "host",
+            "sec-websocket-key",
+            "sec-websocket-accept",
+        ] {
+            assert!(
+                !self.has_header(forbidden),
+                "RFC 8441 CONNECT must not include {forbidden:?}; decoded headers: {:?}",
+                self.headers
+            );
+        }
+    }
+}
+
 // Helper trait for Box
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Unpin> AsyncReadWrite for T {}
@@ -169,6 +215,40 @@ impl MockH2Connection {
             Bytes::new()
         };
         Ok((length, frame_type, flags, stream_id, payload))
+    }
+
+    /// Read the next HEADERS frame and HPACK-decode its header block.
+    #[allow(dead_code)]
+    pub async fn read_decoded_headers(&self) -> std::io::Result<DecodedHeadersFrame> {
+        let (flags, stream_id, payload) = loop {
+            let (_, frame_type, flags, stream_id, payload) = self.read_frame().await?;
+            if frame_type == 0x01 {
+                break (flags, stream_id, payload);
+            }
+
+            if matches!(frame_type, 0x04 | 0x08 | 0x02) {
+                continue;
+            }
+
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("expected HEADERS frame, got type {frame_type:#04x}"),
+            ));
+        };
+
+        let mut decoder = HpackDecoder::new();
+        let headers = decoder.decode(&payload).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to decode HPACK header block: {err}"),
+            )
+        })?;
+
+        Ok(DecodedHeadersFrame {
+            flags,
+            stream_id,
+            headers,
+        })
     }
 
     /// Send a raw frame to the client.

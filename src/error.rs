@@ -95,6 +95,17 @@ pub enum Error {
     /// HTTP/2 SETTINGS_TIMEOUT error (RFC 9113 Section 7).
     #[error("SETTINGS_TIMEOUT (0x04): No SETTINGS frame received within {0:?}")]
     SettingsTimeout(std::time::Duration),
+
+    /// WebSocket over the requested transport is unsupported.
+    #[error("WebSocket unsupported: {0}")]
+    WebSocketUnsupported(String),
+
+    /// WebSocket opening handshake failed.
+    #[error("WebSocket handshake failed with HTTP status {status}")]
+    WebSocketHandshake {
+        status: u16,
+        headers: crate::headers::Headers,
+    },
 }
 
 impl Error {

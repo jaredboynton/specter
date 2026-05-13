@@ -171,6 +171,87 @@ impl HpackEncoder {
         Bytes::from(encoded)
     }
 
+    /// Encode RFC 8441 Extended CONNECT headers for WebSocket over HTTP/2.
+    ///
+    /// The pseudo-header order is deterministic and spec-compliant for RFC 8441;
+    /// it is not claimed to be Chrome-exact.
+    pub fn encode_extended_connect_websocket(
+        &mut self,
+        authority: &str,
+        scheme: &str,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> Result<Bytes, String> {
+        if authority.is_empty() {
+            return Err(":authority must not be empty".to_string());
+        }
+        if scheme.is_empty() {
+            return Err(":scheme must not be empty".to_string());
+        }
+        if path.is_empty() {
+            return Err(":path must not be empty".to_string());
+        }
+
+        let pseudo_headers: [(&[u8], &[u8]); 5] = [
+            (b":method", b"CONNECT"),
+            (b":protocol", b"websocket"),
+            (b":scheme", scheme.as_bytes()),
+            (b":path", path.as_bytes()),
+            (b":authority", authority.as_bytes()),
+        ];
+
+        let mut valid_headers: Vec<(String, &str)> = Vec::with_capacity(headers.len());
+
+        for (name, value) in headers {
+            if name.starts_with(':') {
+                return Err(format!("RFC 8441 user pseudo-header rejected: {name}"));
+            }
+
+            if name.is_empty() {
+                return Err("RFC 8441 header name must not be empty".to_string());
+            }
+            if name
+                .as_bytes()
+                .iter()
+                .any(|&b| b < 0x21 || (b > 0x7E && b != 0x7F))
+            {
+                return Err(format!("RFC 8441 invalid header name rejected: {name}"));
+            }
+
+            let name_lower = name.to_lowercase();
+            if matches!(
+                name_lower.as_str(),
+                "connection"
+                    | "upgrade"
+                    | "host"
+                    | "sec-websocket-key"
+                    | "sec-websocket-accept"
+                    | "sec-websocket-extensions"
+                    | "keep-alive"
+                    | "proxy-connection"
+                    | "transfer-encoding"
+            ) {
+                return Err(format!("RFC 8441 forbidden header rejected: {name_lower}"));
+            }
+
+            if name_lower == "te" && value.to_lowercase() != "trailers" {
+                return Err("RFC 8441 forbids TE values other than trailers".to_string());
+            }
+
+            valid_headers.push((name_lower, value));
+        }
+
+        let mut all_headers: Vec<(&[u8], &[u8])> =
+            Vec::with_capacity(pseudo_headers.len() + valid_headers.len());
+        all_headers.extend_from_slice(&pseudo_headers);
+        for (name, value) in &valid_headers {
+            all_headers.push((name.as_bytes(), value.as_bytes()));
+        }
+
+        let encoded = self.encoder.encode(&all_headers);
+        Ok(Bytes::from(encoded))
+    }
+
     /// Split an encoded header block into chunks if it exceeds max_frame_size.
     /// Returns (first_chunk, remaining_chunks).
     ///

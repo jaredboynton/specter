@@ -38,6 +38,7 @@ mod frame;
 mod handle;
 mod hpack;
 mod hpack_impl;
+mod tunnel;
 
 pub use connection::{
     H2Connection as RawH2Connection, H2Error, StreamResponse, CHROME_WINDOW_UPDATE,
@@ -50,6 +51,7 @@ pub use frame::{
 };
 pub use handle::H2Handle;
 pub use hpack::{HpackDecoder, HpackEncoder, PseudoHeaderOrder};
+pub use tunnel::{H2Tunnel, H2TunnelEvent, H2TunnelOutbound};
 
 // Re-export wrapper types for convenience
 use bytes::Bytes;
@@ -153,7 +155,7 @@ impl H2PooledConnection {
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER);
 
         // Extract the inner connection
-        let driver = H2Driver::new(conn.inner, command_rx);
+        let driver = H2Driver::new(conn.inner, command_tx.clone(), command_rx);
 
         // Spawn driver task
         tokio::spawn(async move {
@@ -177,6 +179,15 @@ impl H2PooledConnection {
         body: Option<Bytes>,
     ) -> Result<Response> {
         self.handle.send_request(method, uri, headers, body).await
+    }
+
+    /// Open an RFC 8441 WebSocket tunnel on this pooled HTTP/2 connection.
+    pub async fn open_websocket_tunnel(
+        &self,
+        uri: Uri,
+        headers: Vec<(String, String)>,
+    ) -> Result<H2Tunnel> {
+        self.handle.open_websocket_tunnel(uri, headers).await
     }
 
     /// Clone this pooled connection handle.
