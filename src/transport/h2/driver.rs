@@ -37,6 +37,7 @@ pub enum DriverCommand {
         method: Method,
         uri: Uri,
         headers: Vec<(String, String)>,
+        body: Option<bytes::Bytes>,
         body_tx: mpsc::Sender<Result<Bytes>>,
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
     },
@@ -57,6 +58,10 @@ pub enum DriverCommand {
 struct DriverStreamState {
     /// Oneshot sender for response completion
     response_tx: Option<oneshot::Sender<Result<StreamResponse>>>,
+    /// Oneshot sender for streaming response headers
+    streaming_headers_tx: Option<oneshot::Sender<StreamingHeadersResult>>,
+    /// Streaming response body sender
+    streaming_body_tx: Option<mpsc::Sender<Result<Bytes>>>,
     /// Accumulated response status
     status: Option<u16>,
     /// Accumulated response headers
@@ -73,6 +78,25 @@ impl DriverStreamState {
     fn new(response_tx: oneshot::Sender<Result<StreamResponse>>, pending_body: Bytes) -> Self {
         Self {
             response_tx: Some(response_tx),
+            streaming_headers_tx: None,
+            streaming_body_tx: None,
+            status: None,
+            headers: Vec::new(),
+            body: BytesMut::new(),
+            pending_body,
+            body_offset: 0,
+        }
+    }
+
+    fn streaming(
+        headers_tx: oneshot::Sender<StreamingHeadersResult>,
+        body_tx: mpsc::Sender<Result<Bytes>>,
+        pending_body: Bytes,
+    ) -> Self {
+        Self {
+            response_tx: None,
+            streaming_headers_tx: Some(headers_tx),
+            streaming_body_tx: Some(body_tx),
             status: None,
             headers: Vec::new(),
             body: BytesMut::new(),
@@ -143,7 +167,7 @@ where
                                     self.handle_send_request(cmd).await?;
                                 }
                                 DriverCommand::SendStreamingRequest { .. } => {
-                                    tracing::warn!("Streaming requests not yet implemented in driver");
+                                    self.handle_send_streaming_request(cmd).await?;
                                 }
                                 DriverCommand::OpenWebSocketTunnel { uri, headers, response_tx } => {
                                     self.handle_open_websocket_tunnel(uri, headers, response_tx).await?;
@@ -195,6 +219,15 @@ where
         Ok(())
     }
 
+    async fn handle_send_streaming_request(&mut self, cmd: DriverCommand) -> Result<()> {
+        if !self.has_available_stream_slot() {
+            self.pending_requests.push_back(cmd);
+        } else {
+            self.send_streaming_request_internal(cmd).await?;
+        }
+        Ok(())
+    }
+
     /// Process pending requests if slots available
     async fn process_pending_requests(&mut self) -> Result<()> {
         while self.has_available_stream_slot() {
@@ -212,7 +245,7 @@ where
                             .await?;
                     }
                     DriverCommand::SendStreamingRequest { .. } => {
-                        tracing::warn!("Streaming requests not yet implemented in driver");
+                        self.send_streaming_request_internal(cmd).await?;
                     }
                     DriverCommand::SendTunnelData {
                         stream_id,
@@ -289,6 +322,50 @@ where
                     if response_tx.send(Err(e)).is_err() {
                         tracing::debug!("Response channel closed while sending error");
                     }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_streaming_request_internal(&mut self, cmd: DriverCommand) -> Result<()> {
+        if let DriverCommand::SendStreamingRequest {
+            method,
+            uri,
+            headers,
+            body,
+            body_tx,
+            headers_tx,
+        } = cmd
+        {
+            let mut req_builder = http::Request::builder().method(method).uri(uri);
+
+            for (key, value) in headers {
+                req_builder = req_builder.header(key, value);
+            }
+
+            let body_bytes = body.unwrap_or_default();
+            let end_stream = body_bytes.is_empty();
+            let req = match req_builder.body(body_bytes.clone()) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = headers_tx.send(Err(Error::HttpProtocol(format!(
+                        "Invalid request: {error}"
+                    ))));
+                    return Ok(());
+                }
+            };
+
+            match self.connection.send_headers(&req, end_stream).await {
+                Ok(stream_id) => {
+                    self.streams.insert(
+                        stream_id,
+                        DriverStreamState::streaming(headers_tx, body_tx, body_bytes),
+                    );
+                    self.flush_pending_data().await?;
+                }
+                Err(error) => {
+                    let _ = headers_tx.send(Err(error));
                 }
             }
         }
@@ -485,6 +562,20 @@ where
         Ok(())
     }
 
+    async fn fail_stream(&mut self, stream_id: u32, message: String) {
+        if let Some(mut stream) = self.streams.remove(&stream_id) {
+            if let Some(tx) = stream.response_tx.take() {
+                let _ = tx.send(Err(Error::HttpProtocol(message.clone())));
+            }
+            if let Some(tx) = stream.streaming_headers_tx.take() {
+                let _ = tx.send(Err(Error::HttpProtocol(message.clone())));
+            }
+            if let Some(tx) = stream.streaming_body_tx.take() {
+                let _ = tx.send(Err(Error::HttpProtocol(message))).await;
+            }
+        }
+    }
+
     /// Handle a single frame
     async fn handle_frame(&mut self, header: FrameHeader, mut payload: Bytes) -> Result<()> {
         // 1. Check control frames that modify connection state
@@ -501,19 +592,8 @@ where
                         .await;
                 }
                 // Notify stream of reset
-                if let Some(mut stream) = self.streams.remove(&sid) {
-                    if let Some(tx) = stream.response_tx.take() {
-                        if tx
-                            .send(Err(Error::HttpProtocol(format!(
-                                "Stream reset by peer: {:?}",
-                                code
-                            ))))
-                            .is_err()
-                        {
-                            tracing::debug!("Response channel closed while notifying stream reset");
-                        }
-                    }
-                }
+                self.fail_stream(sid, format!("Stream reset by peer: {:?}", code))
+                    .await;
                 // Stream slot freed, try to process pending
                 self.process_pending_requests().await?;
                 return Ok(());
@@ -536,18 +616,7 @@ where
                 let sids: Vec<u32> = self.streams.keys().cloned().collect();
                 for sid in sids {
                     if sid > last_sid {
-                        if let Some(mut stream) = self.streams.remove(&sid) {
-                            if let Some(tx) = stream.response_tx.take() {
-                                if tx
-                                    .send(Err(Error::HttpProtocol("GOAWAY received".into())))
-                                    .is_err()
-                                {
-                                    tracing::debug!(
-                                        "Response channel closed while notifying GOAWAY"
-                                    );
-                                }
-                            }
-                        }
+                        self.fail_stream(sid, "GOAWAY received".into()).await;
                     }
                 }
                 // Driver continues processing existing streams until they complete.
@@ -622,6 +691,10 @@ where
                     stream.status = Some(status);
                     stream.headers = regular_headers;
 
+                    if let Some(tx) = stream.streaming_headers_tx.take() {
+                        let _ = tx.send(Ok((stream.status.unwrap_or(0), stream.headers.clone())));
+                    }
+
                     if (header.flags & flags::END_STREAM) != 0 {
                         self.complete_stream(stream_id);
                     }
@@ -650,7 +723,21 @@ where
                     return Ok(());
                 }
 
-                if let Some(stream) = self.streams.get_mut(&stream_id) {
+                let streaming_body_tx = self
+                    .streams
+                    .get(&stream_id)
+                    .and_then(|stream| stream.streaming_body_tx.clone());
+
+                if let Some(tx) = streaming_body_tx {
+                    if !data.is_empty() && tx.send(Ok(data)).await.is_err() {
+                        self.streams.remove(&stream_id);
+                        return Ok(());
+                    }
+
+                    if end_stream {
+                        self.complete_stream(stream_id);
+                    }
+                } else if let Some(stream) = self.streams.get_mut(&stream_id) {
                     stream.body.extend_from_slice(&data);
 
                     if end_stream {
