@@ -37,7 +37,7 @@ mod driver;
 mod frame;
 mod handle;
 mod hpack;
-mod hpack_impl;
+pub mod hpack_impl;
 mod tunnel;
 
 pub use connection::{
@@ -179,6 +179,19 @@ impl H2PooledConnection {
         body: Option<Bytes>,
     ) -> Result<Response> {
         self.handle.send_request(method, uri, headers, body).await
+    }
+
+    /// Send a streaming request using this pooled connection.
+    pub async fn send_streaming_request(
+        &self,
+        method: Method,
+        uri: &Uri,
+        headers: Vec<(String, String)>,
+        body: Option<Bytes>,
+    ) -> Result<(Response, tokio::sync::mpsc::Receiver<Result<Bytes>>)> {
+        self.handle
+            .send_streaming_request(method, uri, headers, body)
+            .await
     }
 
     /// Open an RFC 8441 WebSocket tunnel on this pooled HTTP/2 connection.

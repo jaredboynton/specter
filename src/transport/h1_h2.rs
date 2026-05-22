@@ -642,7 +642,48 @@ impl<'a> RequestBuilder<'a> {
             .parse()
             .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
 
-        // For HTTP/2 streaming, we need direct connection access (no pooling for streaming)
+        let request_url = request.url.clone();
+        let pool_key = Client::make_pool_key(&uri);
+
+        // Check for existing pooled connection
+        let pooled = {
+            let pool = client.h2_pool.read().await;
+            pool.get(&pool_key).cloned()
+        };
+
+        if let Some(conn) = pooled {
+            let body_bytes = if request.body.is_empty() {
+                None
+            } else {
+                Some(request.body.clone().into_bytes()?)
+            };
+
+            match conn
+                .send_streaming_request(request.method.clone(), &uri, headers.to_vec(), body_bytes)
+                .await
+            {
+                Ok((response, rx)) => {
+                    let response = response.with_url(request_url.clone());
+                    if let Some(jar) = &client.cookie_store {
+                        jar.write()
+                            .await
+                            .store_from_headers(response.headers(), request_url.as_str());
+                    }
+                    return Ok((response, rx));
+                }
+                Err(e) => {
+                    // Connection failed - remove from pool and create new one
+                    tracing::debug!(
+                        "Pooled HTTP/2 connection failed for streaming, creating new: {}",
+                        e
+                    );
+                    let mut pool = client.h2_pool.write().await;
+                    pool.remove(&pool_key);
+                }
+            }
+        }
+
+        // No pooled connection or it failed - create new one
         // Apply connect timeout to TCP + TLS handshake
         let connector = client.connector_for_uri(&uri);
         let connect_fut = connector.connect(&uri);
@@ -666,7 +707,7 @@ impl<'a> RequestBuilder<'a> {
         // Create H2 connection (part of connect phase)
         let h2_connect_fut =
             H2Connection::connect(stream, client.http2_settings.clone(), client.pseudo_order);
-        let mut h2_conn = if let Some(connect_timeout) = timeouts.connect {
+        let h2_conn = if let Some(connect_timeout) = timeouts.connect {
             tokio_timeout(connect_timeout, h2_connect_fut)
                 .await
                 .map_err(|_| Error::ConnectTimeout(connect_timeout))??
@@ -674,92 +715,32 @@ impl<'a> RequestBuilder<'a> {
             h2_connect_fut.await?
         };
 
-        // Build HTTP request
-        let mut path = request.url.path().to_string();
-        if path.is_empty() {
-            path = "/".to_string();
-        }
-        if let Some(query) = request.url.query() {
-            path.push('?');
-            path.push_str(query);
+        // Wrap in H2PooledConnection and insert into pool
+        let pooled_conn = H2PooledConnection::new(h2_conn);
+        {
+            let mut pool = client.h2_pool.write().await;
+            pool.insert(pool_key.clone(), pooled_conn.clone());
         }
 
-        let host = request.url.host_str().unwrap_or("localhost");
-        let authority = if let Some(port) = request.url.port_or_known_default() {
-            if port == 443 {
-                host.to_string()
-            } else {
-                format!("{}:{}", host, port)
-            }
+        let body_bytes = if request.body.is_empty() {
+            None
         } else {
-            host.to_string()
+            Some(request.body.clone().into_bytes()?)
         };
 
-        // Build URI with scheme and authority for HTTP/2
-        let full_uri = format!("https://{}{}", authority, path);
-        let mut request_builder = http::Request::builder()
-            .method(request.method.clone())
-            .uri(&full_uri);
+        // Send streaming request on the newly established pooled connection
+        let (response, rx) = pooled_conn
+            .send_streaming_request(request.method.clone(), &uri, headers.to_vec(), body_bytes)
+            .await?;
 
-        // Add custom headers (pseudo-headers are derived from method/uri)
-        for (key, value) in headers.iter() {
-            request_builder = request_builder.header(key, value);
-        }
-
-        let body = request.body.clone().into_bytes()?;
-        let http_request = request_builder
-            .body(body)
-            .map_err(|e| Error::HttpProtocol(format!("Failed to build request: {}", e)))?;
-
-        // Send streaming request with TTFB timeout
-        let send_fut = h2_conn.send_request_streaming(http_request);
-        let (response, rx) = if let Some(ttfb_timeout) = timeouts.ttfb {
-            tokio_timeout(ttfb_timeout, send_fut)
-                .await
-                .map_err(|_| Error::TtfbTimeout(ttfb_timeout))??
-        } else {
-            send_fut.await?
-        };
-
-        // Spawn task to read streaming frames
-        tokio::spawn(async move {
-            loop {
-                match h2_conn.read_streaming_frames().await {
-                    Ok(true) => continue,
-                    Ok(false) => break,
-                    Err(e) => {
-                        tracing::debug!("Streaming read error: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
-
-        // Convert http::Response to our Response type
-        let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect::<Vec<(String, String)>>();
-
-        let our_response = crate::response::Response::new(
-            status,
-            Headers::from(headers),
-            Bytes::new(), // Body comes through rx
-            "HTTP/2".to_string(),
-        );
-
-        let request_url = request.url.clone();
-        let our_response = our_response.with_url(request_url.clone());
-
+        let response = response.with_url(request_url.clone());
         if let Some(jar) = &client.cookie_store {
             jar.write()
                 .await
-                .store_from_headers(our_response.headers(), request_url.as_str());
+                .store_from_headers(response.headers(), request_url.as_str());
         }
 
-        Ok((our_response, rx))
+        Ok((response, rx))
     }
 }
 

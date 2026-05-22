@@ -67,6 +67,51 @@ impl H2Handle {
         ))
     }
 
+    /// Send an HTTP/2 request and receive a streaming response.
+    /// Returns (Response with empty body, Receiver for body chunks).
+    pub async fn send_streaming_request(
+        &self,
+        method: Method,
+        uri: &Uri,
+        headers: Vec<(String, String)>,
+        body: Option<Bytes>,
+    ) -> Result<(Response, mpsc::Receiver<Result<Bytes>>)> {
+        // Allocate channels for headers and body
+        let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
+        let (body_tx, body_rx) = mpsc::channel(32);
+
+        // Send command to driver
+        let command = DriverCommand::SendStreamingRequest {
+            method,
+            uri: uri.clone(),
+            headers,
+            body,
+            body_tx,
+            headers_tx,
+        };
+
+        self.command_tx
+            .send(command)
+            .await
+            .map_err(|_| Error::HttpProtocol("Driver channel closed".into()))?;
+
+        // Wait for headers
+        let (status, regular_headers) = headers_rx
+            .await
+            .map_err(|_| Error::HttpProtocol("Headers channel closed".into()))??;
+
+        // Convert to Response
+        Ok((
+            Response::new(
+                status,
+                Headers::from(regular_headers),
+                Bytes::new(),
+                "HTTP/2".to_string(),
+            ),
+            body_rx,
+        ))
+    }
+
     /// Open an RFC 8441 WebSocket tunnel through the background H2 driver.
     pub async fn open_websocket_tunnel(
         &self,

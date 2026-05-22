@@ -688,11 +688,20 @@ where
                 }
 
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
-                    stream.status = Some(status);
-                    stream.headers = regular_headers;
+                    if status >= 200 {
+                        stream.status = Some(status);
+                        stream.headers = regular_headers;
 
-                    if let Some(tx) = stream.streaming_headers_tx.take() {
-                        let _ = tx.send(Ok((stream.status.unwrap_or(0), stream.headers.clone())));
+                        if let Some(tx) = stream.streaming_headers_tx.take() {
+                            let _ =
+                                tx.send(Ok((stream.status.unwrap_or(0), stream.headers.clone())));
+                        }
+                    } else if status > 0 {
+                        // 1xx informational status
+                        tracing::debug!("H2Driver: Ignoring informational status {}", status);
+                    } else {
+                        // status == 0, likely trailers HEADERS frame (no :status)
+                        tracing::debug!("H2Driver: Received trailers for stream {}", stream_id);
                     }
 
                     if (header.flags & flags::END_STREAM) != 0 {
