@@ -96,6 +96,15 @@ impl H3Handle {
     ) -> Result<(Response, mpsc::Receiver<Result<Bytes>>)> {
         let (headers_tx, headers_rx) = oneshot::channel();
         let (body_tx, body_rx) = mpsc::channel(32);
+        let (driver_body_tx, mut driver_body_rx) = mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            while let Some(item) = driver_body_rx.recv().await {
+                if body_tx.send(item).await.is_err() {
+                    break;
+                }
+            }
+        });
 
         self.command_tx
             .send(DriverCommand::SendStreamingRequest {
@@ -104,7 +113,7 @@ impl H3Handle {
                 headers,
                 body,
                 headers_tx,
-                body_tx,
+                body_tx: driver_body_tx,
             })
             .await
             .map_err(|_| Error::HttpProtocol("H3 Driver channel closed".into()))?;

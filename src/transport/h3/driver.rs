@@ -37,7 +37,7 @@ pub enum DriverCommand {
         headers: Vec<(String, String)>,
         body: Option<Bytes>,
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
-        body_tx: mpsc::Sender<Result<Bytes>>,
+        body_tx: mpsc::UnboundedSender<Result<Bytes>>,
     },
     /// Open an RFC 9220 WebSocket-over-HTTP/3 tunnel.
     OpenWebSocketTunnel {
@@ -63,7 +63,7 @@ pub struct StreamResponse {
 struct DriverStreamState {
     response_tx: Option<oneshot::Sender<Result<StreamResponse>>>,
     streaming_headers_tx: Option<oneshot::Sender<StreamingHeadersResult>>,
-    streaming_body_tx: Option<mpsc::Sender<Result<Bytes>>>,
+    streaming_body_tx: Option<mpsc::UnboundedSender<Result<Bytes>>>,
     status: Option<u16>,
     headers: Vec<(String, String)>,
     body: BytesMut,
@@ -83,7 +83,7 @@ impl DriverStreamState {
 
     fn streaming(
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
-        body_tx: mpsc::Sender<Result<Bytes>>,
+        body_tx: mpsc::UnboundedSender<Result<Bytes>>,
     ) -> Self {
         Self {
             response_tx: None,
@@ -145,6 +145,7 @@ pub struct H3Driver {
 }
 
 impl H3Driver {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         command_tx: mpsc::Sender<DriverCommand>,
         command_rx: mpsc::Receiver<DriverCommand>,
@@ -179,6 +180,10 @@ impl H3Driver {
             tracing::error!("H3 Driver error: {}", e);
             for (_, mut stream) in self.streams.drain() {
                 if let Some(tx) = stream.response_tx.take() {
+                    let _ = tx.send(Err(Error::Quic(format!("Driver error: {}", e))));
+                } else if let Some(tx) = stream.streaming_headers_tx.take() {
+                    let _ = tx.send(Err(Error::Quic(format!("Driver error: {}", e))));
+                } else if let Some(tx) = stream.streaming_body_tx.take() {
                     let _ = tx.send(Err(Error::Quic(format!("Driver error: {}", e))));
                 }
             }
@@ -728,14 +733,11 @@ impl H3Driver {
                     Ok(0) => break,
                     Ok(len) => {
                         if let Some(tx) = &stream.streaming_body_tx {
-                            if tx
-                                .send(Ok(Bytes::copy_from_slice(&buf[..len])))
-                                .await
-                                .is_err()
-                            {
+                            if tx.send(Ok(Bytes::copy_from_slice(&buf[..len]))).is_err() {
+                                stream.streaming_body_tx = None;
                                 break;
                             }
-                        } else {
+                        } else if stream.response_tx.is_some() {
                             stream.body.extend_from_slice(&buf[..len]);
                         }
                     }
@@ -808,9 +810,7 @@ impl H3Driver {
             } else if let Some(tx) = stream.streaming_headers_tx.take() {
                 let _ = tx.send(Err(Error::Quic(format!("Stream reset: {}", error_code))));
             } else if let Some(tx) = stream.streaming_body_tx.take() {
-                let _ = tx
-                    .send(Err(Error::Quic(format!("Stream reset: {}", error_code))))
-                    .await;
+                let _ = tx.send(Err(Error::Quic(format!("Stream reset: {}", error_code))));
             }
         }
 
@@ -853,11 +853,9 @@ impl H3Driver {
                             "HTTP/3 GOAWAY received id={id}"
                         ))));
                     } else if let Some(tx) = stream.streaming_body_tx.take() {
-                        let _ = tx
-                            .send(Err(Error::HttpProtocol(format!(
-                                "HTTP/3 GOAWAY received id={id}"
-                            ))))
-                            .await;
+                        let _ = tx.send(Err(Error::HttpProtocol(format!(
+                            "HTTP/3 GOAWAY received id={id}"
+                        ))));
                     }
                 }
             }
@@ -873,7 +871,7 @@ impl H3Driver {
             } else if let Some(tx) = stream.streaming_headers_tx.take() {
                 let _ = tx.send(Err(Error::HttpProtocol(err.to_string())));
             } else if let Some(tx) = stream.streaming_body_tx.take() {
-                let _ = tx.send(Err(Error::HttpProtocol(err.to_string()))).await;
+                let _ = tx.send(Err(Error::HttpProtocol(err.to_string())));
             }
         }
 

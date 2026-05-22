@@ -659,7 +659,11 @@ impl<'a> RequestBuilder<'a> {
                 body,
             );
 
-            let (response, rx) = if let Some(total_timeout) = timeouts.total {
+            let (response, rx) = if let Some(ttfb_timeout) = timeouts.ttfb {
+                tokio_timeout(ttfb_timeout, fut)
+                    .await
+                    .map_err(|_| Error::TtfbTimeout(ttfb_timeout))??
+            } else if let Some(total_timeout) = timeouts.total {
                 tokio_timeout(total_timeout, fut)
                     .await
                     .map_err(|_| Error::TotalTimeout(total_timeout))??
@@ -676,7 +680,57 @@ impl<'a> RequestBuilder<'a> {
                     .store_from_headers(response.headers(), request_url.as_str());
             }
 
-            return Ok((response, rx));
+            if let Some(enc) = response.content_encoding() {
+                let enc_lc = enc.to_lowercase();
+                if enc_lc.contains("gzip")
+                    || enc_lc.contains("deflate")
+                    || enc_lc.contains("br")
+                    || enc_lc.contains("zstd")
+                {
+                    return Err(Error::Decompression(
+                        "Compressed streaming is unsupported".into(),
+                    ));
+                }
+            }
+
+            let (wrapped_tx, wrapped_rx) = tokio::sync::mpsc::channel(32);
+            let read_idle_timeout = timeouts.read_idle;
+            let total_timeout = timeouts.total;
+            let start_time = tokio::time::Instant::now();
+            let mut mut_rx = rx;
+
+            tokio::spawn(async move {
+                loop {
+                    let item = if let Some(rt) = read_idle_timeout {
+                        match tokio::time::timeout(rt, mut_rx.recv()).await {
+                            Ok(Some(val)) => val,
+                            Ok(None) => break,
+                            Err(_) => {
+                                let _ = wrapped_tx.send(Err(Error::ReadIdleTimeout(rt))).await;
+                                break;
+                            }
+                        }
+                    } else {
+                        match mut_rx.recv().await {
+                            Some(val) => val,
+                            None => break,
+                        }
+                    };
+
+                    if let Some(tt) = total_timeout {
+                        if start_time.elapsed() >= tt {
+                            let _ = wrapped_tx.send(Err(Error::TotalTimeout(tt))).await;
+                            break;
+                        }
+                    }
+
+                    if wrapped_tx.send(item).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            return Ok((response, wrapped_rx));
         }
 
         // Parse URI

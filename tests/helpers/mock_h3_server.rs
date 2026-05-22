@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use quiche::h3::NameValue;
-use quiche::ConnectionId;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -419,6 +418,13 @@ impl MockH3Server {
                                             let _ = h3.send_goaway(&mut conn, id);
                                         }
                                     }
+                                    Some(MockCommand::ResetStream { stream_id, error_code }) => {
+                                        let _ = conn.stream_shutdown(
+                                            stream_id,
+                                            quiche::Shutdown::Write,
+                                            error_code,
+                                        );
+                                    }
                                     None => {
                                         let _ = conn.close(true, 0x00, b"done");
                                     },
@@ -509,6 +515,10 @@ enum MockCommand {
     },
     SendGoAway {
         id: u64,
+    },
+    ResetStream {
+        stream_id: u64,
+        error_code: u64,
     },
 }
 
@@ -604,6 +614,16 @@ impl MockH3Connection {
 
     pub async fn send_goaway(&self, id: u64) {
         let _ = self.cmd_tx.send(MockCommand::SendGoAway { id }).await;
+    }
+
+    pub async fn reset_stream(&self, stream_id: u64, error_code: u64) {
+        let _ = self
+            .cmd_tx
+            .send(MockCommand::ResetStream {
+                stream_id,
+                error_code,
+            })
+            .await;
     }
 
     /// Read next event from the connection

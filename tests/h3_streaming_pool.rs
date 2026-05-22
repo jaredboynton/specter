@@ -166,6 +166,71 @@ async fn h3_pool_separates_authority_and_fingerprint_keys() {
 }
 
 #[tokio::test]
+async fn h3_pool_concurrent_streams_are_isolated() {
+    let server = MockH3Server::new().await.unwrap();
+    let connection_count = server.connection_count();
+    let url = server.url();
+
+    server.start(|conn| async move {
+        for _ in 0..8 {
+            let (stream_id, headers) = loop {
+                match conn.read_event().await {
+                    Some(MockEvent::Headers { stream_id, headers }) => break (stream_id, headers),
+                    Some(_) => continue,
+                    None => return,
+                }
+            };
+            let path = headers
+                .iter()
+                .find(|(name, _)| name == ":path")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| "/stream/unknown".to_string());
+            let marker = path.rsplit('/').next().unwrap_or("unknown").to_string();
+
+            conn.send_response_headers(stream_id, vec![(":status", "200")], false)
+                .await;
+            conn.send_response_data(stream_id, format!("{marker}-a").as_bytes(), false)
+                .await;
+            conn.send_response_data(stream_id, format!("{marker}-b").as_bytes(), true)
+                .await;
+        }
+    });
+
+    let client = H3Client::new().danger_accept_invalid_certs(true);
+    let mut tasks = Vec::new();
+
+    for idx in 0..8 {
+        let client = client.clone();
+        let req_url = format!("{url}/stream/{idx}");
+        tasks.push(tokio::spawn(async move {
+            let (response, mut body_rx) = client
+                .send_streaming(&req_url, "GET", vec![], None)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+
+            let mut chunks = Vec::new();
+            while let Some(chunk) = body_rx.recv().await {
+                chunks.push(String::from_utf8(chunk.unwrap().to_vec()).unwrap());
+            }
+            (idx, chunks)
+        }));
+    }
+
+    for task in tasks {
+        let (idx, chunks) = task.await.unwrap();
+        assert_eq!(
+            chunks,
+            vec![format!("{idx}-a"), format!("{idx}-b")],
+            "stream {idx} received wrong chunks"
+        );
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(connection_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn h3_pool_reconnects_after_idle_timeout() {
     let server = MockH3Server::new().await.unwrap();
     let connection_count = server.connection_count();
