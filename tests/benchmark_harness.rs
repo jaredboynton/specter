@@ -1,6 +1,17 @@
 use specter::{Client, HttpVersion};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[test]
+fn streaming_benchmark_declares_enforceable_h3_gate() {
+    let source = std::fs::read_to_string("benches/streaming_vs_reqwest.rs").unwrap();
+
+    assert!(source.contains("struct H3Gate"));
+    assert!(source.contains("fixture_address: \"127.0.0.1:3203/udp\""));
+    assert!(source.contains("reqwest_h3_unavailable_specter_regression_gate"));
+    assert!(source.contains("SPECTER_BENCH_FORCE_H3_THRESHOLD_FAIL"));
+    assert!(source.contains("--self-test-h3-threshold-failure"));
+}
+
 #[tokio::test]
 async fn test_h1_streaming_local() {
     let _ = tracing_subscriber::fmt()

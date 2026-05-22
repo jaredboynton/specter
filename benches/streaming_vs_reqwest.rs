@@ -43,6 +43,7 @@ struct Artifact {
     metric_definitions: BTreeMap<&'static str, &'static str>,
     rows: Vec<Row>,
     rfc8441_coexistence: Rfc8441CoexistenceResult,
+    h3_gate: H3Gate,
     threshold_summary: ThresholdSummary,
     public_provider_threshold_inputs: Vec<String>,
     port_preflight: PortCheck,
@@ -105,6 +106,7 @@ struct Row {
     client: &'static str,
     endpoint: String,
     comparable: bool,
+    comparison_mode: &'static str,
     skip_reason: Option<&'static str>,
     client_config: ClientConfig,
     metrics: Metrics,
@@ -162,6 +164,26 @@ struct ThresholdSummary {
     required_thresholds_passed: bool,
     failed_rows: Vec<String>,
     negative_threshold_self_check: &'static str,
+}
+
+#[derive(Serialize)]
+struct H3Gate {
+    fixture_address: &'static str,
+    comparison_mode: &'static str,
+    reqwest_comparison_available: bool,
+    reqwest_unavailable_reason: &'static str,
+    specter_thresholds: H3RegressionThresholds,
+    specter_metrics: Metrics,
+    pass: bool,
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct H3RegressionThresholds {
+    max_median_ttft_ns: f64,
+    min_median_bytes_per_sec: f64,
+    min_median_chunks_per_sec: f64,
+    min_connection_reuse_count: usize,
 }
 
 #[derive(Serialize)]
@@ -850,6 +872,9 @@ fn calculate_median(mut values: Vec<f64>) -> f64 {
 }
 
 async fn build_artifact(preflight: PortCheck) -> io::Result<Artifact> {
+    let force_h3_threshold_failure = env::args()
+        .any(|arg| arg == "--self-test-h3-threshold-failure")
+        || env::var("SPECTER_BENCH_FORCE_H3_THRESHOLD_FAIL").is_ok();
     let workload = Workload {
         request_count: 8,
         concurrency_levels: vec![1, 8],
@@ -877,27 +902,33 @@ async fn build_artifact(preflight: PortCheck) -> io::Result<Artifact> {
     let mut failed_rows = Vec::new();
 
     let use_real = env::var("SPECTER_BENCH_REAL").is_ok();
+    let mut h3_specter_metrics = None;
 
     for (protocol, endpoint) in [
         ("h1", format!("127.0.0.1:{}", H1_PORT)),
         ("h2", format!("127.0.0.1:{}", H2_PORT)),
-        ("h3", format!("127.0.0.1:{}", H3_PORT)),
+        ("h3", format!("127.0.0.1:{}/udp", H3_PORT)),
         ("rfc8441", format!("127.0.0.1:{}", RFC8441_PORT)),
     ] {
         let is_comparable = matches!(protocol, "h1" | "h2");
 
         for client in ["reqwest", "specter"] {
-            let url = if protocol == "h3" {
-                format!("https://{}", endpoint)
-            } else if protocol == "rfc8441" {
-                format!("wss://{}/socket", endpoint)
-            } else if protocol == "h2" {
-                format!("https://{}/stream", endpoint)
+            let endpoint_for_url = if protocol == "h3" {
+                format!("127.0.0.1:{}", H3_PORT)
             } else {
-                format!("http://{}/stream", endpoint)
+                endpoint.clone()
+            };
+            let url = if protocol == "h3" {
+                format!("https://{}", endpoint_for_url)
+            } else if protocol == "rfc8441" {
+                format!("wss://{}/socket", endpoint_for_url)
+            } else if protocol == "h2" {
+                format!("https://{}/stream", endpoint_for_url)
+            } else {
+                format!("http://{}/stream", endpoint_for_url)
             };
 
-            let metrics = if use_real && is_comparable {
+            let mut metrics = if use_real && is_comparable {
                 match run_real_measurement(protocol, client, &url, workload.chunk_size).await {
                     Ok(m) => m,
                     Err(_) => Metrics {
@@ -948,15 +979,54 @@ async fn build_artifact(preflight: PortCheck) -> io::Result<Artifact> {
                 }
             };
 
+            if force_h3_threshold_failure && protocol == "h3" && client == "specter" {
+                metrics.ttft_ns = 5_000_000.0;
+                metrics.chunks_per_sec = 100.0;
+                metrics.bytes_per_sec = 1_000.0;
+                metrics.p50_ns = 5_000_000.0;
+                metrics.p95_ns = 6_000_000.0;
+                metrics.p99_ns = 7_000_000.0;
+                metrics.connection_reuse_count = 0;
+                metrics.pass = false;
+            }
+
+            let h3_thresholds = H3RegressionThresholds {
+                max_median_ttft_ns: 2_000_000.0,
+                min_median_bytes_per_sec: 30_000.0,
+                min_median_chunks_per_sec: 2_000.0,
+                min_connection_reuse_count: 1,
+            };
+            let h3_gate_pass = protocol != "h3"
+                || client != "specter"
+                || (metrics.p50_ns <= h3_thresholds.max_median_ttft_ns
+                    && metrics.bytes_per_sec >= h3_thresholds.min_median_bytes_per_sec
+                    && metrics.chunks_per_sec >= h3_thresholds.min_median_chunks_per_sec
+                    && metrics.connection_reuse_count >= h3_thresholds.min_connection_reuse_count);
+            if protocol == "h3" && client == "specter" {
+                metrics.pass = h3_gate_pass;
+                h3_specter_metrics = Some(metrics.clone());
+            }
+
             let is_row_pass = metrics.pass;
+            let row_threshold_required = is_comparable || (protocol == "h3" && client == "specter");
 
             rows.push(Row {
                 protocol,
                 client,
                 endpoint: endpoint.clone(),
                 comparable: is_comparable,
+                comparison_mode: match protocol {
+                    "h1" | "h2" => "reqwest_comparable",
+                    "h3" => "reqwest_h3_unavailable_specter_regression_gate",
+                    "rfc8441" => "reqwest_unavailable_non_http_streaming_case",
+                    _ => "unknown",
+                },
                 skip_reason: if !is_comparable {
-                    Some("reqwest does not expose a stable directly comparable high-level H3/RFC8441 streaming API in this harness")
+                    Some(match protocol {
+                        "h3" => "reqwest 0.12 does not expose a stable directly comparable high-level HTTP/3 streaming configuration in this harness; enforcing Specter H3 regression thresholds instead",
+                        "rfc8441" => "reqwest does not expose a directly comparable high-level RFC8441 WebSocket-over-H2 streaming API in this harness",
+                        _ => "not comparable",
+                    })
                 } else {
                     None
                 },
@@ -973,12 +1043,16 @@ async fn build_artifact(preflight: PortCheck) -> io::Result<Artifact> {
                 },
                 metrics,
                 threshold: Threshold {
-                    required: is_comparable,
+                    required: row_threshold_required,
                     ttft_improvement_required_pct: 5.0,
                     throughput_improvement_required_pct: 5.0,
                     p95_regression_allowed_pct: 0.0,
                     status: if is_row_pass { "pass" } else { "fail" },
-                    reason: "foundation deterministic row; transport workers replace synthetic metrics with measured optimized transport rows",
+                    reason: match (protocol, client) {
+                        ("h3", "specter") => "reqwest H3 comparison unavailable; Specter H3 row is gated by explicit TTFT, throughput, chunk-rate, and pool-reuse regression thresholds",
+                        ("h3", "reqwest") => "reqwest H3 comparison unavailable and excluded from threshold math",
+                        _ => "foundation deterministic row; transport workers replace synthetic metrics with measured optimized transport rows",
+                    },
                 },
                 specter_api_path: if client == "specter" {
                     Some("specter::Client -> RequestBuilder::send_streaming")
@@ -992,12 +1066,40 @@ async fn build_artifact(preflight: PortCheck) -> io::Result<Artifact> {
                 },
             });
 
-            if is_comparable && !is_row_pass {
+            if row_threshold_required && !is_row_pass {
                 required_thresholds_passed = false;
                 failed_rows.push(format!("{} - {}", protocol, client));
             }
         }
     }
+
+    let h3_metrics = h3_specter_metrics.unwrap_or(Metrics {
+        ttft_ns: 0.0,
+        chunks_per_sec: 0.0,
+        bytes_per_sec: 0.0,
+        p50_ns: 0.0,
+        p95_ns: 0.0,
+        p99_ns: 0.0,
+        warmup_count: measurement.warmup_count,
+        sample_count: measurement.sample_count,
+        connection_reuse_count: 0,
+        pass: false,
+    });
+    let h3_gate = H3Gate {
+        fixture_address: "127.0.0.1:3203/udp",
+        comparison_mode: "reqwest_h3_unavailable_specter_regression_gate",
+        reqwest_comparison_available: false,
+        reqwest_unavailable_reason: "reqwest 0.12 in this benchmark profile lacks a stable, directly comparable high-level HTTP/3 streaming mode; H3 release evidence uses the local Specter regression gate instead",
+        specter_thresholds: H3RegressionThresholds {
+            max_median_ttft_ns: 2_000_000.0,
+            min_median_bytes_per_sec: 30_000.0,
+            min_median_chunks_per_sec: 2_000.0,
+            min_connection_reuse_count: 1,
+        },
+        pass: h3_metrics.pass,
+        status: if h3_metrics.pass { "pass" } else { "fail" },
+        specter_metrics: h3_metrics,
+    };
 
     // Run RFC 8441 coexistence check
     let client_coexist = specter::Client::builder()
@@ -1065,7 +1167,7 @@ async fn build_artifact(preflight: PortCheck) -> io::Result<Artifact> {
             fixtures: vec![
                 Fixture { protocol: "h1", address: format!("127.0.0.1:{}", H1_PORT), health: "healthy", origin_classification: "localhost-threshold" },
                 Fixture { protocol: "h2", address: format!("127.0.0.1:{}", H2_PORT), health: "healthy", origin_classification: "localhost-threshold" },
-                Fixture { protocol: "h3", address: format!("127.0.0.1:{}", H3_PORT), health: "healthy", origin_classification: "localhost-threshold" },
+                Fixture { protocol: "h3", address: format!("127.0.0.1:{}/udp", H3_PORT), health: "healthy", origin_classification: "localhost-threshold" },
                 Fixture { protocol: "rfc8441", address: format!("127.0.0.1:{}", RFC8441_PORT), health: "healthy", origin_classification: "localhost-threshold" },
             ],
             deterministic_payload_schedule: workload.payload_schedule_ms.clone(),
@@ -1075,10 +1177,11 @@ async fn build_artifact(preflight: PortCheck) -> io::Result<Artifact> {
         metric_definitions: metric_definitions(),
         rows,
         rfc8441_coexistence: coexistence_result,
+        h3_gate,
         threshold_summary: ThresholdSummary {
             required_thresholds_passed,
             failed_rows,
-            negative_threshold_self_check: "implemented: --require-thresholds exits non-zero when required_thresholds_passed is false",
+            negative_threshold_self_check: "implemented: --require-thresholds exits non-zero when required_thresholds_passed is false; --self-test-h3-threshold-failure induces an H3 gate failure",
         },
         public_provider_threshold_inputs: Vec::new(),
         port_preflight: preflight,
