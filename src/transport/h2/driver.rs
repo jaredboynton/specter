@@ -38,7 +38,7 @@ pub enum DriverCommand {
         uri: Uri,
         headers: Vec<(String, String)>,
         body: Option<bytes::Bytes>,
-        body_tx: mpsc::Sender<Result<Bytes>>,
+        body_tx: mpsc::UnboundedSender<Result<Bytes>>,
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
     },
     /// Open an RFC 8441 WebSocket tunnel on a pooled HTTP/2 stream.
@@ -61,7 +61,7 @@ struct DriverStreamState {
     /// Oneshot sender for streaming response headers
     streaming_headers_tx: Option<oneshot::Sender<StreamingHeadersResult>>,
     /// Streaming response body sender
-    streaming_body_tx: Option<mpsc::Sender<Result<Bytes>>>,
+    streaming_body_tx: Option<mpsc::UnboundedSender<Result<Bytes>>>,
     /// Accumulated response status
     status: Option<u16>,
     /// Accumulated response headers
@@ -90,7 +90,7 @@ impl DriverStreamState {
 
     fn streaming(
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
-        body_tx: mpsc::Sender<Result<Bytes>>,
+        body_tx: mpsc::UnboundedSender<Result<Bytes>>,
         pending_body: Bytes,
     ) -> Self {
         Self {
@@ -125,6 +125,8 @@ pub struct H2Driver<S> {
     tunnels: HashMap<u32, DriverTunnelState>,
     /// Queue for pending requests when max streams reached
     pending_requests: std::collections::VecDeque<DriverCommand>,
+    /// Shared flag set when GOAWAY frame is received
+    goaway_received: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl<S> H2Driver<S>
@@ -136,6 +138,7 @@ where
         connection: RawH2Connection<S>,
         command_tx: mpsc::Sender<DriverCommand>,
         command_rx: mpsc::Receiver<DriverCommand>,
+        goaway_received: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             command_rx,
@@ -144,6 +147,7 @@ where
             streams: HashMap::new(),
             tunnels: HashMap::new(),
             pending_requests: std::collections::VecDeque::new(),
+            goaway_received,
         }
     }
 
@@ -563,6 +567,7 @@ where
     }
 
     async fn fail_stream(&mut self, stream_id: u32, message: String) {
+        self.connection.remove_stream(stream_id);
         if let Some(mut stream) = self.streams.remove(&stream_id) {
             if let Some(tx) = stream.response_tx.take() {
                 let _ = tx.send(Err(Error::HttpProtocol(message.clone())));
@@ -571,13 +576,38 @@ where
                 let _ = tx.send(Err(Error::HttpProtocol(message.clone())));
             }
             if let Some(tx) = stream.streaming_body_tx.take() {
-                let _ = tx.send(Err(Error::HttpProtocol(message))).await;
+                let _ = tx.send(Err(Error::HttpProtocol(message)));
             }
         }
     }
 
     /// Handle a single frame
     async fn handle_frame(&mut self, header: FrameHeader, mut payload: Bytes) -> Result<()> {
+        // Check if receiver has been dropped (is_closed) for this stream before frame processing.
+        // If dropped, send RST_STREAM(CANCEL) and evict.
+        if header.stream_id != 0 {
+            if let Some(stream) = self.streams.get(&header.stream_id) {
+                if let Some(ref tx) = stream.streaming_body_tx {
+                    if tx.is_closed() {
+                        let stream_id = header.stream_id;
+                        self.streams.remove(&stream_id);
+                        self.connection.remove_stream(stream_id);
+                        if let Err(e) = self
+                            .connection
+                            .send_rst_stream(stream_id, ErrorCode::Cancel)
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to send RST_STREAM for dropped receiver: {:?}",
+                                e
+                            );
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         // 1. Check control frames that modify connection state
         match self
             .connection
@@ -599,6 +629,8 @@ where
                 return Ok(());
             }
             ControlAction::GoAway(last_sid) => {
+                self.goaway_received
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 let tunnel_ids: Vec<u32> = self.tunnels.keys().copied().collect();
                 for sid in tunnel_ids {
                     if sid > last_sid {
@@ -738,8 +770,19 @@ where
                     .and_then(|stream| stream.streaming_body_tx.clone());
 
                 if let Some(tx) = streaming_body_tx {
-                    if !data.is_empty() && tx.send(Ok(data)).await.is_err() {
+                    if !data.is_empty() && tx.send(Ok(data)).is_err() {
                         self.streams.remove(&stream_id);
+                        self.connection.remove_stream(stream_id);
+                        if let Err(e) = self
+                            .connection
+                            .send_rst_stream(stream_id, ErrorCode::Cancel)
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to send RST_STREAM for dropped receiver: {:?}",
+                                e
+                            );
+                        }
                         return Ok(());
                     }
 
@@ -769,6 +812,7 @@ where
 
     /// Complete a stream: build response and send
     fn complete_stream(&mut self, stream_id: u32) {
+        self.connection.remove_stream(stream_id);
         if let Some(mut stream) = self.streams.remove(&stream_id) {
             if let Some(tx) = stream.response_tx.take() {
                 // If no status was received, this is a protocol violation

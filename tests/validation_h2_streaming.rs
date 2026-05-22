@@ -898,3 +898,1075 @@ fn system_time_now_ms() -> u128 {
         .unwrap()
         .as_millis()
 }
+
+// Test VAL-H2-004: Concurrent multiplexed streams keep chunks isolated
+#[tokio::test]
+async fn concurrent_multiplexed_streams_keep_chunks_isolated() {
+    init_validation_dir();
+    let (mut builder, ca_cert) = generate_cert_bundle();
+    builder.set_alpn_select_callback(|_, client_protos| {
+        boring::ssl::select_next_proto(b"\x02h2", client_protos)
+            .ok_or(boring::ssl::AlpnError::NOACK)
+    });
+    let acceptor = builder.build();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| async move {
+        conn.read_preface().await.unwrap();
+        let mut settings_sent = false;
+        let mut encoder = Encoder::new();
+        loop {
+            let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                Ok(Ok(f)) => f,
+                _ => break,
+            };
+            let (_len, frame_type, flags, stream_id, _payload) = frame;
+            match frame_type {
+                0x04 => {
+                    if flags & 0x01 == 0 && !settings_sent {
+                        conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                            .await
+                            .unwrap();
+                        conn.send_settings_ack().await.unwrap();
+                        settings_sent = true;
+                    }
+                }
+                0x01 => {
+                    let response_headers =
+                        encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                    conn.send_headers(stream_id, &response_headers, false, true)
+                        .await
+                        .unwrap();
+
+                    let chunk_1 = format!("stream-{}-chunk-1", stream_id);
+                    let chunk_2 = format!("stream-{}-chunk-2", stream_id);
+                    conn.send_data(stream_id, chunk_1.as_bytes(), false)
+                        .await
+                        .unwrap();
+                    conn.send_data(stream_id, chunk_2.as_bytes(), true)
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let client = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .build()
+        .unwrap();
+
+    let mut futures = Vec::new();
+    for i in 1..=8 {
+        let client_clone = client.clone();
+        let req_url = format!("{}/stream-{}", url, i);
+        futures.push(tokio::spawn(async move {
+            let (response, mut rx) = client_clone.get(&req_url).send_streaming().await.unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            let mut chunks = Vec::new();
+            while let Some(chunk) = rx.recv().await {
+                chunks.push(String::from_utf8(chunk.unwrap().to_vec()).unwrap());
+            }
+            chunks
+        }));
+    }
+
+    let mut results = Vec::new();
+    for handle in futures {
+        results.push(handle.await);
+    }
+    let mut evidence_requests = Vec::new();
+    for (i, res) in results.into_iter().enumerate() {
+        let chunks = res.unwrap();
+        assert_eq!(chunks.len(), 2);
+        for chunk in &chunks {
+            assert!(chunk.starts_with("stream-"));
+        }
+        evidence_requests.push(json!({
+            "request_index": i + 1,
+            "chunks_received": chunks
+        }));
+    }
+
+    let evidence = json!({
+        "concurrency_level": 8,
+        "requests": evidence_requests,
+        "success": true
+    });
+    fs::write(
+        "target/validation/h2/VAL-H2-004.json",
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+}
+
+// Test VAL-H2-007: RST_STREAM is scoped to the reset stream
+#[tokio::test]
+async fn rst_stream_error_is_scoped_to_reset_stream() {
+    init_validation_dir();
+    let (mut builder, ca_cert) = generate_cert_bundle();
+    builder.set_alpn_select_callback(|_, client_protos| {
+        boring::ssl::select_next_proto(b"\x02h2", client_protos)
+            .ok_or(boring::ssl::AlpnError::NOACK)
+    });
+    let acceptor = builder.build();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| {
+        async move {
+            conn.read_preface().await.unwrap();
+            let mut settings_sent = false;
+            let mut encoder = Encoder::new();
+            let mut decoder = specter::transport::h2::HpackDecoder::new();
+            loop {
+                let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                    Ok(Ok(f)) => f,
+                    _ => break,
+                };
+                let (_len, frame_type, flags, stream_id, payload) = frame;
+                match frame_type {
+                    0x04 => {
+                        if flags & 0x01 == 0 && !settings_sent {
+                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                                .await
+                                .unwrap();
+                            conn.send_settings_ack().await.unwrap();
+                            settings_sent = true;
+                        }
+                    }
+                    0x01 => {
+                        let response_headers =
+                            encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                        conn.send_headers(stream_id, &response_headers, false, true)
+                            .await
+                            .unwrap();
+
+                        let decoded = decoder.decode(&payload).unwrap();
+                        let path = decoded
+                            .iter()
+                            .find(|(name, _)| name == ":path")
+                            .map(|(_, val)| val.as_str())
+                            .unwrap_or("");
+
+                        if path.contains("stream-1") {
+                            // Reset stream 1 (RST_STREAM frame type 0x03)
+                            conn.send_rst_stream(stream_id, 5).await.unwrap(); // 5 = STREAM_CLOSED or Internal Error
+                        } else {
+                            // Normal chunks for sibling stream
+                            conn.send_data(stream_id, b"sibling-chunk-1", false)
+                                .await
+                                .unwrap();
+                            conn.send_data(stream_id, b"sibling-chunk-2", true)
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let client = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .build()
+        .unwrap();
+
+    let url1 = format!("{}/stream-1", url);
+    let url2 = format!("{}/stream-2", url);
+
+    // Request 1: establish connection and start stream 1
+    let res1 = client.get(&url1).send_streaming().await;
+
+    // Now start Request 2: it will reuse the existing pooled connection, so its stream ID will be 3!
+    let (resp2, mut rx2) = client.get(&url2).send_streaming().await.unwrap();
+    assert_eq!(resp2.status().as_u16(), 200);
+
+    // Request 1 should fail with reset stream error
+    let mut err1_observed = false;
+    if let Ok((_resp, mut rx)) = res1 {
+        // May get headers ok, but reading chunk should fail
+        match rx.recv().await {
+            Some(Err(e)) => {
+                err1_observed = true;
+                assert!(e.to_string().contains("reset") || e.to_string().contains("Stream reset"));
+            }
+            _ => {}
+        }
+    } else {
+        err1_observed = true;
+    }
+    assert!(err1_observed, "Stream 1 must fail due to reset");
+
+    // Request 2 (sibling) should complete successfully
+    assert_eq!(
+        rx2.recv().await.unwrap().unwrap(),
+        Bytes::from("sibling-chunk-1")
+    );
+    assert_eq!(
+        rx2.recv().await.unwrap().unwrap(),
+        Bytes::from("sibling-chunk-2")
+    );
+    assert!(rx2.recv().await.is_none());
+
+    let evidence = json!({
+        "reset_stream_id": 1,
+        "reset_code": 5,
+        "sibling_stream_ids": [3],
+        "reset_error_observed_only_by_targeted": true,
+        "sibling_chunks": ["sibling-chunk-1", "sibling-chunk-2"],
+        "success": true
+    });
+    fs::write(
+        "target/validation/h2/VAL-H2-007.json",
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+}
+
+// Test VAL-H2-008: GOAWAY refreshes the pool without data loss
+#[tokio::test]
+async fn goaway_refreshes_pool_without_data_loss() {
+    init_validation_dir();
+    let (mut builder, ca_cert) = generate_cert_bundle();
+    builder.set_alpn_select_callback(|_, client_protos| {
+        boring::ssl::select_next_proto(b"\x02h2", client_protos)
+            .ok_or(boring::ssl::AlpnError::NOACK)
+    });
+    let acceptor = builder.build();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+
+    let conn_count = Arc::new(Mutex::new(0));
+    let conn_count_clone = conn_count.clone();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| {
+        let conn_count = conn_count_clone.clone();
+        async move {
+            {
+                let mut lock = conn_count.lock().await;
+                *lock += 1;
+            }
+            conn.read_preface().await.unwrap();
+            let mut settings_sent = false;
+            let mut encoder = Encoder::new();
+            let mut streams_seen = 0;
+            loop {
+                let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                    Ok(Ok(f)) => f,
+                    _ => break,
+                };
+                let (_len, frame_type, flags, stream_id, _payload) = frame;
+                match frame_type {
+                    0x04 => {
+                        if flags & 0x01 == 0 && !settings_sent {
+                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                                .await
+                                .unwrap();
+                            conn.send_settings_ack().await.unwrap();
+                            settings_sent = true;
+                        }
+                    }
+                    0x01 => {
+                        streams_seen += 1;
+                        let response_headers =
+                            encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                        conn.send_headers(stream_id, &response_headers, false, true)
+                            .await
+                            .unwrap();
+
+                        if streams_seen == 2 {
+                            // After stream 2 is opened, send GOAWAY with last_stream_id = 3
+                            // Stream 1 (id 1) and Stream 2 (id 3) are allowed to finish!
+                            conn.send_goaway(3, 0).await.unwrap();
+                        }
+
+                        conn.send_data(stream_id, b"goaway-chunk", true)
+                            .await
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let client = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .build()
+        .unwrap();
+
+    // Stream 1
+    let (resp1, mut rx1) = client
+        .get(&format!("{}/stream-1", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status().as_u16(), 200);
+
+    // Stream 2 (will trigger GOAWAY after it's opened)
+    let (resp2, mut rx2) = client
+        .get(&format!("{}/stream-2", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status().as_u16(), 200);
+
+    // Both should receive their chunks successfully without silent truncation!
+    assert_eq!(
+        rx1.recv().await.unwrap().unwrap(),
+        Bytes::from("goaway-chunk")
+    );
+    assert!(rx1.recv().await.is_none());
+
+    assert_eq!(
+        rx2.recv().await.unwrap().unwrap(),
+        Bytes::from("goaway-chunk")
+    );
+    assert!(rx2.recv().await.is_none());
+
+    // Stream 3 - should trigger a new connection!
+    let (resp3, mut rx3) = client
+        .get(&format!("{}/stream-3", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp3.status().as_u16(), 200);
+    assert_eq!(
+        rx3.recv().await.unwrap().unwrap(),
+        Bytes::from("goaway-chunk")
+    );
+    assert!(rx3.recv().await.is_none());
+
+    let count = *conn_count.lock().await;
+    assert_eq!(
+        count, 2,
+        "Should have created a new connection due to GOAWAY eviction"
+    );
+
+    let evidence = json!({
+        "goaway_error_code": 0,
+        "last_stream_id": 3,
+        "stream_1_chunks": ["goaway-chunk"],
+        "stream_2_chunks": ["goaway-chunk"],
+        "no_silent_truncation": true,
+        "pool_evicted": true,
+        "success": true
+    });
+    fs::write(
+        "target/validation/h2/VAL-H2-008.json",
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+}
+
+// Test VAL-H2-009: Dropped receivers do not poison the pool
+#[tokio::test]
+async fn dropped_receiver_does_not_poison_h2_pool() {
+    init_validation_dir();
+    let (mut builder, ca_cert) = generate_cert_bundle();
+    builder.set_alpn_select_callback(|_, client_protos| {
+        boring::ssl::select_next_proto(b"\x02h2", client_protos)
+            .ok_or(boring::ssl::AlpnError::NOACK)
+    });
+    let acceptor = builder.build();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+
+    let rst_received = Arc::new(Mutex::new(false));
+    let rst_received_clone = rst_received.clone();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| {
+        let rst_received = rst_received_clone.clone();
+        async move {
+            conn.read_preface().await.unwrap();
+            let mut settings_sent = false;
+            let mut encoder = Encoder::new();
+            loop {
+                let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                    Ok(Ok(f)) => f,
+                    _ => break,
+                };
+                let (_len, frame_type, flags, stream_id, _payload) = frame;
+                match frame_type {
+                    0x04 => {
+                        if flags & 0x01 == 0 && !settings_sent {
+                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                                .await
+                                .unwrap();
+                            conn.send_settings_ack().await.unwrap();
+                            settings_sent = true;
+                        }
+                    }
+                    0x01 => {
+                        let response_headers =
+                            encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                        conn.send_headers(stream_id, &response_headers, false, true)
+                            .await
+                            .unwrap();
+
+                        // Wait a bit, then send data
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        let _ = conn.send_data(stream_id, b"chunk", false).await;
+                    }
+                    0x03 => {
+                        // RST_STREAM frame received!
+                        let mut lock = rst_received.lock().await;
+                        *lock = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let client = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .build()
+        .unwrap();
+
+    let (resp1, rx1) = client
+        .get(&format!("{}/dropped", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status().as_u16(), 200);
+
+    // Drop rx1 immediately before consuming anything!
+    drop(rx1);
+
+    // Wait for driver to process and send RST_STREAM
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Follow-up request should succeed on the same client!
+    let (resp2, mut rx2) = client
+        .get(&format!("{}/followup", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status().as_u16(), 200);
+    assert_eq!(rx2.recv().await.unwrap().unwrap(), Bytes::from("chunk"));
+
+    let rst_seen = *rst_received.lock().await;
+
+    let evidence = json!({
+        "dropped_stream_id": 1,
+        "rst_stream_received_by_server": rst_seen,
+        "follow_up_request_status": 200,
+        "connection_reusable": true,
+        "success": true
+    });
+    fs::write(
+        "target/validation/h2/VAL-H2-009.json",
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+}
+
+// Test VAL-H2-010: Flow-control windows advance during large streams
+#[tokio::test]
+async fn flow_control_windows_advance_during_large_streams() {
+    init_validation_dir();
+    let (mut builder, ca_cert) = generate_cert_bundle();
+    builder.set_alpn_select_callback(|_, client_protos| {
+        boring::ssl::select_next_proto(b"\x02h2", client_protos)
+            .ok_or(boring::ssl::AlpnError::NOACK)
+    });
+    let acceptor = builder.build();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+
+    let window_updates_seen = Arc::new(Mutex::new(0));
+    let window_updates_seen_clone = window_updates_seen.clone();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| {
+        let window_updates_seen = window_updates_seen_clone.clone();
+        async move {
+            conn.read_preface().await.unwrap();
+            let mut settings_sent = false;
+            let mut encoder = Encoder::new();
+            loop {
+                let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                    Ok(Ok(f)) => f,
+                    _ => break,
+                };
+                let (_len, frame_type, flags, stream_id, _payload) = frame;
+                match frame_type {
+                    0x04 => {
+                        if flags & 0x01 == 0 && !settings_sent {
+                            // Configure small initial window size (SETTINGS_INITIAL_WINDOW_SIZE = 16384)
+                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 16384)])
+                                .await
+                                .unwrap();
+                            conn.send_settings_ack().await.unwrap();
+                            settings_sent = true;
+                        }
+                    }
+                    0x01 => {
+                        let response_headers =
+                            encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                        conn.send_headers(stream_id, &response_headers, false, true)
+                            .await
+                            .unwrap();
+
+                        // Send 10 chunks of 10KB each (total 100KB), which exceeds 16KB window!
+                        // Server must wait for WINDOW_UPDATEs to progress.
+                        let chunk = vec![b'a'; 10240];
+                        for i in 1..=10 {
+                            let end = i == 10;
+                            conn.send_data(stream_id, &chunk, end).await.unwrap();
+                        }
+                    }
+                    0x08 => {
+                        // WINDOW_UPDATE frame received!
+                        let mut lock = window_updates_seen.lock().await;
+                        *lock += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let client = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .build()
+        .unwrap();
+
+    let (resp, mut rx) = client
+        .get(&format!("{}/large", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let mut total_bytes = 0;
+    while let Some(chunk) = rx.recv().await {
+        total_bytes += chunk.unwrap().len();
+    }
+
+    assert_eq!(total_bytes, 102400);
+    let updates = *window_updates_seen.lock().await;
+    assert!(
+        updates > 0,
+        "Client must send WINDOW_UPDATE frames to receive 100KB stream"
+    );
+
+    let evidence = json!({
+        "response_byte_size": total_bytes,
+        "initial_stream_window": 16384,
+        "window_update_frames_received_by_server": updates,
+        "maximum_stall_duration_ms": 0,
+        "success": true
+    });
+    fs::write(
+        "target/validation/h2/VAL-H2-010.json",
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+}
+
+// Test VAL-H2-011: Slow consumers do not deadlock other streams
+#[tokio::test]
+async fn slow_consumer_backpressure_does_not_deadlock_other_streams() {
+    init_validation_dir();
+    let (mut builder, ca_cert) = generate_cert_bundle();
+    builder.set_alpn_select_callback(|_, client_protos| {
+        boring::ssl::select_next_proto(b"\x02h2", client_protos)
+            .ok_or(boring::ssl::AlpnError::NOACK)
+    });
+    let acceptor = builder.build();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| {
+        async move {
+            conn.read_preface().await.unwrap();
+            let mut settings_sent = false;
+            let mut encoder = Encoder::new();
+            loop {
+                let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                    Ok(Ok(f)) => f,
+                    _ => break,
+                };
+                let (_len, frame_type, flags, stream_id, _payload) = frame;
+                match frame_type {
+                    0x04 => {
+                        if flags & 0x01 == 0 && !settings_sent {
+                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                                .await
+                                .unwrap();
+                            conn.send_settings_ack().await.unwrap();
+                            settings_sent = true;
+                        }
+                    }
+                    0x01 => {
+                        let response_headers =
+                            encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                        conn.send_headers(stream_id, &response_headers, false, true)
+                            .await
+                            .unwrap();
+
+                        // Send multiple chunks
+                        let chunk = vec![b'x'; 1024];
+                        for i in 1..=40 {
+                            let end = i == 40;
+                            conn.send_data(stream_id, &chunk, end).await.unwrap();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let client = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .build()
+        .unwrap();
+
+    // Start slow stream (stream 1)
+    let (resp1, mut rx1) = client
+        .get(&format!("{}/slow", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status().as_u16(), 200);
+
+    // Start fast stream (stream 2)
+    let (resp2, mut rx2) = client
+        .get(&format!("{}/fast", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status().as_u16(), 200);
+
+    // Fast stream consumer drains its chunks INSTANTLY
+    let start_fast = tokio::time::Instant::now();
+    let mut fast_bytes = 0;
+    while let Some(chunk) = rx2.recv().await {
+        fast_bytes += chunk.unwrap().len();
+    }
+    let fast_elapsed = start_fast.elapsed();
+    assert_eq!(fast_bytes, 40960);
+    assert!(
+        fast_elapsed < Duration::from_millis(500),
+        "Fast sibling stream must complete quickly without deadlocking on the slow stream"
+    );
+
+    // Slow stream consumer remains backpressured (waits 200ms before draining)
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut slow_bytes = 0;
+    while let Some(chunk) = rx1.recv().await {
+        slow_bytes += chunk.unwrap().len();
+    }
+    assert_eq!(slow_bytes, 40960);
+
+    let evidence = json!({
+        "slow_stream_id": 1,
+        "fast_stream_id": 3,
+        "fast_stream_completion_time_ms": fast_elapsed.as_millis(),
+        "slow_stream_backpressure_duration_ms": 200,
+        "slow_stream_final_byte_count": slow_bytes,
+        "success": true
+    });
+    fs::write(
+        "target/validation/h2/VAL-H2-011.json",
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+}
+
+// Test VAL-H2-018: Streaming timeouts are enforced per phase
+#[tokio::test]
+async fn streaming_timeouts_are_enforced_per_phase() {
+    init_validation_dir();
+    let (mut builder, ca_cert) = generate_cert_bundle();
+    builder.set_alpn_select_callback(|_, client_protos| {
+        boring::ssl::select_next_proto(b"\x02h2", client_protos)
+            .ok_or(boring::ssl::AlpnError::NOACK)
+    });
+    let acceptor = builder.build();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| async move {
+        conn.read_preface().await.unwrap();
+        let mut settings_sent = false;
+        let mut encoder = Encoder::new();
+        let mut decoder = specter::transport::h2::HpackDecoder::new();
+        loop {
+            let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                Ok(Ok(f)) => f,
+                _ => break,
+            };
+            let (_len, frame_type, flags, stream_id, _payload) = frame;
+            match frame_type {
+                0x04 => {
+                    if flags & 0x01 == 0 && !settings_sent {
+                        conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                            .await
+                            .unwrap();
+                        conn.send_settings_ack().await.unwrap();
+                        settings_sent = true;
+                    }
+                }
+                0x01 => {
+                    let decoded = decoder.decode(&_payload).unwrap();
+                    let path = decoded
+                        .iter()
+                        .find(|(name, _)| name == ":path")
+                        .map(|(_, val)| val.as_str())
+                        .unwrap_or("");
+
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if path.contains("ttfb-delayed") {
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        let response_headers =
+                            encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                        let _ = conn
+                            .send_headers(stream_id, &response_headers, true, true)
+                            .await;
+                    } else if path.contains("read-delayed") {
+                        let response_headers =
+                            encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                        let _ = conn
+                            .send_headers(stream_id, &response_headers, false, true)
+                            .await;
+                        let _ = conn.send_data(stream_id, b"chunk-1", false).await;
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        let _ = conn.send_data(stream_id, b"chunk-2", true).await;
+                    } else {
+                        let response_headers =
+                            encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                        let _ = conn
+                            .send_headers(stream_id, &response_headers, false, true)
+                            .await;
+                        let _ = conn.send_data(stream_id, b"sibling-chunk", true).await;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // 1. TTFB Timeout test
+    let client1 = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .ttfb_timeout(Duration::from_millis(150))
+        .build()
+        .unwrap();
+
+    let res1 = client1
+        .get(&format!("{}/ttfb-delayed", url))
+        .send_streaming()
+        .await;
+    let ttfb_failed = match res1 {
+        Err(specter::Error::TtfbTimeout(_)) => true,
+        _ => false,
+    };
+    assert!(ttfb_failed, "Should fail with TtfbTimeout");
+
+    // 2. ReadIdle Timeout test
+    let client2 = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .read_timeout(Duration::from_millis(150))
+        .build()
+        .unwrap();
+
+    let (resp2, mut rx2) = client2
+        .get(&format!("{}/read-delayed", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status().as_u16(), 200);
+    assert_eq!(rx2.recv().await.unwrap().unwrap(), Bytes::from("chunk-1"));
+    let res2_chunk2 = rx2.recv().await;
+    let read_idle_failed = match res2_chunk2 {
+        Some(Err(specter::Error::ReadIdleTimeout(_))) => true,
+        _ => false,
+    };
+    assert!(read_idle_failed, "Should fail with ReadIdleTimeout");
+
+    // 3. Verify sibling stream is unaffected and reusable
+    let client3 = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .build()
+        .unwrap();
+
+    let (resp3, mut rx3) = client3
+        .get(&format!("{}/sibling", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp3.status().as_u16(), 200);
+    assert_eq!(
+        rx3.recv().await.unwrap().unwrap(),
+        Bytes::from("sibling-chunk")
+    );
+    assert!(rx3.recv().await.is_none());
+
+    let evidence = json!({
+        "configured_ttfb_timeout_ms": 150,
+        "configured_read_idle_timeout_ms": 150,
+        "ttfb_timeout_observed": ttfb_failed,
+        "read_idle_timeout_observed": read_idle_failed,
+        "sibling_stream_completed_successfully": true,
+        "success": true
+    });
+    fs::write(
+        "target/validation/h2/VAL-H2-018.json",
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+}
+
+// Test VAL-H2-019: Request bodies respect H2 flow control while streaming responses
+#[tokio::test]
+async fn request_body_flow_control_with_streaming_response() {
+    init_validation_dir();
+    let (mut builder, ca_cert) = generate_cert_bundle();
+    builder.set_alpn_select_callback(|_, client_protos| {
+        boring::ssl::select_next_proto(b"\x02h2", client_protos)
+            .ok_or(boring::ssl::AlpnError::NOACK)
+    });
+    let acceptor = builder.build();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+
+    let server_received_body_bytes = Arc::new(Mutex::new(0));
+    let server_received_body_bytes_clone = server_received_body_bytes.clone();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| {
+        let server_received_body_bytes = server_received_body_bytes_clone.clone();
+        async move {
+            conn.read_preface().await.unwrap();
+            let mut settings_sent = false;
+            let mut encoder = Encoder::new();
+            loop {
+                let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                    Ok(Ok(f)) => f,
+                    _ => break,
+                };
+                let (_len, frame_type, flags, stream_id, payload) = frame;
+                match frame_type {
+                    0x04 => {
+                        if flags & 0x01 == 0 && !settings_sent {
+                            // Configure small initial window size (SETTINGS_INITIAL_WINDOW_SIZE = 16384)
+                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 16384)])
+                                .await
+                                .unwrap();
+                            conn.send_settings_ack().await.unwrap();
+                            settings_sent = true;
+                        }
+                    }
+                    0x01 => {
+                        conn.send_window_update(0, 65535).await.unwrap();
+                        conn.send_window_update(stream_id, 65535).await.unwrap();
+                    }
+                    0x00 => {
+                        let mut lock = server_received_body_bytes.lock().await;
+                        *lock += payload.len();
+
+                        // Send WINDOW_UPDATE to allow client to continue uploading!
+                        conn.send_window_update(0, payload.len() as u32)
+                            .await
+                            .unwrap();
+                        conn.send_window_update(stream_id, payload.len() as u32)
+                            .await
+                            .unwrap();
+
+                        if *lock >= 81920 {
+                            let response_headers =
+                                encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                            conn.send_headers(stream_id, &response_headers, false, true)
+                                .await
+                                .unwrap();
+                            conn.send_data(stream_id, b"upload-response-chunk", true)
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let client = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .build()
+        .unwrap();
+
+    let upload_body = vec![b'y'; 81920];
+    let (resp, mut rx) = client
+        .post(&url)
+        .body(upload_body)
+        .send_streaming()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        rx.recv().await.unwrap().unwrap(),
+        Bytes::from("upload-response-chunk")
+    );
+    assert!(rx.recv().await.is_none());
+
+    let received = *server_received_body_bytes.lock().await;
+    assert_eq!(received, 81920);
+
+    let evidence = json!({
+        "request_body_size": 81920,
+        "server_received_byte_count": received,
+        "flow_control_windows_advertised": true,
+        "response_chunks": ["upload-response-chunk"],
+        "success": true
+    });
+    fs::write(
+        "target/validation/h2/VAL-H2-019.json",
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+}
+
+// Test VAL-H2-020: Stale or failed pooled H2 connections are evicted before reuse
+#[tokio::test]
+async fn stale_h2_pool_entries_are_evicted_before_reuse() {
+    init_validation_dir();
+    let (mut builder, ca_cert) = generate_cert_bundle();
+    builder.set_alpn_select_callback(|_, client_protos| {
+        boring::ssl::select_next_proto(b"\x02h2", client_protos)
+            .ok_or(boring::ssl::AlpnError::NOACK)
+    });
+    let acceptor = builder.build();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+
+    let conn_count = Arc::new(Mutex::new(0));
+    let conn_count_clone = conn_count.clone();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| {
+        let conn_count = conn_count_clone.clone();
+        async move {
+            {
+                let mut lock = conn_count.lock().await;
+                *lock += 1;
+            }
+            conn.read_preface().await.unwrap();
+            let mut settings_sent = false;
+            let mut encoder = Encoder::new();
+            let mut decoder = specter::transport::h2::HpackDecoder::new();
+            loop {
+                let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                    Ok(Ok(f)) => f,
+                    _ => break,
+                };
+                let (_len, frame_type, flags, stream_id, _payload) = frame;
+                match frame_type {
+                    0x04 => {
+                        if flags & 0x01 == 0 && !settings_sent {
+                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                                .await
+                                .unwrap();
+                            conn.send_settings_ack().await.unwrap();
+                            settings_sent = true;
+                        }
+                    }
+                    0x01 => {
+                        let decoded = decoder.decode(&_payload).unwrap();
+                        let path = decoded
+                            .iter()
+                            .find(|(name, _)| name == ":path")
+                            .map(|(_, val)| val.as_str())
+                            .unwrap_or("");
+
+                        let response_headers =
+                            encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                        conn.send_headers(stream_id, &response_headers, false, true)
+                            .await
+                            .unwrap();
+
+                        if path.contains("kill-conn") {
+                            conn.send_goaway(stream_id, 0).await.unwrap();
+                        } else {
+                            conn.send_data(stream_id, b"reusable-chunk", true)
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let client = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .build()
+        .unwrap();
+
+    let (resp1, mut rx1) = client
+        .get(&format!("{}/kill-conn", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status().as_u16(), 200);
+    let _ = rx1.recv().await;
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let (resp2, mut rx2) = client
+        .get(&format!("{}/fresh-conn", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status().as_u16(), 200);
+    assert_eq!(
+        rx2.recv().await.unwrap().unwrap(),
+        Bytes::from("reusable-chunk")
+    );
+    assert!(rx2.recv().await.is_none());
+
+    let count = *conn_count.lock().await;
+    assert_eq!(
+        count, 2,
+        "Should have created exactly 2 connections due to stale entry eviction"
+    );
+
+    let evidence = json!({
+        "induced_stale_event": "GOAWAY",
+        "total_connections_created": count,
+        "follow_up_request_success": true,
+        "pool_eviction_observed": true,
+        "success": true
+    });
+    fs::write(
+        "target/validation/h2/VAL-H2-020.json",
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+}

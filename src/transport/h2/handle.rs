@@ -18,12 +18,28 @@ use crate::transport::h2::tunnel::H2Tunnel;
 pub struct H2Handle {
     /// Channel for sending commands to the driver
     command_tx: mpsc::Sender<DriverCommand>,
+    /// Shared flag set when GOAWAY is received
+    goaway_received: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl H2Handle {
     /// Create a new handle with a command channel to the driver
-    pub fn new(command_tx: mpsc::Sender<DriverCommand>) -> Self {
-        Self { command_tx }
+    pub fn new(
+        command_tx: mpsc::Sender<DriverCommand>,
+        goaway_received: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            command_tx,
+            goaway_received,
+        }
+    }
+
+    /// Check if the driver is still running and hasn't received GOAWAY
+    pub fn is_alive(&self) -> bool {
+        !self.command_tx.is_closed()
+            && !self
+                .goaway_received
+                .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Send an HTTP/2 request and receive the response.
@@ -79,6 +95,18 @@ impl H2Handle {
         // Allocate channels for headers and body
         let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
         let (body_tx, body_rx) = mpsc::channel(32);
+        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<Result<Bytes>>();
+
+        // Spawn a forwarder task to route from unbounded channel to user-visible bounded channel.
+        // This isolates the driver from any slow consumers!
+        let body_tx_clone = body_tx.clone();
+        tokio::spawn(async move {
+            while let Some(item) = internal_rx.recv().await {
+                if body_tx_clone.send(item).await.is_err() {
+                    break;
+                }
+            }
+        });
 
         // Send command to driver
         let command = DriverCommand::SendStreamingRequest {
@@ -86,7 +114,7 @@ impl H2Handle {
             uri: uri.clone(),
             headers,
             body,
-            body_tx,
+            body_tx: internal_tx,
             headers_tx,
         };
 

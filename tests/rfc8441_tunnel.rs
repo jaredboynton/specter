@@ -97,14 +97,15 @@ async fn write_headers(
 fn spawn_driver() -> (H2Handle, DuplexStream, tokio::task::JoinHandle<()>) {
     let (client, server) = duplex(8192);
     let (command_tx, command_rx) = mpsc::channel(8);
-    let handle = H2Handle::new(command_tx.clone());
+    let goaway_received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handle = H2Handle::new(command_tx.clone(), goaway_received.clone());
     let driver_command_tx = command_tx;
     let driver_task = tokio::spawn(async move {
         let conn =
             RawH2Connection::connect(client, Http2Settings::default(), PseudoHeaderOrder::Chrome)
                 .await
                 .unwrap();
-        let driver = H2Driver::new(conn, driver_command_tx, command_rx);
+        let driver = H2Driver::new(conn, driver_command_tx, command_rx, goaway_received);
         let _ = driver.drive().await;
     });
     (handle, server, driver_task)
@@ -113,7 +114,8 @@ fn spawn_driver() -> (H2Handle, DuplexStream, tokio::task::JoinHandle<()>) {
 #[tokio::test]
 async fn rfc8441_handle_open_websocket_tunnel_sends_driver_command() {
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let handle = H2Handle::new(command_tx);
+    let goaway_received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handle = H2Handle::new(command_tx, goaway_received);
     let uri: Uri = "wss://example.com/chat".parse().unwrap();
 
     let open = tokio::spawn(async move {
@@ -170,7 +172,8 @@ async fn rfc8441_handle_open_websocket_tunnel_sends_driver_command() {
 #[tokio::test]
 async fn rfc8441_handle_reports_driver_open_error() {
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let handle = H2Handle::new(command_tx);
+    let goaway_received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handle = H2Handle::new(command_tx, goaway_received);
     let uri: Uri = "wss://example.com/chat".parse().unwrap();
 
     let open = tokio::spawn(async move { handle.open_websocket_tunnel(uri, vec![]).await });

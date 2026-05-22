@@ -153,9 +153,15 @@ impl H2PooledConnection {
     pub fn new(conn: H2Connection) -> Self {
         const CHANNEL_BUFFER: usize = 32;
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER);
+        let goaway_received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         // Extract the inner connection
-        let driver = H2Driver::new(conn.inner, command_tx.clone(), command_rx);
+        let driver = H2Driver::new(
+            conn.inner,
+            command_tx.clone(),
+            command_rx,
+            goaway_received.clone(),
+        );
 
         // Spawn driver task
         tokio::spawn(async move {
@@ -164,9 +170,14 @@ impl H2PooledConnection {
             }
         });
 
-        let handle = H2Handle::new(command_tx);
+        let handle = H2Handle::new(command_tx, goaway_received);
 
         Self { handle }
+    }
+
+    /// Check if the connection is alive (the driver is still running and hasn't received GOAWAY)
+    pub fn is_alive(&self) -> bool {
+        self.handle.is_alive()
     }
 
     /// Send a request using this pooled connection.
