@@ -53,22 +53,16 @@ impl H3Tunnel {
     }
 
     pub async fn recv_bytes(&mut self) -> Option<Result<Bytes>> {
-        loop {
-            match self.recv_event().await? {
-                Ok(H3TunnelEvent::Data(bytes)) => return Some(Ok(bytes)),
-                Ok(H3TunnelEvent::EndStream) => return None,
-                Ok(H3TunnelEvent::Reset(reason)) => {
-                    return Some(Err(Error::HttpProtocol(format!(
-                        "H3 tunnel reset: {reason}"
-                    ))));
-                }
-                Ok(H3TunnelEvent::GoAway { id }) => {
-                    return Some(Err(Error::HttpProtocol(format!(
-                        "H3 tunnel closed by GOAWAY id={id}"
-                    ))));
-                }
-                Err(err) => return Some(Err(err)),
-            }
+        match self.recv_event().await? {
+            Ok(H3TunnelEvent::Data(bytes)) => Some(Ok(bytes)),
+            Ok(H3TunnelEvent::EndStream) => None,
+            Ok(H3TunnelEvent::Reset(reason)) => Some(Err(Error::HttpProtocol(format!(
+                "H3 tunnel reset: {reason}"
+            )))),
+            Ok(H3TunnelEvent::GoAway { id }) => Some(Err(Error::HttpProtocol(format!(
+                "H3 tunnel closed by GOAWAY id={id}"
+            )))),
+            Err(err) => Some(Err(err)),
         }
     }
 }

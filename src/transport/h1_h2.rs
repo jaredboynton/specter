@@ -401,9 +401,7 @@ impl<'a> WebSocketH3Builder<'a> {
         let mut h3_client = self.client.h3_client.clone();
         if self.client.danger_accept_invalid_certs
             || (self.client.localhost_allows_invalid_certs
-                && h3_url
-                    .host_str()
-                    .is_some_and(|host| Client::is_localhost(host)))
+                && h3_url.host_str().is_some_and(Client::is_localhost))
         {
             h3_client = h3_client.danger_accept_invalid_certs(true);
         }

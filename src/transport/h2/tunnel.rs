@@ -53,22 +53,16 @@ impl H2Tunnel {
     }
 
     pub async fn recv_bytes(&mut self) -> Option<Result<Bytes>> {
-        loop {
-            match self.recv_event().await? {
-                Ok(H2TunnelEvent::Data(bytes)) => return Some(Ok(bytes)),
-                Ok(H2TunnelEvent::EndStream) => return None,
-                Ok(H2TunnelEvent::Reset(reason)) => {
-                    return Some(Err(Error::HttpProtocol(format!(
-                        "H2 tunnel reset: {reason}"
-                    ))));
-                }
-                Ok(H2TunnelEvent::GoAway { last_stream_id }) => {
-                    return Some(Err(Error::HttpProtocol(format!(
-                        "H2 tunnel closed by GOAWAY last_stream_id={last_stream_id}"
-                    ))));
-                }
-                Err(err) => return Some(Err(err)),
-            }
+        match self.recv_event().await? {
+            Ok(H2TunnelEvent::Data(bytes)) => Some(Ok(bytes)),
+            Ok(H2TunnelEvent::EndStream) => None,
+            Ok(H2TunnelEvent::Reset(reason)) => Some(Err(Error::HttpProtocol(format!(
+                "H2 tunnel reset: {reason}"
+            )))),
+            Ok(H2TunnelEvent::GoAway { last_stream_id }) => Some(Err(Error::HttpProtocol(
+                format!("H2 tunnel closed by GOAWAY last_stream_id={last_stream_id}"),
+            ))),
+            Err(err) => Some(Err(err)),
         }
     }
 }
