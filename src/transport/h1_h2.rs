@@ -631,9 +631,37 @@ impl<'a> RequestBuilder<'a> {
         let version = request.version.unwrap_or(client.default_version);
 
         if matches!(version, HttpVersion::Http3 | HttpVersion::Http3Only) {
-            return Err(Error::HttpProtocol(
-                "Streaming only supported for HTTP/1.1 and HTTP/2".into(),
-            ));
+            let body = if request.body.is_empty() {
+                None
+            } else {
+                Some(request.body.clone().into_bytes()?.to_vec())
+            };
+
+            let fut = client.h3_client.send_streaming(
+                request.url.as_str(),
+                request.method.as_str(),
+                headers.to_vec(),
+                body,
+            );
+
+            let (response, rx) = if let Some(total_timeout) = timeouts.total {
+                tokio_timeout(total_timeout, fut)
+                    .await
+                    .map_err(|_| Error::TotalTimeout(total_timeout))??
+            } else {
+                fut.await?
+            };
+
+            let request_url = request.url.clone();
+            let response = response.with_url(request_url.clone());
+
+            if let Some(jar) = &client.cookie_store {
+                jar.write()
+                    .await
+                    .store_from_headers(response.headers(), request_url.as_str());
+            }
+
+            return Ok((response, rx));
         }
 
         // Parse URI
@@ -880,6 +908,19 @@ impl<'a> RequestBuilder<'a> {
                 (response, rx)
             }
         };
+
+        if let Some(enc) = response.content_encoding() {
+            let enc_lc = enc.to_lowercase();
+            if enc_lc.contains("gzip")
+                || enc_lc.contains("deflate")
+                || enc_lc.contains("br")
+                || enc_lc.contains("zstd")
+            {
+                return Err(Error::Decompression(
+                    "Compressed streaming is unsupported".into(),
+                ));
+            }
+        }
 
         // Wrap the raw receiver with timeout enforcement (read_idle and total timeout)
         let (wrapped_tx, wrapped_rx) = tokio::sync::mpsc::channel(32);

@@ -4,6 +4,7 @@ use quiche::h3::NameValue;
 use quiche::ConnectionId;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
@@ -41,6 +42,7 @@ pub struct MockH3Server {
     cert_path: String,
     key_path: String,
     enable_extended_connect: bool,
+    connection_count: Arc<AtomicUsize>,
 }
 
 impl MockH3Server {
@@ -79,6 +81,7 @@ impl MockH3Server {
             cert_path: cert_path.to_str().unwrap().to_string(),
             key_path: key_path.to_str().unwrap().to_string(),
             enable_extended_connect: false,
+            connection_count: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -94,6 +97,10 @@ impl MockH3Server {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    pub fn connection_count(&self) -> Arc<AtomicUsize> {
+        self.connection_count.clone()
     }
 
     pub fn start<F, Fut>(self, handler: F) -> tokio::task::JoinHandle<()>
@@ -142,6 +149,7 @@ impl MockH3Server {
         let cert_path = self.cert_path.clone();
         let key_path = self.key_path.clone();
         let enable_extended_connect = self.enable_extended_connect;
+        let connection_count = self.connection_count.clone();
 
         loop {
             let (len, peer) = match socket.recv_from(&mut buf).await {
@@ -188,6 +196,7 @@ impl MockH3Server {
 
                 let (tx, mut rx) = mpsc::channel(100);
                 connections.insert(scid.clone(), tx.clone());
+                connection_count.fetch_add(1, Ordering::SeqCst);
 
                 // Spawn connection handler
                 let socket_clone = socket.clone();
@@ -407,6 +416,7 @@ impl MockH3Server {
 }
 
 #[allow(dead_code)]
+#[allow(clippy::enum_variant_names)]
 enum MockCommand {
     SendFrame {
         stream_id: u64,

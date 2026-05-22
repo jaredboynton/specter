@@ -16,6 +16,8 @@ use tokio::time::sleep;
 use crate::error::{Error, Result};
 use crate::transport::h3::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 
+pub type StreamingHeadersResult = Result<(u16, Vec<(String, String)>)>;
+
 /// Command sent from handle to driver.
 #[derive(Debug)]
 pub enum DriverCommand {
@@ -26,6 +28,16 @@ pub enum DriverCommand {
         headers: Vec<(String, String)>,
         body: Option<Bytes>,
         response_tx: oneshot::Sender<Result<StreamResponse>>,
+    },
+    /// Send a request and return headers as soon as they arrive, with DATA routed
+    /// incrementally through the body channel.
+    SendStreamingRequest {
+        method: http::Method,
+        uri: http::Uri,
+        headers: Vec<(String, String)>,
+        body: Option<Bytes>,
+        headers_tx: oneshot::Sender<StreamingHeadersResult>,
+        body_tx: mpsc::Sender<Result<Bytes>>,
     },
     /// Open an RFC 9220 WebSocket-over-HTTP/3 tunnel.
     OpenWebSocketTunnel {
@@ -50,6 +62,8 @@ pub struct StreamResponse {
 /// Per-stream state tracked by driver.
 struct DriverStreamState {
     response_tx: Option<oneshot::Sender<Result<StreamResponse>>>,
+    streaming_headers_tx: Option<oneshot::Sender<StreamingHeadersResult>>,
+    streaming_body_tx: Option<mpsc::Sender<Result<Bytes>>>,
     status: Option<u16>,
     headers: Vec<(String, String)>,
     body: BytesMut,
@@ -59,6 +73,22 @@ impl DriverStreamState {
     fn new(response_tx: oneshot::Sender<Result<StreamResponse>>) -> Self {
         Self {
             response_tx: Some(response_tx),
+            streaming_headers_tx: None,
+            streaming_body_tx: None,
+            status: None,
+            headers: Vec::new(),
+            body: BytesMut::new(),
+        }
+    }
+
+    fn streaming(
+        headers_tx: oneshot::Sender<StreamingHeadersResult>,
+        body_tx: mpsc::Sender<Result<Bytes>>,
+    ) -> Self {
+        Self {
+            response_tx: None,
+            streaming_headers_tx: Some(headers_tx),
+            streaming_body_tx: Some(body_tx),
             status: None,
             headers: Vec::new(),
             body: BytesMut::new(),
@@ -244,6 +274,9 @@ impl H3Driver {
     async fn handle_command(&mut self, cmd: DriverCommand) -> Result<()> {
         match cmd {
             DriverCommand::SendRequest { .. } => self.handle_send_request(cmd).await?,
+            DriverCommand::SendStreamingRequest { .. } => {
+                self.handle_send_streaming_request(cmd).await?
+            }
             DriverCommand::OpenWebSocketTunnel { .. } => {
                 self.handle_open_websocket_tunnel(cmd).await?
             }
@@ -336,6 +369,77 @@ impl H3Driver {
                 Err(e) => {
                     let _ =
                         response_tx.send(Err(Error::Quic(format!("Send request failed: {}", e))));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_send_streaming_request(&mut self, cmd: DriverCommand) -> Result<()> {
+        if let DriverCommand::SendStreamingRequest {
+            method,
+            uri,
+            headers,
+            body,
+            headers_tx,
+            body_tx,
+        } = cmd
+        {
+            if self.goaway_id.is_some() {
+                let _ = headers_tx.send(Err(Error::HttpProtocol(
+                    "HTTP/3 GOAWAY received; refusing new streaming request".into(),
+                )));
+                return Ok(());
+            }
+
+            let h3_headers = match build_request_headers(&method, &uri, &headers) {
+                Ok(headers) => headers,
+                Err(err) => {
+                    let _ = headers_tx.send(Err(err));
+                    return Ok(());
+                }
+            };
+
+            let fin = body.is_none();
+            match self.h3_conn.send_request(&mut self.conn, &h3_headers, fin) {
+                Ok(stream_id) => {
+                    let mut state = DriverStreamState::streaming(headers_tx, body_tx);
+
+                    if let Some(data) = body {
+                        match self
+                            .h3_conn
+                            .send_body(&mut self.conn, stream_id, &data, true)
+                        {
+                            Ok(sent) if sent == data.len() => {}
+                            Ok(sent) => {
+                                if let Some(tx) = state.streaming_headers_tx.take() {
+                                    let _ = tx.send(Err(Error::Quic(format!(
+                                        "Partial H3 streaming request body write: sent {sent} of {} bytes",
+                                        data.len()
+                                    ))));
+                                }
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                if let Some(tx) = state.streaming_headers_tx.take() {
+                                    let _ = tx.send(Err(Error::Quic(format!(
+                                        "Send streaming body failed: {}",
+                                        e
+                                    ))));
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    self.streams.insert(stream_id, state);
+                }
+                Err(e) => {
+                    let _ = headers_tx.send(Err(Error::Quic(format!(
+                        "Send streaming request failed: {}",
+                        e
+                    ))));
                 }
             }
         }
@@ -553,9 +657,13 @@ impl H3Driver {
 
                 if name == ":status" {
                     stream.status = value.parse().ok();
-                } else {
+                } else if !name.starts_with(':') {
                     stream.headers.push((name.into_owned(), value.into_owned()));
                 }
+            }
+
+            if let (Some(status), Some(tx)) = (stream.status, stream.streaming_headers_tx.take()) {
+                let _ = tx.send(Ok((status, stream.headers.clone())));
             }
         }
 
@@ -592,7 +700,19 @@ impl H3Driver {
             loop {
                 match self.h3_conn.recv_body(&mut self.conn, stream_id, &mut buf) {
                     Ok(0) => break,
-                    Ok(len) => stream.body.extend_from_slice(&buf[..len]),
+                    Ok(len) => {
+                        if let Some(tx) = &stream.streaming_body_tx {
+                            if tx
+                                .send(Ok(Bytes::copy_from_slice(&buf[..len])))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        } else {
+                            stream.body.extend_from_slice(&buf[..len]);
+                        }
+                    }
                     Err(quiche::h3::Error::Done) => break,
                     Err(e) => return Err(Error::Quic(format!("H3 recv body failed: {}", e))),
                 }
@@ -628,6 +748,15 @@ impl H3Driver {
                     ))),
                 };
                 let _ = tx.send(response);
+            } else if let Some(tx) = stream.streaming_headers_tx.take() {
+                let response = match stream.status {
+                    Some(status) => Ok((status, stream.headers)),
+                    None => Err(Error::HttpProtocol(format!(
+                        "H3 stream {} completed without status code",
+                        stream_id
+                    ))),
+                };
+                let _ = tx.send(response);
             }
         }
 
@@ -650,6 +779,12 @@ impl H3Driver {
         if let Some(mut stream) = self.streams.remove(&stream_id) {
             if let Some(tx) = stream.response_tx.take() {
                 let _ = tx.send(Err(Error::Quic(format!("Stream reset: {}", error_code))));
+            } else if let Some(tx) = stream.streaming_headers_tx.take() {
+                let _ = tx.send(Err(Error::Quic(format!("Stream reset: {}", error_code))));
+            } else if let Some(tx) = stream.streaming_body_tx.take() {
+                let _ = tx
+                    .send(Err(Error::Quic(format!("Stream reset: {}", error_code))))
+                    .await;
             }
         }
 
@@ -685,6 +820,16 @@ impl H3Driver {
                         let _ = tx.send(Err(Error::HttpProtocol(format!(
                             "HTTP/3 GOAWAY received id={id}"
                         ))));
+                    } else if let Some(tx) = stream.streaming_headers_tx.take() {
+                        let _ = tx.send(Err(Error::HttpProtocol(format!(
+                            "HTTP/3 GOAWAY received id={id}"
+                        ))));
+                    } else if let Some(tx) = stream.streaming_body_tx.take() {
+                        let _ = tx
+                            .send(Err(Error::HttpProtocol(format!(
+                                "HTTP/3 GOAWAY received id={id}"
+                            ))))
+                            .await;
                     }
                 }
             }
@@ -697,6 +842,10 @@ impl H3Driver {
         for (_, mut stream) in self.streams.drain() {
             if let Some(tx) = stream.response_tx.take() {
                 let _ = tx.send(Err(Error::HttpProtocol(err.to_string())));
+            } else if let Some(tx) = stream.streaming_headers_tx.take() {
+                let _ = tx.send(Err(Error::HttpProtocol(err.to_string())));
+            } else if let Some(tx) = stream.streaming_body_tx.take() {
+                let _ = tx.send(Err(Error::HttpProtocol(err.to_string()))).await;
             }
         }
 
@@ -720,6 +869,9 @@ impl H3Driver {
         match cmd {
             DriverCommand::SendRequest { response_tx, .. } => {
                 let _ = response_tx.send(Err(Error::HttpProtocol(err.to_string())));
+            }
+            DriverCommand::SendStreamingRequest { headers_tx, .. } => {
+                let _ = headers_tx.send(Err(Error::HttpProtocol(err.to_string())));
             }
             DriverCommand::OpenWebSocketTunnel { response_tx, .. } => {
                 let _ = response_tx.send(Err(Error::HttpProtocol(err.to_string())));

@@ -19,12 +19,24 @@ pub use tunnel::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 use crate::error::{Error, Result};
 use crate::fingerprint::tls::TlsFingerprint;
 use crate::response::Response;
+use bytes::Bytes;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct H3PoolKey {
+    host: String,
+    port: u16,
+    verify_peer: bool,
+    fingerprint: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct H3Client {
     tls_fingerprint: Option<TlsFingerprint>,
     verify_peer: bool,
-    // In future: connection pool
+    pool: Arc<RwLock<HashMap<H3PoolKey, H3Handle>>>,
 }
 
 impl Default for H3Client {
@@ -38,6 +50,7 @@ impl H3Client {
         Self {
             tls_fingerprint: None,
             verify_peer: true,
+            pool: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -45,6 +58,7 @@ impl H3Client {
         Self {
             tls_fingerprint: Some(fp),
             verify_peer: true,
+            pool: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -55,9 +69,7 @@ impl H3Client {
     }
 
     /// Send a request.
-    /// Warning: Currently establishes a NEW connection every time (simple wrapper).
-    /// To use multiplexing, use `connect()` to get a handle, then reuse handle.
-    /// This method is for convenience/backwards compat.
+    /// Reuses pooled HTTP/3 connections for the same authority and fingerprint-relevant config.
     pub async fn send_request(
         &self,
         url: &str,
@@ -65,13 +77,7 @@ impl H3Client {
         headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
     ) -> Result<Response> {
-        let (_host, _port, _path) = parse_url_host(url)?;
-
-        // This is inefficient (new connection per request) but compatible.
-        // Implementing full pooling inside H3Client is Phase 2.
-
-        let config = self.create_quic_config()?;
-        let handle = H3Connection::connect(url, config).await?;
+        let handle = self.pooled_handle(url).await?;
 
         // Convert body
         let body_bytes = body.map(bytes::Bytes::from);
@@ -88,19 +94,77 @@ impl H3Client {
             .await
     }
 
+    /// Send a request and stream the response body incrementally.
+    pub async fn send_streaming(
+        &self,
+        url: &str,
+        method: &str,
+        headers: Vec<(String, String)>,
+        body: Option<Vec<u8>>,
+    ) -> Result<(Response, mpsc::Receiver<Result<Bytes>>)> {
+        let handle = self.pooled_handle(url).await?;
+        let uri: http::Uri = url
+            .parse()
+            .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
+        let method_http: http::Method = method
+            .parse()
+            .map_err(|_| Error::HttpProtocol("Invalid Method".into()))?;
+        let body_bytes = body.map(Bytes::from);
+
+        handle
+            .send_streaming_request(method_http, &uri, headers, body_bytes)
+            .await
+    }
+
     /// Open a WebSocket-over-HTTP/3 tunnel using RFC 9220 Extended CONNECT.
     pub async fn open_websocket_tunnel(
         &self,
         url: &str,
         headers: Vec<(String, String)>,
     ) -> Result<H3Tunnel> {
-        let config = self.create_quic_config()?;
-        let handle = H3Connection::connect(url, config).await?;
+        let handle = self.pooled_handle(url).await?;
         let uri: http::Uri = url
             .parse()
             .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
 
         handle.open_websocket_tunnel(uri, headers).await
+    }
+
+    async fn pooled_handle(&self, url: &str) -> Result<H3Handle> {
+        let key = self.pool_key(url)?;
+
+        if let Some(handle) = self.pool.read().await.get(&key).cloned() {
+            if !handle.is_closed() {
+                return Ok(handle);
+            }
+        }
+
+        let mut pool = self.pool.write().await;
+        if let Some(handle) = pool.get(&key).cloned() {
+            if !handle.is_closed() {
+                return Ok(handle);
+            }
+            pool.remove(&key);
+        }
+
+        let config = self.create_quic_config()?;
+        let handle = H3Connection::connect(url, config).await?;
+        pool.insert(key, handle.clone());
+        Ok(handle)
+    }
+
+    fn pool_key(&self, url: &str) -> Result<H3PoolKey> {
+        let (host, port, _path) = parse_url_host(url)?;
+        Ok(H3PoolKey {
+            host,
+            port,
+            verify_peer: self.verify_peer,
+            fingerprint: self
+                .tls_fingerprint
+                .as_ref()
+                .map(|fp| format!("{fp:?}"))
+                .unwrap_or_else(|| "default".to_string()),
+        })
     }
 
     pub(crate) fn create_quic_config(&self) -> Result<quiche::Config> {
@@ -200,6 +264,14 @@ impl H3Client {
 
 fn parse_url_host(url: &str) -> Result<(String, u16, String)> {
     let u = url::Url::parse(url).map_err(|e| Error::Connection(e.to_string()))?;
-    let host = u.host_str().unwrap_or("").to_string();
-    Ok((host, 0, "".into()))
+    if u.scheme() != "https" {
+        return Err(Error::Connection("HTTP/3 requires https".into()));
+    }
+    let host = u
+        .host_str()
+        .ok_or_else(|| Error::Connection("No host".into()))?
+        .to_string();
+    let port = u.port_or_known_default().unwrap_or(443);
+    let path = u.path().to_string();
+    Ok((host, port, path))
 }

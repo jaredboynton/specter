@@ -13,6 +13,7 @@ use tokio::time::{timeout, Duration, Instant};
 struct RequestLog {
     connection_id: usize,
     path: String,
+    cookie_header: Option<String>,
 }
 
 struct H1Fixture {
@@ -66,13 +67,77 @@ async fn handle_connection(id: usize, mut stream: TcpStream, logs: Arc<Mutex<Vec
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or("/")
             .to_string();
+        let cookie_header = request
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("cookie:"))
+            .map(|line| {
+                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    parts[1].trim().to_string()
+                } else {
+                    "".to_string()
+                }
+            });
+
         buffer.drain(..header_end);
         logs.lock().await.push(RequestLog {
             connection_id: id,
             path: path.clone(),
+            cookie_header,
         });
 
         match path.as_str() {
+            "/compressed" => {
+                let body = b"hello compressed";
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                use std::io::Write;
+                encoder.write_all(body).unwrap();
+                let compressed = encoder.finish().unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                            compressed.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                stream.write_all(&compressed).await.unwrap();
+                stream.flush().await.unwrap();
+            }
+            "/cookie" => {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nSet-Cookie: test_cookie=cookie_val; Path=/\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                    )
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+            }
+            "/delay-headers" => {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                    )
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+            }
+            "/delay-chunks" => {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n")
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+                stream.write_all(b"5\r\nfirst\r\n").await.unwrap();
+                stream.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                stream.write_all(b"0\r\n\r\n").await.unwrap();
+                stream.flush().await.unwrap();
+            }
             "/fixed" | "/dispatch" => {
                 write_fixed(&mut stream, &[b"one-", b"two-", b"three"]).await;
             }
@@ -268,4 +333,118 @@ async fn h1_does_not_buffer_unfinished_stream() {
         .unwrap()
         .unwrap();
     assert_eq!(second, Bytes::from_static(b"early-2"));
+}
+
+#[tokio::test]
+async fn h1_streaming_preserves_timeouts_and_cookies() {
+    let fixture = H1Fixture::start().await;
+
+    // Cookie Store Test
+    let client = Client::builder()
+        .prefer_http2(false)
+        .cookie_store(true)
+        .build()
+        .unwrap();
+
+    // 1. Send streaming request to a path that sets a cookie
+    let (_response, rx) = client
+        .get(fixture.endpoint("/cookie"))
+        .version(HttpVersion::Http1_1)
+        .send_streaming()
+        .await
+        .unwrap();
+
+    // Consume body to complete/drain
+    assert_eq!(collect(rx).await, b"ok");
+
+    // 2. Send subsequent request to "/ok" and verify cookie is replayed
+    let _response2 = client
+        .get(fixture.endpoint("/ok"))
+        .version(HttpVersion::Http1_1)
+        .send_streaming()
+        .await
+        .unwrap();
+
+    let logs = fixture.logs().await;
+    // We should have logs for both requests. The second one should contain the cookie.
+    let second_log = logs
+        .iter()
+        .find(|log| log.path == "/ok")
+        .expect("Second request log not found");
+    assert_eq!(
+        second_log.cookie_header.as_deref(),
+        Some("test_cookie=cookie_val")
+    );
+
+    // Timeout Tests
+    // 3. TTFB timeout
+    let ttfb_client = Client::builder()
+        .prefer_http2(false)
+        .ttfb_timeout(Duration::from_millis(50))
+        .build()
+        .unwrap();
+
+    let res = ttfb_client
+        .get(fixture.endpoint("/delay-headers"))
+        .version(HttpVersion::Http1_1)
+        .send_streaming()
+        .await;
+
+    assert!(res.is_err());
+    let err = res.err().unwrap();
+    assert!(
+        matches!(err, specter::Error::TtfbTimeout(_)),
+        "Expected TtfbTimeout, got {:?}",
+        err
+    );
+
+    // 4. Read Idle timeout
+    let idle_client = Client::builder()
+        .prefer_http2(false)
+        .read_timeout(Duration::from_millis(50))
+        .build()
+        .unwrap();
+
+    let (_response3, mut rx3) = idle_client
+        .get(fixture.endpoint("/delay-chunks"))
+        .version(HttpVersion::Http1_1)
+        .send_streaming()
+        .await
+        .unwrap();
+
+    // First chunk should arrive fine
+    let first_chunk: Bytes = rx3.recv().await.unwrap().unwrap();
+    assert_eq!(first_chunk, Bytes::from_static(b"first"));
+
+    // Second chunk should hit ReadIdleTimeout
+    let res_next = rx3.recv().await;
+    assert!(res_next.is_some());
+    let err_next = res_next.unwrap();
+    assert!(err_next.is_err());
+    let err = err_next.err().unwrap();
+    assert!(
+        matches!(err, specter::Error::ReadIdleTimeout(_)),
+        "Expected ReadIdleTimeout, got {:?}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn h1_compressed_streaming_decodes_incrementally() {
+    let fixture = H1Fixture::start().await;
+    let client = Client::builder().prefer_http2(false).build().unwrap();
+
+    let res = client
+        .get(fixture.endpoint("/compressed"))
+        .version(HttpVersion::Http1_1)
+        .send_streaming()
+        .await;
+
+    assert!(res.is_err());
+    let err = res.err().unwrap();
+    assert!(
+        matches!(err, specter::Error::Decompression(_)),
+        "Expected Decompression error, got {:?}",
+        err
+    );
 }

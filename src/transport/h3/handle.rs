@@ -14,7 +14,7 @@ use crate::transport::h3::driver::DriverCommand;
 use crate::transport::h3::H3Tunnel;
 
 /// HTTP/3 connection handle for sending requests
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct H3Handle {
     /// Channel for sending commands to the driver
     command_tx: mpsc::Sender<DriverCommand>,
@@ -24,6 +24,11 @@ impl H3Handle {
     /// Create a new handle with a command channel to the driver
     pub fn new(command_tx: mpsc::Sender<DriverCommand>) -> Self {
         Self { command_tx }
+    }
+
+    /// Return true when the backing driver command channel has closed.
+    pub fn is_closed(&self) -> bool {
+        self.command_tx.is_closed()
     }
 
     /// Send an HTTP/3 request and receive the response.
@@ -64,6 +69,46 @@ impl H3Handle {
             Headers::from(stream_response.headers),
             stream_response.body,
             "HTTP/3".to_string(),
+        ))
+    }
+
+    /// Send an HTTP/3 request and return response headers before the body is complete.
+    ///
+    /// Response DATA frames are delivered incrementally through the returned receiver.
+    pub async fn send_streaming_request(
+        &self,
+        method: http::Method,
+        uri: &http::Uri,
+        headers: Vec<(String, String)>,
+        body: Option<Bytes>,
+    ) -> Result<(Response, mpsc::Receiver<Result<Bytes>>)> {
+        let (headers_tx, headers_rx) = oneshot::channel();
+        let (body_tx, body_rx) = mpsc::channel(32);
+
+        self.command_tx
+            .send(DriverCommand::SendStreamingRequest {
+                method,
+                uri: uri.clone(),
+                headers,
+                body,
+                headers_tx,
+                body_tx,
+            })
+            .await
+            .map_err(|_| Error::HttpProtocol("H3 Driver channel closed".into()))?;
+
+        let (status, headers) = headers_rx
+            .await
+            .map_err(|_| Error::HttpProtocol("H3 streaming headers channel closed".into()))??;
+
+        Ok((
+            Response::new(
+                status,
+                Headers::from(headers),
+                Bytes::new(),
+                "HTTP/3".to_string(),
+            ),
+            body_rx,
         ))
     }
 
