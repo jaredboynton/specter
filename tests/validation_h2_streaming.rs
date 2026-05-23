@@ -5,11 +5,11 @@
 
 use bytes::Bytes;
 use serde_json::json;
-use specter::Client;
+use specter::{Client, CookieJar};
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::timeout;
 
 mod helpers;
@@ -1966,6 +1966,161 @@ async fn stale_h2_pool_entries_are_evicted_before_reuse() {
     });
     fs::write(
         "target/validation/h2/VAL-H2-020.json",
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn stale_h2_pool_retry_response_is_finalized() {
+    init_validation_dir();
+    let (mut builder, ca_cert) = generate_cert_bundle();
+    builder.set_alpn_select_callback(|_, client_protos| {
+        boring::ssl::select_next_proto(b"\x02h2", client_protos)
+            .ok_or(boring::ssl::AlpnError::NOACK)
+    });
+    let acceptor = builder.build();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+
+    let conn_count = Arc::new(Mutex::new(0));
+    let conn_count_clone = conn_count.clone();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| {
+        let conn_count = conn_count_clone.clone();
+        async move {
+            let connection_id = {
+                let mut lock = conn_count.lock().await;
+                *lock += 1;
+                *lock
+            };
+            conn.read_preface().await.unwrap();
+            let mut settings_sent = false;
+            let mut encoder = Encoder::new();
+            let mut decoder = specter::transport::h2::HpackDecoder::new();
+            loop {
+                let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                    Ok(Ok(f)) => f,
+                    _ => break,
+                };
+                let (_len, frame_type, flags, stream_id, payload) = frame;
+                match frame_type {
+                    0x04 => {
+                        if flags & 0x01 == 0 && !settings_sent {
+                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                                .await
+                                .unwrap();
+                            conn.send_settings_ack().await.unwrap();
+                            settings_sent = true;
+                        }
+                    }
+                    0x01 => {
+                        let decoded = decoder.decode(&payload).unwrap();
+                        let path = decoded
+                            .iter()
+                            .find(|(name, _)| name == ":path")
+                            .map(|(_, val)| val.as_str())
+                            .unwrap_or("");
+
+                        if connection_id == 1 && path.contains("retry") {
+                            conn.send_rst_stream(stream_id, 0).await.unwrap();
+                            break;
+                        }
+
+                        let response_headers = if path.contains("retry") {
+                            encoder.encode(&[
+                                (b":status".as_slice(), b"200".as_slice()),
+                                (
+                                    b"set-cookie".as_slice(),
+                                    b"retry_cookie=stored; Secure; Path=/".as_slice(),
+                                ),
+                            ])
+                        } else {
+                            encoder.encode(&[(b":status".as_slice(), b"200".as_slice())])
+                        };
+                        conn.send_headers(stream_id, &response_headers, false, true)
+                            .await
+                            .unwrap();
+                        conn.send_data(
+                            stream_id,
+                            if path.contains("retry") {
+                                b"retried-chunk".as_slice()
+                            } else {
+                                b"prime-chunk".as_slice()
+                            },
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let jar = Arc::new(RwLock::new(CookieJar::new()));
+    let client = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .cookie_jar(jar.clone())
+        .build()
+        .unwrap();
+
+    let prime_url = format!("{}/prime", url);
+    let (prime_resp, mut prime_rx) = timeout(
+        Duration::from_secs(5),
+        client.get(&prime_url).send_streaming(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(prime_resp.status().as_u16(), 200);
+    assert_eq!(
+        prime_rx.recv().await.unwrap().unwrap(),
+        Bytes::from("prime-chunk")
+    );
+    assert!(prime_rx.recv().await.is_none());
+
+    let retry_url = format!("{}/retry", url);
+    let (retry_resp, mut retry_rx) = timeout(
+        Duration::from_secs(5),
+        client.get(&retry_url).send_streaming(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(retry_resp.status().as_u16(), 200);
+    assert_eq!(
+        retry_resp.url().map(|u| u.as_str()),
+        Some(retry_url.as_str())
+    );
+    assert_eq!(
+        retry_rx.recv().await.unwrap().unwrap(),
+        Bytes::from("retried-chunk")
+    );
+    assert!(retry_rx.recv().await.is_none());
+
+    let stored_cookie = jar.read().await.build_cookie_header(&retry_url);
+    assert_eq!(stored_cookie.as_deref(), Some("retry_cookie=stored"));
+
+    let count = *conn_count.lock().await;
+    assert_eq!(
+        count, 2,
+        "retry should replace the stale pooled H2 connection exactly once"
+    );
+
+    let evidence = json!({
+        "induced_stale_event": "pooled stream reset before retry response headers",
+        "total_connections_created": count,
+        "retried_response_url": retry_resp.url().map(|u| u.as_str()).unwrap_or_default(),
+        "set_cookie_persisted": stored_cookie.as_deref() == Some("retry_cookie=stored"),
+        "retried_body": "retried-chunk",
+        "success": true
+    });
+    fs::write(
+        "target/validation/h2/stale-h2-pool-retry-finalization.json",
         serde_json::to_string_pretty(&evidence).unwrap(),
     )
     .unwrap();

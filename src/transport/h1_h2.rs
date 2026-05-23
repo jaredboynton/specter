@@ -905,6 +905,7 @@ impl<'a> RequestBuilder<'a> {
                         );
                         let mut pool = client.h2_pool.write().await;
                         pool.remove(&pool_key);
+                        drop(pool);
 
                         let connector = client.connector_for_uri(&uri);
                         let connect_fut = connector.connect(&uri);
@@ -958,13 +959,21 @@ impl<'a> RequestBuilder<'a> {
                             headers.to_vec(),
                             body_bytes,
                         );
-                        if let Some(ttfb_timeout) = timeouts.ttfb {
+                        let (response, rx) = if let Some(ttfb_timeout) = timeouts.ttfb {
                             tokio_timeout(ttfb_timeout, send_fut)
                                 .await
                                 .map_err(|_| Error::TtfbTimeout(ttfb_timeout))??
                         } else {
                             send_fut.await?
+                        };
+
+                        let response = response.with_url(request_url.clone());
+                        if let Some(jar) = &client.cookie_store {
+                            jar.write()
+                                .await
+                                .store_from_headers(response.headers(), request_url.as_str());
                         }
+                        (response, rx)
                     }
                 }
             } else {
