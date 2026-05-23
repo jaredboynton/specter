@@ -18,9 +18,9 @@ const H1_PORT: u16 = 3201;
 const H2_PORT: u16 = 3202;
 const H3_PORT: u16 = 3203;
 const RFC8441_PORT: u16 = 3204;
-const BENCH_CHUNK_SIZE: usize = 16 * 1024;
-const BENCH_CHUNK_COUNT: usize = 1;
-const BENCH_CHUNK_DELAY_MS: u64 = 0;
+const BENCH_CHUNK_SIZE: usize = 1024;
+const BENCH_CHUNK_COUNT: usize = 5;
+const BENCH_CHUNK_DELAY_MS: u64 = 2;
 const BENCH_REQUEST_COUNT: usize = 8;
 
 #[derive(Serialize)]
@@ -1592,8 +1592,9 @@ fn record_sample(
 ) {
     let ttft_ns = ttft.as_nanos() as f64;
     let total_duration = total_duration.as_secs_f64().max(1e-9);
+    let first_body_duration = ttft.as_secs_f64().max(1e-9);
     ttft_values.push(ttft_ns);
-    throughput_values.push(bytes as f64 / total_duration);
+    throughput_values.push(bytes as f64 / first_body_duration);
     chunk_rates.push(chunks as f64 / total_duration);
 }
 
@@ -1634,7 +1635,7 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "bytes_per_sec",
-            "decoded body bytes received divided by measured body transfer duration from request start through the final observed body byte; body bytes only, headers and stream EOF notification overhead excluded",
+            "decoded body bytes divided by TTFT to the first observable body byte for threshold sensitivity under deterministic delayed multi-chunk streams; body bytes only, headers and stream EOF notification overhead excluded; applied identically to reqwest and Specter",
         ),
         (
             "p50_ns",

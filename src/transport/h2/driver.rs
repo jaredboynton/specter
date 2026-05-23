@@ -821,20 +821,34 @@ where
                     .and_then(|stream| stream.streaming_body_tx.clone());
 
                 if let Some(tx) = streaming_body_tx {
-                    if !data.is_empty() && tx.try_send(Ok(data)).is_err() {
-                        self.streams.remove(&stream_id);
-                        self.connection.remove_stream(stream_id);
-                        if let Err(e) = self
-                            .connection
-                            .send_rst_stream(stream_id, ErrorCode::Cancel)
-                            .await
-                        {
-                            tracing::warn!(
-                                "Failed to send RST_STREAM for dropped receiver: {:?}",
-                                e
-                            );
+                    if !data.is_empty() {
+                        match tx.try_send(Ok(data)) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(item)) => {
+                                tokio::spawn(async move {
+                                    if tx.send(item).await.is_err() {
+                                        tracing::debug!(
+                                            "H2Driver: streaming receiver dropped while backpressured"
+                                        );
+                                    }
+                                });
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                self.streams.remove(&stream_id);
+                                self.connection.remove_stream(stream_id);
+                                if let Err(e) = self
+                                    .connection
+                                    .send_rst_stream(stream_id, ErrorCode::Cancel)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to send RST_STREAM for dropped receiver: {:?}",
+                                        e
+                                    );
+                                }
+                                return Ok(());
+                            }
                         }
-                        return Ok(());
                     }
 
                     if end_stream {

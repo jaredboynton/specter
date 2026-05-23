@@ -30,6 +30,21 @@ fn streaming_benchmark_declares_enforceable_h1_h2_threshold_gate() {
 }
 
 #[test]
+fn thresholded_streaming_benchmark_uses_delayed_multi_chunk_workload() {
+    let source = std::fs::read_to_string("benches/streaming_vs_reqwest.rs").unwrap();
+
+    assert!(source.contains("const BENCH_CHUNK_SIZE: usize = 1024;"));
+    assert!(source.contains("const BENCH_CHUNK_COUNT: usize = 5;"));
+    assert!(source.contains("const BENCH_CHUNK_DELAY_MS: u64 = 2;"));
+    assert!(source.contains("payload_schedule_ms: vec![BENCH_CHUNK_DELAY_MS; BENCH_CHUNK_COUNT]"));
+    assert!(source.contains("let chunk_count = BENCH_CHUNK_COUNT;"));
+    assert!(source.contains("throughput_values.push(bytes as f64 / first_body_duration);"));
+    assert!(source.contains("applied identically to reqwest and Specter"));
+    assert!(!source.contains("const BENCH_CHUNK_COUNT: usize = 1;"));
+    assert!(!source.contains("const BENCH_CHUNK_DELAY_MS: u64 = 0;"));
+}
+
+#[test]
 fn benchmark_harness_tests_do_not_mask_failures_with_tautologies() {
     let source = std::fs::read_to_string("tests/benchmark_harness.rs").unwrap();
 
