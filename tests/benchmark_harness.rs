@@ -21,6 +21,7 @@ fn streaming_benchmark_declares_enforceable_h1_h2_threshold_gate() {
     assert!(source.contains("throughput_improvement_pct >= 5.0"));
     assert!(source.contains("p95_ttft_regression_pct <= 0.0"));
     assert!(source.contains("thresholded_origins: vec![\"127.0.0.1:3201\", \"127.0.0.1:3202\"]"));
+    assert!(source.contains(".unwrap_or_else(|| vec![\"h1\", \"h2\"]);"));
     assert!(source.contains("public_provider_threshold_inputs: Vec::new()"));
     assert!(source.contains("--self-test-threshold-failure"));
     assert!(!source.contains("SPECTER_BENCH_FORCE_THRESHOLD_FAIL"));

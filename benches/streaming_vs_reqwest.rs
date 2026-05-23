@@ -845,7 +845,7 @@ fn parse_options(args: &[String]) -> BenchmarkOptions {
                 .collect::<Vec<_>>()
         })
         .filter(|protocols| !protocols.is_empty())
-        .unwrap_or_else(|| vec!["h1", "h2", "h3", "rfc8441"]);
+        .unwrap_or_else(|| vec!["h1", "h2"]);
     let warmup_count = option_value(args, "--warmups")
         .and_then(|value| value.parse().ok())
         .unwrap_or(1);
@@ -932,11 +932,16 @@ async fn wait_for_health() -> io::Result<()> {
 }
 
 async fn measure_specter_streaming(
+    protocol: &str,
     client: &specter::Client,
     url: &str,
 ) -> Result<(Duration, Duration, usize, usize), Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
-    let (_response, mut rx) = client.get(url).send_streaming().await?;
+    let mut request = client.get(url);
+    if protocol == "h3" {
+        request = request.version(specter::HttpVersion::Http3Only);
+    }
+    let (_response, mut rx) = request.send_streaming().await?;
 
     let mut first_chunk_time = None;
     let mut last_chunk_time = None;
@@ -987,6 +992,7 @@ async fn measure_reqwest_streaming(
 }
 
 async fn measure_specter_streaming_batch(
+    protocol: &str,
     client: &specter::Client,
     url: &str,
     request_count: usize,
@@ -998,7 +1004,7 @@ async fn measure_specter_streaming_batch(
 
     for _ in 0..request_count {
         let (ttft, request_duration, bytes, chunks) =
-            measure_specter_streaming(client, url).await?;
+            measure_specter_streaming(protocol, client, url).await?;
         ttft_values.push(ttft.as_nanos() as f64);
         transfer_duration += request_duration;
         bytes_received += bytes;
@@ -1108,7 +1114,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 endpoint.clone()
             };
             let url = if protocol == "h3" {
-                format!("https://{}", endpoint_for_url)
+                format!("https://{}/stream", endpoint_for_url)
             } else if protocol == "rfc8441" {
                 format!("wss://{}/socket", endpoint_for_url)
             } else if protocol == "h2" {
@@ -1475,8 +1481,13 @@ async fn run_real_measurement(
             .build()?;
         if protocol != "h1" {
             for _ in 0..warmup_count {
-                let _ = measure_specter_streaming_batch(&specter_client, url, BENCH_REQUEST_COUNT)
-                    .await;
+                let _ = measure_specter_streaming_batch(
+                    protocol,
+                    &specter_client,
+                    url,
+                    BENCH_REQUEST_COUNT,
+                )
+                .await;
             }
         }
         for _ in 0..sample_count {
@@ -1491,7 +1502,8 @@ async fn run_real_measurement(
                 &specter_client
             };
             if let Ok((ttft, total_duration, bytes, chunks)) =
-                measure_specter_streaming_batch(client_ref, url, BENCH_REQUEST_COUNT).await
+                measure_specter_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT)
+                    .await
             {
                 record_sample(
                     ttft,
