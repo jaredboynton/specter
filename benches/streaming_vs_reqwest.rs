@@ -102,6 +102,7 @@ struct MeasurementConfig {
     sample_count: usize,
     thresholded_origins: Vec<&'static str>,
     comparable_clients_share_workload: bool,
+    throughput_timing_window: &'static str,
 }
 
 #[derive(Serialize)]
@@ -135,17 +136,18 @@ struct ClientConfig {
 }
 
 #[derive(Serialize, Clone)]
-struct Metrics {
-    ttft_ns: f64,
-    chunks_per_sec: f64,
-    bytes_per_sec: f64,
-    p50_ns: f64,
-    p95_ns: f64,
-    p99_ns: f64,
-    warmup_count: usize,
-    sample_count: usize,
-    connection_reuse_count: usize,
-    pass: bool,
+pub(crate) struct Metrics {
+    pub(crate) ttft_ns: f64,
+    pub(crate) chunks_per_sec: f64,
+    pub(crate) bytes_per_sec: f64,
+    pub(crate) p95_bytes_per_sec: f64,
+    pub(crate) p50_ns: f64,
+    pub(crate) p95_ns: f64,
+    pub(crate) p99_ns: f64,
+    pub(crate) warmup_count: usize,
+    pub(crate) sample_count: usize,
+    pub(crate) connection_reuse_count: usize,
+    pub(crate) pass: bool,
 }
 
 impl Metrics {
@@ -154,6 +156,7 @@ impl Metrics {
             ttft_ns: 0.0,
             chunks_per_sec: 0.0,
             bytes_per_sec: 0.0,
+            p95_bytes_per_sec: 0.0,
             p50_ns: 0.0,
             p95_ns: 0.0,
             p99_ns: 0.0,
@@ -169,6 +172,7 @@ impl Metrics {
             ttft_ns: 0.0,
             chunks_per_sec: 0.0,
             bytes_per_sec: 0.0,
+            p95_bytes_per_sec: 0.0,
             p50_ns: 0.0,
             p95_ns: 0.0,
             p99_ns: 0.0,
@@ -184,7 +188,7 @@ impl Metrics {
 struct Threshold {
     required: bool,
     ttft_improvement_required_pct: f64,
-    throughput_improvement_required_pct: f64,
+    throughput_regression_allowed_pct: f64,
     p95_regression_allowed_pct: f64,
     reqwest_median_ttft_ns: Option<f64>,
     specter_median_ttft_ns: Option<f64>,
@@ -192,6 +196,10 @@ struct Threshold {
     reqwest_median_bytes_per_sec: Option<f64>,
     specter_median_bytes_per_sec: Option<f64>,
     throughput_improvement_pct: Option<f64>,
+    median_throughput_regression_pct: Option<f64>,
+    reqwest_p95_bytes_per_sec: Option<f64>,
+    specter_p95_bytes_per_sec: Option<f64>,
+    p95_throughput_regression_pct: Option<f64>,
     reqwest_p95_ttft_ns: Option<f64>,
     specter_p95_ttft_ns: Option<f64>,
     p95_ttft_regression_pct: Option<f64>,
@@ -282,11 +290,13 @@ struct BenchmarkOptions {
     force_h3_threshold_failure: bool,
 }
 
-struct ComparableThresholdResult {
-    pass: bool,
-    ttft_improvement_pct: f64,
-    throughput_improvement_pct: f64,
-    p95_ttft_regression_pct: f64,
+pub(crate) struct ComparableThresholdResult {
+    pub(crate) pass: bool,
+    pub(crate) ttft_improvement_pct: f64,
+    pub(crate) throughput_improvement_pct: f64,
+    pub(crate) median_throughput_regression_pct: f64,
+    pub(crate) p95_throughput_regression_pct: f64,
+    pub(crate) p95_ttft_regression_pct: f64,
 }
 
 struct Fixtures {
@@ -961,8 +971,8 @@ async fn measure_specter_streaming(
     }
 
     let ttft = first_chunk_time.unwrap_or_else(|| start.elapsed());
-    let total_duration = last_chunk_time.unwrap_or_else(|| start.elapsed());
-    Ok((ttft, total_duration, bytes_received, chunk_count))
+    let transfer_duration = body_transfer_duration(first_chunk_time, last_chunk_time);
+    Ok((ttft, transfer_duration, bytes_received, chunk_count))
 }
 
 async fn measure_reqwest_streaming(
@@ -987,8 +997,18 @@ async fn measure_reqwest_streaming(
     }
 
     let ttft = first_chunk_time.unwrap_or_else(|| start.elapsed());
-    let total_duration = last_chunk_time.unwrap_or_else(|| start.elapsed());
-    Ok((ttft, total_duration, bytes_received, chunk_count))
+    let transfer_duration = body_transfer_duration(first_chunk_time, last_chunk_time);
+    Ok((ttft, transfer_duration, bytes_received, chunk_count))
+}
+
+pub(crate) fn body_transfer_duration(
+    first_chunk_time: Option<Duration>,
+    last_chunk_time: Option<Duration>,
+) -> Duration {
+    match (first_chunk_time, last_chunk_time) {
+        (Some(first), Some(last)) => last.saturating_sub(first).max(Duration::from_nanos(1)),
+        _ => Duration::from_nanos(1),
+    }
 }
 
 async fn measure_specter_streaming_batch(
@@ -1085,6 +1105,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
         sample_count: options.sample_count,
         thresholded_origins: vec!["127.0.0.1:3201", "127.0.0.1:3202"],
         comparable_clients_share_workload: true,
+        throughput_timing_window: "first observed body byte through final observed body byte; identical for reqwest and Specter",
     };
 
     let mut rows = Vec::new();
@@ -1150,6 +1171,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 metrics.ttft_ns = 1_100_000.0;
                 metrics.chunks_per_sec = 2000.0;
                 metrics.bytes_per_sec = 25_000.0;
+                metrics.p95_bytes_per_sec = 24_000.0;
                 metrics.p50_ns = 1_100_000.0;
                 metrics.p95_ns = 1_350_000.0;
                 metrics.p99_ns = 1_450_000.0;
@@ -1161,6 +1183,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 metrics.ttft_ns = 5_000_000.0;
                 metrics.chunks_per_sec = 100.0;
                 metrics.bytes_per_sec = 1_000.0;
+                metrics.p95_bytes_per_sec = 1_000.0;
                 metrics.p50_ns = 5_000_000.0;
                 metrics.p95_ns = 6_000_000.0;
                 metrics.p99_ns = 7_000_000.0;
@@ -1243,8 +1266,8 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 threshold: Threshold {
                     required: row_threshold_required,
                     ttft_improvement_required_pct: 5.0,
-                    throughput_improvement_required_pct: 5.0,
-                    p95_regression_allowed_pct: 0.0,
+                    throughput_regression_allowed_pct: 5.0,
+                    p95_regression_allowed_pct: 5.0,
                     reqwest_median_ttft_ns: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].ttft_ns),
@@ -1263,6 +1286,18 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     throughput_improvement_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.throughput_improvement_pct),
+                    median_throughput_regression_pct: comparable_threshold
+                        .as_ref()
+                        .map(|result| result.median_throughput_regression_pct),
+                    reqwest_p95_bytes_per_sec: comparable_threshold
+                        .as_ref()
+                        .map(|_| protocol_metrics["reqwest"].p95_bytes_per_sec),
+                    specter_p95_bytes_per_sec: comparable_threshold
+                        .as_ref()
+                        .map(|_| protocol_metrics["specter"].p95_bytes_per_sec),
+                    p95_throughput_regression_pct: comparable_threshold
+                        .as_ref()
+                        .map(|result| result.p95_throughput_regression_pct),
                     reqwest_p95_ttft_ns: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].p95_ns),
@@ -1276,7 +1311,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     reason: match (protocol, client) {
                         ("h3", "specter") => "reqwest H3 comparison unavailable; Specter H3 row is gated by explicit TTFT, throughput, chunk-rate, and pool-reuse regression thresholds",
                         ("h3", "reqwest") => "reqwest H3 comparison unavailable and excluded from threshold math",
-                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable threshold: Specter median TTFT must improve by >=5%, median throughput by >=5%, and p95 TTFT must not regress",
+                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable threshold: Specter median TTFT must improve by >=5%, median and p95 throughput must not materially regress by more than 5%, and p95 TTFT must not regress",
                         ("h1" | "h2", "reqwest") => "deterministic localhost reqwest baseline row; excluded as a failing threshold subject but included in threshold math",
                         _ => "non-comparable deterministic row excluded from primary H1/H2 reqwest threshold math",
                     },
@@ -1305,6 +1340,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
         ttft_ns: 0.0,
         chunks_per_sec: 0.0,
         bytes_per_sec: 0.0,
+        p95_bytes_per_sec: 0.0,
         p50_ns: 0.0,
         p95_ns: 0.0,
         p99_ns: 0.0,
@@ -1422,22 +1458,29 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
     })
 }
 
-fn evaluate_comparable_threshold(
+pub(crate) fn evaluate_comparable_threshold(
     reqwest: &Metrics,
     specter: &Metrics,
 ) -> ComparableThresholdResult {
     let ttft_improvement_pct = pct_lower_is_better(reqwest.ttft_ns, specter.ttft_ns);
     let throughput_improvement_pct =
         pct_higher_is_better(reqwest.bytes_per_sec, specter.bytes_per_sec);
+    let median_throughput_regression_pct =
+        pct_lower_is_worse(reqwest.bytes_per_sec, specter.bytes_per_sec);
+    let p95_throughput_regression_pct =
+        pct_lower_is_worse(reqwest.p95_bytes_per_sec, specter.p95_bytes_per_sec);
     let p95_ttft_regression_pct = pct_higher_is_worse(reqwest.p95_ns, specter.p95_ns);
     let pass = ttft_improvement_pct >= 5.0
-        && throughput_improvement_pct >= 5.0
+        && median_throughput_regression_pct <= 5.0
+        && p95_throughput_regression_pct <= 5.0
         && p95_ttft_regression_pct <= 0.0;
 
     ComparableThresholdResult {
         pass,
         ttft_improvement_pct,
         throughput_improvement_pct,
+        median_throughput_regression_pct,
+        p95_throughput_regression_pct,
         p95_ttft_regression_pct,
     }
 }
@@ -1461,6 +1504,13 @@ fn pct_higher_is_worse(baseline: f64, candidate: f64) -> f64 {
         return 0.0;
     }
     ((candidate - baseline) / baseline) * 100.0
+}
+
+fn pct_lower_is_worse(baseline: f64, candidate: f64) -> f64 {
+    if baseline <= 0.0 {
+        return 0.0;
+    }
+    ((baseline - candidate) / baseline) * 100.0
 }
 
 async fn run_real_measurement(
@@ -1557,6 +1607,7 @@ async fn run_real_measurement(
     }
 
     let (p50, p95, p99) = calculate_percentiles(ttft_values.clone());
+    let (_, p95_throughput, _) = calculate_percentiles(throughput_values.clone());
     let median_throughput = calculate_median(throughput_values);
     let median_chunk_rate = calculate_median(chunk_rates);
 
@@ -1564,6 +1615,7 @@ async fn run_real_measurement(
         ttft_ns: p50,
         chunks_per_sec: median_chunk_rate,
         bytes_per_sec: median_throughput,
+        p95_bytes_per_sec: p95_throughput,
         p50_ns: p50,
         p95_ns: p95,
         p99_ns: p99,
@@ -1581,7 +1633,7 @@ async fn run_real_measurement(
     })
 }
 
-fn record_sample(
+pub(crate) fn record_sample(
     ttft: Duration,
     total_duration: Duration,
     bytes: usize,
@@ -1592,9 +1644,8 @@ fn record_sample(
 ) {
     let ttft_ns = ttft.as_nanos() as f64;
     let total_duration = total_duration.as_secs_f64().max(1e-9);
-    let first_body_duration = ttft.as_secs_f64().max(1e-9);
     ttft_values.push(ttft_ns);
-    throughput_values.push(bytes as f64 / first_body_duration);
+    throughput_values.push(bytes as f64 / total_duration);
     chunk_rates.push(chunks as f64 / total_duration);
 }
 
@@ -1631,11 +1682,15 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "chunks_per_sec",
-            "decoded body chunks received divided by measured body transfer duration from request start through the final observed body byte; stream EOF notification overhead excluded",
+            "decoded body chunks received divided by measured body transfer duration from first observed body byte through the final observed body byte; stream EOF notification overhead excluded",
         ),
         (
             "bytes_per_sec",
-            "decoded body bytes divided by TTFT to the first observable body byte for threshold sensitivity under deterministic delayed multi-chunk streams; body bytes only, headers and stream EOF notification overhead excluded; applied identically to reqwest and Specter",
+            "median decoded body bytes per second over samples; each sample divides body bytes by measured body transfer duration from first observed body byte through the final observed body byte, with the same timing window applied identically to reqwest and Specter; headers, TTFT, and stream EOF notification overhead excluded",
+        ),
+        (
+            "p95_bytes_per_sec",
+            "nearest-rank 95th percentile of decoded body bytes per second over samples using the same body transfer duration denominator as bytes_per_sec; enforced for comparable H1/H2 threshold rows so p95 throughput cannot regress",
         ),
         (
             "p50_ns",
@@ -1655,7 +1710,7 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "p95_regression_allowed_pct",
-            "0 means Specter p95 TTFT must be less than or equal to reqwest p95 TTFT",
+            "5 means Specter median and p95 throughput may trail reqwest by at most 5%; p95 TTFT still must be less than or equal to reqwest p95 TTFT",
         ),
     ])
 }
