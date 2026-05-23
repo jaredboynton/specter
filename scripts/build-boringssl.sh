@@ -35,8 +35,52 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LIB_DIR="$PROJECT_ROOT/lib/boringssl"
 
-# boring-sys version must match Cargo.lock
-BORING_SYS_VERSION="4.19.0"
+# boring-sys version: prefer BORING_SYS_VERSION env override, then cargo metadata,
+# then a fallback. Keeping a fallback for offline runs.
+detect_boring_sys_version() {
+    if [[ -n "${BORING_SYS_VERSION:-}" ]]; then
+        echo "$BORING_SYS_VERSION"
+        return 0
+    fi
+    local manifest_args=()
+    for manifest in \
+        "$PROJECT_ROOT/Cargo.toml" \
+        "$PROJECT_ROOT/bindings/node/Cargo.toml" \
+        "$PROJECT_ROOT/bindings/python/Cargo.toml"; do
+        if [[ -f "$manifest" ]]; then
+            manifest_args=(--manifest-path "$manifest")
+            break
+        fi
+    done
+    if command -v cargo &>/dev/null && [[ ${#manifest_args[@]} -gt 0 ]]; then
+        local v
+        v=$(cargo metadata --format-version 1 --offline "${manifest_args[@]}" 2>/dev/null \
+            | python3 -c 'import json,sys
+data=json.load(sys.stdin)
+for p in data.get("packages",[]):
+    if p.get("name")=="boring-sys":
+        print(p.get("version",""))
+        break' 2>/dev/null || true)
+        if [[ -n "$v" ]]; then
+            echo "$v"
+            return 0
+        fi
+        # Try non-offline metadata if offline failed
+        v=$(cargo metadata --format-version 1 "${manifest_args[@]}" 2>/dev/null \
+            | python3 -c 'import json,sys
+data=json.load(sys.stdin)
+for p in data.get("packages",[]):
+    if p.get("name")=="boring-sys":
+        print(p.get("version",""))
+        break' 2>/dev/null || true)
+        if [[ -n "$v" ]]; then
+            echo "$v"
+            return 0
+        fi
+    fi
+    echo "4.21.2"
+}
+BORING_SYS_VERSION="$(detect_boring_sys_version)"
 
 # All supported targets
 ALL_TARGETS=(
