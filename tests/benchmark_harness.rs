@@ -18,7 +18,8 @@ fn streaming_benchmark_declares_enforceable_h1_h2_threshold_gate() {
 
     assert!(source.contains("fn evaluate_comparable_threshold"));
     assert!(source.contains("ttft_improvement_pct >= 5.0"));
-    assert!(source.contains("median_throughput_regression_pct <= 5.0"));
+    assert!(source.contains("throughput_improvement_required_pct: 5.0"));
+    assert!(source.contains("throughput_improvement_pct >= 5.0"));
     assert!(source.contains("p95_throughput_regression_pct <= 5.0"));
     assert!(source.contains("p95_ttft_regression_pct <= 0.0"));
     assert!(source.contains("thresholded_origins: vec![\"127.0.0.1:3201\", \"127.0.0.1:3202\"]"));
@@ -41,6 +42,7 @@ fn thresholded_streaming_benchmark_uses_delayed_multi_chunk_workload() {
     assert!(source.contains("let chunk_count = BENCH_CHUNK_COUNT;"));
     assert!(source.contains("throughput_values.push(bytes as f64 / total_duration);"));
     assert!(source.contains("throughput_timing_window: \"first observed body byte through final observed body byte; identical for reqwest and Specter\""));
+    assert!(source.contains("throughput_improvement_pct >= 5.0"));
     assert!(source.contains("p95_throughput_regression_pct <= 5.0"));
     assert!(source.contains("applied identically to reqwest and Specter"));
     assert!(!source.contains("const BENCH_CHUNK_COUNT: usize = 1;"));

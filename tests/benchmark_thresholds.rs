@@ -39,6 +39,36 @@ fn comparable_threshold_fails_when_median_throughput_regresses() {
 }
 
 #[test]
+fn comparable_threshold_fails_when_median_throughput_is_equal() {
+    let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
+    let specter = metrics(900.0, 1_000.0, 1_100.0, 900.0);
+
+    let result = evaluate_comparable_threshold(&reqwest, &specter);
+
+    assert!(!result.pass);
+    assert!(result.ttft_improvement_pct >= 5.0);
+    assert_eq!(result.throughput_improvement_pct, 0.0);
+    assert!(result.median_throughput_regression_pct <= 5.0);
+    assert!(result.p95_throughput_regression_pct <= 5.0);
+    assert!(result.p95_ttft_regression_pct <= 0.0);
+}
+
+#[test]
+fn comparable_threshold_fails_when_median_throughput_win_is_under_five_percent() {
+    let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
+    let specter = metrics(900.0, 1_049.0, 1_100.0, 900.0);
+
+    let result = evaluate_comparable_threshold(&reqwest, &specter);
+
+    assert!(!result.pass);
+    assert!(result.ttft_improvement_pct >= 5.0);
+    assert!(result.throughput_improvement_pct < 5.0);
+    assert!(result.median_throughput_regression_pct <= 5.0);
+    assert!(result.p95_throughput_regression_pct <= 5.0);
+    assert!(result.p95_ttft_regression_pct <= 0.0);
+}
+
+#[test]
 fn comparable_threshold_fails_when_p95_throughput_regresses() {
     let reqwest = metrics(1_000.0, 1_000.0, 2_000.0, 1_000.0);
     let specter = metrics(900.0, 1_100.0, 1_850.0, 900.0);

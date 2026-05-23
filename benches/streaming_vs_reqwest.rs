@@ -188,6 +188,7 @@ impl Metrics {
 struct Threshold {
     required: bool,
     ttft_improvement_required_pct: f64,
+    throughput_improvement_required_pct: f64,
     throughput_regression_allowed_pct: f64,
     p95_regression_allowed_pct: f64,
     reqwest_median_ttft_ns: Option<f64>,
@@ -1266,6 +1267,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 threshold: Threshold {
                     required: row_threshold_required,
                     ttft_improvement_required_pct: 5.0,
+                    throughput_improvement_required_pct: 5.0,
                     throughput_regression_allowed_pct: 5.0,
                     p95_regression_allowed_pct: 5.0,
                     reqwest_median_ttft_ns: comparable_threshold
@@ -1311,7 +1313,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     reason: match (protocol, client) {
                         ("h3", "specter") => "reqwest H3 comparison unavailable; Specter H3 row is gated by explicit TTFT, throughput, chunk-rate, and pool-reuse regression thresholds",
                         ("h3", "reqwest") => "reqwest H3 comparison unavailable and excluded from threshold math",
-                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable threshold: Specter median TTFT must improve by >=5%, median and p95 throughput must not materially regress by more than 5%, and p95 TTFT must not regress",
+                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable threshold: Specter median TTFT must improve by >=5%, median throughput must improve by >=5%, p95 throughput must not materially regress by more than 5%, and p95 TTFT must not regress",
                         ("h1" | "h2", "reqwest") => "deterministic localhost reqwest baseline row; excluded as a failing threshold subject but included in threshold math",
                         _ => "non-comparable deterministic row excluded from primary H1/H2 reqwest threshold math",
                     },
@@ -1471,7 +1473,7 @@ pub(crate) fn evaluate_comparable_threshold(
         pct_lower_is_worse(reqwest.p95_bytes_per_sec, specter.p95_bytes_per_sec);
     let p95_ttft_regression_pct = pct_higher_is_worse(reqwest.p95_ns, specter.p95_ns);
     let pass = ttft_improvement_pct >= 5.0
-        && median_throughput_regression_pct <= 5.0
+        && throughput_improvement_pct >= 5.0
         && p95_throughput_regression_pct <= 5.0
         && p95_ttft_regression_pct <= 0.0;
 
