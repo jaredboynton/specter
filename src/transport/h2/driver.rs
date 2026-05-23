@@ -42,7 +42,7 @@ pub enum DriverCommand {
         uri: Uri,
         headers: Vec<(String, String)>,
         body: Option<bytes::Bytes>,
-        body_tx: mpsc::UnboundedSender<Result<Bytes>>,
+        body_tx: mpsc::Sender<Result<Bytes>>,
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
     },
     /// Open an RFC 8441 WebSocket tunnel on a pooled HTTP/2 stream.
@@ -65,7 +65,7 @@ struct DriverStreamState {
     /// Oneshot sender for streaming response headers
     streaming_headers_tx: Option<oneshot::Sender<StreamingHeadersResult>>,
     /// Streaming response body sender
-    streaming_body_tx: Option<mpsc::UnboundedSender<Result<Bytes>>>,
+    streaming_body_tx: Option<mpsc::Sender<Result<Bytes>>>,
     /// Accumulated response status
     status: Option<u16>,
     /// Accumulated response headers
@@ -94,7 +94,7 @@ impl DriverStreamState {
 
     fn streaming(
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
-        body_tx: mpsc::UnboundedSender<Result<Bytes>>,
+        body_tx: mpsc::Sender<Result<Bytes>>,
         pending_body: Bytes,
     ) -> Self {
         Self {
@@ -618,7 +618,7 @@ where
                 let _ = tx.send(Err(Error::HttpProtocol(message.clone())));
             }
             if let Some(tx) = stream.streaming_body_tx.take() {
-                let _ = tx.send(Err(Error::HttpProtocol(message)));
+                let _ = tx.try_send(Err(Error::HttpProtocol(message)));
             }
         }
     }
@@ -821,7 +821,7 @@ where
                     .and_then(|stream| stream.streaming_body_tx.clone());
 
                 if let Some(tx) = streaming_body_tx {
-                    if !data.is_empty() && tx.send(Ok(data)).is_err() {
+                    if !data.is_empty() && tx.try_send(Ok(data)).is_err() {
                         self.streams.remove(&stream_id);
                         self.connection.remove_stream(stream_id);
                         if let Err(e) = self

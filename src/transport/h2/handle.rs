@@ -94,19 +94,7 @@ impl H2Handle {
     ) -> Result<(Response, mpsc::Receiver<Result<Bytes>>)> {
         // Allocate channels for headers and body
         let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
-        let (body_tx, body_rx) = mpsc::channel(32);
-        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<Result<Bytes>>();
-
-        // Spawn a forwarder task to route from unbounded channel to user-visible bounded channel.
-        // This isolates the driver from any slow consumers!
-        let body_tx_clone = body_tx.clone();
-        tokio::spawn(async move {
-            while let Some(item) = internal_rx.recv().await {
-                if body_tx_clone.send(item).await.is_err() {
-                    break;
-                }
-            }
-        });
+        let (body_tx, body_rx) = mpsc::channel(128);
 
         // Send command to driver
         let command = DriverCommand::SendStreamingRequest {
@@ -114,7 +102,7 @@ impl H2Handle {
             uri: uri.clone(),
             headers,
             body,
-            body_tx: internal_tx,
+            body_tx,
             headers_tx,
         };
 

@@ -465,8 +465,8 @@ impl H1Connection {
         initial: Vec<u8>,
         tx: &mpsc::Sender<std::result::Result<Bytes, Error>>,
     ) -> Result<()> {
-        if !initial.is_empty() && tx.send(Ok(Bytes::from(initial))).await.is_err() {
-            return Err(Error::HttpProtocol("Streaming receiver dropped".into()));
+        if !initial.is_empty() {
+            Self::send_body_chunk(tx, Bytes::from(initial)).await?;
         }
 
         let mut read_buf = vec![0u8; 8192];
@@ -477,13 +477,7 @@ impl H1Connection {
             if n == 0 {
                 return Ok(());
             }
-            if tx
-                .send(Ok(Bytes::copy_from_slice(&read_buf[..n])))
-                .await
-                .is_err()
-            {
-                return Err(Error::HttpProtocol("Streaming receiver dropped".into()));
-            }
+            Self::send_body_chunk(tx, Bytes::copy_from_slice(&read_buf[..n])).await?;
         }
     }
 
@@ -494,13 +488,13 @@ impl H1Connection {
         tx: &mpsc::Sender<std::result::Result<Bytes, Error>>,
     ) -> Result<()> {
         let initial_len = initial.len().min(content_length);
-        if initial_len > 0
-            && tx
-                .send(Ok(Bytes::copy_from_slice(&initial[..initial_len])))
-                .await
-                .is_err()
-        {
-            return Err(Error::HttpProtocol("Streaming receiver dropped".into()));
+        if initial_len > 0 {
+            let initial_chunk = if initial_len == initial.len() {
+                Bytes::from(initial)
+            } else {
+                Bytes::copy_from_slice(&initial[..initial_len])
+            };
+            Self::send_body_chunk(tx, initial_chunk).await?;
         }
 
         let mut received = initial_len;
@@ -520,13 +514,8 @@ impl H1Connection {
                 )));
             }
             received += n;
-            if tx
-                .send(Ok(Bytes::copy_from_slice(&chunk[..n])))
-                .await
-                .is_err()
-            {
-                return Err(Error::HttpProtocol("Streaming receiver dropped".into()));
-            }
+            chunk.truncate(n);
+            Self::send_body_chunk(tx, Bytes::from(chunk)).await?;
         }
 
         Ok(())
@@ -580,15 +569,26 @@ impl H1Connection {
                     "Malformed chunk: missing trailing CRLF".into(),
                 ));
             }
-            if chunk_size > 0
-                && tx
-                    .send(Ok(Bytes::copy_from_slice(&buffer[..chunk_size])))
-                    .await
-                    .is_err()
-            {
-                return Err(Error::HttpProtocol("Streaming receiver dropped".into()));
+            if chunk_size > 0 {
+                Self::send_body_chunk(tx, Bytes::copy_from_slice(&buffer[..chunk_size])).await?;
             }
             buffer = buffer[chunk_end..].to_vec();
+        }
+    }
+
+    async fn send_body_chunk(
+        tx: &mpsc::Sender<std::result::Result<Bytes, Error>>,
+        chunk: Bytes,
+    ) -> Result<()> {
+        match tx.try_send(Ok(chunk)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(item)) => tx
+                .send(item)
+                .await
+                .map_err(|_| Error::HttpProtocol("Streaming receiver dropped".into())),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(Error::HttpProtocol("Streaming receiver dropped".into()))
+            }
         }
     }
 

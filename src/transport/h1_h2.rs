@@ -1060,6 +1060,10 @@ impl<'a> RequestBuilder<'a> {
             }
         }
 
+        if timeouts.read_idle.is_none() && timeouts.total.is_none() {
+            return Ok((response, rx));
+        }
+
         // Wrap the raw receiver with timeout enforcement (read_idle and total timeout)
         let (wrapped_tx, wrapped_rx) = tokio::sync::mpsc::channel(32);
         let read_idle_timeout = timeouts.read_idle;

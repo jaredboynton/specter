@@ -889,8 +889,8 @@ where
             self.read_buf.extend_from_slice(&buf[..n]);
         }
 
-        let payload_bytes = Bytes::from(self.read_buf[FRAME_HEADER_SIZE..frame_len].to_vec());
-        self.read_buf.advance(frame_len);
+        self.read_buf.advance(FRAME_HEADER_SIZE);
+        let payload_bytes = self.read_buf.split_to(header.length as usize).freeze();
 
         Ok((header, payload_bytes))
     }

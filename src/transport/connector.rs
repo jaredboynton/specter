@@ -605,6 +605,10 @@ impl BoringConnector {
             stream
         };
 
+        tcp_stream
+            .set_nodelay(true)
+            .map_err(|e| Error::Connection(format!("Failed to set TCP_NODELAY: {}", e)))?;
+
         if uri.scheme_str() == Some("https") {
             let ssl_connector = self.configure_ssl(host, alpn_mode)?;
 
