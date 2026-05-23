@@ -1374,6 +1374,136 @@ async fn dropped_receiver_does_not_poison_h2_pool() {
     .unwrap();
 }
 
+#[tokio::test]
+async fn backpressured_receiver_drop_cancels_full_body_channel() {
+    init_validation_dir();
+    let (mut builder, ca_cert) = generate_cert_bundle();
+    builder.set_alpn_select_callback(|_, client_protos| {
+        boring::ssl::select_next_proto(b"\x02h2", client_protos)
+            .ok_or(boring::ssl::AlpnError::NOACK)
+    });
+    let acceptor = builder.build();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+
+    let rst_received = Arc::new(Mutex::new(false));
+    let initial_chunks_sent = Arc::new(tokio::sync::Notify::new());
+    let rst_received_clone = rst_received.clone();
+    let initial_chunks_sent_clone = initial_chunks_sent.clone();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| {
+        let rst_received = rst_received_clone.clone();
+        let initial_chunks_sent = initial_chunks_sent_clone.clone();
+        async move {
+            conn.read_preface().await.unwrap();
+            let mut settings_sent = false;
+            let mut encoder = Encoder::new();
+            let mut request_count = 0usize;
+
+            loop {
+                let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                    Ok(Ok(f)) => f,
+                    _ => break,
+                };
+                let (_len, frame_type, flags, stream_id, _payload) = frame;
+                match frame_type {
+                    0x04 => {
+                        if flags & 0x01 == 0 && !settings_sent {
+                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                                .await
+                                .unwrap();
+                            conn.send_settings_ack().await.unwrap();
+                            settings_sent = true;
+                        }
+                    }
+                    0x01 => {
+                        request_count += 1;
+                        let response_headers =
+                            encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                        conn.send_headers(stream_id, &response_headers, false, true)
+                            .await
+                            .unwrap();
+
+                        if request_count == 1 {
+                            let chunk = vec![b'x'; 1024];
+                            for _ in 0..160 {
+                                conn.send_data(stream_id, &chunk, false).await.unwrap();
+                            }
+                            initial_chunks_sent.notify_waiters();
+                        } else {
+                            conn.send_data(stream_id, b"followup-ok", true)
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    0x03 => {
+                        let mut lock = rst_received.lock().await;
+                        *lock = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let client = Client::builder()
+        .add_root_certificate(ca_cert.clone())
+        .prefer_http2(true)
+        .build()
+        .unwrap();
+
+    let (resp1, rx1) = client
+        .get(&format!("{}/backpressured-drop", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status().as_u16(), 200);
+
+    timeout(Duration::from_secs(1), initial_chunks_sent.notified())
+        .await
+        .expect("server should send enough chunks to fill the bounded body channel");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(rx1);
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if *rst_received.lock().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("driver should send RST_STREAM(CANCEL) after a full body channel receiver is dropped");
+
+    let (resp2, mut rx2) = client
+        .get(&format!("{}/followup-after-backpressure-drop", url))
+        .send_streaming()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status().as_u16(), 200);
+    assert_eq!(
+        rx2.recv().await.unwrap().unwrap(),
+        Bytes::from("followup-ok")
+    );
+
+    let evidence = json!({
+        "dropped_stream_id": 1,
+        "sent_chunks_before_drop": 160,
+        "body_channel_capacity": 128,
+        "rst_stream_received_by_server": true,
+        "follow_up_request_status": 200,
+        "follow_up_body": "followup-ok",
+        "success": true
+    });
+    fs::write(
+        "target/validation/h2/backpressured_receiver_drop_cancels_full_body_channel.json",
+        serde_json::to_string_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+}
+
 // Test VAL-H2-010: Flow-control windows advance during large streams
 #[tokio::test]
 async fn flow_control_windows_advance_during_large_streams() {

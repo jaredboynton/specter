@@ -9,7 +9,7 @@ use http::{Method, Uri};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing;
@@ -76,6 +76,10 @@ struct DriverStreamState {
     pending_body: Bytes,
     /// Offset of pending body already sent
     body_offset: usize,
+    /// Streaming response chunks waiting for downstream receiver capacity.
+    pending_streaming_body: VecDeque<Result<Bytes>>,
+    /// Whether END_STREAM arrived while streaming body chunks are still pending.
+    pending_streaming_end: bool,
 }
 
 impl DriverStreamState {
@@ -89,6 +93,8 @@ impl DriverStreamState {
             body: BytesMut::new(),
             pending_body,
             body_offset: 0,
+            pending_streaming_body: VecDeque::new(),
+            pending_streaming_end: false,
         }
     }
 
@@ -106,6 +112,8 @@ impl DriverStreamState {
             body: BytesMut::new(),
             pending_body,
             body_offset: 0,
+            pending_streaming_body: VecDeque::new(),
+            pending_streaming_end: false,
         }
     }
 }
@@ -171,8 +179,10 @@ where
             // Try to flush any pending data (flow control)
             self.flush_pending_data().await?;
             self.flush_tunnel_data().await?;
+            self.flush_pending_streaming_bodies().await?;
             self.check_keepalive_timeout()?;
             let mut keepalive_timer = self.keepalive_timer();
+            let mut streaming_backpressure_timer = self.streaming_backpressure_timer();
 
             tokio::select! {
                 // Handle incoming commands (send requests)
@@ -224,6 +234,8 @@ where
                     let ping = self.connection.send_ping().await?;
                     self.pending_ping = Some((ping, Instant::now()));
                 }
+
+                _ = &mut streaming_backpressure_timer => {}
             }
         }
         Ok(())
@@ -251,6 +263,16 @@ where
             return Box::pin(std::future::pending());
         }
         Box::pin(tokio::time::sleep(interval))
+    }
+
+    fn streaming_backpressure_timer(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        if self.streams.values().any(|stream| {
+            stream.streaming_body_tx.is_some() && !stream.pending_streaming_body.is_empty()
+        }) {
+            Box::pin(tokio::time::sleep(Duration::from_millis(1)))
+        } else {
+            Box::pin(std::future::pending())
+        }
     }
 
     /// Handle SendRequest command
@@ -623,6 +645,72 @@ where
         }
     }
 
+    async fn cancel_stream_for_dropped_receiver(&mut self, stream_id: u32) {
+        self.streams.remove(&stream_id);
+        self.connection.remove_stream(stream_id);
+        if let Err(e) = self
+            .connection
+            .send_rst_stream(stream_id, ErrorCode::Cancel)
+            .await
+        {
+            tracing::warn!("Failed to send RST_STREAM for dropped receiver: {:?}", e);
+        }
+    }
+
+    async fn flush_pending_streaming_bodies(&mut self) -> Result<()> {
+        let stream_ids: Vec<u32> = self
+            .streams
+            .iter()
+            .filter_map(|(stream_id, stream)| {
+                if stream.streaming_body_tx.is_some() && !stream.pending_streaming_body.is_empty() {
+                    Some(*stream_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for stream_id in stream_ids {
+            let mut should_cancel = false;
+            let mut should_complete = false;
+
+            if let Some(stream) = self.streams.get_mut(&stream_id) {
+                let Some(tx) = stream.streaming_body_tx.as_ref() else {
+                    continue;
+                };
+
+                if tx.is_closed() {
+                    should_cancel = true;
+                } else {
+                    while let Some(item) = stream.pending_streaming_body.pop_front() {
+                        match tx.try_send(item) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(item)) => {
+                                stream.pending_streaming_body.push_front(item);
+                                break;
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                should_cancel = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    should_complete =
+                        stream.pending_streaming_end && stream.pending_streaming_body.is_empty();
+                }
+            }
+
+            if should_cancel {
+                self.cancel_stream_for_dropped_receiver(stream_id).await;
+            } else if should_complete {
+                self.complete_stream(stream_id);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Handle a single frame
     async fn handle_frame(&mut self, header: FrameHeader, mut payload: Bytes) -> Result<()> {
         // Check if receiver has been dropped (is_closed) for this stream before frame processing.
@@ -632,18 +720,7 @@ where
                 if let Some(ref tx) = stream.streaming_body_tx {
                     if tx.is_closed() {
                         let stream_id = header.stream_id;
-                        self.streams.remove(&stream_id);
-                        self.connection.remove_stream(stream_id);
-                        if let Err(e) = self
-                            .connection
-                            .send_rst_stream(stream_id, ErrorCode::Cancel)
-                            .await
-                        {
-                            tracing::warn!(
-                                "Failed to send RST_STREAM for dropped receiver: {:?}",
-                                e
-                            );
-                        }
+                        self.cancel_stream_for_dropped_receiver(stream_id).await;
                         return Ok(());
                     }
                 }
@@ -815,44 +892,53 @@ where
                     return Ok(());
                 }
 
-                let streaming_body_tx = self
+                if self
                     .streams
                     .get(&stream_id)
-                    .and_then(|stream| stream.streaming_body_tx.clone());
-
-                if let Some(tx) = streaming_body_tx {
+                    .and_then(|stream| stream.streaming_body_tx.as_ref())
+                    .is_some()
+                {
                     if !data.is_empty() {
-                        match tx.try_send(Ok(data)) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(item)) => {
-                                tokio::spawn(async move {
-                                    if tx.send(item).await.is_err() {
-                                        tracing::debug!(
-                                            "H2Driver: streaming receiver dropped while backpressured"
-                                        );
+                        let mut should_cancel = false;
+                        if let Some(stream) = self.streams.get_mut(&stream_id) {
+                            let tx = stream.streaming_body_tx.as_ref().expect("checked above");
+                            if stream.pending_streaming_body.is_empty() {
+                                match tx.try_send(Ok(data)) {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(item)) => {
+                                        stream.pending_streaming_body.push_back(item);
                                     }
-                                });
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                self.streams.remove(&stream_id);
-                                self.connection.remove_stream(stream_id);
-                                if let Err(e) = self
-                                    .connection
-                                    .send_rst_stream(stream_id, ErrorCode::Cancel)
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        "Failed to send RST_STREAM for dropped receiver: {:?}",
-                                        e
-                                    );
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        should_cancel = true;
+                                    }
                                 }
-                                return Ok(());
+                            } else {
+                                stream.pending_streaming_body.push_back(Ok(data));
                             }
+                        }
+
+                        if should_cancel {
+                            self.cancel_stream_for_dropped_receiver(stream_id).await;
+                            return Ok(());
                         }
                     }
 
                     if end_stream {
-                        self.complete_stream(stream_id);
+                        let should_complete = if let Some(stream) = self.streams.get_mut(&stream_id)
+                        {
+                            if stream.pending_streaming_body.is_empty() {
+                                true
+                            } else {
+                                stream.pending_streaming_end = true;
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if should_complete {
+                            self.complete_stream(stream_id);
+                        }
                     }
                 } else if let Some(stream) = self.streams.get_mut(&stream_id) {
                     stream.body.extend_from_slice(&data);
