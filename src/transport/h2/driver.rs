@@ -78,10 +78,18 @@ struct DriverStreamState {
     pending_streaming_body: VecDeque<Result<Bytes>>,
     /// Whether END_STREAM arrived while streaming body chunks are still pending.
     pending_streaming_end: bool,
+    /// Driver-owned per-stream inbound flow-control window. Mirrors the value
+    /// the connection's `Stream::recv_window` would have tracked, so the DATA
+    /// hot path only touches `self.streams` for inbound flow accounting.
+    recv_window: i32,
 }
 
 impl DriverStreamState {
-    fn new(response_tx: oneshot::Sender<Result<StreamResponse>>, pending_body: Bytes) -> Self {
+    fn new(
+        response_tx: oneshot::Sender<Result<StreamResponse>>,
+        pending_body: Bytes,
+        recv_window: i32,
+    ) -> Self {
         Self {
             response_tx: Some(response_tx),
             streaming_headers_tx: None,
@@ -93,6 +101,7 @@ impl DriverStreamState {
             body_offset: 0,
             pending_streaming_body: VecDeque::new(),
             pending_streaming_end: false,
+            recv_window,
         }
     }
 
@@ -100,6 +109,7 @@ impl DriverStreamState {
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
         body_tx: mpsc::Sender<Result<Bytes>>,
         pending_body: Bytes,
+        recv_window: i32,
     ) -> Self {
         Self {
             response_tx: None,
@@ -112,6 +122,7 @@ impl DriverStreamState {
             body_offset: 0,
             pending_streaming_body: VecDeque::new(),
             pending_streaming_end: false,
+            recv_window,
         }
     }
 }
@@ -341,10 +352,31 @@ where
 
             if header.stream_id == stream_id && header.frame_type == FrameType::Data {
                 let end_stream = (header.flags & flags::END_STREAM) != 0;
-                let data = self
-                    .connection
-                    .process_inbound_data_frame(stream_id, header.flags, payload)
+                let data =
+                    self.connection
+                        .parse_inbound_data_payload(stream_id, header.flags, payload)?;
+                let data_len = data.len();
+                self.connection
+                    .apply_conn_inbound_flow_control(data_len)
                     .await?;
+
+                let refresh_threshold = self.connection.flow_control_refresh_threshold();
+                let refresh_increment = self.connection.flow_control_refresh_increment();
+                let mut needs_stream_window_update = false;
+                if data_len > 0 {
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        stream.recv_window -= data_len as i32;
+                        if stream.recv_window < refresh_threshold {
+                            stream.recv_window += refresh_increment as i32;
+                            needs_stream_window_update = true;
+                        }
+                    }
+                }
+                if needs_stream_window_update {
+                    self.connection
+                        .send_stream_window_update(stream_id, refresh_increment)
+                        .await?;
+                }
 
                 if !data.is_empty() {
                     match body_tx.try_send(Ok(data)) {
@@ -486,14 +518,17 @@ where
             let has_body = !body_bytes.is_empty();
             let end_stream = !has_body;
 
+            let initial_recv_window = self.connection.local_initial_window_size() as i32;
             match self
                 .connection
                 .send_headers_raw(&method, &uri, &headers, end_stream)
                 .await
             {
                 Ok(stream_id) => {
-                    self.streams
-                        .insert(stream_id, DriverStreamState::new(response_tx, body_bytes));
+                    self.streams.insert(
+                        stream_id,
+                        DriverStreamState::new(response_tx, body_bytes, initial_recv_window),
+                    );
 
                     self.flush_pending_data().await?;
                 }
@@ -520,6 +555,7 @@ where
             let body_bytes = body.unwrap_or_default();
             let end_stream = body_bytes.is_empty();
 
+            let initial_recv_window = self.connection.local_initial_window_size() as i32;
             match self
                 .connection
                 .send_headers_raw(&method, &uri, &headers, end_stream)
@@ -528,7 +564,12 @@ where
                 Ok(stream_id) => {
                     self.streams.insert(
                         stream_id,
-                        DriverStreamState::streaming(headers_tx, body_tx, body_bytes),
+                        DriverStreamState::streaming(
+                            headers_tx,
+                            body_tx,
+                            body_bytes,
+                            initial_recv_window,
+                        ),
                     );
                     self.flush_pending_data().await?;
                 }
@@ -996,12 +1037,12 @@ where
                 let stream_id = header.stream_id;
                 let end_stream = (header.flags & flags::END_STREAM) != 0;
 
-                // Process flow control for inbound DATA frame.
-                // The process_inbound_data_frame method takes stream_id, flags, and payload
-                // to handle window updates and flow control state.
-                let data = self
-                    .connection
-                    .process_inbound_data_frame(stream_id, header.flags, payload)
+                let data =
+                    self.connection
+                        .parse_inbound_data_payload(stream_id, header.flags, payload)?;
+                let data_len = data.len();
+                self.connection
+                    .apply_conn_inbound_flow_control(data_len)
                     .await?;
 
                 if let Some(tunnel) = self.tunnels.get_mut(&stream_id) {
@@ -1015,10 +1056,22 @@ where
                     return Ok(());
                 }
 
+                let refresh_threshold = self.connection.flow_control_refresh_threshold();
+                let refresh_increment = self.connection.flow_control_refresh_increment();
+
                 let mut should_cancel = false;
                 let mut should_complete = false;
+                let mut needs_stream_window_update = false;
 
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
+                    if data_len > 0 {
+                        stream.recv_window -= data_len as i32;
+                        if stream.recv_window < refresh_threshold {
+                            stream.recv_window += refresh_increment as i32;
+                            needs_stream_window_update = true;
+                        }
+                    }
+
                     if let Some(tx) = stream.streaming_body_tx.as_ref() {
                         if !data.is_empty() {
                             if stream.pending_streaming_body.is_empty() {
@@ -1047,6 +1100,12 @@ where
                         stream.body.extend_from_slice(&data);
                         should_complete = end_stream;
                     }
+                }
+
+                if needs_stream_window_update {
+                    self.connection
+                        .send_stream_window_update(stream_id, refresh_increment)
+                        .await?;
                 }
 
                 if should_cancel {

@@ -878,6 +878,79 @@ where
         Ok(data)
     }
 
+    /// Parse an inbound DATA frame payload without touching `self.streams`.
+    ///
+    /// Used by `H2Driver`, which owns per-stream `recv_window` in
+    /// `DriverStreamState` and applies its own stream-level flow control on
+    /// the hot path. Returns the application bytes after stripping any
+    /// padding declared by the frame.
+    pub fn parse_inbound_data_payload(
+        &self,
+        stream_id: u32,
+        flags: u8,
+        payload: Bytes,
+    ) -> Result<Bytes> {
+        if stream_id == 0 {
+            return Err(Error::HttpProtocol(
+                "Invalid DATA frame: DATA frame must have non-zero stream ID".into(),
+            ));
+        }
+
+        if (flags & flags::PADDED) != 0 {
+            let data_frame = DataFrame::parse(stream_id, flags, payload)
+                .map_err(|e| Error::HttpProtocol(format!("Invalid DATA frame: {}", e)))?;
+            Ok(data_frame.data)
+        } else {
+            Ok(payload)
+        }
+    }
+
+    /// Apply connection-level inbound flow control bookkeeping for `data_len`
+    /// received bytes. Decrements `conn_recv_window` and issues a
+    /// connection-level WINDOW_UPDATE when the window drops below the
+    /// refresh threshold. Does not touch per-stream state; driver paths
+    /// that own their own `recv_window` use this to keep connection-level
+    /// flow control correct without re-entering `self.streams`.
+    pub async fn apply_conn_inbound_flow_control(&mut self, data_len: usize) -> Result<()> {
+        self.conn_recv_window -= data_len as i32;
+        if self.conn_recv_window < WINDOW_UPDATE_THRESHOLD {
+            let increment = DEFAULT_INITIAL_WINDOW_SIZE;
+            self.send_window_update(0, increment).await?;
+            self.conn_recv_window += increment as i32;
+        }
+        Ok(())
+    }
+
+    /// Send a stream-level WINDOW_UPDATE without touching `self.streams`.
+    /// Driver paths use this after updating their own `recv_window` to
+    /// avoid an extra HashMap lookup on the inbound DATA hot path.
+    pub async fn send_stream_window_update(
+        &mut self,
+        stream_id: u32,
+        increment: u32,
+    ) -> Result<()> {
+        self.send_window_update(stream_id, increment).await
+    }
+
+    /// Locally configured initial window size used when a new stream is
+    /// opened. Driver seeds its per-stream `recv_window` from this value so
+    /// inbound flow-control accounting matches what the connection's
+    /// `Stream::recv_window` would have used.
+    pub fn local_initial_window_size(&self) -> u32 {
+        self.settings.initial_window_size
+    }
+
+    /// Refresh threshold for stream-level inbound flow-control updates.
+    pub fn flow_control_refresh_threshold(&self) -> i32 {
+        WINDOW_UPDATE_THRESHOLD
+    }
+
+    /// Increment value used when sending stream-level inbound flow-control
+    /// updates after the window drops below the refresh threshold.
+    pub fn flow_control_refresh_increment(&self) -> u32 {
+        DEFAULT_INITIAL_WINDOW_SIZE
+    }
+
     /// Reads response with streaming body - yields headers then streams DATA frames incrementally.
     /// Returns (Response with empty body, Receiver for body chunks).
     /// Does NOT wait for END_STREAM before returning - streams data as it arrives.
