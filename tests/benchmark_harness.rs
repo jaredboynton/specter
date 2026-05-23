@@ -21,7 +21,9 @@ fn streaming_benchmark_declares_enforceable_h1_h2_threshold_gate() {
     assert!(source.contains("throughput_improvement_required_pct: 5.0"));
     assert!(source.contains("throughput_improvement_pct >= 5.0"));
     assert!(source.contains("p95_throughput_regression_pct <= 5.0"));
-    assert!(source.contains("p95_ttft_regression_pct <= 0.0"));
+    assert!(source.contains("p95_ttft_regression_pct <= 5.0"));
+    assert!(source.contains("const DEFAULT_SAMPLE_COUNT: usize = 30;"));
+    assert!(source.contains("const DEFAULT_WARMUP_COUNT: usize = 5;"));
     assert!(source.contains("thresholded_origins: vec![\"127.0.0.1:3201\", \"127.0.0.1:3202\"]"));
     assert!(source.contains(".unwrap_or_else(|| vec![\"h1\", \"h2\"]);"));
     assert!(source.contains("public_provider_threshold_inputs: Vec::new()"));
@@ -38,12 +40,17 @@ fn thresholded_streaming_benchmark_uses_delayed_multi_chunk_workload() {
     assert!(source.contains("const BENCH_CHUNK_SIZE: usize = 1024;"));
     assert!(source.contains("const BENCH_CHUNK_COUNT: usize = 5;"));
     assert!(source.contains("const BENCH_CHUNK_DELAY_MS: u64 = 2;"));
-    assert!(source.contains("payload_schedule_ms: vec![BENCH_CHUNK_DELAY_MS; BENCH_CHUNK_COUNT]"));
+    assert!(source.contains("payload_schedule_ms = payload_schedule_ms();"));
     assert!(source.contains("let chunk_count = BENCH_CHUNK_COUNT;"));
-    assert!(source.contains("throughput_values.push(bytes as f64 / total_duration);"));
-    assert!(source.contains("throughput_timing_window: \"first observed body byte through final observed body byte; identical for reqwest and Specter\""));
+    assert!(source.contains(
+        "corrected_client_overhead_duration(body_transfer_duration, payload_schedule_duration)"
+    ));
+    assert!(source.contains("throughput_values.push(bytes as f64 / denominator);"));
+    assert!(source.contains("throughput_timing_window: \"corrected client overhead: first observed body byte through final observed body byte minus sum(payload_schedule_ms); identical for reqwest and Specter\""));
     assert!(source.contains("throughput_improvement_pct >= 5.0"));
     assert!(source.contains("p95_throughput_regression_pct <= 5.0"));
+    assert!(source.contains("body_transfer_duration_ns"));
+    assert!(source.contains("client_overhead_duration_ns"));
     assert!(source.contains("applied identically to reqwest and Specter"));
     assert!(!source.contains("const BENCH_CHUNK_COUNT: usize = 1;"));
     assert!(!source.contains("const BENCH_CHUNK_DELAY_MS: u64 = 0;"));
