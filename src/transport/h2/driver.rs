@@ -7,8 +7,6 @@
 use bytes::{Bytes, BytesMut};
 use http::{Method, Uri};
 use std::collections::{HashMap, VecDeque};
-use std::future::Future;
-use std::pin::Pin;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -181,8 +179,8 @@ where
             self.flush_tunnel_data().await?;
             self.flush_pending_streaming_bodies().await?;
             self.check_keepalive_timeout()?;
-            let mut keepalive_timer = self.keepalive_timer();
-            let mut streaming_backpressure_timer = self.streaming_backpressure_timer();
+            let keepalive_delay = self.keepalive_delay();
+            let retry_streaming_backpressure = self.has_pending_streaming_body();
 
             tokio::select! {
                 // Handle incoming commands (send requests)
@@ -230,12 +228,24 @@ where
                     }
                 }
 
-                _ = &mut keepalive_timer => {
+                _ = async {
+                    if let Some(delay) = keepalive_delay {
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
                     let ping = self.connection.send_ping().await?;
                     self.pending_ping = Some((ping, Instant::now()));
                 }
 
-                _ = &mut streaming_backpressure_timer => {}
+                _ = async {
+                    if retry_streaming_backpressure {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
             }
         }
         Ok(())
@@ -252,27 +262,21 @@ where
         Ok(())
     }
 
-    fn keepalive_timer(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let Some(interval) = self.config.keep_alive_interval else {
-            return Box::pin(std::future::pending());
-        };
+    fn keepalive_delay(&self) -> Option<Duration> {
+        let interval = self.config.keep_alive_interval?;
         if self.pending_ping.is_some() {
-            return Box::pin(std::future::pending());
+            return None;
         }
         if !self.config.keep_alive_while_idle && self.active_stream_count() == 0 {
-            return Box::pin(std::future::pending());
+            return None;
         }
-        Box::pin(tokio::time::sleep(interval))
+        Some(interval)
     }
 
-    fn streaming_backpressure_timer(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        if self.streams.values().any(|stream| {
+    fn has_pending_streaming_body(&self) -> bool {
+        self.streams.values().any(|stream| {
             stream.streaming_body_tx.is_some() && !stream.pending_streaming_body.is_empty()
-        }) {
-            Box::pin(tokio::time::sleep(Duration::from_millis(1)))
-        } else {
-            Box::pin(std::future::pending())
-        }
+        })
     }
 
     /// Handle SendRequest command
@@ -728,77 +732,87 @@ where
         }
 
         // 1. Check control frames that modify connection state
-        match self
-            .connection
-            .handle_control_frame(&header, payload.clone())
-            .await?
-        {
-            ControlAction::RstStream(sid, code) => {
-                if let Some(tunnel) = self.tunnels.remove(&sid) {
-                    let _ = tunnel
-                        .inbound_tx
-                        .send(Ok(H2TunnelEvent::Reset(format!("{:?}", code))))
+        if matches!(
+            header.frame_type,
+            FrameType::Settings
+                | FrameType::WindowUpdate
+                | FrameType::Ping
+                | FrameType::GoAway
+                | FrameType::RstStream
+                | FrameType::PushPromise
+        ) {
+            match self
+                .connection
+                .handle_control_frame(&header, payload.clone())
+                .await?
+            {
+                ControlAction::RstStream(sid, code) => {
+                    if let Some(tunnel) = self.tunnels.remove(&sid) {
+                        let _ = tunnel
+                            .inbound_tx
+                            .send(Ok(H2TunnelEvent::Reset(format!("{:?}", code))))
+                            .await;
+                    }
+                    // Notify stream of reset
+                    self.fail_stream(sid, format!("Stream reset by peer: {:?}", code))
                         .await;
+                    // Stream slot freed, try to process pending
+                    self.process_pending_requests().await?;
+                    return Ok(());
                 }
-                // Notify stream of reset
-                self.fail_stream(sid, format!("Stream reset by peer: {:?}", code))
-                    .await;
-                // Stream slot freed, try to process pending
-                self.process_pending_requests().await?;
-                return Ok(());
-            }
-            ControlAction::GoAway(last_sid) => {
-                self.goaway_received
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                let tunnel_ids: Vec<u32> = self.tunnels.keys().copied().collect();
-                for sid in tunnel_ids {
-                    if sid > last_sid {
-                        if let Some(tunnel) = self.tunnels.remove(&sid) {
-                            let _ = tunnel
-                                .inbound_tx
-                                .send(Ok(H2TunnelEvent::GoAway {
-                                    last_stream_id: last_sid,
-                                }))
-                                .await;
+                ControlAction::GoAway(last_sid) => {
+                    self.goaway_received
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    let tunnel_ids: Vec<u32> = self.tunnels.keys().copied().collect();
+                    for sid in tunnel_ids {
+                        if sid > last_sid {
+                            if let Some(tunnel) = self.tunnels.remove(&sid) {
+                                let _ = tunnel
+                                    .inbound_tx
+                                    .send(Ok(H2TunnelEvent::GoAway {
+                                        last_stream_id: last_sid,
+                                    }))
+                                    .await;
+                            }
                         }
                     }
+                    // Close all streams > last_sid
+                    let sids: Vec<u32> = self.streams.keys().cloned().collect();
+                    for sid in sids {
+                        if sid > last_sid {
+                            self.fail_stream(sid, "GOAWAY received".into()).await;
+                        }
+                    }
+                    // Driver continues processing existing streams until they complete.
+                    // A future enhancement could implement immediate shutdown on GOAWAY.
+                    return Ok(());
                 }
-                // Close all streams > last_sid
-                let sids: Vec<u32> = self.streams.keys().cloned().collect();
-                for sid in sids {
-                    if sid > last_sid {
-                        self.fail_stream(sid, "GOAWAY received".into()).await;
+                ControlAction::RefusePush(_stream_id, promised_id) => {
+                    // Send RST_STREAM for the promised stream
+                    // RFC 9113 8.4: RST_STREAM with REFUSED_STREAM
+                    if let Err(e) = self
+                        .connection
+                        .send_rst_stream(promised_id, ErrorCode::RefusedStream)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to send RST_STREAM for refused push promise: {:?}",
+                            e
+                        );
                     }
                 }
-                // Driver continues processing existing streams until they complete.
-                // A future enhancement could implement immediate shutdown on GOAWAY.
-                return Ok(());
-            }
-            ControlAction::RefusePush(_stream_id, promised_id) => {
-                // Send RST_STREAM for the promised stream
-                // RFC 9113 8.4: RST_STREAM with REFUSED_STREAM
-                if let Err(e) = self
-                    .connection
-                    .send_rst_stream(promised_id, ErrorCode::RefusedStream)
-                    .await
-                {
-                    tracing::warn!(
-                        "Failed to send RST_STREAM for refused push promise: {:?}",
-                        e
-                    );
+                ControlAction::PingAck(data) => {
+                    if self
+                        .pending_ping
+                        .is_some_and(|(pending_data, _)| pending_data == data)
+                    {
+                        self.pending_ping = None;
+                    }
+                    return Ok(());
                 }
-            }
-            ControlAction::PingAck(data) => {
-                if self
-                    .pending_ping
-                    .is_some_and(|(pending_data, _)| pending_data == data)
-                {
-                    self.pending_ping = None;
+                ControlAction::None => {
+                    // Continue to specific processing
                 }
-                return Ok(());
-            }
-            ControlAction::None => {
-                // Continue to specific processing
             }
         }
 
@@ -892,16 +906,12 @@ where
                     return Ok(());
                 }
 
-                if self
-                    .streams
-                    .get(&stream_id)
-                    .and_then(|stream| stream.streaming_body_tx.as_ref())
-                    .is_some()
-                {
-                    if !data.is_empty() {
-                        let mut should_cancel = false;
-                        if let Some(stream) = self.streams.get_mut(&stream_id) {
-                            let tx = stream.streaming_body_tx.as_ref().expect("checked above");
+                let mut should_cancel = false;
+                let mut should_complete = false;
+
+                if let Some(stream) = self.streams.get_mut(&stream_id) {
+                    if let Some(tx) = stream.streaming_body_tx.as_ref() {
+                        if !data.is_empty() {
                             if stream.pending_streaming_body.is_empty() {
                                 match tx.try_send(Ok(data)) {
                                     Ok(()) => {}
@@ -917,35 +927,26 @@ where
                             }
                         }
 
-                        if should_cancel {
-                            self.cancel_stream_for_dropped_receiver(stream_id).await;
-                            return Ok(());
-                        }
-                    }
-
-                    if end_stream {
-                        let should_complete = if let Some(stream) = self.streams.get_mut(&stream_id)
-                        {
+                        if end_stream {
                             if stream.pending_streaming_body.is_empty() {
-                                true
+                                should_complete = true;
                             } else {
                                 stream.pending_streaming_end = true;
-                                false
                             }
-                        } else {
-                            false
-                        };
-
-                        if should_complete {
-                            self.complete_stream(stream_id);
                         }
+                    } else {
+                        stream.body.extend_from_slice(&data);
+                        should_complete = end_stream;
                     }
-                } else if let Some(stream) = self.streams.get_mut(&stream_id) {
-                    stream.body.extend_from_slice(&data);
+                }
 
-                    if end_stream {
-                        self.complete_stream(stream_id);
-                    }
+                if should_cancel {
+                    self.cancel_stream_for_dropped_receiver(stream_id).await;
+                    return Ok(());
+                }
+
+                if should_complete {
+                    self.complete_stream(stream_id);
                 }
             }
             FrameType::WindowUpdate => {

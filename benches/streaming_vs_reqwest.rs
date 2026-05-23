@@ -18,9 +18,9 @@ const H1_PORT: u16 = 3201;
 const H2_PORT: u16 = 3202;
 const H3_PORT: u16 = 3203;
 const RFC8441_PORT: u16 = 3204;
-const BENCH_CHUNK_SIZE: usize = 1024;
+const BENCH_CHUNK_SIZE: usize = 16 * 1024;
 const BENCH_CHUNK_COUNT: usize = 5;
-const BENCH_CHUNK_DELAY_MS: u64 = 2;
+const BENCH_CHUNK_DELAY_MS: u64 = 1;
 const BENCH_REQUEST_COUNT: usize = 8;
 const DEFAULT_WARMUP_COUNT: usize = 5;
 const DEFAULT_SAMPLE_COUNT: usize = 30;
@@ -152,6 +152,10 @@ pub(crate) struct Metrics {
     pub(crate) sample_count: usize,
     pub(crate) connection_reuse_count: usize,
     pub(crate) pass: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ttft_samples_ns: Vec<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) bytes_per_sec_samples: Vec<f64>,
 }
 
 impl Metrics {
@@ -170,6 +174,8 @@ impl Metrics {
             sample_count,
             connection_reuse_count: 0,
             pass: false,
+            ttft_samples_ns: Vec::new(),
+            bytes_per_sec_samples: Vec::new(),
         }
     }
 
@@ -188,6 +194,8 @@ impl Metrics {
             sample_count,
             connection_reuse_count: 0,
             pass: true,
+            ttft_samples_ns: Vec::new(),
+            bytes_per_sec_samples: Vec::new(),
         }
     }
 }
@@ -199,12 +207,15 @@ struct Threshold {
     throughput_improvement_required_pct: f64,
     throughput_regression_allowed_pct: f64,
     p95_regression_allowed_pct: f64,
+    wilcoxon_p_value_required_less_than: f64,
     reqwest_median_ttft_ns: Option<f64>,
     specter_median_ttft_ns: Option<f64>,
     ttft_improvement_pct: Option<f64>,
+    ttft_wilcoxon_signed_rank_p_value: Option<f64>,
     reqwest_median_bytes_per_sec: Option<f64>,
     specter_median_bytes_per_sec: Option<f64>,
     throughput_improvement_pct: Option<f64>,
+    throughput_wilcoxon_signed_rank_p_value: Option<f64>,
     median_throughput_regression_pct: Option<f64>,
     reqwest_p95_bytes_per_sec: Option<f64>,
     specter_p95_bytes_per_sec: Option<f64>,
@@ -306,6 +317,8 @@ pub(crate) struct ComparableThresholdResult {
     pub(crate) median_throughput_regression_pct: f64,
     pub(crate) p95_throughput_regression_pct: f64,
     pub(crate) p95_ttft_regression_pct: f64,
+    pub(crate) ttft_wilcoxon_signed_rank_p_value: f64,
+    pub(crate) throughput_wilcoxon_signed_rank_p_value: f64,
 }
 
 struct Fixtures {
@@ -606,6 +619,7 @@ async fn start_h1_server(port: u16) -> tokio::task::JoinHandle<()> {
         .unwrap();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
+            let _ = stream.set_nodelay(true);
             tokio::spawn(handle_h1_connection(stream));
         }
     })
@@ -627,6 +641,7 @@ async fn start_h2_server(
         .unwrap();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
+            let _ = stream.set_nodelay(true);
             let acceptor_clone = acceptor.clone();
             tokio::spawn(async move {
                 if let Ok(tls_stream) = tokio_boring::accept(&acceptor_clone, stream).await {
@@ -1209,6 +1224,8 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 metrics.p95_ns = 1_350_000.0;
                 metrics.p99_ns = 1_450_000.0;
                 metrics.pass = false;
+                metrics.ttft_samples_ns = vec![1_100_000.0; options.sample_count];
+                metrics.bytes_per_sec_samples = vec![25_000.0; options.sample_count];
             }
 
             if options.force_h3_threshold_failure && protocol == "h3" && client == "specter" {
@@ -1302,6 +1319,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     throughput_improvement_required_pct: 5.0,
                     throughput_regression_allowed_pct: 5.0,
                     p95_regression_allowed_pct: 5.0,
+                    wilcoxon_p_value_required_less_than: 0.01,
                     reqwest_median_ttft_ns: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].ttft_ns),
@@ -1311,6 +1329,9 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     ttft_improvement_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.ttft_improvement_pct),
+                    ttft_wilcoxon_signed_rank_p_value: comparable_threshold
+                        .as_ref()
+                        .map(|result| result.ttft_wilcoxon_signed_rank_p_value),
                     reqwest_median_bytes_per_sec: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].bytes_per_sec),
@@ -1320,6 +1341,9 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     throughput_improvement_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.throughput_improvement_pct),
+                    throughput_wilcoxon_signed_rank_p_value: comparable_threshold
+                        .as_ref()
+                        .map(|result| result.throughput_wilcoxon_signed_rank_p_value),
                     median_throughput_regression_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.median_throughput_regression_pct),
@@ -1345,7 +1369,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     reason: match (protocol, client) {
                         ("h3", "specter") => "reqwest H3 comparison unavailable; Specter H3 row is gated by explicit TTFT, throughput, chunk-rate, and pool-reuse regression thresholds",
                         ("h3", "reqwest") => "reqwest H3 comparison unavailable and excluded from threshold math",
-                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable threshold: Specter median TTFT must improve by >=5%, median throughput must improve by >=5%, p95 throughput must not regress by more than 5%, and p95 TTFT must not regress by more than 5%",
+                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable threshold: Specter median TTFT must improve by >=5%, median throughput must improve by >=5%, paired Wilcoxon signed-rank p-values for TTFT and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 TTFT must not regress by more than 5%",
                         ("h1" | "h2", "reqwest") => "deterministic localhost reqwest baseline row; excluded as a failing threshold subject but included in threshold math",
                         _ => "non-comparable deterministic row excluded from primary H1/H2 reqwest threshold math",
                     },
@@ -1384,6 +1408,8 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
         sample_count: measurement.sample_count,
         connection_reuse_count: 0,
         pass: !h3_selected,
+        ttft_samples_ns: Vec::new(),
+        bytes_per_sec_samples: Vec::new(),
     });
     let h3_gate = H3Gate {
         fixture_address: "127.0.0.1:3203/udp",
@@ -1482,7 +1508,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
         threshold_summary: ThresholdSummary {
             required_thresholds_passed,
             failed_rows,
-            negative_threshold_self_check: "implemented: --require-thresholds exits non-zero when required_thresholds_passed is false; --self-test-threshold-failure induces required H1/H2 comparable threshold failures; --self-test-h3-threshold-failure induces an H3 gate failure",
+            negative_threshold_self_check: "implemented: --require-thresholds exits non-zero when required_thresholds_passed is false; --self-test-threshold-failure induces required H1/H2 comparable threshold failures, including median win and p95 regression failures; Wilcoxon p-value failures are part of the same required_thresholds_passed gate; --self-test-h3-threshold-failure induces an H3 gate failure",
         },
         public_provider_threshold_inputs: Vec::new(),
         port_preflight: preflight,
@@ -1506,8 +1532,20 @@ pub(crate) fn evaluate_comparable_threshold(
     let p95_throughput_regression_pct =
         pct_lower_is_worse(reqwest.p95_bytes_per_sec, specter.p95_bytes_per_sec);
     let p95_ttft_regression_pct = pct_higher_is_worse(reqwest.p95_ns, specter.p95_ns);
+    let ttft_wilcoxon_signed_rank_p_value = paired_wilcoxon_signed_rank_p_value(
+        &reqwest.ttft_samples_ns,
+        &specter.ttft_samples_ns,
+        true,
+    );
+    let throughput_wilcoxon_signed_rank_p_value = paired_wilcoxon_signed_rank_p_value(
+        &reqwest.bytes_per_sec_samples,
+        &specter.bytes_per_sec_samples,
+        false,
+    );
     let pass = ttft_improvement_pct >= 5.0
         && throughput_improvement_pct >= 5.0
+        && ttft_wilcoxon_signed_rank_p_value < 0.01
+        && throughput_wilcoxon_signed_rank_p_value < 0.01
         && p95_throughput_regression_pct <= 5.0
         && p95_ttft_regression_pct <= 5.0;
 
@@ -1518,7 +1556,87 @@ pub(crate) fn evaluate_comparable_threshold(
         median_throughput_regression_pct,
         p95_throughput_regression_pct,
         p95_ttft_regression_pct,
+        ttft_wilcoxon_signed_rank_p_value,
+        throughput_wilcoxon_signed_rank_p_value,
     }
+}
+
+pub(crate) fn paired_wilcoxon_signed_rank_p_value(
+    baseline_samples: &[f64],
+    specter_samples: &[f64],
+    lower_is_better: bool,
+) -> f64 {
+    if baseline_samples.len() != specter_samples.len() || baseline_samples.len() < 2 {
+        return 1.0;
+    }
+
+    let mut differences: Vec<(f64, bool)> = baseline_samples
+        .iter()
+        .zip(specter_samples.iter())
+        .filter_map(|(baseline, specter)| {
+            if !baseline.is_finite() || !specter.is_finite() {
+                return None;
+            }
+            let improvement = if lower_is_better {
+                baseline - specter
+            } else {
+                specter - baseline
+            };
+            if improvement == 0.0 {
+                None
+            } else {
+                Some((improvement.abs(), improvement > 0.0))
+            }
+        })
+        .collect();
+
+    let n = differences.len();
+    if n < 2 {
+        return 1.0;
+    }
+
+    differences.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let mut positive_rank_sum = 0.0;
+    let mut index = 0;
+    while index < n {
+        let mut end = index + 1;
+        while end < n && differences[end].0 == differences[index].0 {
+            end += 1;
+        }
+        let average_rank = ((index + 1 + end) as f64) / 2.0;
+        for item in differences.iter().take(end).skip(index) {
+            if item.1 {
+                positive_rank_sum += average_rank;
+            }
+        }
+        index = end;
+    }
+
+    let n_f = n as f64;
+    let mean = n_f * (n_f + 1.0) / 4.0;
+    let variance = n_f * (n_f + 1.0) * (2.0 * n_f + 1.0) / 24.0;
+    if variance <= 0.0 {
+        return 1.0;
+    }
+
+    let z = (positive_rank_sum - mean - 0.5) / variance.sqrt();
+    (1.0 - standard_normal_cdf(z)).clamp(0.0, 1.0)
+}
+
+fn standard_normal_cdf(z: f64) -> f64 {
+    0.5 * (1.0 + erf_approx(z / std::f64::consts::SQRT_2))
+}
+
+fn erf_approx(x: f64) -> f64 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let y = 1.0
+        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
+            + 0.254829592)
+            * t
+            * (-x * x).exp();
+    sign * y
 }
 
 fn pct_lower_is_better(baseline: f64, candidate: f64) -> f64 {
@@ -1654,7 +1772,7 @@ async fn run_real_measurement(
 
     let (p50, p95, p99) = calculate_percentiles(ttft_values.clone());
     let (_, p95_throughput, _) = calculate_percentiles(throughput_values.clone());
-    let median_throughput = calculate_median(throughput_values);
+    let median_throughput = calculate_median(throughput_values.clone());
     let median_chunk_rate = calculate_median(chunk_rates);
     let median_body_transfer_duration_ns = calculate_median(body_transfer_duration_values);
     let median_client_overhead_duration_ns = calculate_median(client_overhead_duration_values);
@@ -1680,6 +1798,8 @@ async fn run_real_measurement(
                 .saturating_sub(1)
         },
         pass: true,
+        ttft_samples_ns: ttft_values,
+        bytes_per_sec_samples: throughput_values,
     })
 }
 
@@ -1776,6 +1896,10 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         (
             "p95_regression_allowed_pct",
             "5 means additive p95 budgets allow Specter p95 throughput or p95 TTFT to regress versus reqwest by at most 5%; median TTFT and median throughput still must each improve by at least 5%",
+        ),
+        (
+            "wilcoxon_signed_rank_p_value",
+            "one-sided paired Wilcoxon signed-rank normal-approximation p-value over matched reqwest/Specter samples; TTFT ranks baseline minus Specter as improvement, corrected-overhead throughput ranks Specter minus baseline as improvement, and threshold rows require p < 0.01 for both median deltas",
         ),
     ])
 }

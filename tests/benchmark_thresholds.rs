@@ -6,10 +6,13 @@ use std::time::Duration;
 
 use streaming_vs_reqwest::{
     body_transfer_duration, corrected_client_overhead_duration, evaluate_comparable_threshold,
-    record_sample, Metrics,
+    paired_wilcoxon_signed_rank_p_value, record_sample, Metrics,
 };
 
 fn metrics(ttft_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64) -> Metrics {
+    let ttft_samples_ns = vec![ttft_ns; 30];
+    let bytes_per_sec_samples = vec![bytes_per_sec; 30];
+
     Metrics {
         ttft_ns,
         chunks_per_sec: 1_000.0,
@@ -21,9 +24,11 @@ fn metrics(ttft_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64
         p95_ns,
         p99_ns: p95_ns,
         warmup_count: 0,
-        sample_count: 1,
+        sample_count: 30,
         connection_reuse_count: 0,
         pass: true,
+        ttft_samples_ns,
+        bytes_per_sec_samples,
     }
 }
 
@@ -72,6 +77,20 @@ fn comparable_threshold_fails_when_median_throughput_win_is_under_five_percent()
 }
 
 #[test]
+fn comparable_threshold_fails_when_median_ttft_win_is_under_five_percent() {
+    let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
+    let specter = metrics(951.0, 1_100.0, 1_100.0, 951.0);
+
+    let result = evaluate_comparable_threshold(&reqwest, &specter);
+
+    assert!(!result.pass);
+    assert!(result.ttft_improvement_pct < 5.0);
+    assert!(result.throughput_improvement_pct >= 5.0);
+    assert!(result.p95_throughput_regression_pct <= 5.0);
+    assert!(result.p95_ttft_regression_pct <= 5.0);
+}
+
+#[test]
 fn comparable_threshold_fails_when_p95_throughput_regresses() {
     let reqwest = metrics(1_000.0, 1_000.0, 2_000.0, 1_000.0);
     let specter = metrics(900.0, 1_100.0, 1_850.0, 900.0);
@@ -97,6 +116,50 @@ fn comparable_threshold_fails_when_p95_ttft_regresses_over_five_percent() {
     assert!(result.throughput_improvement_pct >= 5.0);
     assert!(result.p95_throughput_regression_pct <= 5.0);
     assert!(result.p95_ttft_regression_pct > 5.0);
+}
+
+#[test]
+fn comparable_threshold_emits_and_enforces_wilcoxon_p_values() {
+    let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
+    let specter = metrics(900.0, 1_100.0, 1_100.0, 900.0);
+
+    let result = evaluate_comparable_threshold(&reqwest, &specter);
+
+    assert!(result.pass);
+    assert!(result.ttft_wilcoxon_signed_rank_p_value < 0.01);
+    assert!(result.throughput_wilcoxon_signed_rank_p_value < 0.01);
+}
+
+#[test]
+fn comparable_threshold_fails_when_wilcoxon_p_values_are_not_significant() {
+    let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
+    let mut specter = metrics(900.0, 1_100.0, 1_100.0, 900.0);
+    specter.ttft_samples_ns = (0..30)
+        .map(|idx| if idx < 16 { 900.0 } else { 2_000.0 })
+        .collect();
+    specter.bytes_per_sec_samples = (0..30)
+        .map(|idx| if idx < 16 { 1_100.0 } else { 100.0 })
+        .collect();
+
+    let result = evaluate_comparable_threshold(&reqwest, &specter);
+
+    assert!(!result.pass);
+    assert!(result.ttft_improvement_pct >= 5.0);
+    assert!(result.throughput_improvement_pct >= 5.0);
+    assert!(result.ttft_wilcoxon_signed_rank_p_value >= 0.01);
+    assert!(result.throughput_wilcoxon_signed_rank_p_value >= 0.01);
+}
+
+#[test]
+fn paired_wilcoxon_signed_rank_uses_direction_for_metric_semantics() {
+    let baseline = vec![1_000.0; 30];
+    let lower_specter = vec![900.0; 30];
+    let higher_specter = vec![1_100.0; 30];
+
+    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &lower_specter, true) < 0.01);
+    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &higher_specter, false) < 0.01);
+    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &higher_specter, true) > 0.99);
+    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &lower_specter, false) > 0.99);
 }
 
 #[test]

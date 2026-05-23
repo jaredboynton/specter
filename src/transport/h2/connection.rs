@@ -850,16 +850,14 @@ where
     pub async fn read_next_frame(&mut self) -> Result<(FrameHeader, Bytes)> {
         // Read frame header
         while self.read_buf.len() < FRAME_HEADER_SIZE {
-            let mut buf = [0u8; 16384];
             let n = self
                 .stream
-                .read(&mut buf)
+                .read_buf(&mut self.read_buf)
                 .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
             if n == 0 {
                 return Err(Error::HttpProtocol("Connection closed".into()));
             }
-            self.read_buf.extend_from_slice(&buf[..n]);
         }
 
         let header = FrameHeader::parse(&self.read_buf[..FRAME_HEADER_SIZE]).ok_or_else(|| {
@@ -877,16 +875,14 @@ where
         // Wait for full frame
         let frame_len = FRAME_HEADER_SIZE + header.length as usize;
         while self.read_buf.len() < frame_len {
-            let mut buf = [0u8; 16384];
             let n = self
                 .stream
-                .read(&mut buf)
+                .read_buf(&mut self.read_buf)
                 .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
             if n == 0 {
                 return Err(Error::HttpProtocol("Connection closed".into()));
             }
-            self.read_buf.extend_from_slice(&buf[..n]);
         }
 
         self.read_buf.advance(FRAME_HEADER_SIZE);
@@ -1160,16 +1156,14 @@ where
     pub async fn read_streaming_frames(&mut self) -> Result<bool> {
         // Read frame header
         while self.read_buf.len() < FRAME_HEADER_SIZE {
-            let mut buf = [0u8; 16384];
             let n = self
                 .stream
-                .read(&mut buf)
+                .read_buf(&mut self.read_buf)
                 .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
             if n == 0 {
                 return Err(Error::HttpProtocol("Connection closed".into()));
             }
-            self.read_buf.extend_from_slice(&buf[..n]);
         }
 
         let header = FrameHeader::parse(&self.read_buf[..FRAME_HEADER_SIZE]).ok_or_else(|| {
@@ -1187,20 +1181,18 @@ where
         // Wait for full frame
         let frame_len = FRAME_HEADER_SIZE + header.length as usize;
         while self.read_buf.len() < frame_len {
-            let mut buf = [0u8; 16384];
             let n = self
                 .stream
-                .read(&mut buf)
+                .read_buf(&mut self.read_buf)
                 .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
             if n == 0 {
                 return Err(Error::HttpProtocol("Connection closed".into()));
             }
-            self.read_buf.extend_from_slice(&buf[..n]);
         }
 
-        let payload_bytes = Bytes::from(self.read_buf[FRAME_HEADER_SIZE..frame_len].to_vec());
-        self.read_buf.advance(frame_len);
+        self.read_buf.advance(FRAME_HEADER_SIZE);
+        let payload_bytes = self.read_buf.split_to(header.length as usize).freeze();
 
         // Process frame - route to streaming channel if stream has streaming_tx
         self.process_streaming_frame(header, payload_bytes).await
@@ -1388,16 +1380,14 @@ where
         loop {
             // Read frame header
             while self.read_buf.len() < FRAME_HEADER_SIZE {
-                let mut buf = [0u8; 16384];
                 let n = self
                     .stream
-                    .read(&mut buf)
+                    .read_buf(&mut self.read_buf)
                     .await
                     .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
                 if n == 0 {
                     return Err(Error::HttpProtocol("Connection closed".into()));
                 }
-                self.read_buf.extend_from_slice(&buf[..n]);
             }
 
             let header =
@@ -1416,20 +1406,18 @@ where
             // Wait for full frame
             let frame_len = FRAME_HEADER_SIZE + header.length as usize;
             while self.read_buf.len() < frame_len {
-                let mut buf = [0u8; 16384];
                 let n = self
                     .stream
-                    .read(&mut buf)
+                    .read_buf(&mut self.read_buf)
                     .await
                     .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
                 if n == 0 {
                     return Err(Error::HttpProtocol("Connection closed".into()));
                 }
-                self.read_buf.extend_from_slice(&buf[..n]);
             }
 
-            let payload_bytes = Bytes::from(self.read_buf[FRAME_HEADER_SIZE..frame_len].to_vec());
-            self.read_buf.advance(frame_len);
+            self.read_buf.advance(FRAME_HEADER_SIZE);
+            let payload_bytes = self.read_buf.split_to(header.length as usize).freeze();
 
             match header.frame_type {
                 FrameType::Headers => {

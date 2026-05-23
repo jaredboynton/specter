@@ -3,7 +3,7 @@
 //! Uses httparse for response parsing and raw I/O for maximum control
 //! over request formatting and header order.
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http::{Method, Uri};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -469,15 +469,16 @@ impl H1Connection {
             Self::send_body_chunk(tx, Bytes::from(initial)).await?;
         }
 
-        let mut read_buf = vec![0u8; 8192];
+        let mut read_buf = BytesMut::with_capacity(8192);
         loop {
-            let n = self.stream.read(&mut read_buf).await.map_err(|e| {
+            read_buf.clear();
+            let n = self.stream.read_buf(&mut read_buf).await.map_err(|e| {
                 Error::HttpProtocol(format!("Failed to read body (close-delimited): {}", e))
             })?;
             if n == 0 {
                 return Ok(());
             }
-            Self::send_body_chunk(tx, Bytes::copy_from_slice(&read_buf[..n])).await?;
+            Self::send_body_chunk(tx, read_buf.split_to(n).freeze()).await?;
         }
     }
 
@@ -498,12 +499,14 @@ impl H1Connection {
         }
 
         let mut received = initial_len;
+        let mut chunk = BytesMut::with_capacity(8192);
         while received < content_length {
             let remaining = content_length - received;
-            let mut chunk = vec![0u8; remaining.min(8192)];
+            chunk.clear();
+            chunk.reserve(remaining.min(8192));
             let n = self
                 .stream
-                .read(&mut chunk)
+                .read_buf(&mut chunk)
                 .await
                 .map_err(|e| Error::HttpProtocol(format!("Failed to read body: {}", e)))?;
 
@@ -514,8 +517,7 @@ impl H1Connection {
                 )));
             }
             received += n;
-            chunk.truncate(n);
-            Self::send_body_chunk(tx, Bytes::from(chunk)).await?;
+            Self::send_body_chunk(tx, chunk.split_to(n).freeze()).await?;
         }
 
         Ok(())

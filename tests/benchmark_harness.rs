@@ -22,6 +22,8 @@ fn streaming_benchmark_declares_enforceable_h1_h2_threshold_gate() {
     assert!(source.contains("throughput_improvement_pct >= 5.0"));
     assert!(source.contains("p95_throughput_regression_pct <= 5.0"));
     assert!(source.contains("p95_ttft_regression_pct <= 5.0"));
+    assert!(source.contains("ttft_wilcoxon_signed_rank_p_value < 0.01"));
+    assert!(source.contains("throughput_wilcoxon_signed_rank_p_value < 0.01"));
     assert!(source.contains("const DEFAULT_SAMPLE_COUNT: usize = 30;"));
     assert!(source.contains("const DEFAULT_WARMUP_COUNT: usize = 5;"));
     assert!(source.contains("thresholded_origins: vec![\"127.0.0.1:3201\", \"127.0.0.1:3202\"]"));
@@ -37,9 +39,9 @@ fn streaming_benchmark_declares_enforceable_h1_h2_threshold_gate() {
 fn thresholded_streaming_benchmark_uses_delayed_multi_chunk_workload() {
     let source = std::fs::read_to_string("benches/streaming_vs_reqwest.rs").unwrap();
 
-    assert!(source.contains("const BENCH_CHUNK_SIZE: usize = 1024;"));
+    assert!(source.contains("const BENCH_CHUNK_SIZE: usize = 16 * 1024;"));
     assert!(source.contains("const BENCH_CHUNK_COUNT: usize = 5;"));
-    assert!(source.contains("const BENCH_CHUNK_DELAY_MS: u64 = 2;"));
+    assert!(source.contains("const BENCH_CHUNK_DELAY_MS: u64 = 1;"));
     assert!(source.contains("payload_schedule_ms = payload_schedule_ms();"));
     assert!(source.contains("let chunk_count = BENCH_CHUNK_COUNT;"));
     assert!(source.contains(
@@ -51,6 +53,7 @@ fn thresholded_streaming_benchmark_uses_delayed_multi_chunk_workload() {
     assert!(source.contains("p95_throughput_regression_pct <= 5.0"));
     assert!(source.contains("body_transfer_duration_ns"));
     assert!(source.contains("client_overhead_duration_ns"));
+    assert!(source.contains("paired Wilcoxon signed-rank"));
     assert!(source.contains("applied identically to reqwest and Specter"));
     assert!(!source.contains("const BENCH_CHUNK_COUNT: usize = 1;"));
     assert!(!source.contains("const BENCH_CHUNK_DELAY_MS: u64 = 0;"));
