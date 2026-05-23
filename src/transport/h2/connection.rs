@@ -5,7 +5,8 @@
 use bytes::{Buf, Bytes, BytesMut};
 use http::{Method, Request, Response, StatusCode, Uri};
 use std::collections::HashMap;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
 use tracing;
 
@@ -16,6 +17,7 @@ use crate::response::Response as SpecterResponse;
 use super::frame::*;
 use super::hpack::{HpackDecoder, HpackEncoder, PseudoHeaderOrder};
 use super::hpack_impl::Encoder as RawHpackEncoder;
+use super::write_half::H2WriteHalf;
 
 /// Type alias for HTTP/2 errors (matches Error type).
 pub type H2Error = Error;
@@ -76,25 +78,28 @@ pub enum ControlAction {
 }
 
 /// HTTP/2 connection with full fingerprint control.
+///
+/// Read-side state (decoder, per-stream state, receive window) lives directly
+/// on the connection; the write-side socket half, HPACK encoder, client
+/// stream-id allocator, and connection-level send window are owned by an
+/// `Arc<H2WriteHalf>` so future inline streaming callers can share write
+/// access without going through the H2 driver command channel.
 pub struct H2Connection<S> {
-    /// Underlying stream (TLS socket).
-    stream: S,
-    /// HPACK encoder with custom pseudo-header order.
-    encoder: HpackEncoder,
+    /// Read half of the underlying TLS/TCP stream.
+    reader: ReadHalf<S>,
+    /// Shared write-side owner. Held by the connection and clonable as
+    /// `Arc<H2WriteHalf<_>>` for future inline streaming callers.
+    write_half: Arc<H2WriteHalf<WriteHalf<S>>>,
     /// HPACK decoder.
     decoder: HpackDecoder,
     /// Connection settings.
     settings: Http2Settings,
     /// Pseudo-header order for fingerprinting.
     pseudo_order: PseudoHeaderOrder,
-    /// Next stream ID (client uses odd numbers).
-    next_stream_id: u32,
     /// Active streams.
     streams: HashMap<u32, Stream>,
     /// Connection-level receive window.
     conn_recv_window: i32,
-    /// Connection-level send window.
-    conn_send_window: i32,
     /// Peer's settings.
     peer_settings: PeerSettings,
     /// Read buffer.
@@ -214,16 +219,17 @@ where
             .await
             .map_err(|e| Error::HttpProtocol(format!("Failed to flush: {}", e)))?;
 
+        let (reader, writer) = tokio::io::split(stream);
+        let write_half = Arc::new(H2WriteHalf::new(writer, HpackEncoder::new(pseudo_order)));
+
         let conn = Self {
-            stream,
-            encoder: HpackEncoder::new(pseudo_order),
+            reader,
+            write_half,
             decoder: HpackDecoder::new(),
             settings: settings.clone(),
             pseudo_order,
-            next_stream_id: 1,
             streams: HashMap::new(),
             conn_recv_window: (DEFAULT_INITIAL_WINDOW_SIZE + settings.initial_window_update) as i32,
-            conn_send_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
             peer_settings: PeerSettings::default(),
             read_buf: BytesMut::with_capacity(16384),
             pending_headers: None,
@@ -266,7 +272,7 @@ where
     }
 
     /// Apply peer's settings.
-    fn apply_peer_settings(&mut self, settings: &SettingsFrame) -> Result<()> {
+    async fn apply_peer_settings(&mut self, settings: &SettingsFrame) -> Result<()> {
         self.peer_settings.received_settings = true;
 
         for (id, value) in &settings.settings {
@@ -274,7 +280,9 @@ where
                 0x1 => {
                     // HeaderTableSize
                     self.peer_settings.header_table_size = *value;
-                    self.encoder.set_max_table_size(*value as usize);
+                    self.write_half
+                        .set_encoder_max_table_size(*value as usize)
+                        .await;
                 }
                 0x2 => {
                     // EnablePush
@@ -371,14 +379,6 @@ where
     ) -> Result<(u32, bool)> {
         self.ensure_enable_connect_protocol().await?;
 
-        let stream_id = self.next_stream_id;
-        if stream_id == 0 || (stream_id & 0x1) == 0 {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: Client stream ID must be odd and non-zero".into(),
-            ));
-        }
-        self.next_stream_id += 2;
-
         let scheme = uri.scheme_str().unwrap_or("https");
         let authority = uri.authority().map(|a| a.as_str()).unwrap_or("");
         let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
@@ -390,6 +390,12 @@ where
                 "PROTOCOL_ERROR: HEADERS frame header block cannot be empty".into(),
             ));
         }
+
+        let max_frame_size = self.peer_settings.max_frame_size as usize;
+        let stream_id = self
+            .write_half
+            .write_extended_connect_websocket(header_block, max_frame_size)
+            .await?;
 
         self.streams.insert(
             stream_id,
@@ -404,49 +410,6 @@ where
                 response_data: BytesMut::new(),
             },
         );
-
-        let max_frame_size = self.peer_settings.max_frame_size as usize;
-        if header_block.len() <= max_frame_size {
-            let headers_frame = HeadersFrame::new(stream_id, header_block)
-                .end_stream(false)
-                .end_headers(true);
-
-            self.stream
-                .write_all(&headers_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
-        } else {
-            let chunks: Vec<Bytes> = header_block
-                .chunks(max_frame_size)
-                .map(Bytes::copy_from_slice)
-                .collect();
-
-            let headers_frame = HeadersFrame::new(stream_id, chunks[0].clone())
-                .end_stream(false)
-                .end_headers(false);
-
-            self.stream
-                .write_all(&headers_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
-
-            let num_chunks = chunks.len();
-            for (idx, chunk) in chunks.into_iter().skip(1).enumerate() {
-                let is_last = idx == num_chunks - 2;
-                let cont_frame = ContinuationFrame::new(stream_id, chunk, is_last);
-                self.stream
-                    .write_all(&cont_frame.serialize())
-                    .await
-                    .map_err(|e| {
-                        Error::HttpProtocol(format!("Failed to send CONTINUATION: {}", e))
-                    })?;
-            }
-        }
-
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
 
         let (status, _response_headers, end_stream) = self
             .read_response_headers_with_end_stream(stream_id)
@@ -654,44 +617,17 @@ where
         headers: &[(String, String)],
         end_stream: bool,
     ) -> Result<u32> {
-        // Allocate stream ID
-        let stream_id = self.next_stream_id;
-        self.next_stream_id += 2; // Client uses odd stream IDs
+        let max_frame_size = self.peer_settings.max_frame_size as usize;
+        let stream_id = self
+            .write_half
+            .write_request_headers(method, uri, headers, end_stream, max_frame_size)
+            .await?;
 
-        // Extract URI components
-        let scheme = uri.scheme_str().unwrap_or("https");
-        let authority = uri.authority().map(|a| a.as_str()).unwrap_or("localhost");
-        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-
-        // RFC 9113 Section 8.1.2.3: Validate pseudo-header values
-        if method.as_str().is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :method pseudo-header cannot be empty".into(),
-            ));
-        }
-        if scheme.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :scheme pseudo-header cannot be empty".into(),
-            ));
-        }
-        if authority.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :authority pseudo-header cannot be empty".into(),
-            ));
-        }
-        if path.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :path pseudo-header cannot be empty".into(),
-            ));
-        }
-
-        // Register stream immediately so flow control checks work
         let stream_state = if end_stream {
             StreamState::HalfClosedLocal
         } else {
             StreamState::Open
         };
-
         self.streams.insert(
             stream_id,
             Stream {
@@ -705,70 +641,6 @@ where
                 response_data: BytesMut::new(),
             },
         );
-
-        // Encode headers with custom pseudo-header order
-        let header_block =
-            self.encoder
-                .encode_request(method.as_str(), scheme, authority, path, headers);
-
-        // RFC 9113 Section 6.2: HEADERS frame header block must not be empty
-        if header_block.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: HEADERS frame header block cannot be empty".into(),
-            ));
-        }
-
-        // Check if headers exceed max frame size and need CONTINUATION frames
-        let max_frame_size = self.peer_settings.max_frame_size as usize;
-
-        if header_block.len() <= max_frame_size {
-            // Single HEADERS frame with END_HEADERS flag
-            let headers_frame = HeadersFrame::new(stream_id, header_block)
-                .end_stream(end_stream)
-                .end_headers(true);
-
-            self.stream
-                .write_all(&headers_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
-        } else {
-            // Split across HEADERS + CONTINUATION frames
-            let chunks: Vec<Bytes> = header_block
-                .chunks(max_frame_size)
-                .map(Bytes::copy_from_slice)
-                .collect();
-
-            // First: HEADERS without END_HEADERS
-            let first_chunk = chunks[0].clone();
-            let headers_frame = HeadersFrame::new(stream_id, first_chunk)
-                .end_stream(end_stream)
-                .end_headers(false);
-
-            self.stream
-                .write_all(&headers_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
-
-            // Middle: CONTINUATION frames
-            let num_chunks = chunks.len();
-            for (idx, chunk) in chunks.into_iter().skip(1).enumerate() {
-                let is_last = idx == num_chunks - 2; // -2 because we skipped first chunk
-                let cont_frame = ContinuationFrame::new(
-                    stream_id, chunk, is_last, // Only last chunk has END_HEADERS
-                );
-                self.stream
-                    .write_all(&cont_frame.serialize())
-                    .await
-                    .map_err(|e| {
-                        Error::HttpProtocol(format!("Failed to send CONTINUATION: {}", e))
-                    })?;
-            }
-        }
-
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
 
         Ok(stream_id)
     }
@@ -789,70 +661,43 @@ where
             if !self.streams.contains_key(&stream_id) {
                 return Err(Error::HttpProtocol("Stream not found for DATA".into()));
             }
-
-            let data_frame = DataFrame::new(stream_id, Bytes::new()).end_stream(true);
-
-            self.stream
-                .write_all(&data_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send DATA: {}", e)))?;
-
-            self.stream
-                .flush()
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
-
+            let max_frame_size = self.peer_settings.max_frame_size as usize;
+            self.write_half
+                .write_data(stream_id, &[], true, i32::MAX, max_frame_size)
+                .await?;
             if let Some(stream) = self.streams.get_mut(&stream_id) {
                 stream.state = StreamState::HalfClosedLocal;
             }
-
             return Ok(0);
         }
 
-        // Check available window
-        let available_conn = self.conn_send_window;
-        let available_stream = if let Some(stream) = self.streams.get(&stream_id) {
-            stream.send_window
-        } else {
-            return Err(Error::HttpProtocol("Stream not found for DATA".into()));
+        let stream_send_window = match self.streams.get(&stream_id) {
+            Some(stream) => stream.send_window,
+            None => return Err(Error::HttpProtocol("Stream not found for DATA".into())),
         };
+        let max_frame_size = self.peer_settings.max_frame_size as usize;
+        let sent = self
+            .write_half
+            .write_data(
+                stream_id,
+                data,
+                end_stream,
+                stream_send_window,
+                max_frame_size,
+            )
+            .await?;
 
-        let available = available_conn.min(available_stream);
-
-        if available <= 0 {
-            // Window exhausted
-            return Ok(0);
-        }
-
-        // Calculate how much we can send
-        let max_frame = self.peer_settings.max_frame_size as i32;
-        let to_send_len = (data.len() as i32).min(available).min(max_frame);
-
-        let chunk = Bytes::copy_from_slice(&data[..to_send_len as usize]);
-        let is_last = end_stream && to_send_len as usize == data.len();
-
-        let data_frame = DataFrame::new(stream_id, chunk).end_stream(is_last);
-
-        self.stream
-            .write_all(&data_frame.serialize())
-            .await
-            .map_err(|e| Error::HttpProtocol(format!("Failed to send DATA: {}", e)))?;
-
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
-
-        // Decrement windows
-        self.conn_send_window -= to_send_len;
-        if let Some(stream) = self.streams.get_mut(&stream_id) {
-            stream.send_window -= to_send_len;
-            if is_last {
-                stream.state = StreamState::HalfClosedLocal;
+        if sent > 0 {
+            let is_last = end_stream && sent == data.len();
+            if let Some(stream) = self.streams.get_mut(&stream_id) {
+                stream.send_window -= sent as i32;
+                if is_last {
+                    stream.state = StreamState::HalfClosedLocal;
+                }
             }
         }
 
-        Ok(to_send_len as usize)
+        Ok(sent)
     }
 
     /// Read the next frame from the connection.
@@ -861,7 +706,7 @@ where
         // Read frame header
         while self.read_buf.len() < FRAME_HEADER_SIZE {
             let n = self
-                .stream
+                .reader
                 .read_buf(&mut self.read_buf)
                 .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
@@ -886,7 +731,7 @@ where
         let frame_len = FRAME_HEADER_SIZE + header.length as usize;
         while self.read_buf.len() < frame_len {
             let n = self
-                .stream
+                .reader
                 .read_buf(&mut self.read_buf)
                 .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
@@ -916,16 +761,10 @@ where
                     // ACK received - fine
                 } else {
                     // Update settings
-                    self.apply_peer_settings(&settings)?;
+                    self.apply_peer_settings(&settings).await?;
 
                     // Send ACK
-                    let ack = SettingsFrame::ack();
-                    self.stream.write_all(&ack.serialize()).await.map_err(|e| {
-                        Error::HttpProtocol(format!("Failed to send SETTINGS ACK: {}", e))
-                    })?;
-                    self.stream.flush().await.map_err(|e| {
-                        Error::HttpProtocol(format!("Failed to flush SETTINGS ACK: {}", e))
-                    })?;
+                    self.write_half.write_settings_ack().await?;
                 }
                 Ok(ControlAction::None)
             }
@@ -941,7 +780,7 @@ where
 
                 if header.stream_id == 0 {
                     // Connection-level window update
-                    self.conn_send_window += wu.increment as i32;
+                    self.write_half.add_conn_send_window(wu.increment).await;
                 } else {
                     // Stream-level window update
                     if let Some(stream) = self.streams.get_mut(&header.stream_id) {
@@ -956,16 +795,7 @@ where
                         return Ok(ControlAction::PingAck(ping.data));
                     }
                     if !ping.ack {
-                        let pong = PingFrame::ack(ping.data);
-                        self.stream
-                            .write_all(&pong.serialize())
-                            .await
-                            .map_err(|e| {
-                                Error::HttpProtocol(format!("Failed to send PING ACK: {}", e))
-                            })?;
-                        self.stream.flush().await.map_err(|e| {
-                            Error::HttpProtocol(format!("Failed to flush PING ACK: {}", e))
-                        })?;
+                        self.write_half.write_ping_ack(ping.data).await?;
                     }
                 }
                 Ok(ControlAction::None)
@@ -1101,9 +931,10 @@ where
                     } else {
                         // Flow control window exhausted - read frames to get WINDOW_UPDATE
                         if std::time::Instant::now() > deadline {
+                            let conn_send_window = self.write_half.conn_send_window().await;
                             return Err(Error::HttpProtocol(format!(
                                 "Flow control blocked: no WINDOW_UPDATE received within {}s timeout (body size: {} bytes, sent: {} bytes, conn_send_window: {})",
-                                FLOW_CONTROL_TIMEOUT_SECS, body_len, offset, self.conn_send_window
+                                FLOW_CONTROL_TIMEOUT_SECS, body_len, offset, conn_send_window
                             )));
                         }
 
@@ -1183,7 +1014,7 @@ where
         // Read frame header
         while self.read_buf.len() < FRAME_HEADER_SIZE {
             let n = self
-                .stream
+                .reader
                 .read_buf(&mut self.read_buf)
                 .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
@@ -1208,7 +1039,7 @@ where
         let frame_len = FRAME_HEADER_SIZE + header.length as usize;
         while self.read_buf.len() < frame_len {
             let n = self
-                .stream
+                .reader
                 .read_buf(&mut self.read_buf)
                 .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
@@ -1407,7 +1238,7 @@ where
             // Read frame header
             while self.read_buf.len() < FRAME_HEADER_SIZE {
                 let n = self
-                    .stream
+                    .reader
                     .read_buf(&mut self.read_buf)
                     .await
                     .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
@@ -1433,7 +1264,7 @@ where
             let frame_len = FRAME_HEADER_SIZE + header.length as usize;
             while self.read_buf.len() < frame_len {
                 let n = self
-                    .stream
+                    .reader
                     .read_buf(&mut self.read_buf)
                     .await
                     .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
@@ -1760,16 +1591,9 @@ where
 
     /// Sends WINDOW_UPDATE frame for connection (stream_id=0) or specific stream
     async fn send_window_update(&mut self, stream_id: u32, increment: u32) -> Result<()> {
-        let frame = WindowUpdateFrame::new(stream_id, increment);
-        self.stream
-            .write_all(&frame.serialize())
+        self.write_half
+            .write_window_update(stream_id, increment)
             .await
-            .map_err(|e| Error::HttpProtocol(format!("Failed to send WINDOW_UPDATE: {}", e)))?;
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| Error::HttpProtocol(format!("Failed to flush WINDOW_UPDATE: {}", e)))?;
-        Ok(())
     }
 
     /// Get the pseudo-header order.
@@ -1802,119 +1626,12 @@ where
         headers: Vec<(String, String)>,
         body: Option<Bytes>,
     ) -> Result<u32> {
-        // Allocate stream ID
-        let stream_id = self.next_stream_id;
-        if stream_id == 0 || (stream_id & 0x1) == 0 {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: Client stream ID must be odd and non-zero".into(),
-            ));
-        }
-        self.next_stream_id += 2;
-
-        // Extract URI components
-        let scheme = uri.scheme_str().unwrap_or("https");
-        let authority = uri.authority().map(|a| a.as_str()).unwrap_or("localhost");
-        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-
-        // Validate pseudo-headers
-        if method.as_str().is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :method pseudo-header cannot be empty".into(),
-            ));
-        }
-        if scheme.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :scheme pseudo-header cannot be empty".into(),
-            ));
-        }
-        if authority.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :authority pseudo-header cannot be empty".into(),
-            ));
-        }
-        if path.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: :path pseudo-header cannot be empty".into(),
-            ));
-        }
-
-        // Encode headers
-        let header_block =
-            self.encoder
-                .encode_request(method.as_str(), scheme, authority, path, &headers);
-
-        if header_block.is_empty() {
-            return Err(Error::HttpProtocol(
-                "PROTOCOL_ERROR: HEADERS frame header block cannot be empty".into(),
-            ));
-        }
-
-        // Check if headers exceed max frame size and need CONTINUATION frames
         let max_frame_size = self.peer_settings.max_frame_size as usize;
         let end_stream = body.is_none();
-
-        if header_block.len() <= max_frame_size {
-            // Single HEADERS frame with END_HEADERS flag
-            let headers_frame = HeadersFrame::new(stream_id, header_block)
-                .end_stream(end_stream)
-                .end_headers(true);
-
-            self.stream
-                .write_all(&headers_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
-        } else {
-            // Split across HEADERS + CONTINUATION frames
-            let chunks: Vec<Bytes> = header_block
-                .chunks(max_frame_size)
-                .map(Bytes::copy_from_slice)
-                .collect();
-
-            let first_chunk = chunks[0].clone();
-            let headers_frame = HeadersFrame::new(stream_id, first_chunk)
-                .end_stream(end_stream)
-                .end_headers(false);
-
-            self.stream
-                .write_all(&headers_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send HEADERS: {}", e)))?;
-
-            let num_chunks = chunks.len();
-            for (idx, chunk) in chunks.into_iter().skip(1).enumerate() {
-                let is_last = idx == num_chunks - 2;
-                let cont_frame = ContinuationFrame::new(stream_id, chunk, is_last);
-                self.stream
-                    .write_all(&cont_frame.serialize())
-                    .await
-                    .map_err(|e| {
-                        Error::HttpProtocol(format!("Failed to send CONTINUATION: {}", e))
-                    })?;
-            }
-        }
-
-        // Send DATA frame if there's a body
-        if let Some(body_data) = body {
-            let data_len = body_data.len() as i32;
-            if self.conn_send_window < data_len {
-                return Err(Error::HttpProtocol(
-                    "Connection send window exhausted".into(),
-                ));
-            }
-
-            let data_frame = DataFrame::new(stream_id, body_data).end_stream(true);
-            self.stream
-                .write_all(&data_frame.serialize())
-                .await
-                .map_err(|e| Error::HttpProtocol(format!("Failed to send DATA: {}", e)))?;
-
-            self.conn_send_window -= data_len;
-        }
-
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))?;
+        let stream_id = self
+            .write_half
+            .write_request_with_optional_body(&method, uri, &headers, body, max_frame_size)
+            .await?;
 
         // Register stream
         let stream_state = if end_stream {
@@ -1945,7 +1662,6 @@ where
     ///
     /// Returns the PING data (8 bytes) that should be echoed back in the PONG.
     pub async fn send_ping(&mut self) -> Result<[u8; 8]> {
-        use crate::transport::h2::frame::PingFrame;
         use getrandom::fill as getrandom_fill;
 
         // Generate random 8-byte ping data
@@ -1953,17 +1669,7 @@ where
         getrandom_fill(&mut ping_data)
             .map_err(|e| Error::HttpProtocol(format!("Failed to generate ping data: {}", e)))?;
 
-        let ping_frame = PingFrame::new(ping_data);
-        self.stream
-            .write_all(&ping_frame.serialize())
-            .await
-            .map_err(|e| Error::HttpProtocol(format!("Failed to send PING: {}", e)))?;
-
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| Error::HttpProtocol(format!("Failed to flush PING: {}", e)))?;
-
+        self.write_half.write_ping(ping_data).await?;
         Ok(ping_data)
     }
 
@@ -1976,7 +1682,7 @@ where
         while self.read_buf.len() < FRAME_HEADER_SIZE {
             let mut buf = [0u8; 16384];
             let n = self
-                .stream
+                .reader
                 .read(&mut buf)
                 .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
@@ -2003,7 +1709,7 @@ where
         while self.read_buf.len() < frame_len {
             let mut buf = [0u8; 16384];
             let n = self
-                .stream
+                .reader
                 .read(&mut buf)
                 .await
                 .map_err(|e| Error::HttpProtocol(format!("Read error: {}", e)))?;
@@ -2111,27 +1817,15 @@ where
 
     /// Send RST_STREAM frame.
     pub async fn send_rst_stream(&mut self, stream_id: u32, error_code: ErrorCode) -> Result<()> {
-        let frame = RstStreamFrame::new(stream_id, error_code);
-        self.stream
-            .write_all(&frame.serialize())
+        self.write_half
+            .write_rst_stream(stream_id, error_code)
             .await
-            .map_err(|e| Error::HttpProtocol(format!("Failed to send RST_STREAM: {}", e)))?;
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))
     }
 
     /// Send GOAWAY frame.
     pub async fn send_goaway(&mut self, last_stream_id: u32, error_code: ErrorCode) -> Result<()> {
-        let frame = GoAwayFrame::new(last_stream_id, error_code);
-        self.stream
-            .write_all(&frame.serialize())
+        self.write_half
+            .write_goaway(last_stream_id, error_code)
             .await
-            .map_err(|e| Error::HttpProtocol(format!("Failed to send GOAWAY: {}", e)))?;
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| Error::HttpProtocol(format!("Flush error: {}", e)))
     }
 }

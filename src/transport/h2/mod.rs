@@ -39,6 +39,7 @@ mod handle;
 mod hpack;
 pub mod hpack_impl;
 mod tunnel;
+mod write_half;
 
 pub use connection::{
     H2Connection as RawH2Connection, H2Error, StreamResponse, CHROME_WINDOW_UPDATE,
