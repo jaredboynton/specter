@@ -60,6 +60,48 @@ fn thresholded_streaming_benchmark_uses_delayed_multi_chunk_workload() {
 }
 
 #[test]
+fn benchmark_fixtures_use_monotonic_deadline_spin_wait_pacing() {
+    let source = std::fs::read_to_string("benches/streaming_vs_reqwest.rs").unwrap();
+
+    assert!(source.contains("FIXTURE_PACING_MODE: &str = \"monotonic_deadline_spin_wait\""));
+    assert!(source.contains("FIXTURE_MONOTONIC_CLOCK_SOURCE: &str = \"std::time::Instant\""));
+    assert!(source.contains("fn spin_wait_until(target: Instant)"));
+    assert!(source.contains("async fn pace_chunk_until(target: Instant)"));
+    assert!(source.contains("std::hint::spin_loop()"));
+    assert!(source.contains("inter_chunk_target_deadlines_ms"));
+    assert!(source.contains("pace_chunk_until(target).await;"));
+
+    let pattern = ["tokio::time::sleep(Duration::from_millis(", "delay_ms"].join("");
+    assert!(
+        !source.contains(&pattern),
+        "benchmark fixture must not call tokio::time::sleep for inter-chunk pacing; use pace_chunk_until against a monotonic deadline anchored on Instant",
+    );
+
+    assert!(
+        source.contains("let chunk_send_anchor = Instant::now();"),
+        "benchmark fixtures must anchor each stream's chunk emission to a single Instant for drift-free pacing; saw no anchor",
+    );
+}
+
+#[test]
+fn benchmark_artifact_emits_pacing_evidence_fields() {
+    let source = std::fs::read_to_string("benches/streaming_vs_reqwest.rs").unwrap();
+
+    assert!(source.contains("pacing_mode: FIXTURE_PACING_MODE"));
+    assert!(source.contains("monotonic_clock_source: FIXTURE_MONOTONIC_CLOCK_SOURCE"));
+    assert!(source.contains("target_inter_chunk_pacing_ms: BENCH_CHUNK_DELAY_MS"));
+    assert!(source.contains("inter_chunk_target_deadlines_ms: workload"));
+    assert!(source.contains("actual_send_gap: ActualSendGap"));
+    assert!(source.contains("pub(crate) struct ActualSendGap"));
+    assert!(source.contains("over_budget_fraction"));
+    assert!(source.contains("median_minus_target_ns"));
+    assert!(source.contains("\"actual_send_gap.median_ns\""));
+    assert!(source.contains("\"actual_send_gap.p95_ns\""));
+    assert!(source.contains("\"fixture.pacing_mode\""));
+    assert!(source.contains("\"fixture.monotonic_clock_source\""));
+}
+
+#[test]
 fn benchmark_harness_tests_do_not_mask_failures_with_tautologies() {
     let source = std::fs::read_to_string("tests/benchmark_harness.rs").unwrap();
 

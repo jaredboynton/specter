@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use streaming_vs_reqwest::{
     body_transfer_duration, corrected_client_overhead_duration, evaluate_comparable_threshold,
-    paired_wilcoxon_signed_rank_p_value, record_sample, Metrics,
+    inter_chunk_gaps_ns, pace_chunk_until, paired_wilcoxon_signed_rank_p_value, record_sample,
+    spin_wait_until, summarize_send_gaps, ActualSendGap, Metrics,
 };
 
 fn metrics(ttft_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64) -> Metrics {
@@ -27,6 +28,7 @@ fn metrics(ttft_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64
         sample_count: 30,
         connection_reuse_count: 0,
         pass: true,
+        actual_send_gap: ActualSendGap::empty(),
         ttft_samples_ns,
         bytes_per_sec_samples,
     }
@@ -169,6 +171,7 @@ fn throughput_sample_uses_corrected_client_overhead_duration_not_ttft_or_raw_dur
     let mut chunk_rates = Vec::new();
     let mut body_transfer_duration_values = Vec::new();
     let mut client_overhead_duration_values = Vec::new();
+    let mut send_gap_samples_ns = Vec::new();
 
     record_sample(
         Duration::from_millis(2),
@@ -176,11 +179,13 @@ fn throughput_sample_uses_corrected_client_overhead_duration_not_ttft_or_raw_dur
         Duration::from_millis(7),
         5 * 1024,
         5,
+        &[1_000_000.0, 1_000_000.0, 1_000_000.0, 1_000_000.0],
         &mut ttft_values,
         &mut throughput_values,
         &mut chunk_rates,
         &mut body_transfer_duration_values,
         &mut client_overhead_duration_values,
+        &mut send_gap_samples_ns,
     );
 
     assert_eq!(ttft_values, vec![2_000_000.0]);
@@ -189,6 +194,7 @@ fn throughput_sample_uses_corrected_client_overhead_duration_not_ttft_or_raw_dur
     assert_eq!(throughput_values.len(), 1);
     assert!((throughput_values[0] - 5_120_000.0).abs() < f64::EPSILON);
     assert!((chunk_rates[0] - 5_000.0).abs() < f64::EPSILON);
+    assert_eq!(send_gap_samples_ns.len(), 4);
 }
 
 #[test]
@@ -210,5 +216,95 @@ fn corrected_client_overhead_duration_subtracts_payload_schedule_with_floor() {
     assert_eq!(
         corrected_client_overhead_duration(Duration::from_millis(8), Duration::from_millis(8)),
         Duration::from_nanos(1)
+    );
+}
+
+#[test]
+fn inter_chunk_gaps_ns_returns_pairwise_deltas_clamped_at_zero() {
+    let offsets = vec![0.0, 1_000_000.0, 2_050_000.0, 3_010_000.0];
+    let gaps = inter_chunk_gaps_ns(&offsets);
+    assert_eq!(gaps.len(), 3);
+    assert!((gaps[0] - 1_000_000.0).abs() < f64::EPSILON);
+    assert!((gaps[1] - 1_050_000.0).abs() < f64::EPSILON);
+    assert!((gaps[2] - 960_000.0).abs() < f64::EPSILON);
+
+    let regression = vec![0.0, 5_000.0, 4_000.0];
+    let monotonic_gaps = inter_chunk_gaps_ns(&regression);
+    assert_eq!(monotonic_gaps[0], 5_000.0);
+    assert_eq!(monotonic_gaps[1], 0.0);
+
+    assert!(inter_chunk_gaps_ns(&[]).is_empty());
+    assert!(inter_chunk_gaps_ns(&[1_000.0]).is_empty());
+}
+
+#[test]
+fn summarize_send_gaps_proves_monotonic_deadline_pacing_when_gaps_track_target() {
+    let mut samples = vec![1_001_000.0; 120];
+    samples.push(1_080_000.0);
+
+    let summary = summarize_send_gaps(&samples, 1);
+    assert_eq!(summary.target_ms, 1);
+    assert_eq!(summary.sample_count, 121);
+    assert!((summary.median_ns - 1_001_000.0).abs() < f64::EPSILON);
+    assert!(summary.median_minus_target_ns.abs() <= 5_000.0);
+    assert!(summary.p95_minus_target_ns <= 100_000.0);
+    assert!((summary.over_budget_fraction - 0.0).abs() < 1e-9);
+}
+
+#[test]
+fn summarize_send_gaps_flags_scheduler_sleep_jitter_regressions() {
+    let samples = vec![2_500_000.0; 100];
+
+    let summary = summarize_send_gaps(&samples, 1);
+    assert!(summary.median_minus_target_ns >= 1_000_000.0);
+    assert!(summary.over_budget_fraction > 0.5);
+}
+
+#[test]
+fn summarize_send_gaps_handles_empty_input_without_panic() {
+    let summary = summarize_send_gaps(&[], 1);
+    assert_eq!(summary.sample_count, 0);
+    assert_eq!(summary.median_ns, 0.0);
+    assert_eq!(summary.over_budget_fraction, 0.0);
+}
+
+#[test]
+fn spin_wait_until_returns_immediately_when_target_in_past() {
+    let target = std::time::Instant::now() - Duration::from_millis(5);
+    let start = std::time::Instant::now();
+    spin_wait_until(target);
+    assert!(start.elapsed() < Duration::from_micros(500));
+}
+
+#[test]
+fn spin_wait_until_holds_until_target_with_microsecond_precision() {
+    let start = std::time::Instant::now();
+    let target = start + Duration::from_micros(800);
+    spin_wait_until(target);
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_micros(800));
+    assert!(elapsed < Duration::from_millis(2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pace_chunk_until_yields_then_spins_to_microsecond_precision() {
+    let start = std::time::Instant::now();
+    let target = start + Duration::from_millis(1);
+    pace_chunk_until(target).await;
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(1),
+        "pace_chunk_until returned before deadline: {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed < Duration::from_millis(3),
+        "pace_chunk_until exceeded reasonable upper bound: {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed.saturating_sub(Duration::from_millis(1)) < Duration::from_micros(500),
+        "pace_chunk_until overshot target by more than 500us: {:?}",
+        elapsed
     );
 }

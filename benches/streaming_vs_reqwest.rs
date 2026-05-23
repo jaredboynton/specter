@@ -9,7 +9,7 @@ use std::net::{SocketAddr, TcpListener as StdTcpListener, UdpSocket};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket as TokioUdpSocket};
 use tokio::sync::mpsc;
@@ -24,6 +24,32 @@ const BENCH_CHUNK_DELAY_MS: u64 = 1;
 const BENCH_REQUEST_COUNT: usize = 8;
 const DEFAULT_WARMUP_COUNT: usize = 5;
 const DEFAULT_SAMPLE_COUNT: usize = 30;
+
+const FIXTURE_PACING_MODE: &str = "monotonic_deadline_spin_wait";
+const FIXTURE_MONOTONIC_CLOCK_SOURCE: &str = "std::time::Instant";
+const PACING_SPIN_LEAD_IN: Duration = Duration::from_micros(150);
+
+#[inline]
+pub(crate) fn spin_wait_until(target: Instant) {
+    while Instant::now() < target {
+        std::hint::spin_loop();
+    }
+}
+
+#[inline]
+pub(crate) async fn pace_chunk_until(target: Instant) {
+    while target.saturating_duration_since(Instant::now()) > PACING_SPIN_LEAD_IN {
+        tokio::task::yield_now().await;
+    }
+    spin_wait_until(target);
+}
+
+#[inline]
+pub(crate) fn inter_chunk_target_deadlines_ms(delay_ms: u64, chunk_count: usize) -> Vec<u64> {
+    (1..chunk_count)
+        .map(|i| delay_ms.saturating_mul(i as u64))
+        .collect()
+}
 
 #[derive(Serialize)]
 struct Rfc8441CoexistenceResult {
@@ -77,6 +103,11 @@ struct Git {
 struct FixtureConfig {
     fixtures: Vec<Fixture>,
     deterministic_payload_schedule: Vec<u64>,
+    pacing_mode: &'static str,
+    monotonic_clock_source: &'static str,
+    inter_chunk_target_deadlines_ms: Vec<u64>,
+    target_inter_chunk_pacing_ms: u64,
+    pacing_implementation: &'static str,
 }
 
 #[derive(Serialize)]
@@ -94,6 +125,9 @@ struct Workload {
     chunk_size: usize,
     chunk_count: usize,
     payload_schedule_ms: Vec<u64>,
+    inter_chunk_target_deadlines_ms: Vec<u64>,
+    pacing_mode: &'static str,
+    monotonic_clock_source: &'static str,
     tokio_runtime: &'static str,
     pools: &'static str,
 }
@@ -152,10 +186,76 @@ pub(crate) struct Metrics {
     pub(crate) sample_count: usize,
     pub(crate) connection_reuse_count: usize,
     pub(crate) pass: bool,
+    pub(crate) actual_send_gap: ActualSendGap,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) ttft_samples_ns: Vec<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) bytes_per_sec_samples: Vec<f64>,
+}
+
+#[derive(Serialize, Clone, Default)]
+pub(crate) struct ActualSendGap {
+    pub(crate) target_ms: u64,
+    pub(crate) sample_count: usize,
+    pub(crate) median_ns: f64,
+    pub(crate) p95_ns: f64,
+    pub(crate) min_ns: f64,
+    pub(crate) max_ns: f64,
+    pub(crate) median_minus_target_ns: f64,
+    pub(crate) p95_minus_target_ns: f64,
+    pub(crate) over_budget_fraction: f64,
+    pub(crate) measurement_source: &'static str,
+}
+
+impl ActualSendGap {
+    pub(crate) fn empty() -> Self {
+        Self {
+            target_ms: BENCH_CHUNK_DELAY_MS,
+            sample_count: 0,
+            median_ns: 0.0,
+            p95_ns: 0.0,
+            min_ns: 0.0,
+            max_ns: 0.0,
+            median_minus_target_ns: 0.0,
+            p95_minus_target_ns: 0.0,
+            over_budget_fraction: 0.0,
+            measurement_source:
+                "client_observed_inter_chunk_receive_gap_using_std_time_instant_monotonic_clock",
+        }
+    }
+}
+
+pub(crate) fn summarize_send_gaps(samples_ns: &[f64], target_ms: u64) -> ActualSendGap {
+    if samples_ns.is_empty() {
+        return ActualSendGap::empty();
+    }
+    let mut sorted = samples_ns.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let len = sorted.len();
+    let median = sorted[len / 2];
+    let p95_idx = ((len as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(len - 1);
+    let p95 = sorted[p95_idx];
+    let min = *sorted.first().unwrap();
+    let max = *sorted.last().unwrap();
+    let target_ns = (target_ms as f64) * 1_000_000.0;
+    let max_budget_ns = target_ns + 500_000.0;
+    let over_budget = sorted.iter().filter(|gap| **gap > max_budget_ns).count();
+
+    ActualSendGap {
+        target_ms,
+        sample_count: len,
+        median_ns: median,
+        p95_ns: p95,
+        min_ns: min,
+        max_ns: max,
+        median_minus_target_ns: median - target_ns,
+        p95_minus_target_ns: p95 - target_ns,
+        over_budget_fraction: over_budget as f64 / len as f64,
+        measurement_source:
+            "client_observed_inter_chunk_receive_gap_using_std_time_instant_monotonic_clock",
+    }
 }
 
 impl Metrics {
@@ -174,6 +274,7 @@ impl Metrics {
             sample_count,
             connection_reuse_count: 0,
             pass: false,
+            actual_send_gap: ActualSendGap::empty(),
             ttft_samples_ns: Vec::new(),
             bytes_per_sec_samples: Vec::new(),
         }
@@ -194,6 +295,7 @@ impl Metrics {
             sample_count,
             connection_reuse_count: 0,
             pass: true,
+            actual_send_gap: ActualSendGap::empty(),
             ttft_samples_ns: Vec::new(),
             bytes_per_sec_samples: Vec::new(),
         }
@@ -476,15 +578,18 @@ async fn handle_h1_connection(mut stream: tokio::net::TcpStream) {
                             }
 
                             let chunk_data = vec![b'a'; chunk_size];
+                            let chunk_send_anchor = Instant::now();
                             for i in 0..chunk_count {
+                                if i > 0 {
+                                    let target = chunk_send_anchor
+                                        + Duration::from_millis(delay_ms.saturating_mul(i as u64));
+                                    pace_chunk_until(target).await;
+                                }
                                 if stream.write_all(&chunk_data).await.is_err() {
                                     break;
                                 }
                                 if stream.flush().await.is_err() {
                                     break;
-                                }
-                                if i + 1 < chunk_count {
-                                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                                 }
                             }
                         } else {
@@ -584,13 +689,18 @@ async fn handle_h2_connection<
                                 let chunk_count = BENCH_CHUNK_COUNT;
                                 let delay_ms = BENCH_CHUNK_DELAY_MS;
                                 let chunk_data = vec![b's'; chunk_size];
+                                let chunk_send_anchor = Instant::now();
 
                                 for i in 0..chunk_count {
+                                    if i > 0 {
+                                        let target = chunk_send_anchor
+                                            + Duration::from_millis(
+                                                delay_ms.saturating_mul(i as u64),
+                                            );
+                                        pace_chunk_until(target).await;
+                                    }
                                     let end_stream = i == chunk_count - 1;
                                     let _ = tx_clone.send((0x00, if end_stream { 0x01 } else { 0x00 }, stream_id, chunk_data.clone())).await;
-                                    if !end_stream {
-                                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                                    }
                                 }
                             });
                         }
@@ -786,13 +896,18 @@ async fn start_h3_server(
                                                                     let chunk_count = BENCH_CHUNK_COUNT;
                                                                     let delay_ms = BENCH_CHUNK_DELAY_MS;
                                                                     let chunk_data = vec![b's'; chunk_size];
+                                                                    let chunk_send_anchor = Instant::now();
 
                                                                     for i in 0..chunk_count {
+                                                                        if i > 0 {
+                                                                            let target = chunk_send_anchor
+                                                                                + Duration::from_millis(
+                                                                                    delay_ms.saturating_mul(i as u64),
+                                                                                );
+                                                                            pace_chunk_until(target).await;
+                                                                        }
                                                                         let end_stream = i == chunk_count - 1;
                                                                         let _ = h3.send_body(&mut conn, stream_id, &chunk_data, end_stream);
-                                                                        if !end_stream {
-                                                                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                                                                        }
                                                                     }
                                                                 }
                                                             }
@@ -969,7 +1084,7 @@ async fn measure_specter_streaming(
     protocol: &str,
     client: &specter::Client,
     url: &str,
-) -> Result<(Duration, Duration, usize, usize), Box<dyn std::error::Error>> {
+) -> Result<(Duration, Duration, usize, usize, Vec<f64>), Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
     let mut request = client.get(url);
     if protocol == "h3" {
@@ -981,6 +1096,7 @@ async fn measure_specter_streaming(
     let mut last_chunk_time = None;
     let mut bytes_received = 0;
     let mut chunk_count = 0;
+    let mut chunk_offsets_ns: Vec<f64> = Vec::with_capacity(BENCH_CHUNK_COUNT);
 
     while let Some(chunk_res) = rx.recv().await {
         let elapsed = start.elapsed();
@@ -991,24 +1107,33 @@ async fn measure_specter_streaming(
             bytes_received += chunk.len();
             chunk_count += 1;
             last_chunk_time = Some(elapsed);
+            chunk_offsets_ns.push(elapsed.as_nanos() as f64);
         }
     }
 
     let ttft = first_chunk_time.unwrap_or_else(|| start.elapsed());
     let transfer_duration = body_transfer_duration(first_chunk_time, last_chunk_time);
-    Ok((ttft, transfer_duration, bytes_received, chunk_count))
+    let gaps_ns = inter_chunk_gaps_ns(&chunk_offsets_ns);
+    Ok((
+        ttft,
+        transfer_duration,
+        bytes_received,
+        chunk_count,
+        gaps_ns,
+    ))
 }
 
 async fn measure_reqwest_streaming(
     client: &reqwest::Client,
     url: &str,
-) -> Result<(Duration, Duration, usize, usize), Box<dyn std::error::Error>> {
+) -> Result<(Duration, Duration, usize, usize, Vec<f64>), Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
     let mut response = client.get(url).send().await?;
     let mut first_chunk_time = None;
     let mut last_chunk_time = None;
     let mut bytes_received = 0;
     let mut chunk_count = 0;
+    let mut chunk_offsets_ns: Vec<f64> = Vec::with_capacity(BENCH_CHUNK_COUNT);
 
     while let Some(chunk) = response.chunk().await? {
         let elapsed = start.elapsed();
@@ -1018,11 +1143,29 @@ async fn measure_reqwest_streaming(
         bytes_received += chunk.len();
         chunk_count += 1;
         last_chunk_time = Some(elapsed);
+        chunk_offsets_ns.push(elapsed.as_nanos() as f64);
     }
 
     let ttft = first_chunk_time.unwrap_or_else(|| start.elapsed());
     let transfer_duration = body_transfer_duration(first_chunk_time, last_chunk_time);
-    Ok((ttft, transfer_duration, bytes_received, chunk_count))
+    let gaps_ns = inter_chunk_gaps_ns(&chunk_offsets_ns);
+    Ok((
+        ttft,
+        transfer_duration,
+        bytes_received,
+        chunk_count,
+        gaps_ns,
+    ))
+}
+
+pub(crate) fn inter_chunk_gaps_ns(chunk_offsets_ns: &[f64]) -> Vec<f64> {
+    if chunk_offsets_ns.len() < 2 {
+        return Vec::new();
+    }
+    chunk_offsets_ns
+        .windows(2)
+        .map(|window| (window[1] - window[0]).max(0.0))
+        .collect()
 }
 
 pub(crate) fn body_transfer_duration(
@@ -1062,50 +1205,66 @@ async fn measure_specter_streaming_batch(
     client: &specter::Client,
     url: &str,
     request_count: usize,
-) -> Result<(Duration, Duration, usize, usize), Box<dyn std::error::Error>> {
+) -> Result<(Duration, Duration, usize, usize, Vec<f64>), Box<dyn std::error::Error>> {
     let mut ttft_values = Vec::with_capacity(request_count);
     let mut transfer_duration = Duration::ZERO;
     let mut bytes_received = 0;
     let mut chunk_count = 0;
+    let mut all_gaps_ns: Vec<f64> = Vec::with_capacity(request_count * BENCH_CHUNK_COUNT);
 
     for _ in 0..request_count {
-        let (ttft, request_duration, bytes, chunks) =
+        let (ttft, request_duration, bytes, chunks, gaps_ns) =
             measure_specter_streaming(protocol, client, url).await?;
         ttft_values.push(ttft.as_nanos() as f64);
         transfer_duration += request_duration;
         bytes_received += bytes;
         chunk_count += chunks;
+        all_gaps_ns.extend(gaps_ns);
     }
 
     let median_ttft_ns = calculate_median(ttft_values);
     let ttft = Duration::from_nanos(median_ttft_ns as u64);
     let total_duration = transfer_duration;
-    Ok((ttft, total_duration, bytes_received, chunk_count))
+    Ok((
+        ttft,
+        total_duration,
+        bytes_received,
+        chunk_count,
+        all_gaps_ns,
+    ))
 }
 
 async fn measure_reqwest_streaming_batch(
     client: &reqwest::Client,
     url: &str,
     request_count: usize,
-) -> Result<(Duration, Duration, usize, usize), Box<dyn std::error::Error>> {
+) -> Result<(Duration, Duration, usize, usize, Vec<f64>), Box<dyn std::error::Error>> {
     let mut ttft_values = Vec::with_capacity(request_count);
     let mut transfer_duration = Duration::ZERO;
     let mut bytes_received = 0;
     let mut chunk_count = 0;
+    let mut all_gaps_ns: Vec<f64> = Vec::with_capacity(request_count * BENCH_CHUNK_COUNT);
 
     for _ in 0..request_count {
-        let (ttft, request_duration, bytes, chunks) =
+        let (ttft, request_duration, bytes, chunks, gaps_ns) =
             measure_reqwest_streaming(client, url).await?;
         ttft_values.push(ttft.as_nanos() as f64);
         transfer_duration += request_duration;
         bytes_received += bytes;
         chunk_count += chunks;
+        all_gaps_ns.extend(gaps_ns);
     }
 
     let median_ttft_ns = calculate_median(ttft_values);
     let ttft = Duration::from_nanos(median_ttft_ns as u64);
     let total_duration = transfer_duration;
-    Ok((ttft, total_duration, bytes_received, chunk_count))
+    Ok((
+        ttft,
+        total_duration,
+        bytes_received,
+        chunk_count,
+        all_gaps_ns,
+    ))
 }
 
 fn calculate_percentiles(mut values: Vec<f64>) -> (f64, f64, f64) {
@@ -1137,12 +1296,17 @@ fn calculate_median(mut values: Vec<f64>) -> f64 {
 
 async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io::Result<Artifact> {
     let payload_schedule_ms = payload_schedule_ms();
+    let inter_chunk_deadlines =
+        inter_chunk_target_deadlines_ms(BENCH_CHUNK_DELAY_MS, BENCH_CHUNK_COUNT);
     let workload = Workload {
         request_count: BENCH_REQUEST_COUNT,
         concurrency_levels: options.concurrency_levels.clone(),
         chunk_size: BENCH_CHUNK_SIZE,
         chunk_count: BENCH_CHUNK_COUNT,
         payload_schedule_ms,
+        inter_chunk_target_deadlines_ms: inter_chunk_deadlines.clone(),
+        pacing_mode: FIXTURE_PACING_MODE,
+        monotonic_clock_source: FIXTURE_MONOTONIC_CLOCK_SOURCE,
         tokio_runtime: "tokio multi_thread",
         pools: "protocol-specific: H1 cold isolated client per sample; H2/H3 warm pooled",
     };
@@ -1408,6 +1572,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
         sample_count: measurement.sample_count,
         connection_reuse_count: 0,
         pass: !h3_selected,
+        actual_send_gap: ActualSendGap::empty(),
         ttft_samples_ns: Vec::new(),
         bytes_per_sec_samples: Vec::new(),
     });
@@ -1498,6 +1663,12 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 Fixture { protocol: "rfc8441", address: format!("127.0.0.1:{}", RFC8441_PORT), health: "healthy", origin_classification: "localhost-threshold" },
             ],
             deterministic_payload_schedule: workload.payload_schedule_ms.clone(),
+            pacing_mode: FIXTURE_PACING_MODE,
+            monotonic_clock_source: FIXTURE_MONOTONIC_CLOCK_SOURCE,
+            inter_chunk_target_deadlines_ms: workload.inter_chunk_target_deadlines_ms.clone(),
+            target_inter_chunk_pacing_ms: BENCH_CHUNK_DELAY_MS,
+            pacing_implementation:
+                "spin_wait_until(Instant::now() < anchor + i * BENCH_CHUNK_DELAY_MS) per H1/H2/H3 fixture chunk emission; no tokio::time::sleep is used for inter-chunk pacing",
         },
         workload,
         measurement_config: measurement,
@@ -1680,6 +1851,7 @@ async fn run_real_measurement(
     let mut chunk_rates = Vec::new();
     let mut body_transfer_duration_values = Vec::new();
     let mut client_overhead_duration_values = Vec::new();
+    let mut all_send_gaps_ns: Vec<f64> = Vec::new();
     let scheduled_duration = payload_schedule_duration(payload_schedule_ms, BENCH_REQUEST_COUNT);
 
     if client == "specter" {
@@ -1709,7 +1881,7 @@ async fn run_real_measurement(
             } else {
                 &specter_client
             };
-            if let Ok((ttft, total_duration, bytes, chunks)) =
+            if let Ok((ttft, total_duration, bytes, chunks, gaps_ns)) =
                 measure_specter_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT)
                     .await
             {
@@ -1719,11 +1891,13 @@ async fn run_real_measurement(
                     scheduled_duration,
                     bytes,
                     chunks,
+                    &gaps_ns,
                     &mut ttft_values,
                     &mut throughput_values,
                     &mut chunk_rates,
                     &mut body_transfer_duration_values,
                     &mut client_overhead_duration_values,
+                    &mut all_send_gaps_ns,
                 );
             }
         }
@@ -1747,7 +1921,7 @@ async fn run_real_measurement(
             } else {
                 &reqwest_client
             };
-            if let Ok((ttft, total_duration, bytes, chunks)) =
+            if let Ok((ttft, total_duration, bytes, chunks, gaps_ns)) =
                 measure_reqwest_streaming_batch(client_ref, url, BENCH_REQUEST_COUNT).await
             {
                 record_sample(
@@ -1756,11 +1930,13 @@ async fn run_real_measurement(
                     scheduled_duration,
                     bytes,
                     chunks,
+                    &gaps_ns,
                     &mut ttft_values,
                     &mut throughput_values,
                     &mut chunk_rates,
                     &mut body_transfer_duration_values,
                     &mut client_overhead_duration_values,
+                    &mut all_send_gaps_ns,
                 );
             }
         }
@@ -1776,6 +1952,7 @@ async fn run_real_measurement(
     let median_chunk_rate = calculate_median(chunk_rates);
     let median_body_transfer_duration_ns = calculate_median(body_transfer_duration_values);
     let median_client_overhead_duration_ns = calculate_median(client_overhead_duration_values);
+    let actual_send_gap = summarize_send_gaps(&all_send_gaps_ns, BENCH_CHUNK_DELAY_MS);
 
     Ok(Metrics {
         ttft_ns: p50,
@@ -1798,28 +1975,33 @@ async fn run_real_measurement(
                 .saturating_sub(1)
         },
         pass: true,
+        actual_send_gap,
         ttft_samples_ns: ttft_values,
         bytes_per_sec_samples: throughput_values,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_sample(
     ttft: Duration,
     body_transfer_duration: Duration,
     payload_schedule_duration: Duration,
     bytes: usize,
     chunks: usize,
+    inter_chunk_send_gaps_ns: &[f64],
     ttft_values: &mut Vec<f64>,
     throughput_values: &mut Vec<f64>,
     chunk_rates: &mut Vec<f64>,
     body_transfer_duration_values: &mut Vec<f64>,
     client_overhead_duration_values: &mut Vec<f64>,
+    send_gap_samples_ns: &mut Vec<f64>,
 ) {
     let ttft_ns = ttft.as_nanos() as f64;
     let client_overhead_duration =
         corrected_client_overhead_duration(body_transfer_duration, payload_schedule_duration);
     let denominator = client_overhead_duration.as_secs_f64().max(1e-9);
     ttft_values.push(ttft_ns);
+    send_gap_samples_ns.extend_from_slice(inter_chunk_send_gaps_ns);
     throughput_values.push(bytes as f64 / denominator);
     chunk_rates.push(chunks as f64 / denominator);
     body_transfer_duration_values.push(body_transfer_duration.as_nanos() as f64);
@@ -1900,6 +2082,30 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         (
             "wilcoxon_signed_rank_p_value",
             "one-sided paired Wilcoxon signed-rank normal-approximation p-value over matched reqwest/Specter samples; TTFT ranks baseline minus Specter as improvement, corrected-overhead throughput ranks Specter minus baseline as improvement, and threshold rows require p < 0.01 for both median deltas",
+        ),
+        (
+            "actual_send_gap.median_ns",
+            "client-observed median wall-clock interval in nanoseconds between successive received body chunks across all samples on this row; with monotonic deadline spin-wait fixture pacing this should track BENCH_CHUNK_DELAY_MS at microsecond-scale precision",
+        ),
+        (
+            "actual_send_gap.p95_ns",
+            "client-observed p95 wall-clock interval in nanoseconds between successive received body chunks across all samples on this row; releases require this to remain near BENCH_CHUNK_DELAY_MS so scheduler/kqueue jitter cannot dominate the corrected client-overhead denominator",
+        ),
+        (
+            "actual_send_gap.median_minus_target_ns",
+            "median observed inter-chunk wall-clock gap minus the target inter-chunk pacing (BENCH_CHUNK_DELAY_MS); near-zero values prove monotonic deadline spin-wait is in effect rather than scheduler-sleep jitter",
+        ),
+        (
+            "actual_send_gap.over_budget_fraction",
+            "fraction of observed inter-chunk gaps that exceeded the target pacing by more than 500us; intended as a guard against scheduler-sleep regressions in the fixture",
+        ),
+        (
+            "fixture.pacing_mode",
+            "monotonic_deadline_spin_wait: each H1/H2/H3 fixture chunk is sent at anchor + i*delay using std::time::Instant deadlines and a spin-wait loop, not tokio::time::sleep; this removes macOS scheduler/kqueue jitter from the corrected client-overhead denominator",
+        ),
+        (
+            "fixture.monotonic_clock_source",
+            "std::time::Instant: monotonic clock used by the fixture deadline computation and by the client inter-chunk receive timestamps reported under actual_send_gap",
         ),
     ])
 }
