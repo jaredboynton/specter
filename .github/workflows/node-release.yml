@@ -53,6 +53,22 @@ jobs:
         if: contains(matrix.settings.target, 'unknown-linux')
         run: brew install zig
 
+      - name: Install BoringSSL build tools
+        run: brew install cmake ninja
+
+      - name: Build prebuilt BoringSSL for ${{ matrix.settings.target }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          # Prime the cargo cache so build-boringssl.sh can locate the
+          # boring-sys vendored source. The bindings crate has the same
+          # boring-sys version pinned, so fetching either manifest works.
+          cargo fetch --manifest-path bindings/node/Cargo.toml
+          chmod +x scripts/build-boringssl.sh
+          ./scripts/build-boringssl.sh "${{ matrix.settings.target }}"
+          find "lib/boringssl/${{ matrix.settings.target }}/build" -maxdepth 1 -type f | head -10
+          find lib/boringssl/include/openssl -maxdepth 1 -type f | head -10
+
       - name: Install dependencies
         run: |
           cd bindings/node
@@ -115,6 +131,17 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install BoringSSL build tools
+        run: brew install cmake ninja
+
+      - name: Build prebuilt BoringSSL for aarch64-apple-darwin
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          cargo fetch --manifest-path bindings/node/Cargo.toml
+          chmod +x scripts/build-boringssl.sh
+          ./scripts/build-boringssl.sh aarch64-apple-darwin
 
       - name: Install dependencies
         run: |

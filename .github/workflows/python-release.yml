@@ -20,6 +20,18 @@ jobs:
         target: [x86_64-apple-darwin, aarch64-apple-darwin]
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install BoringSSL build tools
+        run: brew install cmake ninja
+      - name: Build prebuilt BoringSSL for ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          cargo fetch --manifest-path bindings/python/Cargo.toml
+          chmod +x scripts/build-boringssl.sh
+          ./scripts/build-boringssl.sh "${{ matrix.target }}"
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -55,10 +67,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: |
           brew update
-          brew install cmake
+          brew install cmake ninja
+      - name: Build prebuilt BoringSSL for aarch64-apple-darwin
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          cargo fetch --manifest-path bindings/python/Cargo.toml
+          chmod +x scripts/build-boringssl.sh
+          ./scripts/build-boringssl.sh aarch64-apple-darwin
       # maturin develop requires a virtualenv - create one explicitly
       - name: Create virtualenv and install deps
         run: |
