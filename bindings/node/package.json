@@ -1,6 +1,6 @@
 {
   "name": "specters",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Node.js bindings for Specter HTTP, WebSocket, HTTP/2, and HTTP/3 tunnel client",
   "main": "index.js",
   "types": "index.d.ts",
@@ -35,10 +35,10 @@
     ]
   },
   "optionalDependencies": {
-    "specters-darwin-x64": "3.0.0",
-    "specters-darwin-arm64": "3.0.0",
-    "specters-linux-x64-gnu": "3.0.0",
-    "specters-linux-arm64-gnu": "3.0.0"
+    "specters-darwin-x64": "3.1.0",
+    "specters-darwin-arm64": "3.1.0",
+    "specters-linux-x64-gnu": "3.1.0",
+    "specters-linux-arm64-gnu": "3.1.0"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.6.2",

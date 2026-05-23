@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "specter-python"
-version = "3.0.0"
+version = "3.1.0"
 dependencies = [
  "bytes",
  "http",
@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "specters"
-version = "3.0.0"
+version = "3.1.0"
 dependencies = [
  "base64",
  "boring",

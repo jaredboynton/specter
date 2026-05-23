@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "specters"
-version = "3.0.0"
+version = "3.1.0"
 description = "Python bindings for Specter HTTP, WebSocket, HTTP/2, and HTTP/3 tunnel client"
 readme = "README_PYPI.md"
 license = { text = "MIT" }
