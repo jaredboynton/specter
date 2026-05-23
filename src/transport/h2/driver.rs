@@ -7,6 +7,8 @@
 use bytes::{Bytes, BytesMut};
 use http::{Method, Uri};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -56,6 +58,19 @@ pub enum DriverCommand {
     },
 }
 
+/// Inline-registered streaming stream sent from `H2Handle` to the driver.
+///
+/// The handle has already written HEADERS via the shared write half and
+/// allocated `stream_id`. The driver only needs to register the response
+/// routing channels and the seed `recv_window`.
+#[derive(Debug)]
+pub struct InlineRegistration {
+    pub stream_id: u32,
+    pub headers_tx: oneshot::Sender<StreamingHeadersResult>,
+    pub body_tx: mpsc::Sender<Result<Bytes>>,
+    pub recv_window: i32,
+}
+
 /// Per-stream state tracked by driver
 struct DriverStreamState {
     /// Oneshot sender for response completion
@@ -82,6 +97,10 @@ struct DriverStreamState {
     /// the connection's `Stream::recv_window` would have tracked, so the DATA
     /// hot path only touches `self.streams` for inbound flow accounting.
     recv_window: i32,
+    /// Marks streams registered via the inline shared-writer fast path so
+    /// the driver knows to decrement the inline-active counter on stream
+    /// teardown.
+    inline: bool,
 }
 
 impl DriverStreamState {
@@ -102,6 +121,7 @@ impl DriverStreamState {
             pending_streaming_body: VecDeque::new(),
             pending_streaming_end: false,
             recv_window,
+            inline: false,
         }
     }
 
@@ -123,7 +143,18 @@ impl DriverStreamState {
             pending_streaming_body: VecDeque::new(),
             pending_streaming_end: false,
             recv_window,
+            inline: false,
         }
+    }
+
+    fn streaming_inline(
+        headers_tx: oneshot::Sender<StreamingHeadersResult>,
+        body_tx: mpsc::Sender<Result<Bytes>>,
+        recv_window: i32,
+    ) -> Self {
+        let mut state = Self::streaming(headers_tx, body_tx, Bytes::new(), recv_window);
+        state.inline = true;
+        state
     }
 }
 
@@ -147,11 +178,22 @@ pub struct H2Driver<S> {
     /// Queue for pending requests when max streams reached
     pending_requests: std::collections::VecDeque<DriverCommand>,
     /// Shared flag set when GOAWAY frame is received
-    goaway_received: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    goaway_received: Arc<AtomicBool>,
     /// Runtime keepalive and flow-control tuning.
     config: H2TransportConfig,
     /// Outstanding keepalive ping payload and send time.
     pending_ping: Option<([u8; 8], Instant)>,
+    /// Channel for inline-registered streaming streams (HEADERS already
+    /// written by the caller). Decoupled from `command_rx` so the inline
+    /// caller never awaits the bounded mpsc command hop.
+    inline_register_rx: mpsc::UnboundedReceiver<InlineRegistration>,
+    /// Counter incremented by the inline caller before HEADERS write and
+    /// decremented by the driver when the stream is removed. Mirrors the
+    /// value visible to `H2Handle::try_send_streaming_inline`.
+    inline_active: Arc<AtomicUsize>,
+    /// Toggle that disables future inline streaming when an RFC 8441 tunnel
+    /// or other ineligible state is in effect.
+    inline_eligible: Arc<AtomicBool>,
 }
 
 impl<S> H2Driver<S>
@@ -163,8 +205,35 @@ where
         connection: RawH2Connection<S>,
         command_tx: mpsc::Sender<DriverCommand>,
         command_rx: mpsc::Receiver<DriverCommand>,
-        goaway_received: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        goaway_received: Arc<AtomicBool>,
         config: H2TransportConfig,
+    ) -> Self {
+        let (_, inline_register_rx) = mpsc::unbounded_channel();
+        Self::new_with_inline(
+            connection,
+            command_tx,
+            command_rx,
+            goaway_received,
+            config,
+            inline_register_rx,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    /// Create a new driver wired to an inline-registration channel and the
+    /// shared `inline_active` / `inline_eligible` counters that the matching
+    /// `H2Handle` sees.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_inline(
+        connection: RawH2Connection<S>,
+        command_tx: mpsc::Sender<DriverCommand>,
+        command_rx: mpsc::Receiver<DriverCommand>,
+        goaway_received: Arc<AtomicBool>,
+        config: H2TransportConfig,
+        inline_register_rx: mpsc::UnboundedReceiver<InlineRegistration>,
+        inline_active: Arc<AtomicUsize>,
+        inline_eligible: Arc<AtomicBool>,
     ) -> Self {
         Self {
             command_rx,
@@ -176,12 +245,17 @@ where
             goaway_received,
             config,
             pending_ping: None,
+            inline_register_rx,
+            inline_active,
+            inline_eligible,
         }
     }
 
     /// Run the driver loop - processes commands and reads frames
     pub async fn drive(mut self) -> Result<()> {
         loop {
+            self.drain_inline_registrations();
+
             // Processing pending requests if slots available
             self.process_pending_requests().await?;
 
@@ -190,6 +264,7 @@ where
             self.flush_tunnel_data().await?;
             self.flush_pending_streaming_bodies().await?;
             self.check_keepalive_timeout()?;
+            self.refresh_inline_eligibility();
 
             if let Some(stream_id) = self.single_stream_fast_path_target() {
                 if self
@@ -227,6 +302,13 @@ where
                             // Channel closed - driver should shutdown
                             break;
                         }
+                    }
+                }
+
+                // Drain freshly registered inline streams.
+                inline = self.inline_register_rx.recv() => {
+                    if let Some(reg) = inline {
+                        self.register_inline_stream(reg);
                     }
                 }
 
@@ -272,13 +354,51 @@ where
         Ok(())
     }
 
+    /// Drain freshly arrived inline registrations into `self.streams` so the
+    /// next frame routed to one of them finds the entry. Called at the top of
+    /// the main loop and again at the top of frame handling to close the
+    /// race where the response HEADERS arrive before the registration
+    /// notice is observed.
+    fn drain_inline_registrations(&mut self) {
+        while let Ok(reg) = self.inline_register_rx.try_recv() {
+            self.register_inline_stream(reg);
+        }
+    }
+
+    fn register_inline_stream(&mut self, reg: InlineRegistration) {
+        self.streams.insert(
+            reg.stream_id,
+            DriverStreamState::streaming_inline(reg.headers_tx, reg.body_tx, reg.recv_window),
+        );
+    }
+
+    /// Clear or restore the inline-eligibility flag based on whether the
+    /// driver currently allows sequential inline streams. RFC 8441 tunnels
+    /// and GOAWAY block inline writes; other driver-managed streams may
+    /// coexist with at most one inline stream because the shared write
+    /// half preserves stream-id ordering and the driver routes by id.
+    fn refresh_inline_eligibility(&self) {
+        let eligible = self.tunnels.is_empty() && !self.goaway_received.load(Ordering::Relaxed);
+        self.inline_eligible.store(eligible, Ordering::Relaxed);
+    }
+
+    /// Decrement the inline-active counter when an inline-registered stream
+    /// is removed. The handle observes this counter going back to zero
+    /// before allowing the next sequential inline stream.
+    fn note_stream_removed(state: &DriverStreamState, inline_active: &Arc<AtomicUsize>) {
+        if state.inline {
+            inline_active.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
     /// Returns the stream ID eligible for the single-stream streaming fast
     /// path, or `None` when the regular multiplexed driver loop must run.
     ///
     /// Fast-path conditions: exactly one active stream, that stream is a
     /// streaming response with no pending request body left to send, no
     /// queued multiplexed work, no RFC 8441 tunnels open, no outstanding
-    /// keepalive ping, no streaming backpressure currently buffered, and the
+    /// keepalive ping, no streaming backpressure currently buffered, no
+    /// pending inline registration waiting to be drained, and the
     /// `command_rx` queue is empty so we will not delay another command.
     fn single_stream_fast_path_target(&self) -> Option<u32> {
         if self.streams.len() != 1
@@ -286,6 +406,7 @@ where
             || !self.pending_requests.is_empty()
             || self.pending_ping.is_some()
             || !self.command_rx.is_empty()
+            || !self.inline_register_rx.is_empty()
         {
             return None;
         }
@@ -328,12 +449,17 @@ where
             match self.command_rx.try_recv() {
                 Ok(cmd) => {
                     self.pending_requests.push_back(cmd);
-                    return Ok(processed_any);
+                    return Ok(true);
                 }
                 Err(mpsc::error::TryRecvError::Empty) => {}
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     return Ok(processed_any);
                 }
+            }
+
+            if let Ok(reg) = self.inline_register_rx.try_recv() {
+                self.register_inline_stream(reg);
+                return Ok(true);
             }
 
             if body_tx.is_closed() {
@@ -785,6 +911,7 @@ where
     async fn fail_stream(&mut self, stream_id: u32, message: String) {
         self.connection.remove_stream(stream_id);
         if let Some(mut stream) = self.streams.remove(&stream_id) {
+            Self::note_stream_removed(&stream, &self.inline_active);
             if let Some(tx) = stream.response_tx.take() {
                 let _ = tx.send(Err(Error::HttpProtocol(message.clone())));
             }
@@ -798,7 +925,9 @@ where
     }
 
     async fn cancel_stream_for_dropped_receiver(&mut self, stream_id: u32) {
-        self.streams.remove(&stream_id);
+        if let Some(state) = self.streams.remove(&stream_id) {
+            Self::note_stream_removed(&state, &self.inline_active);
+        }
         self.connection.remove_stream(stream_id);
         if let Err(e) = self
             .connection
@@ -868,6 +997,10 @@ where
 
     /// Handle a single frame
     async fn handle_frame(&mut self, header: FrameHeader, mut payload: Bytes) -> Result<()> {
+        // Drain any inline registrations so a freshly registered stream is
+        // visible before we try to route this frame to it.
+        self.drain_inline_registrations();
+
         // Check if receiver has been dropped (is_closed) for this stream before frame processing.
         // If dropped, send RST_STREAM(CANCEL) and evict.
         if header.stream_id != 0 {
@@ -1134,6 +1267,7 @@ where
     fn complete_stream(&mut self, stream_id: u32) {
         self.connection.remove_stream(stream_id);
         if let Some(mut stream) = self.streams.remove(&stream_id) {
+            Self::note_stream_removed(&stream, &self.inline_active);
             if let Some(tx) = stream.response_tx.take() {
                 // If no status was received, this is a protocol violation
                 // Return an error rather than defaulting to 200

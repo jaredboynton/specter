@@ -5,6 +5,7 @@
 use bytes::{Buf, Bytes, BytesMut};
 use http::{Method, Request, Response, StatusCode, Uri};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
@@ -102,6 +103,10 @@ pub struct H2Connection<S> {
     conn_recv_window: i32,
     /// Peer's settings.
     peer_settings: PeerSettings,
+    /// Mirror of `peer_settings.max_frame_size` for callers that share the
+    /// write half without holding `&self`. Updated whenever
+    /// `apply_peer_settings` accepts a new MAX_FRAME_SIZE.
+    peer_max_frame_size: Arc<AtomicU32>,
     /// Read buffer.
     read_buf: BytesMut,
     /// Buffer for accumulating header fragments when CONTINUATION frames are in progress.
@@ -231,6 +236,7 @@ where
             streams: HashMap::new(),
             conn_recv_window: (DEFAULT_INITIAL_WINDOW_SIZE + settings.initial_window_update) as i32,
             peer_settings: PeerSettings::default(),
+            peer_max_frame_size: Arc::new(AtomicU32::new(DEFAULT_MAX_FRAME_SIZE)),
             read_buf: BytesMut::with_capacity(16384),
             pending_headers: None,
             goaway_last_stream_id: None,
@@ -321,6 +327,7 @@ where
                         continue; // Invalid setting, ignore per RFC 9113 Section 6.5.2
                     }
                     self.peer_settings.max_frame_size = *value;
+                    self.peer_max_frame_size.store(*value, Ordering::Relaxed);
                 }
                 0x6 => {
                     // MaxHeaderListSize
@@ -949,6 +956,19 @@ where
     /// updates after the window drops below the refresh threshold.
     pub fn flow_control_refresh_increment(&self) -> u32 {
         DEFAULT_INITIAL_WINDOW_SIZE
+    }
+
+    /// Clone of the shared write-side owner. Inline streaming callers use
+    /// this to write HEADERS atomically alongside the H2 driver without
+    /// going through the driver command channel.
+    pub(crate) fn write_half_arc(&self) -> Arc<H2WriteHalf<WriteHalf<S>>> {
+        Arc::clone(&self.write_half)
+    }
+
+    /// Shared atomic mirror of `peer_settings.max_frame_size` for callers
+    /// that share the write half but cannot hold `&self`.
+    pub(crate) fn peer_max_frame_size_arc(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.peer_max_frame_size)
     }
 
     /// Reads response with streaming body - yields headers then streams DATA frames incrementally.

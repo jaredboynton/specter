@@ -30,7 +30,7 @@ use super::hpack::HpackEncoder;
 /// peer-side WINDOW_UPDATE.
 const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 65535;
 
-pub(super) struct H2WriteHalf<W> {
+pub(crate) struct H2WriteHalf<W> {
     inner: Mutex<H2WriteHalfInner<W>>,
 }
 
@@ -76,7 +76,7 @@ where
     /// write HEADERS (plus CONTINUATION when the encoded block exceeds the
     /// peer's `max_frame_size`). Returns the allocated stream id.
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn write_request_headers(
+    pub(crate) async fn write_request_headers(
         &self,
         method: &Method,
         uri: &Uri,

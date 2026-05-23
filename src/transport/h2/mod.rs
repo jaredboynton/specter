@@ -54,6 +54,8 @@ pub use handle::H2Handle;
 pub use hpack::{HpackDecoder, HpackEncoder, PseudoHeaderOrder};
 pub use tunnel::{H2Tunnel, H2TunnelEvent, H2TunnelOutbound};
 
+use handle::H2InlineState;
+
 // Re-export wrapper types for convenience
 use bytes::Bytes;
 use http::{Method, Uri};
@@ -180,13 +182,32 @@ impl H2PooledConnection {
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER);
         let goaway_received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        // Extract the inner connection
-        let driver = H2Driver::new(
+        let (inline_register_tx, inline_register_rx) = tokio::sync::mpsc::unbounded_channel();
+        let inline_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let inline_eligible = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        let write_half = conn.inner.write_half_arc();
+        let peer_max_frame_size = conn.inner.peer_max_frame_size_arc();
+        let initial_window_size = conn.inner.local_initial_window_size();
+
+        let inline_state = std::sync::Arc::new(H2InlineState {
+            write_half,
+            peer_max_frame_size,
+            initial_window_size,
+            register_tx: inline_register_tx,
+            inline_active: inline_active.clone(),
+            inline_eligible: inline_eligible.clone(),
+        });
+
+        let driver = H2Driver::new_with_inline(
             conn.inner,
             command_tx.clone(),
             command_rx,
             goaway_received.clone(),
             config,
+            inline_register_rx,
+            inline_active,
+            inline_eligible,
         );
 
         // Spawn driver task
@@ -196,7 +217,7 @@ impl H2PooledConnection {
             }
         });
 
-        let handle = H2Handle::new(command_tx, goaway_received);
+        let handle = H2Handle::with_inline(command_tx, goaway_received, inline_state);
         Self { handle }
     }
 
