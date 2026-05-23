@@ -64,10 +64,7 @@ impl H2Handle {
             response_tx,
         };
 
-        self.command_tx
-            .send(command)
-            .await
-            .map_err(|_| Error::HttpProtocol("Driver channel closed".into()))?;
+        send_driver_command(&self.command_tx, command).await?;
 
         // Wait for response
         let stream_response = response_rx
@@ -106,10 +103,7 @@ impl H2Handle {
             headers_tx,
         };
 
-        self.command_tx
-            .send(command)
-            .await
-            .map_err(|_| Error::HttpProtocol("Driver channel closed".into()))?;
+        send_driver_command(&self.command_tx, command).await?;
 
         // Wait for headers
         let (status, regular_headers) = headers_rx
@@ -136,17 +130,35 @@ impl H2Handle {
     ) -> Result<H2Tunnel> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
-        self.command_tx
-            .send(DriverCommand::OpenWebSocketTunnel {
+        send_driver_command(
+            &self.command_tx,
+            DriverCommand::OpenWebSocketTunnel {
                 uri,
                 headers,
                 response_tx,
-            })
-            .await
-            .map_err(|_| Error::HttpProtocol("Driver channel closed".into()))?;
+            },
+        )
+        .await
+        .map_err(|_| Error::HttpProtocol("Tunnel response channel closed".into()))?;
 
         response_rx
             .await
             .map_err(|_| Error::HttpProtocol("Tunnel response channel closed".into()))?
+    }
+}
+
+async fn send_driver_command(
+    tx: &mpsc::Sender<DriverCommand>,
+    command: DriverCommand,
+) -> Result<()> {
+    match tx.try_send(command) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(command)) => tx
+            .send(command)
+            .await
+            .map_err(|_| Error::HttpProtocol("Driver channel closed".into())),
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(Error::HttpProtocol("Driver channel closed".into()))
+        }
     }
 }

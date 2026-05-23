@@ -19,6 +19,8 @@ const MAX_HEADERS_SIZE: usize = 64 * 1024;
 /// Maximum number of headers to parse.
 const MAX_HEADERS_COUNT: usize = 100;
 
+const STREAM_READ_BUF_SIZE: usize = 16 * 1024;
+
 /// HTTP/1.1 connection for sending requests.
 pub struct H1Connection {
     stream: MaybeHttpsStream,
@@ -469,7 +471,7 @@ impl H1Connection {
             Self::send_body_chunk(tx, Bytes::from(initial)).await?;
         }
 
-        let mut read_buf = BytesMut::with_capacity(8192);
+        let mut read_buf = BytesMut::with_capacity(STREAM_READ_BUF_SIZE);
         loop {
             read_buf.clear();
             let n = self.stream.read_buf(&mut read_buf).await.map_err(|e| {
@@ -499,11 +501,11 @@ impl H1Connection {
         }
 
         let mut received = initial_len;
-        let mut chunk = BytesMut::with_capacity(8192);
+        let mut chunk = BytesMut::with_capacity(STREAM_READ_BUF_SIZE);
         while received < content_length {
             let remaining = content_length - received;
             chunk.clear();
-            chunk.reserve(remaining.min(8192));
+            chunk.reserve(remaining.min(STREAM_READ_BUF_SIZE));
             let n = self
                 .stream
                 .read_buf(&mut chunk)
