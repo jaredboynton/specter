@@ -509,7 +509,8 @@ impl H3Client {
             }
         }
 
-        let _ticket = self.dispatcher.acquire(key.origin_key()).await;
+        let origin: OriginKey = key.origin_key();
+        let _ticket = self.dispatcher.acquire(origin).await;
 
         let mut pool = self.pool.write().await;
         if let Some(handle) = pool.get(&key).cloned() {
