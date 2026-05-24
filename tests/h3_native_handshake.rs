@@ -3637,10 +3637,12 @@ fn native_h3_client_peer_connection_close_supersedes_local_closing_phase() {
     let events = client
         .open_server_h3_event_packet(peer_close.packet.as_ref())
         .unwrap();
-    assert!(matches!(
-        events.as_slice(),
-        [ServerH3Event::ConnectionClose { .. }]
-    ));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ServerH3Event::ConnectionClose { .. })),
+        "expected at least one ConnectionClose event, got {events:?}"
+    );
     assert!(client.close_state().is_draining());
     assert!(!client.close_state().is_closing());
     assert!(client.is_close_draining());

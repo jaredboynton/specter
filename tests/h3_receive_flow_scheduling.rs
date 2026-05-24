@@ -472,6 +472,28 @@ fn native_h3_driver_schedules_application_loss_detection_timer() {
 }
 
 #[test]
+fn native_h3_driver_decays_send_window_on_ack_ecn_congestion() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let observe_recovery_signals = driver
+        .split("fn observe_recovery_signals")
+        .nth(1)
+        .expect("driver must have observe_recovery_signals")
+        .split("async fn handle_command")
+        .next()
+        .expect("observe_recovery_signals section");
+
+    assert!(
+        observe_recovery_signals.contains("take_client_application_ecn_congestion()"),
+        "native H3 driver must consume ACK_ECN CE congestion signals from recovery"
+    );
+    assert!(
+        observe_recovery_signals.contains("send_scheduler.observe_loss()"),
+        "ACK_ECN CE congestion must decay the adaptive send window just like loss"
+    );
+}
+
+#[test]
 fn native_mock_h3_server_schedules_timer_driven_delayed_application_acks() {
     let mock_server = std::fs::read_to_string("tests/helpers/mock_h3_server.rs")
         .expect("native mock H3 server source");
