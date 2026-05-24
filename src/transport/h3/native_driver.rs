@@ -2800,6 +2800,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tunnel_inbound_small_chunks_do_not_backpressure_by_item_count() {
+        let (response_tx, _response_rx) = oneshot::channel();
+        let mut tunnel = NativeDriverTunnelState::new(response_tx);
+
+        for _ in 0..33 {
+            assert_eq!(
+                tunnel.push_inbound(H3TunnelEvent::Data(Bytes::from_static(b"x"))),
+                TunnelInboundStatus::Open
+            );
+        }
+
+        assert!(
+            !tunnel.is_inbound_backpressured(1),
+            "many tiny tunnel chunks below the byte budget must not pause socket reads just because 32 item slots filled"
+        );
+    }
+
+    #[test]
+    fn tunnel_inbound_large_chunk_backpressures_by_byte_budget() {
+        let (response_tx, _response_rx) = oneshot::channel();
+        let mut tunnel = NativeDriverTunnelState::new(response_tx);
+        let large_payload = Bytes::from(vec![
+            0x42;
+            H3TransportConfig::default()
+                .tunnel_outbound_byte_budget
+                + 1
+        ]);
+
+        assert_eq!(
+            tunnel.push_inbound(H3TunnelEvent::Data(large_payload)),
+            TunnelInboundStatus::Open
+        );
+
+        assert!(
+            tunnel.is_inbound_backpressured(1),
+            "one oversized tunnel chunk must consume the byte budget even though it is only one channel item"
+        );
+    }
+
     #[tokio::test]
     async fn reset_on_full_tunnel_inbound_is_queued_until_public_reader_frees_capacity() {
         let stream_id = 0;
