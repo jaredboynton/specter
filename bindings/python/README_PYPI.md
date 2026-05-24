@@ -2,7 +2,7 @@
 
 Python bindings for the Specter HTTP client with TLS, HTTP/2, HTTP/3, RFC 6455 WebSocket, and RFC 8441 Extended CONNECT support.
 
-Supported Chrome fingerprints are `specter.FingerprintProfile.Chrome142` through `specter.FingerprintProfile.Chrome148`; examples use `Chrome148`, the latest implemented profile.
+Supported Chrome fingerprints are `specter.FingerprintProfile.Chrome142` through `specter.FingerprintProfile.Chrome148`. Supported Firefox fingerprints are `specter.FingerprintProfile.Firefox133` through `specter.FingerprintProfile.Firefox151`, plus ESR branches `FirefoxEsr115`, `FirefoxEsr128`, and `FirefoxEsr140`; examples use `Chrome148`, the latest implemented Chrome profile.
 
 ## Installation
 

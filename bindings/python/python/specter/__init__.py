@@ -42,6 +42,9 @@ With fingerprinting:
     >>> builder.fingerprint(specter.FingerprintProfile.Chrome148)
     >>> client = builder.build()
 
+Supported profiles include Chrome142 through Chrome148, Firefox133 through
+Firefox151, and Firefox ESR branches 115, 128, and 140.
+
 With custom timeouts:
     >>> timeouts = (specter.Timeouts()
     ...     .connect(5.0)
