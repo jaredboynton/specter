@@ -101,7 +101,7 @@ main() {
     local base_url="https://github.com/$BSSL_PREBUILD_REPO/releases/download/$BSSL_PREBUILD_VERSION"
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "$tmp_dir"' EXIT
+    trap "rm -rf '$tmp_dir'" EXIT
 
     log "Downloading $BSSL_PREBUILD_REPO $BSSL_PREBUILD_VERSION $target"
     curl -fsSL "$base_url/SHA256SUMS" -o "$tmp_dir/SHA256SUMS"

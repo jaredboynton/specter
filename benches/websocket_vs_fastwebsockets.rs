@@ -297,7 +297,9 @@ async fn run_tungstenite(
         ws.send(TungMessage::Binary(payload.to_vec())).await?;
         match ws.next().await.transpose()? {
             Some(TungMessage::Binary(bytes)) if bytes.as_slice() == payload => {}
-            other => return Err(format!("unexpected tokio-tungstenite echo frame: {other:?}").into()),
+            other => {
+                return Err(format!("unexpected tokio-tungstenite echo frame: {other:?}").into())
+            }
         }
     }
     let elapsed = started.elapsed();
