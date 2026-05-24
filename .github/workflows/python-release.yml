@@ -31,7 +31,9 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           cargo fetch --manifest-path bindings/python/Cargo.toml
           chmod +x scripts/build-boringssl.sh
-          ./scripts/build-boringssl.sh "${{ matrix.target }}"
+          ./scripts/build-boringssl.sh --manifest-path bindings/python/Cargo.toml "${{ matrix.target }}"
+          test -s lib/boringssl/include/openssl/x509v3.h
+          test -s "lib/boringssl/${{ matrix.target }}/build/libssl.a"
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -78,7 +80,9 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           cargo fetch --manifest-path bindings/python/Cargo.toml
           chmod +x scripts/build-boringssl.sh
-          ./scripts/build-boringssl.sh aarch64-apple-darwin
+          ./scripts/build-boringssl.sh --manifest-path bindings/python/Cargo.toml aarch64-apple-darwin
+          test -s lib/boringssl/include/openssl/x509v3.h
+          test -s lib/boringssl/aarch64-apple-darwin/build/libssl.a
       # maturin develop requires a virtualenv - create one explicitly
       - name: Create virtualenv and install deps
         run: |
