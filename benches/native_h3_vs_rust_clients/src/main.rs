@@ -24,7 +24,7 @@ const LOCAL_FIXTURE_CHUNK_COUNT: usize = 5;
 const LOCAL_FIXTURE_CHUNK_DELAY_MS: u64 = 1;
 const LOCAL_FIXTURE_H3_STREAM_SEGMENT_SIZE: usize = 1_200;
 const LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE: usize = 1_024;
-const LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES: usize = 32;
+const LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES: usize = 40;
 const LOCAL_FIXTURE_TUNNEL_SLOW_CONSUMER_DELAY_MS: u64 = 25;
 const LOCAL_FIXTURE_TUNNEL_SLOW_READ_DELAY_MS: u64 = 1;
 const LOCAL_FIXTURE_TRANSPORT_PAYLOAD_SIZE: usize = 1_024;
@@ -216,19 +216,19 @@ fn competitor_specs() -> Vec<CompetitorSpec> {
             id: "h3_quinn_rfc9220_tunnel",
             crate_name: "h3+h3-quinn",
             version: "h3 0.0.8 / h3-quinn 0.0.10",
-            role: "h3_tunnel_comparator",
+            role: "unsupported_h3_tunnel_comparator",
             required_for_superiority: false,
             invocation_notes:
-                "Pending hyperium h3 Extended CONNECT/WebSocket-over-H3 tunnel comparator adapter.",
+                "Unsupported in this harness: h3 0.0.8 has no WebSocket protocol surface for RFC 9220.",
         },
         CompetitorSpec {
             id: "reqwest_h3_rfc9220_tunnel",
             crate_name: "reqwest",
             version: "0.13.3",
-            role: "h3_tunnel_comparator",
+            role: "unsupported_h3_tunnel_comparator",
             required_for_superiority: false,
             invocation_notes:
-                "Pending reqwest H3 tunnel comparator if a public RFC9220/WebSocket API becomes available.",
+                "Unsupported in this harness: reqwest H3 exposes request/response APIs, not an RFC 9220 tunnel API.",
         },
         CompetitorSpec {
             id: "quiche_direct",
@@ -486,14 +486,23 @@ fn row_context(competitor_id: &str) -> Option<RowContext> {
             ),
             notes: Some("Measures a delayed-reader RFC9220 tunnel while a same-origin H3 streaming response completes."),
         }),
-        "quiche_direct_rfc9220_tunnel"
-        | "tokio_quiche_rfc9220_tunnel"
-        | "h3_quinn_rfc9220_tunnel"
-        | "reqwest_h3_rfc9220_tunnel" => Some(RowContext {
+        "quiche_direct_rfc9220_tunnel" | "tokio_quiche_rfc9220_tunnel" => Some(RowContext {
             protocol: "h3_rfc9220",
             workload: "websocket_over_h3_raw_tunnel_echo",
             default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
             notes: Some("Explicit RFC9220 comparator slot; adapter is pending and excluded from the HTTP/3 superiority gate."),
+        }),
+        "h3_quinn_rfc9220_tunnel" => Some(RowContext {
+            protocol: "h3_rfc9220",
+            workload: "websocket_over_h3_raw_tunnel_echo",
+            default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
+            notes: Some("h3/h3-quinn is tracked as unsupported for RFC9220 WebSocket tunnels until its public protocol surface exposes websocket Extended CONNECT."),
+        }),
+        "reqwest_h3_rfc9220_tunnel" => Some(RowContext {
+            protocol: "h3_rfc9220",
+            workload: "websocket_over_h3_raw_tunnel_echo",
+            default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
+            notes: Some("reqwest_h3 is tracked as unsupported for RFC9220 WebSocket tunnels because reqwest does not expose a bidirectional H3 tunnel API."),
         }),
         "tokio_tungstenite_rfc9220" => Some(RowContext {
             protocol: "h3_rfc9220",
@@ -519,14 +528,26 @@ fn row_context(competitor_id: &str) -> Option<RowContext> {
 
 fn apply_row_context(row: &mut BenchmarkRow, sample_count: Option<usize>) {
     let Some(context) = row_context(&row.competitor_id) else {
-        row.sample_count = sample_count;
+        if row.sample_count.is_none() {
+            row.sample_count = sample_count;
+        }
         return;
     };
-    row.protocol = Some(context.protocol.into());
-    row.workload = Some(context.workload.into());
-    row.payload_bytes = context.default_payload_bytes;
-    row.sample_count = sample_count;
-    row.notes = context.notes.map(str::to_string);
+    if row.protocol.is_none() {
+        row.protocol = Some(context.protocol.into());
+    }
+    if row.workload.is_none() {
+        row.workload = Some(context.workload.into());
+    }
+    if row.payload_bytes.is_none() {
+        row.payload_bytes = context.default_payload_bytes;
+    }
+    if row.sample_count.is_none() {
+        row.sample_count = sample_count;
+    }
+    if row.notes.is_none() {
+        row.notes = context.notes.map(str::to_string);
+    }
 }
 
 fn local_native_fixture_measurement_plan() -> Vec<&'static str> {
@@ -576,11 +597,15 @@ fn placeholder_rows(
         .into_iter()
         .map(|spec| {
             if let Some(row) = best_imported_competitor_row(imported_competitor_rows, spec.id) {
-                return row.clone();
+                let mut row = row.clone();
+                apply_row_context(&mut row, None);
+                return row;
             }
             if spec.id == "specter_native" {
                 if let Some(row) = imported_specter_row.as_ref() {
-                    return row.clone();
+                    let mut row = row.clone();
+                    apply_row_context(&mut row, None);
+                    return row;
                 }
             }
             if let Some(row) = unsupported_rfc9220_comparator_row(spec.id) {
@@ -609,7 +634,10 @@ fn placeholder_rows(
 fn unsupported_rfc9220_comparator_row(competitor_id: &str) -> Option<BenchmarkRow> {
     matches!(
         competitor_id,
-        "tokio_tungstenite_rfc9220" | "reqwest_rfc9220"
+        "tokio_tungstenite_rfc9220"
+            | "reqwest_rfc9220"
+            | "h3_quinn_rfc9220_tunnel"
+            | "reqwest_h3_rfc9220_tunnel"
     )
     .then(|| {
         let mut row = BenchmarkRow {
@@ -843,6 +871,38 @@ async fn main() -> anyhow::Result<()> {
             .await?,
         );
     }
+    if let Some(url) = option_value(&args, "--measure-specter-native-rfc9220-tunnel-close-url") {
+        measured_competitor_rows.push(
+            measure_specter_native_rfc9220_tunnel_close(
+                &url,
+                option_usize(&args, "--warmups", 3)?,
+                option_usize(&args, "--samples", 30)?,
+            )
+            .await?,
+        );
+    }
+    if let Some(tunnel_url) =
+        option_value(&args, "--measure-specter-native-rfc9220-tunnel-mixed-url")
+    {
+        let stream_url = option_value(
+            &args,
+            "--measure-specter-native-rfc9220-tunnel-mixed-stream-url",
+        )
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--measure-specter-native-rfc9220-tunnel-mixed-url requires --measure-specter-native-rfc9220-tunnel-mixed-stream-url"
+            )
+        })?;
+        measured_competitor_rows.push(
+            measure_specter_native_rfc9220_tunnel_mixed(
+                &stream_url,
+                &tunnel_url,
+                option_usize(&args, "--warmups", 3)?,
+                option_usize(&args, "--samples", 30)?,
+            )
+            .await?,
+        );
+    }
     if let Some(url) = option_value(&args, "--measure-quinn-transport-url") {
         measured_competitor_rows.push(
             measure_quinn_transport(
@@ -969,6 +1029,20 @@ async fn measure_local_native_fixture(
             "specter_native_rfc9220_tunnel" => {
                 let tunnel_url = fixture.tunnel_url();
                 measure_specter_native_rfc9220_tunnel(&tunnel_url, warmups, samples).await
+            }
+            "specter_native_rfc9220_tunnel_close" => {
+                let tunnel_url = fixture.tunnel_url();
+                measure_specter_native_rfc9220_tunnel_close(&tunnel_url, warmups, samples).await
+            }
+            "specter_native_rfc9220_tunnel_mixed" => {
+                let tunnel_url = fixture.tunnel_url();
+                measure_specter_native_rfc9220_tunnel_mixed(
+                    fixture.stream_url(),
+                    &tunnel_url,
+                    warmups,
+                    samples,
+                )
+                .await
             }
             other => anyhow::bail!("unknown local native fixture client {other}"),
         }
@@ -1847,16 +1921,7 @@ async fn measure_specter_native_rfc9220_tunnel(
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
-    fingerprint.transport.ack_eliciting_threshold = 128;
-    let client = specter::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .h3_backend(specter::H3Backend::Native)
-        .h3_fingerprint(fingerprint)
-        .prefer_http2(false)
-        .h3_upgrade(false)
-        .total_timeout(ADAPTER_TIMEOUT)
-        .build()?;
+    let client = specter_rfc9220_client()?;
 
     for _ in 0..warmups {
         let _ = measure_specter_native_rfc9220_tunnel_once(&client, url).await?;
@@ -1868,6 +1933,65 @@ async fn measure_specter_native_rfc9220_tunnel(
     }
 
     Ok(specter_native_rfc9220_tunnel_row_from_samples(&measured))
+}
+
+fn specter_rfc9220_client() -> anyhow::Result<specter::Client> {
+    let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
+    fingerprint.transport.ack_eliciting_threshold = 128;
+    Ok(specter::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .h3_backend(specter::H3Backend::Native)
+        .h3_fingerprint(fingerprint)
+        .prefer_http2(false)
+        .h3_upgrade(false)
+        .total_timeout(ADAPTER_TIMEOUT)
+        .build()?)
+}
+
+async fn measure_specter_native_rfc9220_tunnel_close(
+    url: &str,
+    warmups: usize,
+    samples: usize,
+) -> anyhow::Result<BenchmarkRow> {
+    let client = specter_rfc9220_client()?;
+    for _ in 0..warmups {
+        let _ = measure_specter_native_rfc9220_tunnel_close_once(&client, url).await?;
+    }
+
+    let mut measured = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        measured.push(measure_specter_native_rfc9220_tunnel_close_once(&client, url).await?);
+    }
+
+    Ok(specter_native_rfc9220_tunnel_close_row_from_samples(
+        &measured,
+    ))
+}
+
+async fn measure_specter_native_rfc9220_tunnel_mixed(
+    stream_url: &str,
+    tunnel_url: &str,
+    warmups: usize,
+    samples: usize,
+) -> anyhow::Result<BenchmarkRow> {
+    let client = specter_rfc9220_client()?;
+    for _ in 0..warmups {
+        let _ =
+            measure_specter_native_rfc9220_tunnel_mixed_once(&client, stream_url, tunnel_url)
+                .await?;
+    }
+
+    let mut measured = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        measured.push(
+            measure_specter_native_rfc9220_tunnel_mixed_once(&client, stream_url, tunnel_url)
+                .await?,
+        );
+    }
+
+    Ok(specter_native_rfc9220_tunnel_mixed_row_from_samples(
+        &measured,
+    ))
 }
 
 async fn measure_specter_native_rfc9220_tunnel_once(
@@ -1896,6 +2020,127 @@ async fn measure_specter_native_rfc9220_tunnel_once(
 
     let total_ns = start.elapsed().as_nanos() as f64;
     Ok(AdapterSample::new(total_ns, total_ns, echoed.len() as u64))
+}
+
+async fn measure_specter_native_rfc9220_tunnel_close_once(
+    client: &specter::Client,
+    url: &str,
+) -> anyhow::Result<AdapterSample> {
+    let payload = Bytes::from(vec![b'c'; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE]);
+    let start = Instant::now();
+    let mut tunnel = tokio::time::timeout(ADAPTER_TIMEOUT, client.websocket_h3(url).open())
+        .await
+        .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel close open timed out"))??;
+
+    tunnel.send_bytes(payload.clone(), true).await?;
+
+    let echoed = tokio::time::timeout(ADAPTER_TIMEOUT, tunnel.recv_bytes())
+        .await
+        .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel close echo timed out"))?
+        .ok_or_else(|| anyhow::anyhow!("specter_native RFC 9220 tunnel close before echo"))??;
+    if echoed.len() != payload.len() {
+        anyhow::bail!(
+            "specter_native RFC 9220 close echo length mismatch: expected {}, got {}",
+            payload.len(),
+            echoed.len()
+        );
+    }
+
+    let end = tokio::time::timeout(ADAPTER_TIMEOUT, tunnel.recv_bytes())
+        .await
+        .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel server FIN timed out"))?;
+    if let Some(extra) = end {
+        let extra = extra?;
+        anyhow::bail!(
+            "specter_native RFC 9220 tunnel expected server FIN, got {} extra bytes",
+            extra.len()
+        );
+    }
+
+    let total_ns = start.elapsed().as_nanos() as f64;
+    Ok(AdapterSample::new(total_ns, total_ns, echoed.len() as u64))
+}
+
+async fn measure_specter_native_rfc9220_tunnel_mixed_once(
+    client: &specter::Client,
+    stream_url: &str,
+    tunnel_url: &str,
+) -> anyhow::Result<AdapterSample> {
+    let payload = Bytes::from(vec![b'm'; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE]);
+    let expected_tunnel_bytes = LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES;
+    let start = Instant::now();
+    let mut tunnel = tokio::time::timeout(ADAPTER_TIMEOUT, client.websocket_h3(tunnel_url).open())
+        .await
+        .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 mixed tunnel open timed out"))??;
+
+    for index in 0..LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES {
+        tunnel
+            .send_bytes(
+                payload.clone(),
+                index + 1 == LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES,
+            )
+            .await?;
+    }
+
+    let (stream_first_byte_ns, stream_bytes) =
+        measure_specter_native_http3_stream_with_client(client, stream_url, start).await?;
+
+    let mut echoed = 0usize;
+    while echoed < expected_tunnel_bytes {
+        let chunk = tokio::time::timeout(ADAPTER_TIMEOUT, tunnel.recv_bytes())
+            .await
+            .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 mixed tunnel drain timed out"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "specter_native RFC 9220 mixed tunnel ended after {echoed} of {expected_tunnel_bytes} bytes"
+                )
+            })??;
+        echoed = echoed.saturating_add(chunk.len());
+    }
+    if echoed != expected_tunnel_bytes {
+        anyhow::bail!(
+            "specter_native RFC 9220 mixed tunnel echo length mismatch: expected {expected_tunnel_bytes}, got {echoed}"
+        );
+    }
+
+    let _ = tokio::time::timeout(ADAPTER_TIMEOUT, tunnel.recv_bytes()).await;
+    Ok(AdapterSample::new(
+        stream_first_byte_ns,
+        start.elapsed().as_nanos() as f64,
+        stream_bytes.saturating_add(echoed as u64),
+    ))
+}
+
+async fn measure_specter_native_http3_stream_with_client(
+    client: &specter::Client,
+    url: &str,
+    start: Instant,
+) -> anyhow::Result<(f64, u64)> {
+    let mut response = client
+        .get(url)
+        .version(specter::HttpVersion::Http3Only)
+        .send_streaming()
+        .await?;
+    if !(200..300).contains(&response.status_code()) {
+        anyhow::bail!(
+            "specter_native mixed stream received non-success status {}",
+            response.status_code()
+        );
+    }
+
+    let mut first_byte_ns = None;
+    let mut bytes = 0u64;
+    while let Some(chunk) = response.body_mut().chunk().await {
+        let chunk = chunk?;
+        if !chunk.is_empty() {
+            first_byte_ns.get_or_insert_with(|| start.elapsed().as_nanos() as f64);
+            bytes = bytes.saturating_add(chunk.len() as u64);
+        }
+    }
+    Ok((
+        first_byte_ns.unwrap_or_else(|| start.elapsed().as_nanos() as f64),
+        bytes,
+    ))
 }
 
 async fn measure_quinn_transport(
