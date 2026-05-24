@@ -308,6 +308,25 @@ fn client_builder_exposes_h2_stream_capacity_knob() {
     );
 }
 
+#[test]
+fn client_builder_exposes_h3_streaming_body_buffer_slots() {
+    let client = Client::builder()
+        .h3_streaming_body_buffer_slots(3)
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        client.h3_streaming_body_buffer_slots(),
+        3,
+        "ClientBuilder must expose the H3 response-body queue slot cap"
+    );
+    assert_eq!(
+        client.h3_client().streaming_body_buffer_slots(),
+        3,
+        "ClientBuilder must propagate the H3 body slot cap into H3Client"
+    );
+}
+
 #[tokio::test]
 async fn client_builder_h3_max_idle_timeout_forces_reconnect() {
     let server = MockH3Server::new().await.unwrap();

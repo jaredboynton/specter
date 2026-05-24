@@ -231,6 +231,23 @@ The request-body benchmark uses a fixed `5 x 1024B` body schedule, `2ms` inter-c
 
 See [`docs/benchmarks/2026-05-24-streaming/`](docs/benchmarks/2026-05-24-streaming/) for the summary, raw JSON artifacts, exact commands, and RFC 8441 coexistence proof. These are deterministic local benchmark results, not a claim that every network or workload is faster.
 
+### Live LLM streaming vs reqwest
+
+The localhost results above hold up against a real production LLM endpoint. Specter ships a second bench, [`benches/codex_real_streaming.rs`](benches/codex_real_streaming.rs), that hits `POST https://chatgpt.com/backend-api/codex/responses` (the Codex backend, SSE over HTTP/2) and measures TTFT and end-to-end wall time for both Specter and reqwest with paired interleaved samples.
+
+Specter vs reqwest on `POST https://chatgpt.com/backend-api/codex/responses` (n=10, 5 pairs):
+
+| Metric | Specter | reqwest | Specter advantage |
+| --- | ---: | ---: | ---: |
+| Median TTFT | 558.8 ms | 924.4 ms | −365.6 ms (−40%) |
+| Median wall time | 670.7 ms | 968.9 ms | −298.2 ms (−31%) |
+| Wall time 95% CI | [−419, −52] | (excludes zero) | statistically significant |
+| Wilcoxon p-value | 0.0295 | < 0.05 | significant |
+
+Both clients negotiated HTTP/2; all 10 samples passed the per-pair oracle (`status_code==200 AND delta_count>=1 AND response.completed`). All 5 paired samples showed Specter faster, with the wall-time 95% CI excluding zero — a real, measurable Specter advantage on a live LLM stream over the public internet, not just localhost fixtures.
+
+Run with `cargo bench --bench codex_real_streaming` (skips with exit 0 when `~/.codex/auth.json` is absent). The companion WebSocket bench, [`benches/codex_ws_streaming.rs`](benches/codex_ws_streaming.rs), measures the same endpoint over `wss://` against `tokio-tungstenite` — at n=10 the result is within noise; reqwest itself does not support WebSockets, so the WebSocket capability is a Specter-only feature.
+
 ## Implementation
 
 **HTTP/1.1** - Direct socket implementation, no hyper dependency.
