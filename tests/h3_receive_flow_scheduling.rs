@@ -557,3 +557,48 @@ fn native_h3_same_fixture_schedules_application_loss_detection_timer() {
         "native H3 same-fixture server must retransmit application STREAM data on server application PTO"
     );
 }
+
+#[test]
+fn native_mock_h3_server_runs_connection_close_window() {
+    let mock_server = std::fs::read_to_string("tests/helpers/mock_h3_server.rs")
+        .expect("native mock H3 server source");
+
+    assert!(
+        mock_server.contains("closing_connection_close_packet: Option<Bytes>"),
+        "native mock H3 server must retain the protected CONNECTION_CLOSE packet for server close replays"
+    );
+    assert!(
+        mock_server.contains("run_server_close_window"),
+        "native mock H3 server must keep the server alive for a bounded close window"
+    );
+    assert!(
+        mock_server.contains("server_should_replay_connection_close"),
+        "native mock H3 server must rate-limit server CONNECTION_CLOSE replays using QuicCloseState"
+    );
+    assert!(
+        mock_server.contains("server_close_time_until_expiry"),
+        "native mock H3 server close window must be tied to the server PTO-derived close timer"
+    );
+}
+
+#[test]
+fn native_h3_fixture_suppresses_sends_after_peer_connection_close() {
+    let mock_server = std::fs::read_to_string("tests/helpers/mock_h3_server.rs")
+        .expect("native mock H3 server source");
+    let fixture = std::fs::read_to_string("benches/native_h3_vs_rust_clients/src/main.rs")
+        .expect("native H3 same-fixture benchmark source");
+
+    for (name, source) in [("mock", mock_server), ("same-fixture", fixture)] {
+        let process_datagram = source
+            .split("let events = self.handshake.open_client_h3_event_packet(packet)?;")
+            .nth(1)
+            .expect("server process_datagram must open client H3 events")
+            .split("build_server_application_ack_packet_after_or_delay")
+            .next()
+            .expect("server process_datagram must decide whether to ACK");
+        assert!(
+            process_datagram.contains("close_state().is_draining()"),
+            "{name} server must suppress ACK/flow-control/retransmit sends after peer CONNECTION_CLOSE enters draining"
+        );
+    }
+}

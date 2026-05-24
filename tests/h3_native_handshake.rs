@@ -3550,6 +3550,117 @@ fn native_h3_client_enters_close_draining_after_peer_connection_close() {
         .is_empty());
 }
 
+// RFC9000 § 10.2: emitting a CONNECTION_CLOSE must transition the local
+// endpoint into the closing phase and arm the 3 * PTO close timer derived
+// from the application loss detector's PTO.
+#[test]
+fn native_h3_client_enters_closing_phase_on_local_connection_close() {
+    let (_, mut client, _) = completed_native_server_handshake();
+    let _close = client
+        .build_client_connection_close_packet(0x00, Bytes::from_static(b"local close"))
+        .unwrap();
+
+    assert!(client.close_state().is_closing());
+    assert!(!client.close_state().is_draining());
+    assert!(client.is_close_draining());
+
+    let close_window = client.client_close_window();
+    let pto = client.client_application_pto();
+    assert!(close_window >= pto * 3, "RFC9000 close window is 3 * PTO");
+
+    let now = std::time::Instant::now();
+    assert!(!client.client_is_close_window_expired(now));
+    let remaining = client.client_close_time_until_expiry(now).expect("draining window pending");
+    assert!(remaining <= close_window);
+    let far_future = now + close_window + Duration::from_millis(50);
+    assert!(client.client_is_close_window_expired(far_future));
+}
+
+// RFC9000 § 10.2.1: a closing endpoint may replay CONNECTION_CLOSE in
+// response to peer packets but MUST rate-limit those replays. This test
+// drives the close-state machine directly to prove the gating logic.
+#[test]
+fn native_h3_client_replays_connection_close_rate_limited() {
+    let (_, mut client, _) = completed_native_server_handshake();
+    let _close = client
+        .build_client_connection_close_packet(0x00, Bytes::from_static(b"local"))
+        .unwrap();
+    // Lock in a known, deterministic replay interval and threshold so the
+    // assertions do not depend on wall-clock PTO drift.
+    let close_state = client.close_state_mut();
+    close_state.set_replay_min_interval(Duration::from_millis(50));
+    close_state.set_replay_packet_threshold(1);
+
+    let t0 = std::time::Instant::now();
+    assert!(!client.client_should_replay_connection_close(t0), "no peer packets yet");
+    client.client_observe_inbound_packet_for_close();
+    assert!(!client.client_should_replay_connection_close(t0), "interval not elapsed");
+    assert!(
+        client.client_should_replay_connection_close(t0 + Duration::from_millis(60)),
+        "after one packet plus min-interval the replay fires"
+    );
+    client.client_mark_connection_close_replayed(t0 + Duration::from_millis(60));
+    assert!(
+        !client.client_should_replay_connection_close(t0 + Duration::from_millis(60)),
+        "replays must wait for fresh inbound packets after mark_replayed"
+    );
+    client.client_observe_inbound_packet_for_close();
+    assert!(
+        client.client_should_replay_connection_close(t0 + Duration::from_millis(150)),
+        "subsequent packet plus interval re-enables replay"
+    );
+}
+
+// RFC9000 § 10.2: receiving a peer CONNECTION_CLOSE while we have a pending
+// local close (we were in the closing phase) MUST supersede our closing
+// phase with the draining phase, because draining endpoints "MUST NOT send
+// any packets except a single CONNECTION_CLOSE".
+#[test]
+fn native_h3_client_peer_connection_close_supersedes_local_closing_phase() {
+    let (_, mut client, mut server) = completed_native_server_handshake();
+    let _local_close = client
+        .build_client_connection_close_packet(0x00, Bytes::from_static(b"local"))
+        .unwrap();
+    assert!(client.close_state().is_closing());
+
+    let peer_close = server
+        .build_server_connection_close_packet(0x0100, Bytes::from_static(b"peer"))
+        .unwrap();
+    let events = client
+        .open_server_h3_event_packet(peer_close.packet.as_ref())
+        .unwrap();
+    assert!(matches!(
+        events.as_slice(),
+        [ServerH3Event::ConnectionClose { .. }]
+    ));
+    assert!(client.close_state().is_draining());
+    assert!(!client.close_state().is_closing());
+    assert!(client.is_close_draining());
+}
+
+// RFC9000 § 10.2 mirrored on the server: emitting CONNECTION_CLOSE on the
+// server side puts the server handshake into the closing phase with a
+// 3 * PTO close window.
+#[test]
+fn native_h3_server_enters_closing_phase_on_local_connection_close() {
+    let (_, _, mut server) = completed_native_server_handshake();
+    let _close = server
+        .build_server_connection_close_packet(0x0100, Bytes::from_static(b"server close"))
+        .unwrap();
+
+    assert!(server.close_state().is_closing());
+    assert!(server.is_close_draining());
+
+    let close_window = server.server_close_window();
+    let pto = server.server_application_pto();
+    assert!(close_window >= pto * 3, "RFC9000 close window is 3 * PTO");
+
+    let now = std::time::Instant::now();
+    assert!(!server.server_is_close_window_expired(now));
+    let far_future = now + close_window + Duration::from_millis(50);
+    assert!(server.server_is_close_window_expired(far_future));
+}
+
 #[test]
 fn native_h3_handshake_packetizes_client_application_stream_with_write_secret() {
     let write_secret = Bytes::from_static(&[0xaa; 32]);
