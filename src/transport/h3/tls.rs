@@ -598,8 +598,19 @@ impl NativeQuicTlsSession {
         ssl.set_hostname(server_name)
             .map_err(|err| Error::Tls(format!("failed to set QUIC SNI: {err}")))?;
         ssl.replace_ex_data(capture_index(), state.clone());
+        // BoringSSL's `SSL_CTX_set_early_data_enabled(ctx, 1)` on the
+        // context makes any captured SSL_SESSION early-data capable so the
+        // next connect can opt in to 0-RTT (RFC 9001 section 4.6). On this
+        // particular SSL we only want to *offer* early data when the
+        // caller explicitly opted in via `zero_rtt_early_data` and
+        // installed a replayable ticket - otherwise BoringSSL would emit
+        // a ClientHello with `early_data` advertised but no PSK binder
+        // that the server can map to early data, which the server then
+        // rejects with `SSL_ERROR_EARLY_DATA_REJECTED`.
+        let wants_zero_rtt_offer = zero_rtt_early_data.is_some_and(|data| !data.is_empty())
+            && replayed_session_ticket.is_some();
         unsafe {
-            SSL_set_early_data_enabled(ssl.as_ptr(), 1);
+            SSL_set_early_data_enabled(ssl.as_ptr(), i32::from(wants_zero_rtt_offer));
         }
 
         let transport_parameters =
