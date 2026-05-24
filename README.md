@@ -244,6 +244,20 @@ The request-body benchmark uses a fixed `5 x 1024B` body schedule, `2ms` inter-c
 
 See [`docs/benchmarks/2026-05-24-streaming/`](docs/benchmarks/2026-05-24-streaming/) for the summary, raw JSON artifacts, exact commands, and RFC 8441 coexistence proof. These are deterministic local benchmark results, not a claim that every network or workload is faster.
 
+### Local WebSocket echo vs fastwebsockets and tokio-tungstenite
+
+Specter also ships a local RFC 6455 echo benchmark, [`benches/websocket_vs_fastwebsockets.rs`](benches/websocket_vs_fastwebsockets.rs), against `fastwebsockets 0.10.0` and `tokio-tungstenite 0.24`.
+
+From [`docs/benchmarks/websocket-vs-fastwebsockets/2026-05-24-final.json`](docs/benchmarks/websocket-vs-fastwebsockets/2026-05-24-final.json), using 5,000 measured 1 KiB binary echoes after 500 warmups:
+
+| Client | Messages/sec | Throughput |
+| --- | ---: | ---: |
+| Specter | 61,152 | 59.72 MiB/s |
+| tokio-tungstenite | 60,489 | 59.07 MiB/s |
+| fastwebsockets | 54,701 | 53.42 MiB/s |
+
+The gate requires Specter to match or exceed both baselines; this run passed at +11.79% vs fastwebsockets and +1.10% vs tokio-tungstenite. Run with `cargo bench --bench websocket_vs_fastwebsockets -- --messages 5000 --warmups 500 --payload-bytes 1024 --require-thresholds`.
+
 ### Live LLM streaming vs reqwest
 
 The localhost results above hold up against a real production LLM endpoint. Specter ships a second bench, [`benches/codex_real_streaming.rs`](benches/codex_real_streaming.rs), that hits `POST https://chatgpt.com/backend-api/codex/responses` (the Codex backend, SSE over HTTP/2) and measures TTFT and end-to-end wall time for both Specter and reqwest with paired interleaved samples.
@@ -276,7 +290,7 @@ Specter vs tokio-tungstenite 0.24 on `wss://chatgpt.com/backend-api/codex/respon
 
 The story isn't median — it's the tail. tokio-tungstenite has dramatically worse worst-case behavior on this endpoint: p95 TTFT is 2.9× higher and p95 wall time is 1.6× higher. For LLM-streaming applications where one slow request blocks the whole pipeline, this tail behavior matters more than median.
 
-Optimizations applied to win the tail: pre-allocated 16 KB read buffer on `WebSocket::new`, CSPRNG-backed mask key cache (one `getrandom` syscall per 64 outbound frames instead of per-frame), and `#[inline]` on the frame decode hot path. Source: [`src/websocket/frame.rs`](src/websocket/frame.rs), [`src/websocket/connection.rs`](src/websocket/connection.rs).
+Optimizations applied to win the tail/local echo gate: pre-allocated 16 KB read buffer on `WebSocket::new`, reused frame encode buffer, CSPRNG-backed mask key cache (one `getrandom` syscall per 64 outbound frames instead of per-frame), word-sized payload masking, and `#[inline]` on the frame decode hot path. Source: [`src/websocket/frame.rs`](src/websocket/frame.rs), [`src/websocket/connection.rs`](src/websocket/connection.rs).
 
 Run with `cargo bench --bench codex_ws_streaming`.
 

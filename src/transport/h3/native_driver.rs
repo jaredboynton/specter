@@ -833,7 +833,7 @@ impl NativeH3Driver {
     fn client_application_ack_deadline(&self) -> Option<Instant> {
         self.handshake
             .client_application_ack_deadline(Duration::from_millis(
-                self.fingerprint.transport.max_ack_delay_ms.max(1),
+                self.fingerprint.transport.max_ack_delay_ms,
             ))
     }
 
@@ -1404,7 +1404,7 @@ impl NativeH3Driver {
             .handshake
             .build_client_application_ack_packet_after_or_delay(
                 self.fingerprint.transport.ack_eliciting_threshold,
-                Duration::from_millis(self.fingerprint.transport.max_ack_delay_ms.max(1)),
+                Duration::from_millis(self.fingerprint.transport.max_ack_delay_ms),
                 Instant::now(),
             )?
         {
