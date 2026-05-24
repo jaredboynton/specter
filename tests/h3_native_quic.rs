@@ -440,6 +440,7 @@ fn native_quic_transport_parameters_emit_grease_and_custom_unknowns() {
     );
 }
 
+#[test]
 fn native_quic_transport_parameters_emit_max_datagram_frame_size() {
     let params = QuicTransportParams {
         grease: false,

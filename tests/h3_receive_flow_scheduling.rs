@@ -181,6 +181,44 @@ fn native_h3_driver_retries_flow_control_blocked_open_stream_data() {
 }
 
 #[test]
+fn native_h3_driver_schedules_request_body_and_tunnel_data_fairly() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let scheduler = driver
+        .split("struct H3SendScheduler")
+        .nth(1)
+        .expect("native H3 driver must have a send scheduler")
+        .split("struct H3ReleasedReceiveCredit")
+        .next()
+        .expect("send scheduler section");
+    let flush = driver
+        .split("async fn flush_scheduled_send_work")
+        .nth(1)
+        .expect("native H3 driver must flush through the scheduler")
+        .split("async fn flush_pending_tunnel_data_once")
+        .next()
+        .expect("scheduled send flush section");
+
+    assert!(
+        scheduler.contains("next_classes"),
+        "native H3 scheduler must arbitrate request-body and tunnel DATA classes"
+    );
+    assert!(
+        scheduler.contains("ordered_streams"),
+        "native H3 scheduler must rotate streams within each DATA class"
+    );
+    assert!(
+        flush.contains("flush_request_stream_bodies_once")
+            && flush.contains("flush_pending_tunnel_data_once"),
+        "native H3 driver must route both request-body and tunnel DATA through the fair scheduler"
+    );
+    assert!(
+        driver.contains("data_budget") && driver.contains("record_data_sent"),
+        "native H3 sends must use a bounded, adaptive per-turn DATA budget"
+    );
+}
+
+#[test]
 fn native_h3_driver_schedules_timer_driven_delayed_application_acks() {
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
