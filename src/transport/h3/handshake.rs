@@ -782,6 +782,7 @@ pub struct NativeQuicServerHandshake {
     server_initial_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     server_handshake_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     recovery: RecoveryState,
+    ack_delay_exponent: u64,
     next_client_initial_packet_number: u64,
     next_client_handshake_packet_number: u64,
     next_client_application_packet_number: u64,
@@ -875,6 +876,7 @@ impl NativeQuicServerHandshake {
             close_draining: false,
             close_state: QuicCloseState::default(),
             recovery: recovery_state_from_transport(&fingerprint.transport),
+            ack_delay_exponent: fingerprint.transport.ack_delay_exponent,
         })
     }
 
@@ -948,6 +950,7 @@ impl NativeQuicServerHandshake {
             close_draining: false,
             close_state: QuicCloseState::default(),
             recovery: recovery_state_from_transport(&fingerprint.transport),
+            ack_delay_exponent: fingerprint.transport.ack_delay_exponent,
         })
     }
 
@@ -965,60 +968,6 @@ impl NativeQuicServerHandshake {
 
     pub fn close_state_mut(&mut self) -> &mut QuicCloseState {
         &mut self.close_state
-    }
-
-    /// Read-only access to the RFC9002 packet-space recovery state for tests
-    /// and the H3 driver loss-detection timer wakeup on the server side.
-    pub fn recovery(&self) -> &RecoveryState {
-        &self.recovery
-    }
-
-    /// Driver hook: when the server-side loss detection timer fires, call
-    /// this to declare time-threshold losses (RFC9002 § 6.1.2) or schedule a
-    /// PTO probe in the earliest in-flight space.
-    pub fn on_loss_detection_timeout(&mut self, now: Instant) -> LossDetectionOutcome {
-        self.recovery.on_loss_detection_timeout(now)
-    }
-
-    /// Next loss-detection timer deadline on the server side.
-    pub fn loss_detection_timer(&self) -> Option<Instant> {
-        self.recovery.loss_detection_timer()
-    }
-
-    /// Server-side PTO duration (RFC9002 § 6.2.1) applied to the Application
-    /// space after handshake confirmation.
-    pub fn application_pto(&self) -> Duration {
-        self.recovery.current_pto()
-    }
-
-    /// Retransmit server application stream packets whose PTO has expired.
-    /// Mirrors the client-side `retransmit_pto_client_application_stream_packets`.
-    pub fn retransmit_pto_server_application_stream_packets(
-        &mut self,
-        now: Instant,
-        pto_timeout: Duration,
-    ) -> Result<Vec<ServerApplicationPacket>> {
-        let expired_packets = self
-            .server_application_loss_detector
-            .pto_expired_packets(now, pto_timeout);
-        let mut expired_packets = expired_packets;
-        expired_packets.sort_unstable();
-        expired_packets.dedup();
-        let mut retransmits = Vec::new();
-        for packet_number in expired_packets {
-            self.server_application_loss_detector
-                .retire_packet(packet_number);
-            let Some(sent) = self.server_application_sent_streams.remove(&packet_number) else {
-                continue;
-            };
-            retransmits.push(self.build_server_application_stream_packet_at_offset(
-                sent.stream_id,
-                sent.stream_offset,
-                sent.data,
-                sent.fin,
-            )?);
-        }
-        Ok(retransmits)
     }
 
     /// RFC9000 § 10.2 closing: called by the server driver after emitting a
@@ -1272,7 +1221,7 @@ impl NativeQuicServerHandshake {
                 let outcome = self.recovery.on_ack_received(
                     PacketNumberSpace::Initial,
                     &frame,
-                    self.tls.fingerprint.transport.ack_delay_exponent,
+                    self.ack_delay_exponent,
                     Instant::now(),
                 )?;
                 for (packet_number, _) in outcome.newly_acked {
@@ -1390,7 +1339,7 @@ impl NativeQuicServerHandshake {
                 let outcome = self.recovery.on_ack_received(
                     PacketNumberSpace::Handshake,
                     &frame,
-                    self.tls.fingerprint.transport.ack_delay_exponent,
+                    self.ack_delay_exponent,
                     Instant::now(),
                 )?;
                 for (packet_number, _) in outcome.newly_acked {
@@ -1462,7 +1411,7 @@ impl NativeQuicServerHandshake {
                 let outcome = self.recovery.on_ack_received(
                     PacketNumberSpace::Application,
                     frame,
-                    self.tls.fingerprint.transport.ack_delay_exponent,
+                    self.ack_delay_exponent,
                     now,
                 )?;
                 for (packet_number, _) in outcome.newly_acked {
