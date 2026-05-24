@@ -915,6 +915,14 @@ impl QuicLossDetector {
         self.ecn_ce_marked_packets
     }
 
+    pub fn largest_acked(&self) -> Option<u64> {
+        self.largest_acked
+    }
+
+    pub fn largest_sent(&self) -> Option<u64> {
+        self.largest_sent
+    }
+
     fn collect_ack_range(
         &self,
         largest_acknowledged: u64,
