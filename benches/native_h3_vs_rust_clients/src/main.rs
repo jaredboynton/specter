@@ -3753,6 +3753,57 @@ mod tests {
                 .unwrap_or_else(|| panic!("{competitor_id} row should be explicit"));
             assert_eq!(row.status, expected_status);
             assert_eq!(row.source, expected_source);
+            assert_ne!(
+                row.status, "pending_adapter",
+                "{competitor_id} must not regress to pending_adapter once a real adapter exists"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_promotes_rfc9220_comparator_rows_when_measurements_imported() {
+        let measured_rows = vec![
+            super::BenchmarkRow {
+                competitor_id: "quiche_direct_rfc9220_tunnel".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(2_750_000.0),
+                p95_ttft_ns: Some(2_850_000.0),
+                bytes_per_sec: Some(372_000.0),
+                source: "quiche_direct_rfc9220_tunnel_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "tokio_quiche_rfc9220_tunnel".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(4_000_000.0),
+                p95_ttft_ns: Some(4_600_000.0),
+                bytes_per_sec: Some(236_000.0),
+                source: "tokio_quiche_rfc9220_tunnel_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+        ];
+
+        let artifact = super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &measured_rows);
+
+        for competitor_id in ["quiche_direct_rfc9220_tunnel", "tokio_quiche_rfc9220_tunnel"] {
+            let row = artifact
+                .rows
+                .iter()
+                .find(|row| row.competitor_id == competitor_id)
+                .unwrap_or_else(|| panic!("{competitor_id} row should be present"));
+            assert_eq!(
+                row.status, "measured_pass",
+                "{competitor_id} row should reflect imported measurement"
+            );
+            assert_ne!(
+                row.source, "native_h3_vs_rust_clients_harness",
+                "{competitor_id} row source should reflect the adapter, not the pending placeholder"
+            );
+            assert_eq!(row.sample_count, Some(100));
+            assert!(row.p50_ttft_ns.is_some());
+            assert!(row.p95_ttft_ns.is_some());
         }
     }
 
