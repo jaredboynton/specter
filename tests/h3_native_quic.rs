@@ -523,6 +523,28 @@ fn native_quic_ack_frame_round_trips_minimal_ack_range() {
 }
 
 #[test]
+fn native_quic_ack_ecn_frame_round_trips_ranges_and_ecn_counts() {
+    let frame = QuicFrame::AckEcn {
+        largest_acknowledged: 42,
+        ack_delay: 7,
+        first_ack_range: 10,
+        ranges: vec![QuicAckRange {
+            gap: 1,
+            ack_range_length: 3,
+        }],
+        ect0_count: 123,
+        ect1_count: 4,
+        ce_count: 2,
+    };
+
+    let encoded = encode_frame(&frame);
+    let decoded = decode_frame(&encoded).unwrap();
+
+    assert_eq!(encoded[0], 0x03);
+    assert_eq!(decoded, frame);
+}
+
+#[test]
 fn native_quic_ack_tracker_builds_rfc9000_ack_ranges() {
     let mut tracker = QuicAckTracker::default();
     tracker.observe(10);
@@ -686,6 +708,31 @@ fn native_quic_loss_detector_applies_ack_frame_ranges() {
                 gap: 1,
                 ack_range_length: 2,
             }],
+        })
+        .unwrap();
+
+    assert_eq!(detector.lost_packets(), vec![1, 2, 3, 7]);
+}
+
+#[test]
+fn native_quic_loss_detector_applies_ack_ecn_frame_ranges() {
+    let mut detector = QuicLossDetector::default();
+    for packet_number in 1..=10 {
+        detector.on_packet_sent(packet_number);
+    }
+
+    detector
+        .on_ack_frame(&QuicFrame::AckEcn {
+            largest_acknowledged: 10,
+            ack_delay: 0,
+            first_ack_range: 1,
+            ranges: vec![QuicAckRange {
+                gap: 1,
+                ack_range_length: 2,
+            }],
+            ect0_count: 10,
+            ect1_count: 0,
+            ce_count: 1,
         })
         .unwrap();
 

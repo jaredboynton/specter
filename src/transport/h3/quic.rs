@@ -49,6 +49,7 @@ const TP_MAX_DATAGRAM_FRAME_SIZE: u64 = 0x20;
 const FRAME_PADDING: u64 = 0x00;
 const FRAME_PING: u64 = 0x01;
 const FRAME_ACK: u64 = 0x02;
+const FRAME_ACK_ECN: u64 = 0x03;
 const FRAME_RESET_STREAM: u64 = 0x04;
 const FRAME_STOP_SENDING: u64 = 0x05;
 const FRAME_CRYPTO: u64 = 0x06;
@@ -184,6 +185,15 @@ pub enum QuicFrame {
         ack_delay: u64,
         first_ack_range: u64,
         ranges: Vec<QuicAckRange>,
+    },
+    AckEcn {
+        largest_acknowledged: u64,
+        ack_delay: u64,
+        first_ack_range: u64,
+        ranges: Vec<QuicAckRange>,
+        ect0_count: u64,
+        ect1_count: u64,
+        ce_count: u64,
     },
     Crypto {
         offset: u64,
@@ -521,19 +531,25 @@ impl QuicLossDetector {
     }
 
     pub fn on_ack_frame(&mut self, frame: &QuicFrame) -> Result<Vec<u64>> {
-        let QuicFrame::Ack {
-            largest_acknowledged,
-            first_ack_range,
-            ranges,
-            ..
-        } = frame
-        else {
-            return Ok(Vec::new());
+        let (largest_acknowledged, first_ack_range, ranges) = match frame {
+            QuicFrame::Ack {
+                largest_acknowledged,
+                first_ack_range,
+                ranges,
+                ..
+            }
+            | QuicFrame::AckEcn {
+                largest_acknowledged,
+                first_ack_range,
+                ranges,
+                ..
+            } => (*largest_acknowledged, *first_ack_range, ranges),
+            _ => return Ok(Vec::new()),
         };
 
         let mut acked_packets = Vec::new();
         let mut smallest_acked =
-            self.on_ack_range(*largest_acknowledged, *first_ack_range, &mut acked_packets)?;
+            self.on_ack_range(largest_acknowledged, first_ack_range, &mut acked_packets)?;
         for range in ranges {
             let gap = range
                 .gap
@@ -1259,14 +1275,34 @@ pub fn encode_frame(frame: &QuicFrame) -> Bytes {
             ranges,
         } => {
             put_varint(&mut out, FRAME_ACK);
-            put_varint(&mut out, *largest_acknowledged);
-            put_varint(&mut out, *ack_delay);
-            put_varint(&mut out, ranges.len() as u64);
-            put_varint(&mut out, *first_ack_range);
-            for range in ranges {
-                put_varint(&mut out, range.gap);
-                put_varint(&mut out, range.ack_range_length);
-            }
+            encode_ack_fields(
+                &mut out,
+                *largest_acknowledged,
+                *ack_delay,
+                *first_ack_range,
+                ranges,
+            );
+        }
+        QuicFrame::AckEcn {
+            largest_acknowledged,
+            ack_delay,
+            first_ack_range,
+            ranges,
+            ect0_count,
+            ect1_count,
+            ce_count,
+        } => {
+            put_varint(&mut out, FRAME_ACK_ECN);
+            encode_ack_fields(
+                &mut out,
+                *largest_acknowledged,
+                *ack_delay,
+                *first_ack_range,
+                ranges,
+            );
+            put_varint(&mut out, *ect0_count);
+            put_varint(&mut out, *ect1_count);
+            put_varint(&mut out, *ce_count);
         }
         QuicFrame::Crypto { offset, data } => {
             put_varint(&mut out, FRAME_CRYPTO);
@@ -1874,7 +1910,8 @@ fn decode_frame_from(input: &mut Bytes) -> Result<QuicFrame> {
     match frame_type {
         FRAME_PADDING => Ok(QuicFrame::Padding),
         FRAME_PING => Ok(QuicFrame::Ping),
-        FRAME_ACK => decode_ack_frame(input),
+        FRAME_ACK => decode_ack_frame(input, false),
+        FRAME_ACK_ECN => decode_ack_frame(input, true),
         FRAME_CRYPTO => Ok(QuicFrame::Crypto {
             offset: get_varint(input)?,
             data: {
@@ -1992,7 +2029,7 @@ fn decode_frame_from(input: &mut Bytes) -> Result<QuicFrame> {
     }
 }
 
-fn decode_ack_frame(input: &mut Bytes) -> Result<QuicFrame> {
+fn decode_ack_frame(input: &mut Bytes, ecn_counts: bool) -> Result<QuicFrame> {
     let largest_acknowledged = get_varint(input)?;
     let ack_delay = get_varint(input)?;
     let range_count = get_varint(input)?;
@@ -2004,12 +2041,24 @@ fn decode_ack_frame(input: &mut Bytes) -> Result<QuicFrame> {
             ack_range_length: get_varint(input)?,
         });
     }
-    Ok(QuicFrame::Ack {
-        largest_acknowledged,
-        ack_delay,
-        first_ack_range,
-        ranges,
-    })
+    if ecn_counts {
+        Ok(QuicFrame::AckEcn {
+            largest_acknowledged,
+            ack_delay,
+            first_ack_range,
+            ranges,
+            ect0_count: get_varint(input)?,
+            ect1_count: get_varint(input)?,
+            ce_count: get_varint(input)?,
+        })
+    } else {
+        Ok(QuicFrame::Ack {
+            largest_acknowledged,
+            ack_delay,
+            first_ack_range,
+            ranges,
+        })
+    }
 }
 
 fn decode_stream_frame(frame_type: u8, input: &mut Bytes) -> Result<QuicFrame> {
