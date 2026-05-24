@@ -14,6 +14,7 @@ use tokio::sync::Notify;
 use tokio::time::{sleep, Sleep};
 
 use crate::error::Error;
+use crate::transport::h3::native::data_frame_encoded_len;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct H3BodyTimeouts {
@@ -269,7 +270,7 @@ impl HttpBody for H3Body {
                 Ok(bytes) => {
                     self.shared
                         .released_recv_bytes
-                        .fetch_add(bytes.len(), Ordering::Relaxed);
+                        .fetch_add(data_frame_encoded_len(bytes.len()), Ordering::Relaxed);
                     self.shared.driver_notify.notify_one();
                     self.reset_read_idle();
                     if bytes.is_empty() {
@@ -345,7 +346,11 @@ mod tests {
 
         let shared = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 2);
         assert!(matches!(
-            shared.push(Ok(Bytes::from_static(b"hello"))),
+            shared.push(Ok(Bytes::from(vec![0x41; 63]))),
+            H3BodyPush::Accepted
+        ));
+        assert!(matches!(
+            shared.push(Ok(Bytes::from(vec![0x42; 64]))),
             H3BodyPush::Accepted
         ));
 
@@ -356,7 +361,18 @@ mod tests {
         assert_eq!(shared.take_released_recv_bytes(), 0);
         let frame = Pin::new(&mut body).poll_frame(&mut context);
         assert!(matches!(frame, Poll::Ready(Some(Ok(_)))));
-        assert_eq!(shared.take_released_recv_bytes(), 5);
+        assert_eq!(
+            shared.take_released_recv_bytes(),
+            65,
+            "63 payload bytes must release DATA frame type + one-byte length overhead"
+        );
+        let frame = Pin::new(&mut body).poll_frame(&mut context);
+        assert!(matches!(frame, Poll::Ready(Some(Ok(_)))));
+        assert_eq!(
+            shared.take_released_recv_bytes(),
+            67,
+            "64 payload bytes must release DATA frame type + two-byte length overhead"
+        );
         assert_eq!(shared.take_released_recv_bytes(), 0);
     }
 }

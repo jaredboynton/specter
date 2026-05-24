@@ -6,6 +6,7 @@ use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 
 use crate::error::{Error, Result};
+use crate::transport::h3::native::data_frame_encoded_len;
 
 /// Outbound bytes queued by an RFC 9220 tunnel handle for the H3 driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +162,7 @@ impl H3Tunnel {
         if released > 0 {
             credit
                 .released_recv_bytes
-                .fetch_add(released, Ordering::Relaxed);
+                .fetch_add(data_frame_encoded_len(released), Ordering::Relaxed);
         }
         credit.driver_notify.notify_one();
     }
@@ -450,5 +451,27 @@ mod tests {
         // configured ceiling; otherwise the per-tunnel cap would lose meaning.
         credit.release_send_bytes(4 * budget);
         assert_eq!(credit.available_send_permits(), budget);
+    }
+
+    #[tokio::test]
+    async fn recv_event_releases_encoded_data_frame_credit() {
+        let (_outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        drop(outbound_rx);
+        let (inbound_tx, inbound_rx) = mpsc::channel(1);
+        let credit = H3TunnelCredit::new(Arc::new(Notify::new()), 1024);
+        let mut tunnel = H3Tunnel::new_with_credit(_outbound_tx, inbound_rx, credit.clone());
+
+        inbound_tx
+            .send(Ok(H3TunnelEvent::Data(Bytes::from(vec![0x42; 64]))))
+            .await
+            .expect("queue inbound data");
+
+        let event = tunnel.recv_event().await.expect("inbound event");
+        assert!(matches!(event, Ok(H3TunnelEvent::Data(bytes)) if bytes.len() == 64));
+        assert_eq!(
+            credit.take_released_recv_bytes(),
+            67,
+            "64 payload bytes must release DATA frame type + two-byte length overhead"
+        );
     }
 }

@@ -62,6 +62,12 @@ pub struct H3Header {
     value: String,
 }
 
+pub(crate) fn data_frame_encoded_len(payload_len: usize) -> usize {
+    varint_len(FRAME_DATA)
+        .saturating_add(varint_len(payload_len as u64))
+        .saturating_add(payload_len)
+}
+
 impl H3Header {
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
