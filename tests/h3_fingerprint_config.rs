@@ -1,4 +1,7 @@
-use specter::fingerprint::{FingerprintProfile, H3Settings, Http3Fingerprint, QuicTransportParams};
+use specter::fingerprint::{
+    FingerprintProfile, H3Settings, Http3Fingerprint, NativeH3TlsFeatureStatus,
+    QuicTransportParams, TlsFingerprint,
+};
 use specter::{Client, H3Backend, H3Client};
 
 #[test]
@@ -109,4 +112,22 @@ fn h3_backend_defaults_to_native_client_path() {
 
     let client = Client::builder().build().unwrap();
     assert_eq!(client.h3_client().h3_backend(), H3Backend::Native);
+}
+
+#[test]
+fn tls_fingerprint_reports_native_h3_resumption_and_zero_rtt_capability() {
+    let capabilities = TlsFingerprint::chrome().native_h3_capabilities();
+
+    assert_eq!(
+        capabilities.session_resumption,
+        NativeH3TlsFeatureStatus::Unsupported {
+            reason: "native H3 does not yet wire BoringSSL session tickets into the QUIC handshake"
+        }
+    );
+    assert_eq!(
+        capabilities.zero_rtt,
+        NativeH3TlsFeatureStatus::Unsupported {
+            reason: "native H3 cannot send 0-RTT until session resumption and early-data transport replay are implemented"
+        }
+    );
 }

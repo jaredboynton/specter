@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use specter::fingerprint::{
-    CertCompression, Http3Fingerprint, RawQuicTransportParameter, TlsFingerprint,
+    CertCompression, Http3Fingerprint, NativeH3TlsFeatureStatus, RawQuicTransportParameter,
+    TlsFingerprint,
 };
 use specter::transport::h3::quic::{
     decode_frames, decode_long_header, decode_transport_parameters, derive_initial_key_material,
@@ -8,8 +9,8 @@ use specter::transport::h3::quic::{
     ConnectionId, LongHeaderType, QuicFrame, TransportParameter,
 };
 use specter::transport::h3::tls::{
-    build_client_initial_packet, capture_client_initial_crypto, NativeQuicTlsSession,
-    QuicEncryptionLevel, QuicSecretDirection, QuicTlsSecret,
+    build_client_initial_packet, capture_client_initial_crypto, native_h3_tls_capabilities,
+    NativeQuicTlsSession, QuicEncryptionLevel, QuicSecretDirection, QuicTlsSecret,
 };
 
 mod helpers;
@@ -138,6 +139,24 @@ fn native_tls_clienthello_advertises_tls_fingerprint_cert_compression() {
     assert!(
         extensions.contains(&27),
         "Brotli cert compression should advertise compress_certificate extension 27 in {extensions:?}"
+    );
+}
+
+#[test]
+fn native_h3_tls_capabilities_make_resumption_and_zero_rtt_gaps_explicit() {
+    let capabilities = native_h3_tls_capabilities(&TlsFingerprint::chrome());
+
+    assert_eq!(
+        capabilities.session_resumption,
+        NativeH3TlsFeatureStatus::Unsupported {
+            reason: "native H3 does not yet wire BoringSSL session tickets into the QUIC handshake"
+        }
+    );
+    assert_eq!(
+        capabilities.zero_rtt,
+        NativeH3TlsFeatureStatus::Unsupported {
+            reason: "native H3 cannot send 0-RTT until session resumption and early-data transport replay are implemented"
+        }
     );
 }
 

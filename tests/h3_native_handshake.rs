@@ -2325,6 +2325,92 @@ fn native_h3_handshake_answers_path_challenge_with_path_response() {
 }
 
 #[test]
+fn native_h3_client_path_challenge_validates_only_matching_path_response() {
+    let read_secret = Bytes::from_static(&[0x9a; 32]);
+    let write_secret = Bytes::from_static(&[0x9b; 32]);
+    let server_keys = derive_packet_key_material_from_secret(read_secret.clone()).unwrap();
+    let client_keys = derive_packet_key_material_from_secret(write_secret.clone()).unwrap();
+    let mut handshake = NativeQuicHandshake::client(
+        "example.com",
+        &Http3Fingerprint::chrome(),
+        ConnectionId::from_static(b"server-dcid"),
+        ConnectionId::from_static(b"client-scid"),
+    )
+    .unwrap();
+    handshake
+        .install_tls_secrets(&[
+            QuicTlsSecret {
+                direction: QuicSecretDirection::Read,
+                level: QuicEncryptionLevel::Application,
+                secret: read_secret,
+            },
+            QuicTlsSecret {
+                direction: QuicSecretDirection::Write,
+                level: QuicEncryptionLevel::Application,
+                secret: write_secret,
+            },
+        ])
+        .unwrap();
+    let challenge = *b"PATHPING";
+
+    let challenge_packet = handshake
+        .build_client_path_challenge_packet(challenge)
+        .unwrap();
+    let opened = open_short_header_packet(
+        &client_keys,
+        &challenge_packet.packet,
+        b"server-dcid".len(),
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(handshake.client_path_validation_pending_count(), 1);
+    assert_eq!(
+        decode_frames(&opened.payload)
+            .unwrap()
+            .into_iter()
+            .filter(|frame| !matches!(frame, QuicFrame::Padding))
+            .collect::<Vec<_>>(),
+        vec![QuicFrame::PathChallenge(challenge)]
+    );
+
+    let wrong_response = protect_short_header_packet(
+        &server_keys,
+        &ConnectionId::from_static(b"client-scid"),
+        0,
+        2,
+        false,
+        &encode_frame(&QuicFrame::PathResponse(*b"WRONGDAT")),
+    )
+    .unwrap();
+    assert_eq!(
+        handshake
+            .open_server_h3_event_packet(&wrong_response)
+            .unwrap(),
+        Vec::<ServerH3Event>::new()
+    );
+    assert_eq!(handshake.client_path_validation_pending_count(), 1);
+    assert!(!handshake.is_client_path_validated(&challenge));
+
+    let response = protect_short_header_packet(
+        &server_keys,
+        &ConnectionId::from_static(b"client-scid"),
+        1,
+        2,
+        false,
+        &encode_frame(&QuicFrame::PathResponse(challenge)),
+    )
+    .unwrap();
+
+    assert!(handshake
+        .open_server_h3_event_packet(&response)
+        .unwrap()
+        .is_empty());
+    assert!(handshake.is_client_path_validated(&challenge));
+    assert_eq!(handshake.client_path_validation_pending_count(), 0);
+}
+
+#[test]
 fn native_h3_handshake_packetizes_client_connection_close() {
     let write_secret = Bytes::from_static(&[0x96; 32]);
     let keys = derive_packet_key_material_from_secret(write_secret.clone()).unwrap();

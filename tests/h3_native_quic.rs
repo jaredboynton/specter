@@ -856,6 +856,98 @@ fn native_quic_loss_detector_applies_ack_ecn_frame_ranges() {
 }
 
 #[test]
+fn native_quic_loss_detector_rejects_ack_ecn_counter_regression() {
+    let mut detector = QuicLossDetector::default();
+    for packet_number in 1..=3 {
+        detector.on_packet_sent(packet_number);
+    }
+
+    detector
+        .on_ack_frame(&QuicFrame::AckEcn {
+            largest_acknowledged: 1,
+            ack_delay: 0,
+            first_ack_range: 0,
+            ranges: Vec::new(),
+            ect0_count: 1,
+            ect1_count: 0,
+            ce_count: 0,
+        })
+        .unwrap();
+    let err = detector
+        .on_ack_frame(&QuicFrame::AckEcn {
+            largest_acknowledged: 2,
+            ack_delay: 0,
+            first_ack_range: 0,
+            ranges: Vec::new(),
+            ect0_count: 0,
+            ect1_count: 0,
+            ce_count: 0,
+        })
+        .unwrap_err();
+
+    assert!(format!("{err}").contains("QUIC ACK_ECN counters decreased"));
+    assert!(detector.ecn_validation_failed());
+}
+
+#[test]
+fn native_quic_loss_detector_rejects_ack_ecn_counts_above_new_acknowledgements() {
+    let mut detector = QuicLossDetector::default();
+    detector.on_packet_sent(1);
+
+    let err = detector
+        .on_ack_frame(&QuicFrame::AckEcn {
+            largest_acknowledged: 1,
+            ack_delay: 0,
+            first_ack_range: 0,
+            ranges: Vec::new(),
+            ect0_count: 2,
+            ect1_count: 0,
+            ce_count: 0,
+        })
+        .unwrap_err();
+
+    assert!(format!("{err}").contains("QUIC ACK_ECN count increase"));
+    assert!(detector.ecn_validation_failed());
+}
+
+#[test]
+fn native_quic_loss_detector_records_ce_marks_without_marking_acked_packets_lost() {
+    let mut detector = QuicLossDetector::default();
+    for packet_number in 1..=4 {
+        detector.on_packet_sent(packet_number);
+    }
+
+    detector
+        .on_ack_frame(&QuicFrame::AckEcn {
+            largest_acknowledged: 2,
+            ack_delay: 0,
+            first_ack_range: 1,
+            ranges: Vec::new(),
+            ect0_count: 1,
+            ect1_count: 0,
+            ce_count: 1,
+        })
+        .unwrap();
+
+    assert_eq!(detector.ecn_ce_marked_packets(), 1);
+    assert_eq!(detector.lost_packets(), Vec::<u64>::new());
+
+    detector
+        .on_ack_frame(&QuicFrame::AckEcn {
+            largest_acknowledged: 4,
+            ack_delay: 0,
+            first_ack_range: 1,
+            ranges: Vec::new(),
+            ect0_count: 2,
+            ect1_count: 0,
+            ce_count: 2,
+        })
+        .unwrap();
+
+    assert_eq!(detector.ecn_ce_marked_packets(), 2);
+}
+
+#[test]
 fn native_quic_loss_detector_reports_pto_expired_unacked_packets_by_send_time() {
     let mut detector = QuicLossDetector::default();
     let sent_at = Instant::now();
