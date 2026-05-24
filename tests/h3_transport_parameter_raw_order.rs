@@ -81,7 +81,7 @@ fn native_quic_raw_ordered_transport_parameters_can_place_dynamic_client_cid() {
             RawQuicTransportParameter::initial_source_connection_id(),
             RawQuicTransportParameter {
                 id: 0x04,
-                value: vec![64],
+                value: vec![63],
             },
         ]),
         ..QuicTransportParams::chrome()
@@ -100,7 +100,7 @@ fn native_quic_raw_ordered_transport_parameters_can_place_dynamic_client_cid() {
         vec![
             TransportParameter::MaxIdleTimeout(42),
             TransportParameter::InitialSourceConnectionId(Bytes::from_static(b"client-scid")),
-            TransportParameter::InitialMaxData(64),
+            TransportParameter::InitialMaxData(63),
         ]
     );
 }
