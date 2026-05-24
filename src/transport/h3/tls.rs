@@ -431,6 +431,36 @@ impl NativeQuicTlsSession {
         self.ssl.session_reused()
     }
 
+    /// Native HTTP/3 handshake status, combining TLS 1.3 resumption
+    /// (RFC 8446 section 2.2) and QUIC 0-RTT acceptance/rejection
+    /// (RFC 9001 section 4.6, section 9.2).
+    ///
+    /// Stable only once the TLS handshake has produced application secrets.
+    pub fn handshake_status(&self) -> NativeH3HandshakeStatus {
+        let ssl = self.ssl.as_ptr().cast_const();
+        let reused = unsafe { SSL_session_reused(ssl) != 0 };
+        let zero_rtt_offered = self.zero_rtt_offer.is_some();
+        if !reused && !zero_rtt_offered {
+            return NativeH3HandshakeStatus::None;
+        }
+        let accepted = unsafe { SSL_early_data_accepted(ssl) != 0 };
+        let in_early = unsafe { SSL_in_early_data(ssl) != 0 };
+        match (reused, zero_rtt_offered, accepted || in_early) {
+            (true, true, true) => NativeH3HandshakeStatus::EarlyAccepted,
+            (true, true, false) => NativeH3HandshakeStatus::EarlyRejected,
+            (true, false, _) => NativeH3HandshakeStatus::Resumed,
+            (false, _, _) => NativeH3HandshakeStatus::None,
+        }
+    }
+
+    /// Returns BoringSSL's `SSL_get_early_data_reason` code (e.g.
+    /// `ssl_early_data_accepted = 2`, `ssl_early_data_quic_parameter_mismatch = 13`).
+    /// Useful for diagnostic logging of 0-RTT rejection.
+    pub fn early_data_reason(&self) -> u32 {
+        let ssl = self.ssl.as_ptr().cast_const();
+        unsafe { SSL_get_early_data_reason(ssl) }
+    }
+
     pub fn transport_parameters(&self) -> &Bytes {
         &self.transport_parameters
     }
@@ -485,6 +515,9 @@ impl NativeQuicTlsSession {
             TlsExtensionOrderBehavior::BrowserPermuted
         ));
         builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
+        unsafe {
+            SSL_CTX_set_early_data_enabled(builder.as_ptr(), 1);
+        }
         let ticket_state = state.clone();
         builder.set_new_session_callback(move |_ssl, session| {
             if let Ok(der) = session.to_der() {

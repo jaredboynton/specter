@@ -214,6 +214,20 @@ impl H3Client {
         self.transport_config.streaming_body_buffer_slots
     }
 
+    /// Override the per-tunnel outbound byte budget used to backpressure
+    /// `H3Tunnel::send_bytes` against the H3 driver.
+    pub fn with_tunnel_outbound_byte_budget(mut self, budget: usize) -> Self {
+        self.clear_hot_handle();
+        self.transport_config.tunnel_outbound_byte_budget =
+            budget.max(MIN_H3_TUNNEL_OUTBOUND_BYTE_BUDGET);
+        self
+    }
+
+    /// Configured per-tunnel outbound byte budget.
+    pub fn tunnel_outbound_byte_budget(&self) -> usize {
+        self.transport_config.tunnel_outbound_byte_budget
+    }
+
     /// Set a custom idle timeout (in milliseconds)
     pub fn with_max_idle_timeout(mut self, timeout_ms: u64) -> Self {
         self.clear_hot_handle();
