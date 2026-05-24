@@ -234,7 +234,7 @@ async fn test_h1_streaming_local() {
     // High-level send_streaming currently only supports H2, so H1 streaming should fail or fall back.
     // Let's verify that send_streaming returns an error if version is forced to H1.
     let req = client
-        .get(&format!("http://{addr}/stream"))
+        .get(format!("http://{addr}/stream"))
         .version(HttpVersion::Http1_1);
     let mut response = req.send_streaming().await.unwrap();
     assert_eq!(response.status().as_u16(), 200);

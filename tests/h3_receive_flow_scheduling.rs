@@ -129,6 +129,29 @@ fn native_h3_driver_flushes_receive_credit_from_consumed_body_bytes() {
 }
 
 #[test]
+fn native_h3_connect_wires_client_initial_pto_retransmission() {
+    let connection = std::fs::read_to_string("src/transport/h3/connection.rs")
+        .expect("native H3 connection source");
+    let connect_native = connection
+        .split("async fn connect_native")
+        .nth(1)
+        .expect("native H3 connection must have connect_native")
+        .split("fn random_connection_id")
+        .next()
+        .expect("connect_native section");
+
+    assert!(
+        connect_native.contains("record_client_initial_sent_at"),
+        "connect_native must record Initial sends so client Initial PTO can arm"
+    );
+    assert!(
+        connect_native.contains("on_loss_detection_timeout")
+            && connect_native.contains("retransmit_pto_client_initial_crypto_packets"),
+        "connect_native must retransmit client Initial CRYPTO when the loss-detection timer fires"
+    );
+}
+
+#[test]
 fn native_mock_h3_server_schedules_receive_flow_control_updates() {
     let mock_server = std::fs::read_to_string("tests/helpers/mock_h3_server.rs")
         .expect("native mock H3 server source");
