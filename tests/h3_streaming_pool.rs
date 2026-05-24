@@ -125,6 +125,56 @@ async fn h3_pool_reuses_live_same_key_connection() {
 }
 
 #[tokio::test]
+async fn h3_client_exposes_reusable_handle_for_streaming_requests() {
+    let server = MockH3Server::new().await.unwrap();
+    let connection_count = server.connection_count();
+    let url = server.url();
+
+    server.start(|conn| async move {
+        for _ in 0..2 {
+            let stream_id = loop {
+                match conn.read_event().await {
+                    Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                    Some(_) => continue,
+                    None => return,
+                }
+            };
+
+            conn.send_response_headers(stream_id, vec![(":status", "200")], false)
+                .await;
+            conn.send_response_data(stream_id, b"chunk", true).await;
+        }
+    });
+
+    let client = H3Client::new().danger_accept_invalid_certs(true);
+    let handle = client.handle(&url).await.unwrap();
+    let uri: http::Uri = url.parse().unwrap();
+
+    for _ in 0..2 {
+        let mut response = handle
+            .send_streaming(http::Method::GET, &uri, vec![], RequestBody::Empty)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response
+                .body_mut()
+                .frame()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap(),
+            bytes::Bytes::from_static(b"chunk")
+        );
+        assert!(response.body_mut().frame().await.is_none());
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(connection_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn native_h3_backend_streams_response_chunks_incrementally() {
     let server = MockH3Server::new().await.unwrap();
     let url = server.url();
