@@ -16,7 +16,6 @@ use quinn::rustls;
 use quinn::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
 
 const QUICHE_MAX_DATAGRAM_SIZE: usize = 1350;
 const ADAPTER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -289,6 +288,10 @@ fn quinn_transport_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
     adapter_row_from_samples("quinn_transport", "quinn_transport_adapter", samples)
 }
 
+fn s2n_quic_transport_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
+    adapter_row_from_samples("s2n_quic_transport", "s2n_quic_transport_adapter", samples)
+}
+
 #[cfg(test)]
 fn tokio_quiche_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
     adapter_row_from_samples("tokio_quiche", "tokio_quiche_adapter", samples)
@@ -309,30 +312,23 @@ fn percentile(sorted_samples: &[f64], percentile: f64) -> Option<f64> {
 }
 
 fn local_native_fixture_measurement_plan() -> Vec<&'static str> {
+    let mut plan = vec![
+        "specter_native",
+        "quiche_direct",
+        "tokio_quiche",
+        "h3_quinn",
+    ];
     #[cfg(feature = "reqwest-h3")]
     {
-        let mut plan = vec![
-            "specter_native",
-            "quiche_direct",
-            "tokio_quiche",
-            "h3_quinn",
-        ];
         plan.push("reqwest_h3");
-        plan.push("quinn_transport");
-        plan.push("specter_native_rfc9220_tunnel");
-        plan
     }
-    #[cfg(not(feature = "reqwest-h3"))]
+    plan.push("quinn_transport");
+    #[cfg(feature = "s2n-quic-transport")]
     {
-        vec![
-            "specter_native",
-            "quiche_direct",
-            "tokio_quiche",
-            "h3_quinn",
-            "quinn_transport",
-            "specter_native_rfc9220_tunnel",
-        ]
+        plan.push("s2n_quic_transport");
     }
+    plan.push("specter_native_rfc9220_tunnel");
+    plan
 }
 
 fn local_native_fixture_measurement_plan_for(
@@ -598,6 +594,24 @@ async fn main() -> anyhow::Result<()> {
             .await?,
         );
     }
+    if let Some(url) = option_value(&args, "--measure-s2n-quic-transport-url") {
+        let cert_path = option_value(&args, "--s2n-quic-cert")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--measure-s2n-quic-transport-url requires --s2n-quic-cert"
+                )
+            })?;
+        measured_competitor_rows.push(
+            measure_s2n_quic_transport(
+                &url,
+                option_usize(&args, "--warmups", 3)?,
+                option_usize(&args, "--samples", 30)?,
+                &cert_path,
+            )
+            .await?,
+        );
+    }
     if let Some(url) = option_value(&args, "--measure-reqwest-h3-url") {
         measured_competitor_rows.push(
             measure_reqwest_h3(
@@ -687,6 +701,12 @@ async fn measure_local_native_fixture(
                 let fixture = LocalQuinnTransportFixture::start().await?;
                 measure_quinn_transport(fixture.url(), warmups, samples).await
             }
+            #[cfg(feature = "s2n-quic-transport")]
+            "s2n_quic_transport" => {
+                let fixture = LocalS2nQuicTransportFixture::start().await?;
+                measure_s2n_quic_transport(fixture.url(), warmups, samples, fixture.cert_path())
+                    .await
+            }
             #[cfg(feature = "reqwest-h3")]
             "reqwest_h3" => measure_reqwest_h3(url, warmups, samples).await,
             "specter_native_rfc9220_tunnel" => {
@@ -767,7 +787,7 @@ impl LocalQuinnTransportFixture {
         let port = endpoint.local_addr()?.port();
         let task = tokio::spawn(run_local_quinn_transport_fixture(endpoint));
         Ok(Self {
-            url: format!("quic://localhost:{port}/transport"),
+            url: format!("quic://127.0.0.1:{port}/transport"),
             task,
         })
     }
@@ -780,6 +800,52 @@ impl LocalQuinnTransportFixture {
 impl Drop for LocalQuinnTransportFixture {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+#[cfg(feature = "s2n-quic-transport")]
+struct LocalS2nQuicTransportFixture {
+    url: String,
+    cert_path: PathBuf,
+    key_path: PathBuf,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "s2n-quic-transport")]
+impl LocalS2nQuicTransportFixture {
+    async fn start() -> anyhow::Result<Self> {
+        let (cert_path, key_path) = write_local_fixture_cert_files("specter_s2n_transport")?;
+        let mut server = s2n_quic::Server::builder()
+            .with_tls((cert_path.as_path(), key_path.as_path()))?
+            .with_io("127.0.0.1:0")?
+            .start()?;
+        let port = server.local_addr()?.port();
+        let task = tokio::spawn(async move {
+            run_local_s2n_quic_transport_fixture(&mut server).await;
+        });
+        Ok(Self {
+            url: format!("quic://127.0.0.1:{port}/transport"),
+            cert_path,
+            key_path,
+            task,
+        })
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn cert_path(&self) -> &Path {
+        &self.cert_path
+    }
+}
+
+#[cfg(feature = "s2n-quic-transport")]
+impl Drop for LocalS2nQuicTransportFixture {
+    fn drop(&mut self) {
+        self.task.abort();
+        let _ = fs::remove_file(&self.cert_path);
+        let _ = fs::remove_file(&self.key_path);
     }
 }
 
@@ -806,6 +872,32 @@ async fn echo_quinn_transport_stream(
         .await?;
     send.write_all(&bytes).await?;
     send.finish()?;
+    Ok(())
+}
+
+#[cfg(feature = "s2n-quic-transport")]
+async fn run_local_s2n_quic_transport_fixture(server: &mut s2n_quic::Server) {
+    while let Some(mut connection) = server.accept().await {
+        tokio::spawn(async move {
+            while let Ok(Some(mut stream)) = connection.accept_bidirectional_stream().await {
+                tokio::spawn(async move {
+                    let _ = echo_s2n_quic_transport_stream(&mut stream).await;
+                });
+            }
+        });
+    }
+}
+
+#[cfg(feature = "s2n-quic-transport")]
+async fn echo_s2n_quic_transport_stream(
+    stream: &mut s2n_quic::stream::BidirectionalStream,
+) -> anyhow::Result<()> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.receive().await? {
+        bytes.extend_from_slice(chunk.as_ref());
+    }
+    stream.send(Bytes::from(bytes)).await?;
+    stream.close().await?;
     Ok(())
 }
 
@@ -852,6 +944,20 @@ fn generate_local_fixture_cert_pem() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let _ = fs::remove_file(cert_path);
     let _ = fs::remove_file(key_path);
     Ok((cert_pem, key_pem))
+}
+
+#[cfg(feature = "s2n-quic-transport")]
+fn write_local_fixture_cert_files(prefix: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let (cert_pem, key_pem) = generate_local_fixture_cert_pem()?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let cert_path = std::env::temp_dir().join(format!("{prefix}_{stamp}.crt"));
+    let key_path = std::env::temp_dir().join(format!("{prefix}_{stamp}.key"));
+    fs::write(&cert_path, cert_pem)?;
+    fs::write(&key_path, key_pem)?;
+    Ok((cert_path, key_path))
 }
 
 async fn run_local_native_h3_fixture(
@@ -1541,6 +1647,94 @@ async fn measure_quinn_transport_once(connection: &quinn::Connection) -> anyhow:
     if echoed.as_slice() != payload.as_ref() {
         anyhow::bail!(
             "quinn_transport echo mismatch: expected {} bytes, got {} bytes",
+            payload.len(),
+            echoed.len()
+        );
+    }
+
+    let total_ns = start.elapsed().as_nanos() as f64;
+    Ok(AdapterSample::new(total_ns, total_ns, echoed.len() as u64))
+}
+
+#[cfg(feature = "s2n-quic-transport")]
+async fn measure_s2n_quic_transport(
+    url: &str,
+    warmups: usize,
+    samples: usize,
+    cert_path: &Path,
+) -> anyhow::Result<BenchmarkRow> {
+    let url = url::Url::parse(url)?;
+    let peer_addr = url
+        .socket_addrs(|| Some(443))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("URL resolved to no socket addresses"))?;
+    let mut client = s2n_quic::Client::builder()
+        .with_tls(cert_path)?
+        .with_io(if peer_addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        })?
+        .start()?;
+    let connect = s2n_quic::client::Connect::new(peer_addr).with_server_name("localhost");
+    let mut connection = client.connect(connect).await?;
+    connection.keep_alive(true)?;
+
+    for _ in 0..warmups {
+        let _ = measure_s2n_quic_transport_once(&mut connection).await?;
+    }
+
+    let mut measured = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        measured.push(measure_s2n_quic_transport_once(&mut connection).await?);
+    }
+
+    connection.close(0u32.into());
+    let _ = tokio::time::timeout(Duration::from_secs(1), client.wait_idle()).await;
+
+    Ok(s2n_quic_transport_row_from_samples(&measured))
+}
+
+#[cfg(not(feature = "s2n-quic-transport"))]
+async fn measure_s2n_quic_transport(
+    _url: &str,
+    _warmups: usize,
+    _samples: usize,
+    _cert_path: &Path,
+) -> anyhow::Result<BenchmarkRow> {
+    anyhow::bail!(
+        "--measure-s2n-quic-transport-url requires --features s2n-quic-transport"
+    )
+}
+
+#[cfg(feature = "s2n-quic-transport")]
+async fn measure_s2n_quic_transport_once(
+    connection: &mut s2n_quic::connection::Connection,
+) -> anyhow::Result<AdapterSample> {
+    let payload = Bytes::from(vec![b's'; LOCAL_FIXTURE_TRANSPORT_PAYLOAD_SIZE]);
+    let start = Instant::now();
+    let mut stream = tokio::time::timeout(ADAPTER_TIMEOUT, connection.open_bidirectional_stream())
+        .await
+        .map_err(|_| anyhow::anyhow!("s2n_quic_transport open_bidirectional_stream timed out"))??;
+
+    stream.send(payload.clone()).await?;
+    stream.finish()?;
+
+    let mut echoed = Vec::with_capacity(payload.len());
+    loop {
+        let chunk = tokio::time::timeout(ADAPTER_TIMEOUT, stream.receive())
+            .await
+            .map_err(|_| anyhow::anyhow!("s2n_quic_transport echo timed out"))??;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        echoed.extend_from_slice(chunk.as_ref());
+    }
+
+    if echoed.as_slice() != payload.as_ref() {
+        anyhow::bail!(
+            "s2n_quic_transport echo mismatch: expected {} bytes, got {} bytes",
             payload.len(),
             echoed.len()
         );
@@ -2368,6 +2562,7 @@ mod tests {
             "quiche_direct",
             "tokio_quiche",
             "h3_quinn",
+            "quinn_transport",
             "specter_native_rfc9220_tunnel",
         ];
         #[cfg(feature = "reqwest-h3")]
@@ -2376,6 +2571,7 @@ mod tests {
             "quiche_direct",
             "tokio_quiche",
             "h3_quinn",
+            "quinn_transport",
             "reqwest_h3",
             "specter_native_rfc9220_tunnel",
         ];
