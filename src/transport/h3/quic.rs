@@ -8,7 +8,8 @@ use boring::symm::{decrypt_aead, encrypt_aead, Cipher, Crypter, Mode};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::{Error, Result};
-use crate::fingerprint::QuicTransportParams;
+use crate::fingerprint::http3::RawQuicTransportParameterConnectionId;
+use crate::fingerprint::{QuicTransportParams, RawQuicTransportParameter};
 
 const INITIAL_SALT_V1: [u8; 20] = [
     0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
@@ -1657,9 +1658,7 @@ pub fn recover_packet_number(
 pub fn encode_transport_parameters(params: &QuicTransportParams) -> Bytes {
     let mut out = BytesMut::new();
     if let Some(raw_ordered_parameters) = &params.raw_ordered_transport_parameters {
-        for parameter in raw_ordered_parameters {
-            put_transport_parameter_bytes(&mut out, parameter.id, &parameter.value);
-        }
+        put_raw_ordered_transport_parameters(&mut out, raw_ordered_parameters, None);
         return out.freeze();
     }
     put_transport_parameter(
@@ -1729,16 +1728,78 @@ pub fn encode_transport_parameters(params: &QuicTransportParams) -> Bytes {
     out.freeze()
 }
 
+#[derive(Clone, Copy)]
+struct DynamicTransportParameterConnectionIds<'a> {
+    original_destination_connection_id: Option<&'a ConnectionId>,
+    initial_source_connection_id: Option<&'a ConnectionId>,
+    retry_source_connection_id: Option<&'a ConnectionId>,
+}
+
+fn put_raw_ordered_transport_parameters(
+    out: &mut BytesMut,
+    raw_ordered_parameters: &[RawQuicTransportParameter],
+    connection_ids: Option<DynamicTransportParameterConnectionIds<'_>>,
+) {
+    for parameter in raw_ordered_parameters {
+        if let Some(connection_ids) = connection_ids {
+            match parameter.connection_id_placeholder() {
+                Some(RawQuicTransportParameterConnectionId::OriginalDestination) => {
+                    if let Some(connection_id) = connection_ids.original_destination_connection_id {
+                        put_transport_parameter_bytes(out, parameter.id, connection_id.as_bytes());
+                    }
+                    continue;
+                }
+                Some(RawQuicTransportParameterConnectionId::InitialSource) => {
+                    if let Some(connection_id) = connection_ids.initial_source_connection_id {
+                        put_transport_parameter_bytes(out, parameter.id, connection_id.as_bytes());
+                    }
+                    continue;
+                }
+                Some(RawQuicTransportParameterConnectionId::RetrySource) => {
+                    if let Some(connection_id) = connection_ids.retry_source_connection_id {
+                        put_transport_parameter_bytes(out, parameter.id, connection_id.as_bytes());
+                    }
+                    continue;
+                }
+                None => {}
+            }
+        }
+        put_transport_parameter_bytes(out, parameter.id, &parameter.value);
+    }
+}
+
+fn raw_ordered_transport_parameters_contain_id(params: &QuicTransportParams, id: u64) -> bool {
+    params
+        .raw_ordered_transport_parameters
+        .as_ref()
+        .is_some_and(|parameters| parameters.iter().any(|parameter| parameter.id == id))
+}
+
 pub fn encode_transport_parameters_with_initial_source_connection_id(
     params: &QuicTransportParams,
     initial_source_connection_id: &ConnectionId,
 ) -> Bytes {
-    let mut out = BytesMut::from(encode_transport_parameters(params).as_ref());
-    put_transport_parameter_bytes(
-        &mut out,
-        TP_INITIAL_SOURCE_CONNECTION_ID,
-        initial_source_connection_id.as_bytes(),
-    );
+    let mut out = BytesMut::new();
+    if let Some(raw_ordered_parameters) = &params.raw_ordered_transport_parameters {
+        put_raw_ordered_transport_parameters(
+            &mut out,
+            raw_ordered_parameters,
+            Some(DynamicTransportParameterConnectionIds {
+                original_destination_connection_id: None,
+                initial_source_connection_id: Some(initial_source_connection_id),
+                retry_source_connection_id: None,
+            }),
+        );
+    } else {
+        out.extend_from_slice(encode_transport_parameters(params).as_ref());
+    }
+    if !raw_ordered_transport_parameters_contain_id(params, TP_INITIAL_SOURCE_CONNECTION_ID) {
+        put_transport_parameter_bytes(
+            &mut out,
+            TP_INITIAL_SOURCE_CONNECTION_ID,
+            initial_source_connection_id.as_bytes(),
+        );
+    }
     out.freeze()
 }
 
@@ -1749,23 +1810,41 @@ pub fn encode_server_transport_parameters(
     retry_source_connection_id: Option<&ConnectionId>,
 ) -> Bytes {
     let mut out = BytesMut::new();
-    put_transport_parameter_bytes(
-        &mut out,
-        TP_ORIGINAL_DESTINATION_CONNECTION_ID,
-        original_destination_connection_id.as_bytes(),
-    );
-    out.extend_from_slice(encode_transport_parameters(params).as_ref());
-    put_transport_parameter_bytes(
-        &mut out,
-        TP_INITIAL_SOURCE_CONNECTION_ID,
-        initial_source_connection_id.as_bytes(),
-    );
-    if let Some(retry_source_connection_id) = retry_source_connection_id {
+    if !raw_ordered_transport_parameters_contain_id(params, TP_ORIGINAL_DESTINATION_CONNECTION_ID) {
         put_transport_parameter_bytes(
             &mut out,
-            TP_RETRY_SOURCE_CONNECTION_ID,
-            retry_source_connection_id.as_bytes(),
+            TP_ORIGINAL_DESTINATION_CONNECTION_ID,
+            original_destination_connection_id.as_bytes(),
         );
+    }
+    if let Some(raw_ordered_parameters) = &params.raw_ordered_transport_parameters {
+        put_raw_ordered_transport_parameters(
+            &mut out,
+            raw_ordered_parameters,
+            Some(DynamicTransportParameterConnectionIds {
+                original_destination_connection_id: Some(original_destination_connection_id),
+                initial_source_connection_id: Some(initial_source_connection_id),
+                retry_source_connection_id,
+            }),
+        );
+    } else {
+        out.extend_from_slice(encode_transport_parameters(params).as_ref());
+    }
+    if !raw_ordered_transport_parameters_contain_id(params, TP_INITIAL_SOURCE_CONNECTION_ID) {
+        put_transport_parameter_bytes(
+            &mut out,
+            TP_INITIAL_SOURCE_CONNECTION_ID,
+            initial_source_connection_id.as_bytes(),
+        );
+    }
+    if let Some(retry_source_connection_id) = retry_source_connection_id {
+        if !raw_ordered_transport_parameters_contain_id(params, TP_RETRY_SOURCE_CONNECTION_ID) {
+            put_transport_parameter_bytes(
+                &mut out,
+                TP_RETRY_SOURCE_CONNECTION_ID,
+                retry_source_connection_id.as_bytes(),
+            );
+        }
     }
     out.freeze()
 }
@@ -3018,25 +3097,51 @@ mod close_state_tests {
             .on_ack_frame_at(&ack_frame(7, 10_000), acked_at)
             .expect("ack frame decoded");
         assert!(acked.contains(&7));
-        assert!(detector.smoothed_rtt().is_some());
-        let smoothed = detector.smoothed_rtt().unwrap();
         let latest = detector.latest_rtt().unwrap();
         assert_eq!(latest, Duration::from_millis(80));
         let min_rtt = detector.min_rtt().unwrap();
         assert_eq!(min_rtt, latest, "first sample establishes min_rtt");
-        let expected_adjusted = latest - Duration::from_millis(10);
+        // RFC9002 § 5.3: ack_delay adjustment MUST NOT pull the sample below
+        // min_rtt. For the first sample min_rtt == latest, so the
+        // adjustment is skipped and smoothed_rtt uses the raw latest_rtt.
+        let smoothed = detector.smoothed_rtt().unwrap();
         assert_eq!(
-            smoothed, expected_adjusted,
-            "first smoothed_rtt is the adjusted latest sample"
+            smoothed, latest,
+            "first sample uses unadjusted latest_rtt because adjustment would underflow min_rtt"
         );
         let rttvar = detector.rttvar();
-        assert_eq!(rttvar, expected_adjusted / 2);
+        assert_eq!(rttvar, latest / 2);
 
         let pto = detector.current_pto();
         let expected_pto = smoothed
             + (rttvar.saturating_mul(4)).max(TIMER_GRANULARITY)
             + Duration::from_millis(25);
         assert_eq!(pto, expected_pto);
+    }
+
+    // RFC9002 § 5.3: once min_rtt is anchored low enough by an earlier
+    // sample, subsequent samples must subtract ack_delay before the EWMA.
+    #[test]
+    fn loss_detector_subtracts_ack_delay_when_min_rtt_allows_it() {
+        let mut detector = QuicLossDetector::default()
+            .with_max_ack_delay(Duration::from_millis(25))
+            .with_peer_ack_delay_exponent(0);
+        let t0 = Instant::now();
+        detector.on_packet_sent_at(1, t0);
+        detector
+            .on_ack_frame_at(&ack_frame(1, 0), t0 + Duration::from_millis(20))
+            .unwrap();
+        assert_eq!(detector.min_rtt(), Some(Duration::from_millis(20)));
+
+        detector.on_packet_sent_at(2, t0 + Duration::from_millis(30));
+        // latest = 120ms, ack_delay = 10ms, adjusted = 110ms >= min_rtt(20).
+        // EWMA: smoothed = 7/8 * 20 + 1/8 * 110 = 30ms (truncating integer).
+        detector
+            .on_ack_frame_at(&ack_frame(2, 10_000), t0 + Duration::from_millis(150))
+            .unwrap();
+        let smoothed = detector.smoothed_rtt().unwrap();
+        let expected = (Duration::from_millis(20) * 7 + Duration::from_millis(110)) / 8;
+        assert_eq!(smoothed, expected, "RFC9002 5.3 EWMA must use adjusted_rtt");
     }
 
     #[test]

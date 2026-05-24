@@ -55,6 +55,64 @@ pub struct RawQuicTransportParameter {
     pub value: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum RawQuicTransportParameterConnectionId {
+    OriginalDestination,
+    InitialSource,
+    RetrySource,
+}
+
+impl RawQuicTransportParameter {
+    const ORIGINAL_DESTINATION_CONNECTION_ID_ID: u64 = 0x00;
+    const INITIAL_SOURCE_CONNECTION_ID_ID: u64 = 0x0f;
+    const RETRY_SOURCE_CONNECTION_ID_ID: u64 = 0x10;
+    const ORIGINAL_DESTINATION_CONNECTION_ID_PLACEHOLDER: &'static [u8] =
+        b"$specter:original_destination_connection_id";
+    const INITIAL_SOURCE_CONNECTION_ID_PLACEHOLDER: &'static [u8] =
+        b"$specter:initial_source_connection_id";
+    const RETRY_SOURCE_CONNECTION_ID_PLACEHOLDER: &'static [u8] =
+        b"$specter:retry_source_connection_id";
+
+    pub fn original_destination_connection_id() -> Self {
+        Self {
+            id: Self::ORIGINAL_DESTINATION_CONNECTION_ID_ID,
+            value: Self::ORIGINAL_DESTINATION_CONNECTION_ID_PLACEHOLDER.to_vec(),
+        }
+    }
+
+    pub fn initial_source_connection_id() -> Self {
+        Self {
+            id: Self::INITIAL_SOURCE_CONNECTION_ID_ID,
+            value: Self::INITIAL_SOURCE_CONNECTION_ID_PLACEHOLDER.to_vec(),
+        }
+    }
+
+    pub fn retry_source_connection_id() -> Self {
+        Self {
+            id: Self::RETRY_SOURCE_CONNECTION_ID_ID,
+            value: Self::RETRY_SOURCE_CONNECTION_ID_PLACEHOLDER.to_vec(),
+        }
+    }
+
+    pub(crate) fn connection_id_placeholder(&self) -> Option<RawQuicTransportParameterConnectionId> {
+        match (self.id, self.value.as_slice()) {
+            (
+                Self::ORIGINAL_DESTINATION_CONNECTION_ID_ID,
+                Self::ORIGINAL_DESTINATION_CONNECTION_ID_PLACEHOLDER,
+            ) => Some(RawQuicTransportParameterConnectionId::OriginalDestination),
+            (
+                Self::INITIAL_SOURCE_CONNECTION_ID_ID,
+                Self::INITIAL_SOURCE_CONNECTION_ID_PLACEHOLDER,
+            ) => Some(RawQuicTransportParameterConnectionId::InitialSource),
+            (
+                Self::RETRY_SOURCE_CONNECTION_ID_ID,
+                Self::RETRY_SOURCE_CONNECTION_ID_PLACEHOLDER,
+            ) => Some(RawQuicTransportParameterConnectionId::RetrySource),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QuicTransportParams {
     pub max_idle_timeout_ms: u64,
