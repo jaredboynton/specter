@@ -1,14 +1,20 @@
 use boring::ssl::{SslAcceptor, SslAcceptorBuilder, SslFiletype, SslMethod};
+use bytes::Bytes;
+use futures_core::Stream;
 use quiche::h3::NameValue;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
+use std::future::Future;
 use std::io;
+use std::marker::PhantomData;
 use std::net::{SocketAddr, TcpListener as StdTcpListener, UdpSocket};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket as TokioUdpSocket};
@@ -24,6 +30,12 @@ const BENCH_CHUNK_DELAY_MS: u64 = 1;
 const BENCH_REQUEST_COUNT: usize = 8;
 const DEFAULT_WARMUP_COUNT: usize = 5;
 const DEFAULT_SAMPLE_COUNT: usize = 30;
+
+// Request-body streaming workload (per feature: 5 chunks of 1024B at 2ms pacing).
+const BENCH_REQ_CHUNK_SIZE: usize = 1024;
+const BENCH_REQ_CHUNK_COUNT: usize = 5;
+const BENCH_REQ_CHUNK_DELAY_MS: u64 = 2;
+const BENCH_REQ_BODY_LEN: u64 = (BENCH_REQ_CHUNK_SIZE as u64) * (BENCH_REQ_CHUNK_COUNT as u64);
 
 const FIXTURE_PACING_MODE: &str = "monotonic_deadline_spin_wait";
 const FIXTURE_MONOTONIC_CLOCK_SOURCE: &str = "std::time::Instant";
@@ -49,6 +61,37 @@ pub(crate) fn inter_chunk_target_deadlines_ms(delay_ms: u64, chunk_count: usize)
     (1..chunk_count)
         .map(|i| delay_ms.saturating_mul(i as u64))
         .collect()
+}
+
+fn request_payload_schedule_ms() -> Vec<u64> {
+    let mut schedule = Vec::with_capacity(BENCH_REQ_CHUNK_COUNT);
+    schedule.push(0);
+    schedule.extend(std::iter::repeat_n(
+        BENCH_REQ_CHUNK_DELAY_MS,
+        BENCH_REQ_CHUNK_COUNT.saturating_sub(1),
+    ));
+    schedule
+}
+
+#[derive(Serialize, Clone)]
+struct RequestBodySchedule {
+    chunk_size: usize,
+    chunk_count: usize,
+    chunk_delay_ms: u64,
+    total_bytes: u64,
+    payload_schedule_ms: Vec<u64>,
+}
+
+impl RequestBodySchedule {
+    fn standard() -> Self {
+        Self {
+            chunk_size: BENCH_REQ_CHUNK_SIZE,
+            chunk_count: BENCH_REQ_CHUNK_COUNT,
+            chunk_delay_ms: BENCH_REQ_CHUNK_DELAY_MS,
+            total_bytes: BENCH_REQ_BODY_LEN,
+            payload_schedule_ms: request_payload_schedule_ms(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -145,6 +188,7 @@ struct MeasurementConfig {
 struct Row {
     protocol: &'static str,
     client: &'static str,
+    direction: &'static str,
     endpoint: String,
     comparable: bool,
     comparison_mode: &'static str,
@@ -156,6 +200,8 @@ struct Row {
     specter_api_path: Option<&'static str>,
     protocol_selected_by_normal_dispatch: bool,
     pool_reuse_metadata: PoolReuse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_body_schedule: Option<RequestBodySchedule>,
 }
 
 #[derive(Serialize)]
@@ -408,8 +454,10 @@ struct BenchmarkOptions {
     warmup_count: usize,
     sample_count: usize,
     concurrency_levels: Vec<usize>,
+    request_body_streaming_only: bool,
     force_comparable_threshold_failure: bool,
     force_h3_threshold_failure: bool,
+    force_request_threshold_failure: bool,
 }
 
 pub(crate) struct ComparableThresholdResult {
@@ -425,6 +473,66 @@ pub(crate) struct ComparableThresholdResult {
 
 struct Fixtures {
     tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+struct PacingRequestBodyStream<E> {
+    chunk_index: usize,
+    anchor: Instant,
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    observed_chunk_offsets_ns: Arc<Mutex<Vec<f64>>>,
+    _error: PhantomData<E>,
+}
+
+impl<E> PacingRequestBodyStream<E> {
+    fn new(observed_chunk_offsets_ns: Arc<Mutex<Vec<f64>>>) -> Self {
+        Self {
+            chunk_index: 0,
+            anchor: Instant::now(),
+            sleep: None,
+            observed_chunk_offsets_ns,
+            _error: PhantomData,
+        }
+    }
+}
+
+impl<E> Unpin for PacingRequestBodyStream<E> {}
+
+impl<E> Stream for PacingRequestBodyStream<E> {
+    type Item = Result<Bytes, E>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.chunk_index >= BENCH_REQ_CHUNK_COUNT {
+            return Poll::Ready(None);
+        }
+
+        if self.chunk_index > 0 {
+            let target = self.anchor
+                + Duration::from_millis(
+                    BENCH_REQ_CHUNK_DELAY_MS.saturating_mul(self.chunk_index as u64),
+                );
+            if Instant::now() < target {
+                if self.sleep.is_none() {
+                    self.sleep = Some(Box::pin(tokio::time::sleep(
+                        target.saturating_duration_since(Instant::now()),
+                    )));
+                }
+                if let Some(sleep) = self.sleep.as_mut() {
+                    if sleep.as_mut().poll(cx).is_pending() {
+                        return Poll::Pending;
+                    }
+                }
+                self.sleep = None;
+                spin_wait_until(target);
+            }
+        }
+
+        let offset_ns = self.anchor.elapsed().as_nanos() as f64;
+        if let Ok(mut offsets) = self.observed_chunk_offsets_ns.lock() {
+            offsets.push(offset_ns);
+        }
+        self.chunk_index += 1;
+        Poll::Ready(Some(Ok(Bytes::from(vec![b'u'; BENCH_REQ_CHUNK_SIZE]))))
+    }
 }
 
 impl Drop for Fixtures {
@@ -528,7 +636,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2Conn<S> {
 }
 
 async fn handle_h1_connection(mut stream: tokio::net::TcpStream) {
-    let mut buf = [0u8; 4096];
+    let mut buf = vec![0u8; 16 * 1024];
     let mut read_bytes = 0;
 
     loop {
@@ -536,86 +644,220 @@ async fn handle_h1_connection(mut stream: tokio::net::TcpStream) {
             Ok(0) => break,
             Ok(n) => {
                 read_bytes += n;
-                let mut headers = [httparse::Header {
-                    name: "",
-                    value: &[],
-                }; 64];
-                let mut req = httparse::Request::new(&mut headers);
-                match req.parse(&buf[..read_bytes]) {
-                    Ok(httparse::Status::Complete(amt)) => {
-                        let path = req.path.unwrap_or("/");
-                        let mut keep_alive = false;
-                        for h in req.headers.iter() {
-                            if h.name.eq_ignore_ascii_case("connection")
-                                && std::str::from_utf8(h.value)
-                                    .unwrap_or("")
-                                    .to_lowercase()
-                                    .contains("keep-alive")
-                            {
-                                keep_alive = true;
-                            }
-                        }
-
-                        if path == "/health" {
-                            let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\nok";
-                            if stream.write_all(response.as_bytes()).await.is_err() {
-                                break;
-                            }
-                        } else if path.starts_with("/stream") {
-                            let chunk_size = BENCH_CHUNK_SIZE;
-                            let chunk_count = BENCH_CHUNK_COUNT;
-                            let delay_ms = BENCH_CHUNK_DELAY_MS;
-                            let total_size = chunk_size * chunk_count;
-
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: {}\r\nContent-Length: {}\r\n\r\n",
-                                if keep_alive { "keep-alive" } else { "close" },
-                                total_size
-                            );
-
-                            if stream.write_all(response.as_bytes()).await.is_err() {
-                                break;
-                            }
-
-                            let chunk_data = vec![b'a'; chunk_size];
-                            let chunk_send_anchor = Instant::now();
-                            for i in 0..chunk_count {
-                                if i > 0 {
-                                    let target = chunk_send_anchor
-                                        + Duration::from_millis(delay_ms.saturating_mul(i as u64));
-                                    pace_chunk_until(target).await;
+                let parsed = {
+                    let mut headers = [httparse::Header {
+                        name: "",
+                        value: &[],
+                    }; 64];
+                    let mut req = httparse::Request::new(&mut headers);
+                    match req.parse(&buf[..read_bytes]) {
+                        Ok(httparse::Status::Complete(amt)) => {
+                            let path = req.path.unwrap_or("/").to_string();
+                            let method = req.method.unwrap_or("GET").to_string();
+                            let mut keep_alive = false;
+                            let mut content_length: Option<usize> = None;
+                            let mut is_chunked = false;
+                            for h in req.headers.iter() {
+                                if h.name.eq_ignore_ascii_case("connection")
+                                    && std::str::from_utf8(h.value)
+                                        .unwrap_or("")
+                                        .to_lowercase()
+                                        .contains("keep-alive")
+                                {
+                                    keep_alive = true;
                                 }
-                                if stream.write_all(&chunk_data).await.is_err() {
-                                    break;
+                                if h.name.eq_ignore_ascii_case("content-length") {
+                                    if let Ok(s) = std::str::from_utf8(h.value) {
+                                        content_length = s.trim().parse().ok();
+                                    }
                                 }
-                                if stream.flush().await.is_err() {
-                                    break;
+                                if h.name.eq_ignore_ascii_case("transfer-encoding")
+                                    && std::str::from_utf8(h.value)
+                                        .unwrap_or("")
+                                        .to_lowercase()
+                                        .contains("chunked")
+                                {
+                                    is_chunked = true;
                                 }
                             }
-                        } else {
-                            let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                            let _ = stream.write_all(response.as_bytes()).await;
-                            break;
+                            Some((path, method, keep_alive, content_length, is_chunked, amt))
                         }
-
-                        if !keep_alive {
-                            break;
-                        }
-
-                        buf.copy_within(amt..read_bytes, 0);
-                        read_bytes -= amt;
+                        Ok(httparse::Status::Partial) => None,
+                        Err(_) => return,
                     }
-                    Ok(httparse::Status::Partial) => {
-                        if read_bytes >= buf.len() {
-                            break;
+                };
+
+                let Some((path, method, keep_alive, content_length, is_chunked, amt)) = parsed
+                else {
+                    if read_bytes >= buf.len() {
+                        return;
+                    }
+                    continue;
+                };
+
+                if path == "/health" {
+                    let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\nok";
+                    if stream.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    buf.copy_within(amt..read_bytes, 0);
+                    read_bytes -= amt;
+                } else if path.starts_with("/upload") && method == "POST" {
+                    // Drain request body (chunked or fixed-length), then respond.
+                    // First, slide the buffer so it starts at the body bytes already received.
+                    buf.copy_within(amt..read_bytes, 0);
+                    read_bytes -= amt;
+                    if is_chunked {
+                        if !drain_h1_chunked_body(&mut stream, &mut buf, &mut read_bytes).await {
+                            return;
+                        }
+                    } else if let Some(expected) = content_length {
+                        if !drain_h1_fixed_body(&mut stream, &mut buf, &mut read_bytes, expected)
+                            .await
+                        {
+                            return;
                         }
                     }
-                    Err(_) => break,
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\nConnection: {}\r\n\r\nok",
+                        if keep_alive { "keep-alive" } else { "close" }
+                    );
+                    if stream.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+                } else if path.starts_with("/stream") {
+                    let chunk_size = BENCH_CHUNK_SIZE;
+                    let chunk_count = BENCH_CHUNK_COUNT;
+                    let delay_ms = BENCH_CHUNK_DELAY_MS;
+                    let total_size = chunk_size * chunk_count;
+
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: {}\r\nContent-Length: {}\r\n\r\n",
+                        if keep_alive { "keep-alive" } else { "close" },
+                        total_size
+                    );
+
+                    if stream.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+
+                    let chunk_data = vec![b'a'; chunk_size];
+                    let chunk_send_anchor = Instant::now();
+                    for i in 0..chunk_count {
+                        if i > 0 {
+                            let target = chunk_send_anchor
+                                + Duration::from_millis(delay_ms.saturating_mul(i as u64));
+                            pace_chunk_until(target).await;
+                        }
+                        if stream.write_all(&chunk_data).await.is_err() {
+                            return;
+                        }
+                        if stream.flush().await.is_err() {
+                            return;
+                        }
+                    }
+                    buf.copy_within(amt..read_bytes, 0);
+                    read_bytes -= amt;
+                } else {
+                    let response =
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    return;
+                }
+
+                if !keep_alive {
+                    return;
                 }
             }
-            Err(_) => break,
+            Err(_) => return,
         }
     }
+}
+
+async fn drain_h1_fixed_body(
+    stream: &mut tokio::net::TcpStream,
+    buf: &mut Vec<u8>,
+    read_bytes: &mut usize,
+    expected: usize,
+) -> bool {
+    let mut consumed = std::cmp::min(*read_bytes, expected);
+    buf.copy_within(consumed..*read_bytes, 0);
+    *read_bytes -= consumed;
+    while consumed < expected {
+        if *read_bytes == buf.len() {
+            buf.resize(buf.len() * 2, 0);
+        }
+        match stream.read(&mut buf[*read_bytes..]).await {
+            Ok(0) => return false,
+            Ok(n) => {
+                *read_bytes += n;
+                let take = std::cmp::min(*read_bytes, expected - consumed);
+                consumed += take;
+                buf.copy_within(take..*read_bytes, 0);
+                *read_bytes -= take;
+            }
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+async fn drain_h1_chunked_body(
+    stream: &mut tokio::net::TcpStream,
+    buf: &mut Vec<u8>,
+    read_bytes: &mut usize,
+) -> bool {
+    loop {
+        // Need a chunk size line.
+        let line_end = loop {
+            if let Some(pos) = find_crlf(&buf[..*read_bytes]) {
+                break pos;
+            }
+            if *read_bytes == buf.len() {
+                buf.resize(buf.len() * 2, 0);
+            }
+            match stream.read(&mut buf[*read_bytes..]).await {
+                Ok(0) => return false,
+                Ok(n) => {
+                    *read_bytes += n;
+                }
+                Err(_) => return false,
+            }
+        };
+        let size_line = std::str::from_utf8(&buf[..line_end]).unwrap_or("");
+        let size_str = size_line.split(';').next().unwrap_or("").trim();
+        let chunk_size = match usize::from_str_radix(size_str, 16) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        // Discard size line + CRLF.
+        let consume = line_end + 2;
+        buf.copy_within(consume..*read_bytes, 0);
+        *read_bytes -= consume;
+
+        // Need chunk_size + trailing CRLF bytes.
+        let needed = chunk_size + 2;
+        while *read_bytes < needed {
+            if *read_bytes == buf.len() {
+                buf.resize(std::cmp::max(buf.len() * 2, needed + 16), 0);
+            }
+            match stream.read(&mut buf[*read_bytes..]).await {
+                Ok(0) => return false,
+                Ok(n) => *read_bytes += n,
+                Err(_) => return false,
+            }
+        }
+        // Discard chunk body + CRLF.
+        buf.copy_within(needed..*read_bytes, 0);
+        *read_bytes -= needed;
+        if chunk_size == 0 {
+            return true;
+        }
+    }
+}
+
+fn find_crlf(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\r\n")
 }
 
 async fn handle_h2_connection<
@@ -631,6 +873,10 @@ async fn handle_h2_connection<
     let mut settings_sent = false;
     let mut decoder = specter::transport::h2::HpackDecoder::new();
     let (tx, mut rx) = mpsc::channel::<(u8, u8, u32, Vec<u8>)>(100);
+    // Track upload stream IDs and bytes received so DATA on those streams is
+    // consumed for upload accounting instead of echoed back as response body.
+    let mut upload_streams: HashSet<u32> = HashSet::new();
+    let mut upload_bytes: HashMap<u32, u64> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -669,6 +915,8 @@ async fn handle_h2_connection<
                             }
                         }
 
+                        let end_stream_on_headers = flags & 0x01 != 0;
+
                         if method == "CONNECT" && is_websocket {
                             let tx_clone = tx.clone();
                             tokio::spawn(async move {
@@ -680,6 +928,18 @@ async fn handle_h2_connection<
                                 let _ = tx_clone.send((0x01, 0x04, stream_id, vec![0x88])).await;
                                 let _ = tx_clone.send((0x00, 0x01, stream_id, b"ok".to_vec())).await;
                             });
+                        } else if path.starts_with("/upload") && method == "POST" {
+                            if end_stream_on_headers {
+                                // Empty body upload, immediately respond.
+                                let tx_clone = tx.clone();
+                                tokio::spawn(async move {
+                                    let _ = tx_clone.send((0x01, 0x04, stream_id, vec![0x88])).await;
+                                    let _ = tx_clone.send((0x00, 0x01, stream_id, b"ok".to_vec())).await;
+                                });
+                            } else {
+                                upload_streams.insert(stream_id);
+                                upload_bytes.insert(stream_id, 0);
+                            }
                         } else if path.starts_with("/stream") {
                             let tx_clone = tx.clone();
                             tokio::spawn(async move {
@@ -706,10 +966,40 @@ async fn handle_h2_connection<
                         }
                     }
                     0x00 => {
-                        let tx_clone = tx.clone();
-                        tokio::spawn(async move {
-                            let _ = tx_clone.send((0x00, flags, stream_id, payload)).await;
-                        });
+                        if upload_streams.contains(&stream_id) {
+                            // Account upload bytes; send WINDOW_UPDATE so the
+                            // client can keep sending; on END_STREAM emit the
+                            // final 200 OK response with a tiny "ok" body.
+                            let received = payload.len() as u64;
+                            let entry = upload_bytes.entry(stream_id).or_insert(0);
+                            *entry += received;
+                            let end_stream = flags & 0x01 != 0;
+
+                            // Connection-level WINDOW_UPDATE.
+                            if received > 0 {
+                                let mut window_increment = [0u8; 4];
+                                window_increment.copy_from_slice(&(received as u32).to_be_bytes());
+                                let _ = tx.send((0x08, 0x00, 0, window_increment.to_vec())).await;
+                                let _ = tx.send((0x08, 0x00, stream_id, window_increment.to_vec())).await;
+                            }
+
+                            if end_stream {
+                                upload_streams.remove(&stream_id);
+                                upload_bytes.remove(&stream_id);
+                                let tx_clone = tx.clone();
+                                tokio::spawn(async move {
+                                    let _ = tx_clone.send((0x01, 0x04, stream_id, vec![0x88])).await;
+                                    let _ = tx_clone
+                                        .send((0x00, 0x01, stream_id, b"ok".to_vec()))
+                                        .await;
+                                });
+                            }
+                        } else {
+                            let tx_clone = tx.clone();
+                            tokio::spawn(async move {
+                                let _ = tx_clone.send((0x00, flags, stream_id, payload)).await;
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -1077,6 +1367,14 @@ fn parse_options(args: &[String]) -> BenchmarkOptions {
         .filter(|levels| !levels.is_empty())
         .unwrap_or_else(|| vec![1, 8]);
 
+    let force_comparable_threshold_failure = args
+        .iter()
+        .any(|arg| arg == "--self-test-threshold-failure");
+    let force_request_threshold_failure = force_comparable_threshold_failure
+        || args
+            .iter()
+            .any(|arg| arg == "--self-test-request-threshold-failure");
+
     BenchmarkOptions {
         require_thresholds: args.iter().any(|arg| arg == "--require-thresholds"),
         json_path,
@@ -1084,12 +1382,12 @@ fn parse_options(args: &[String]) -> BenchmarkOptions {
         warmup_count,
         sample_count,
         concurrency_levels,
-        force_comparable_threshold_failure: args
-            .iter()
-            .any(|arg| arg == "--self-test-threshold-failure"),
+        request_body_streaming_only: args.iter().any(|arg| arg == "--request-body-streaming"),
+        force_comparable_threshold_failure,
         force_h3_threshold_failure: args
             .iter()
             .any(|arg| arg == "--self-test-h3-threshold-failure"),
+        force_request_threshold_failure,
     }
 }
 
@@ -1337,6 +1635,164 @@ async fn measure_reqwest_streaming_batch(
     ))
 }
 
+fn request_body_transfer_duration(
+    first_body_chunk_offset_ns: Option<f64>,
+    response_first_body_time: Duration,
+) -> Duration {
+    match first_body_chunk_offset_ns {
+        Some(first_offset_ns) => {
+            let response_ns = response_first_body_time.as_nanos() as f64;
+            Duration::from_nanos((response_ns - first_offset_ns).max(1.0) as u64)
+        }
+        _ => Duration::from_nanos(1),
+    }
+}
+
+async fn measure_specter_request_streaming(
+    protocol: &str,
+    client: &specter::Client,
+    url: &str,
+) -> Result<(Duration, Duration, usize, usize, Vec<f64>), Box<dyn std::error::Error>> {
+    let observed_offsets = Arc::new(Mutex::new(Vec::with_capacity(BENCH_REQ_CHUNK_COUNT)));
+    let body_stream = PacingRequestBodyStream::<specter::Error>::new(observed_offsets.clone());
+    let start = Instant::now();
+    let mut request = client
+        .post(url)
+        .body_stream_sized(body_stream, BENCH_REQ_BODY_LEN);
+    if protocol == "h3" {
+        request = request.version(specter::HttpVersion::Http3Only);
+    }
+    let mut response = request.send_streaming().await?;
+
+    let mut first_response_body_time = None;
+    while let Some(frame_res) = response.body_mut().frame().await {
+        let elapsed = start.elapsed();
+        let frame = frame_res?;
+        if let Ok(chunk) = frame.into_data() {
+            if !chunk.is_empty() && first_response_body_time.is_none() {
+                first_response_body_time = Some(elapsed);
+            }
+        }
+    }
+
+    let response_complete_time = start.elapsed();
+    let offsets = observed_offsets
+        .lock()
+        .map(|offsets| offsets.clone())
+        .unwrap_or_default();
+    let response_first_body_time = first_response_body_time.unwrap_or_else(|| start.elapsed());
+    let transfer_duration =
+        request_body_transfer_duration(offsets.first().copied(), response_complete_time);
+    let gaps_ns = inter_chunk_gaps_ns(&offsets);
+    Ok((
+        response_first_body_time,
+        transfer_duration,
+        BENCH_REQ_BODY_LEN as usize,
+        BENCH_REQ_CHUNK_COUNT,
+        gaps_ns,
+    ))
+}
+
+async fn measure_reqwest_request_streaming(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<(Duration, Duration, usize, usize, Vec<f64>), Box<dyn std::error::Error>> {
+    let observed_offsets = Arc::new(Mutex::new(Vec::with_capacity(BENCH_REQ_CHUNK_COUNT)));
+    let body_stream = PacingRequestBodyStream::<io::Error>::new(observed_offsets.clone());
+    let start = Instant::now();
+    let mut response = client
+        .post(url)
+        .body(reqwest::Body::wrap_stream(body_stream))
+        .send()
+        .await?;
+
+    let mut first_response_body_time = None;
+    while let Some(chunk) = response.chunk().await? {
+        if !chunk.is_empty() && first_response_body_time.is_none() {
+            first_response_body_time = Some(start.elapsed());
+        }
+    }
+    let response_complete_time = start.elapsed();
+    let offsets = observed_offsets
+        .lock()
+        .map(|offsets| offsets.clone())
+        .unwrap_or_default();
+    let response_first_body_time = first_response_body_time.unwrap_or_else(|| start.elapsed());
+    let transfer_duration =
+        request_body_transfer_duration(offsets.first().copied(), response_complete_time);
+    let gaps_ns = inter_chunk_gaps_ns(&offsets);
+    Ok((
+        response_first_body_time,
+        transfer_duration,
+        BENCH_REQ_BODY_LEN as usize,
+        BENCH_REQ_CHUNK_COUNT,
+        gaps_ns,
+    ))
+}
+
+async fn measure_specter_request_streaming_batch(
+    protocol: &str,
+    client: &specter::Client,
+    url: &str,
+    request_count: usize,
+) -> Result<(Duration, Duration, usize, usize, Vec<f64>), Box<dyn std::error::Error>> {
+    let mut ttft_values = Vec::with_capacity(request_count);
+    let mut transfer_duration = Duration::ZERO;
+    let mut bytes_sent = 0;
+    let mut chunk_count = 0;
+    let mut all_gaps_ns: Vec<f64> = Vec::with_capacity(request_count * BENCH_REQ_CHUNK_COUNT);
+
+    for _ in 0..request_count {
+        let (ttft, request_duration, bytes, chunks, gaps_ns) =
+            measure_specter_request_streaming(protocol, client, url).await?;
+        ttft_values.push(ttft.as_nanos() as f64);
+        transfer_duration += request_duration;
+        bytes_sent += bytes;
+        chunk_count += chunks;
+        all_gaps_ns.extend(gaps_ns);
+    }
+
+    let median_ttft_ns = calculate_median(ttft_values);
+    Ok((
+        Duration::from_nanos(median_ttft_ns as u64),
+        transfer_duration,
+        bytes_sent,
+        chunk_count,
+        all_gaps_ns,
+    ))
+}
+
+async fn measure_reqwest_request_streaming_batch(
+    client: &reqwest::Client,
+    url: &str,
+    request_count: usize,
+) -> Result<(Duration, Duration, usize, usize, Vec<f64>), Box<dyn std::error::Error>> {
+    let mut ttft_values = Vec::with_capacity(request_count);
+    let mut transfer_duration = Duration::ZERO;
+    let mut bytes_sent = 0;
+    let mut chunk_count = 0;
+    let mut all_gaps_ns: Vec<f64> = Vec::with_capacity(request_count * BENCH_REQ_CHUNK_COUNT);
+
+    for _ in 0..request_count {
+        let (ttft, request_duration, bytes, chunks, gaps_ns) =
+            measure_reqwest_request_streaming(client, url).await?;
+        ttft_values.push(ttft.as_nanos() as f64);
+        transfer_duration += request_duration;
+        bytes_sent += bytes;
+        chunk_count += chunks;
+        all_gaps_ns.extend(gaps_ns);
+    }
+
+    let median_ttft_ns = calculate_median(ttft_values);
+    Ok((
+        Duration::from_nanos(median_ttft_ns as u64),
+        transfer_duration,
+        bytes_sent,
+        chunk_count,
+        all_gaps_ns,
+    ))
+}
+
 fn calculate_percentiles(mut values: Vec<f64>) -> (f64, f64, f64) {
     if values.is_empty() {
         return (0.0, 0.0, 0.0);
@@ -1395,12 +1851,16 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
 
     let mut h3_specter_metrics = None;
 
-    for (protocol, endpoint) in [
-        ("h1", format!("127.0.0.1:{}", H1_PORT)),
-        ("h2", format!("127.0.0.1:{}", H2_PORT)),
-        ("h3", format!("127.0.0.1:{}/udp", H3_PORT)),
-        ("rfc8441", format!("127.0.0.1:{}", RFC8441_PORT)),
-    ] {
+    for (protocol, endpoint) in if options.request_body_streaming_only {
+        Vec::new()
+    } else {
+        vec![
+            ("h1", format!("127.0.0.1:{}", H1_PORT)),
+            ("h2", format!("127.0.0.1:{}", H2_PORT)),
+            ("h3", format!("127.0.0.1:{}/udp", H3_PORT)),
+            ("rfc8441", format!("127.0.0.1:{}", RFC8441_PORT)),
+        ]
+    } {
         if !options.protocols.contains(&protocol) {
             continue;
         }
@@ -1517,6 +1977,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
             rows.push(Row {
                 protocol,
                 client,
+                direction: "response",
                 endpoint: endpoint.clone(),
                 comparable: is_comparable,
                 comparison_mode: match protocol {
@@ -1609,7 +2070,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     },
                 },
                 specter_api_path: if client == "specter" {
-                    Some("specter::Client -> RequestBuilder::send_streaming")
+                    Some("specter::Client -> RequestBuilder::send_streaming -> specter::Body::frame")
                 } else {
                     None
                 },
@@ -1618,11 +2079,206 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     connection_reuse_count,
                     cold_or_warm_pool: "warm",
                 },
+                request_body_schedule: None,
             });
 
             if row_threshold_required && !is_row_pass {
                 required_thresholds_passed = false;
-                failed_rows.push(format!("{} - {}", protocol, client));
+                failed_rows.push(format!("{} - {} (response)", protocol, client));
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Request-body streaming rows (H1, H2): 5 chunks * 1024B at 2ms pacing,
+    // 8 requests per sample. Specter uses RequestBuilder::body_stream_sized;
+    // reqwest uses reqwest::Body::wrap_stream.
+    // -------------------------------------------------------------------
+    let request_payload_schedule = request_payload_schedule_ms();
+    for (protocol, endpoint) in [
+        ("h1", format!("127.0.0.1:{}", H1_PORT)),
+        ("h2", format!("127.0.0.1:{}", H2_PORT)),
+    ] {
+        if !options.protocols.contains(&protocol) {
+            continue;
+        }
+
+        let is_comparable = matches!(protocol, "h1" | "h2");
+        let mut protocol_metrics = BTreeMap::new();
+        let mut protocol_measurement_sources = BTreeMap::new();
+
+        for client in ["reqwest", "specter"] {
+            let url = if protocol == "h2" {
+                format!("https://{}/upload", endpoint)
+            } else {
+                format!("http://{}/upload", endpoint)
+            };
+
+            let mut measurement_source = "localhost_real_measurement";
+            let mut metrics = match run_real_request_body_measurement(
+                protocol,
+                client,
+                &url,
+                options.warmup_count,
+                options.sample_count,
+                &request_payload_schedule,
+            )
+            .await
+            {
+                Ok(m) => m,
+                Err(_) => {
+                    measurement_source = "localhost_real_measurement_failed";
+                    Metrics::failed(options.warmup_count, options.sample_count)
+                }
+            };
+
+            // Negative self-test: --self-test-threshold-failure (and the
+            // request-specific variant) must force a failing Specter request
+            // row identically to the response row.
+            if options.force_request_threshold_failure && client == "specter" {
+                measurement_source = "self_test_induced_threshold_failure";
+                metrics.ttft_ns = 1_100_000.0;
+                metrics.chunks_per_sec = 1000.0;
+                metrics.bytes_per_sec = 25_000.0;
+                metrics.p95_bytes_per_sec = 24_000.0;
+                metrics.p50_ns = 1_100_000.0;
+                metrics.p95_ns = 1_350_000.0;
+                metrics.p99_ns = 1_450_000.0;
+                metrics.pass = false;
+                metrics.ttft_samples_ns = vec![1_100_000.0; options.sample_count];
+                metrics.bytes_per_sec_samples = vec![25_000.0; options.sample_count];
+            }
+
+            protocol_metrics.insert(client, metrics.clone());
+            protocol_measurement_sources.insert(client, measurement_source);
+        }
+
+        let comparable_threshold = if is_comparable {
+            Some(evaluate_comparable_threshold(
+                protocol_metrics
+                    .get("reqwest")
+                    .expect("reqwest metrics captured"),
+                protocol_metrics
+                    .get("specter")
+                    .expect("specter metrics captured"),
+            ))
+        } else {
+            None
+        };
+
+        for client in ["reqwest", "specter"] {
+            let mut metrics = protocol_metrics
+                .get(client)
+                .expect("client metrics captured")
+                .clone();
+            let row_threshold_required = is_comparable;
+            let is_row_pass = match (&comparable_threshold, client) {
+                (Some(result), "specter") => result.pass,
+                (Some(_), "reqwest") => true,
+                _ => metrics.pass,
+            };
+            metrics.pass = is_row_pass;
+            let connection_reuse_count = metrics.connection_reuse_count;
+
+            rows.push(Row {
+                protocol,
+                client,
+                direction: "request",
+                endpoint: endpoint.clone(),
+                comparable: is_comparable,
+                comparison_mode: match protocol {
+                    "h1" | "h2" => "reqwest_comparable",
+                    _ => "unknown",
+                },
+                skip_reason: None,
+                measurement_source: protocol_measurement_sources[client],
+                client_config: ClientConfig {
+                    runtime: "tokio multi_thread",
+                    payload_schedule_ms: request_payload_schedule.clone(),
+                    chunk_size: BENCH_REQ_CHUNK_SIZE,
+                    request_count: BENCH_REQUEST_COUNT,
+                    concurrency: 1,
+                    warmup_count: options.warmup_count,
+                    sample_count: options.sample_count,
+                    decompression: "disabled",
+                    byte_accounting: "uploaded request body bytes only; headers excluded",
+                },
+                metrics,
+                threshold: Threshold {
+                    required: row_threshold_required,
+                    ttft_improvement_required_pct: 5.0,
+                    throughput_improvement_required_pct: 5.0,
+                    throughput_regression_allowed_pct: 5.0,
+                    p95_regression_allowed_pct: 5.0,
+                    wilcoxon_p_value_required_less_than: 0.01,
+                    reqwest_median_ttft_ns: comparable_threshold
+                        .as_ref()
+                        .map(|_| protocol_metrics["reqwest"].ttft_ns),
+                    specter_median_ttft_ns: comparable_threshold
+                        .as_ref()
+                        .map(|_| protocol_metrics["specter"].ttft_ns),
+                    ttft_improvement_pct: comparable_threshold
+                        .as_ref()
+                        .map(|result| result.ttft_improvement_pct),
+                    ttft_wilcoxon_signed_rank_p_value: comparable_threshold
+                        .as_ref()
+                        .map(|result| result.ttft_wilcoxon_signed_rank_p_value),
+                    reqwest_median_bytes_per_sec: comparable_threshold
+                        .as_ref()
+                        .map(|_| protocol_metrics["reqwest"].bytes_per_sec),
+                    specter_median_bytes_per_sec: comparable_threshold
+                        .as_ref()
+                        .map(|_| protocol_metrics["specter"].bytes_per_sec),
+                    throughput_improvement_pct: comparable_threshold
+                        .as_ref()
+                        .map(|result| result.throughput_improvement_pct),
+                    throughput_wilcoxon_signed_rank_p_value: comparable_threshold
+                        .as_ref()
+                        .map(|result| result.throughput_wilcoxon_signed_rank_p_value),
+                    median_throughput_regression_pct: comparable_threshold
+                        .as_ref()
+                        .map(|result| result.median_throughput_regression_pct),
+                    reqwest_p95_bytes_per_sec: comparable_threshold
+                        .as_ref()
+                        .map(|_| protocol_metrics["reqwest"].p95_bytes_per_sec),
+                    specter_p95_bytes_per_sec: comparable_threshold
+                        .as_ref()
+                        .map(|_| protocol_metrics["specter"].p95_bytes_per_sec),
+                    p95_throughput_regression_pct: comparable_threshold
+                        .as_ref()
+                        .map(|result| result.p95_throughput_regression_pct),
+                    reqwest_p95_ttft_ns: comparable_threshold
+                        .as_ref()
+                        .map(|_| protocol_metrics["reqwest"].p95_ns),
+                    specter_p95_ttft_ns: comparable_threshold
+                        .as_ref()
+                        .map(|_| protocol_metrics["specter"].p95_ns),
+                    p95_ttft_regression_pct: comparable_threshold
+                        .as_ref()
+                        .map(|result| result.p95_ttft_regression_pct),
+                    status: if is_row_pass { "pass" } else { "fail" },
+                    reason: match (protocol, client) {
+                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable request-body streaming threshold: Specter median TTFT (response status/headers) must improve by >=5%, median upload throughput must improve by >=5%, paired Wilcoxon signed-rank p-values for TTFT and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 TTFT must not regress by more than 5%",
+                        ("h1" | "h2", "reqwest") => "deterministic localhost reqwest baseline request-body streaming row; excluded as a failing threshold subject but included in threshold math",
+                        _ => "non-comparable deterministic request-body row excluded from primary H1/H2 reqwest threshold math",
+                    },
+                },
+                specter_api_path: if client == "specter" {
+                    Some("specter::Client -> RequestBuilder::body_stream_sized -> send_streaming -> specter::Body::frame")
+                } else {
+                    None
+                },
+                protocol_selected_by_normal_dispatch: client == "specter",
+                pool_reuse_metadata: PoolReuse {
+                    connection_reuse_count,
+                    cold_or_warm_pool: "warm",
+                },
+                request_body_schedule: Some(RequestBodySchedule::standard()),
+            });
+
+            if row_threshold_required && !is_row_pass {
+                required_thresholds_passed = false;
+                failed_rows.push(format!("{} - {} (request)", protocol, client));
             }
         }
     }
@@ -2025,6 +2681,158 @@ async fn run_real_measurement(
     let median_body_transfer_duration_ns = calculate_median(body_transfer_duration_values);
     let median_client_overhead_duration_ns = calculate_median(client_overhead_duration_values);
     let actual_send_gap = summarize_send_gaps(&all_send_gaps_ns, BENCH_CHUNK_DELAY_MS);
+
+    Ok(Metrics {
+        ttft_ns: p50,
+        chunks_per_sec: median_chunk_rate,
+        bytes_per_sec: median_throughput,
+        p95_bytes_per_sec: p95_throughput,
+        body_transfer_duration_ns: median_body_transfer_duration_ns,
+        client_overhead_duration_ns: median_client_overhead_duration_ns,
+        p50_ns: p50,
+        p95_ns: p95,
+        p99_ns: p99,
+        warmup_count,
+        sample_count,
+        connection_reuse_count: if protocol == "h1" {
+            sample_count.saturating_mul(BENCH_REQUEST_COUNT.saturating_sub(1))
+        } else {
+            warmup_count
+                .saturating_add(sample_count)
+                .saturating_mul(BENCH_REQUEST_COUNT)
+                .saturating_sub(1)
+        },
+        pass: true,
+        actual_send_gap,
+        ttft_samples_ns: ttft_values,
+        bytes_per_sec_samples: throughput_values,
+    })
+}
+
+async fn run_real_request_body_measurement(
+    protocol: &str,
+    client: &str,
+    url: &str,
+    warmup_count: usize,
+    sample_count: usize,
+    payload_schedule_ms: &[u64],
+) -> Result<Metrics, Box<dyn std::error::Error>> {
+    let mut ttft_values = Vec::new();
+    let mut throughput_values = Vec::new();
+    let mut chunk_rates = Vec::new();
+    let mut body_transfer_duration_values = Vec::new();
+    let mut client_overhead_duration_values = Vec::new();
+    let mut all_send_gaps_ns: Vec<f64> = Vec::new();
+    let scheduled_duration = payload_schedule_duration(payload_schedule_ms, BENCH_REQUEST_COUNT);
+
+    if client == "specter" {
+        let specter_client = specter::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .prefer_http2(protocol == "h2")
+            .build()?;
+        if protocol != "h1" {
+            for _ in 0..warmup_count {
+                let _ = measure_specter_request_streaming_batch(
+                    protocol,
+                    &specter_client,
+                    url,
+                    BENCH_REQUEST_COUNT,
+                )
+                .await;
+            }
+        }
+        for _ in 0..sample_count {
+            let h1_client;
+            let client_ref = if protocol == "h1" {
+                h1_client = specter::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .prefer_http2(false)
+                    .build()?;
+                &h1_client
+            } else {
+                &specter_client
+            };
+            if let Ok((ttft, total_duration, bytes, chunks, gaps_ns)) =
+                measure_specter_request_streaming_batch(
+                    protocol,
+                    client_ref,
+                    url,
+                    BENCH_REQUEST_COUNT,
+                )
+                .await
+            {
+                record_sample(
+                    ttft,
+                    total_duration,
+                    scheduled_duration,
+                    bytes,
+                    chunks,
+                    &gaps_ns,
+                    &mut ttft_values,
+                    &mut throughput_values,
+                    &mut chunk_rates,
+                    &mut body_transfer_duration_values,
+                    &mut client_overhead_duration_values,
+                    &mut all_send_gaps_ns,
+                );
+            }
+        }
+    } else {
+        let reqwest_client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()?;
+        if protocol != "h1" {
+            for _ in 0..warmup_count {
+                let _ = measure_reqwest_request_streaming_batch(
+                    &reqwest_client,
+                    url,
+                    BENCH_REQUEST_COUNT,
+                )
+                .await;
+            }
+        }
+        for _ in 0..sample_count {
+            let h1_client;
+            let client_ref = if protocol == "h1" {
+                h1_client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .build()?;
+                &h1_client
+            } else {
+                &reqwest_client
+            };
+            if let Ok((ttft, total_duration, bytes, chunks, gaps_ns)) =
+                measure_reqwest_request_streaming_batch(client_ref, url, BENCH_REQUEST_COUNT).await
+            {
+                record_sample(
+                    ttft,
+                    total_duration,
+                    scheduled_duration,
+                    bytes,
+                    chunks,
+                    &gaps_ns,
+                    &mut ttft_values,
+                    &mut throughput_values,
+                    &mut chunk_rates,
+                    &mut body_transfer_duration_values,
+                    &mut client_overhead_duration_values,
+                    &mut all_send_gaps_ns,
+                );
+            }
+        }
+    }
+
+    if ttft_values.is_empty() {
+        return Err("No successful request-body samples".into());
+    }
+
+    let (p50, p95, p99) = calculate_percentiles(ttft_values.clone());
+    let (_, p95_throughput, _) = calculate_percentiles(throughput_values.clone());
+    let median_throughput = calculate_median(throughput_values.clone());
+    let median_chunk_rate = calculate_median(chunk_rates);
+    let median_body_transfer_duration_ns = calculate_median(body_transfer_duration_values);
+    let median_client_overhead_duration_ns = calculate_median(client_overhead_duration_values);
+    let actual_send_gap = summarize_send_gaps(&all_send_gaps_ns, BENCH_REQ_CHUNK_DELAY_MS);
 
     Ok(Metrics {
         ttft_ns: p50,

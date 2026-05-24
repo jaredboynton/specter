@@ -36,6 +36,28 @@ fn streaming_benchmark_declares_enforceable_h1_h2_threshold_gate() {
 }
 
 #[test]
+fn streaming_benchmark_declares_enforceable_request_body_streaming_gate() {
+    let source = std::fs::read_to_string("benches/streaming_vs_reqwest.rs").unwrap();
+
+    assert!(source.contains("const BENCH_REQ_CHUNK_SIZE: usize = 1024;"));
+    assert!(source.contains("const BENCH_REQ_CHUNK_COUNT: usize = 5;"));
+    assert!(source.contains("const BENCH_REQ_CHUNK_DELAY_MS: u64 = 2;"));
+    assert!(source.contains("struct RequestBodySchedule"));
+    assert!(source.contains("request_body_schedule: Some(RequestBodySchedule::standard())"));
+    assert!(source.contains("direction: \"request\""));
+    assert!(source.contains("reqwest::Body::wrap_stream"));
+    assert!(source.contains("RequestBuilder::body_stream_sized -> send_streaming"));
+    assert!(source.contains("run_real_request_body_measurement"));
+    assert!(source.contains("--request-body-streaming"));
+    assert!(source.contains("--self-test-request-threshold-failure"));
+    assert!(source.contains("throughput_improvement_pct >= 5.0"));
+    assert!(source.contains("ttft_wilcoxon_signed_rank_p_value < 0.01"));
+    assert!(source.contains("throughput_wilcoxon_signed_rank_p_value < 0.01"));
+    assert!(source.contains("request_payload_schedule_ms()"));
+    assert!(source.contains("BENCH_REQ_BODY_LEN"));
+}
+
+#[test]
 fn thresholded_streaming_benchmark_uses_delayed_multi_chunk_workload() {
     let source = std::fs::read_to_string("benches/streaming_vs_reqwest.rs").unwrap();
 
