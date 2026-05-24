@@ -177,7 +177,8 @@ pub struct PacketSpaceRecovery {
     largest_acked: Option<u64>,
     loss_time: Option<Instant>,
     time_of_last_ack_eliciting_packet: Option<Instant>,
-    ecn_ce_count: u64,
+    ecn_counts: Option<EcnCounters>,
+    ecn_validation_failed: bool,
 }
 
 impl PacketSpaceRecovery {
@@ -187,7 +188,8 @@ impl PacketSpaceRecovery {
             largest_acked: None,
             loss_time: None,
             time_of_last_ack_eliciting_packet: None,
-            ecn_ce_count: 0,
+            ecn_counts: None,
+            ecn_validation_failed: false,
         }
     }
 
@@ -219,6 +221,27 @@ impl PacketSpaceRecovery {
             .filter(|p| p.in_flight)
             .map(|p| p.size as u64)
             .sum()
+    }
+
+    pub fn ecn_ce_count(&self) -> u64 {
+        self.ecn_counts.map_or(0, |counters| counters.ce)
+    }
+
+    pub fn ecn_validation_failed(&self) -> bool {
+        self.ecn_validation_failed
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct EcnCounters {
+    ect0: u64,
+    ect1: u64,
+    ce: u64,
+}
+
+impl EcnCounters {
+    fn decreased_from(self, previous: Self) -> bool {
+        self.ect0 < previous.ect0 || self.ect1 < previous.ect1 || self.ce < previous.ce
     }
 }
 
@@ -325,6 +348,8 @@ impl CongestionController {
 pub struct AckOutcome {
     pub newly_acked: Vec<(u64, SentPacketInfo)>,
     pub lost: Vec<(u64, SentPacketInfo)>,
+    pub ecn_congestion: bool,
+    pub ecn_validation_failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -506,7 +531,7 @@ impl RecoveryState {
             return Ok(AckOutcome::default());
         }
 
-        let (largest_acknowledged, ack_delay, first_ack_range, ranges, ce_count) = match frame {
+        let (largest_acknowledged, ack_delay, first_ack_range, ranges, ecn_counts) = match frame {
             QuicFrame::Ack {
                 largest_acknowledged,
                 ack_delay,
@@ -524,6 +549,8 @@ impl RecoveryState {
                 ack_delay,
                 first_ack_range,
                 ranges,
+                ect0_count,
+                ect1_count,
                 ce_count,
                 ..
             } => (
@@ -531,7 +558,11 @@ impl RecoveryState {
                 *ack_delay,
                 *first_ack_range,
                 ranges.as_slice(),
-                Some(*ce_count),
+                Some(EcnCounters {
+                    ect0: *ect0_count,
+                    ect1: *ect1_count,
+                    ce: *ce_count,
+                }),
             ),
             _ => return Ok(AckOutcome::default()),
         };
@@ -549,11 +580,16 @@ impl RecoveryState {
                 self.consume_range(space, largest_in_range, range.ack_range_length, &mut acked);
         }
 
+        let (ecn_congestion, ecn_validation_failed) =
+            self.handle_ack_ecn(space, ecn_counts, &acked, now);
+
         if acked.is_empty() {
-            // ACK_ECN CE growth still informs congestion control even without newly
-            // acked packets, but bookkeeping is unaffected so we skip RTT updates.
             self.update_loss_detection_timer();
-            return Ok(AckOutcome::default());
+            return Ok(AckOutcome {
+                ecn_congestion,
+                ecn_validation_failed,
+                ..AckOutcome::default()
+            });
         }
 
         let pkt_space = &mut self.spaces[space.index()];
@@ -578,16 +614,6 @@ impl RecoveryState {
             self.congestion.on_packet_acked(info);
         }
 
-        if let Some(ce_count) = ce_count {
-            let pkt_space = &mut self.spaces[space.index()];
-            if ce_count > pkt_space.ecn_ce_count {
-                pkt_space.ecn_ce_count = ce_count;
-                if let Some((_, oldest)) = acked.iter().min_by_key(|(_, info)| info.sent_at) {
-                    self.congestion.on_congestion_event(oldest.sent_at, now);
-                }
-            }
-        }
-
         let lost = self.detect_and_remove_lost_packets(space, now);
 
         let any_ack_eliciting = acked.iter().any(|(_, info)| info.ack_eliciting);
@@ -603,7 +629,44 @@ impl RecoveryState {
         Ok(AckOutcome {
             newly_acked: acked,
             lost,
+            ecn_congestion,
+            ecn_validation_failed,
         })
+    }
+
+    fn handle_ack_ecn(
+        &mut self,
+        space: PacketNumberSpace,
+        counters: Option<EcnCounters>,
+        acked: &[(u64, SentPacketInfo)],
+        now: Instant,
+    ) -> (bool, bool) {
+        let Some(counters) = counters else {
+            return (false, false);
+        };
+        let pkt_space = &mut self.spaces[space.index()];
+        if pkt_space.ecn_validation_failed {
+            return (false, true);
+        }
+        if pkt_space
+            .ecn_counts
+            .is_some_and(|previous| counters.decreased_from(previous))
+        {
+            pkt_space.ecn_validation_failed = true;
+            return (false, true);
+        }
+        let previous_ce = pkt_space.ecn_ce_count();
+        pkt_space.ecn_counts = Some(counters);
+        if counters.ce <= previous_ce {
+            return (false, false);
+        }
+        let congestion_sent_at = acked
+            .iter()
+            .map(|(_, info)| info.sent_at)
+            .min()
+            .unwrap_or(now);
+        self.congestion.on_congestion_event(congestion_sent_at, now);
+        (true, false)
     }
 
     fn consume_range(
