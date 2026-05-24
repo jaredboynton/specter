@@ -1,5 +1,6 @@
 //! Native QUIC/TLS helpers for HTTP/3.
 
+use std::io::Read;
 use std::os::raw::c_int;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -14,7 +15,7 @@ use bytes::Bytes;
 use foreign_types_shared::ForeignType;
 
 use crate::error::{Error, Result};
-use crate::fingerprint::{Http3Fingerprint, TlsFingerprint};
+use crate::fingerprint::{CertCompression, Http3Fingerprint, TlsFingerprint};
 use crate::transport::h3::quic::{
     build_initial_crypto_packet, derive_initial_key_material,
     derive_packet_key_material_from_secret, encode_initial_header,
@@ -481,7 +482,90 @@ fn apply_tls_fingerprint(
             })?;
     }
 
+    apply_tls_cert_compression(builder, fingerprint.cert_compression)?;
+
     Ok(())
+}
+
+fn apply_tls_cert_compression(
+    builder: &mut SslContextBuilder,
+    cert_compression: CertCompression,
+) -> Result<()> {
+    let (algorithm, decompress) = match cert_compression {
+        CertCompression::Brotli => (
+            ffi::TLSEXT_cert_compression_brotli as u16,
+            Some(decompress_brotli_cert as _),
+        ),
+        CertCompression::Zlib => (
+            ffi::TLSEXT_cert_compression_zlib as u16,
+            Some(decompress_zlib_cert as _),
+        ),
+        CertCompression::None => return Ok(()),
+    };
+
+    unsafe {
+        if ffi::SSL_CTX_add_cert_compression_alg(
+            builder.as_ptr(),
+            algorithm,
+            None,
+            decompress,
+        ) != 1
+        {
+            return Err(Error::Tls(
+                "failed to configure QUIC TLS certificate compression".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+unsafe extern "C" fn decompress_brotli_cert(
+    _ssl: *mut ffi::SSL,
+    out: *mut *mut ffi::CRYPTO_BUFFER,
+    uncompressed_len: usize,
+    input: *const u8,
+    input_len: usize,
+) -> c_int {
+    let compressed = std::slice::from_raw_parts(input, input_len);
+    let mut decompressed = Vec::with_capacity(uncompressed_len);
+    let mut decoder = brotli::Decompressor::new(compressed, uncompressed_len);
+    write_decompressed_cert(out, uncompressed_len, decoder.read_to_end(&mut decompressed), &decompressed)
+}
+
+unsafe extern "C" fn decompress_zlib_cert(
+    _ssl: *mut ffi::SSL,
+    out: *mut *mut ffi::CRYPTO_BUFFER,
+    uncompressed_len: usize,
+    input: *const u8,
+    input_len: usize,
+) -> c_int {
+    let compressed = std::slice::from_raw_parts(input, input_len);
+    let mut decoder = flate2::read::DeflateDecoder::new(compressed);
+    let mut decompressed = Vec::with_capacity(uncompressed_len);
+    write_decompressed_cert(out, uncompressed_len, decoder.read_to_end(&mut decompressed), &decompressed)
+}
+
+unsafe fn write_decompressed_cert(
+    out: *mut *mut ffi::CRYPTO_BUFFER,
+    uncompressed_len: usize,
+    result: std::io::Result<usize>,
+    decompressed: &[u8],
+) -> c_int {
+    if !matches!(result, Ok(_) if decompressed.len() == uncompressed_len) {
+        return 0;
+    }
+
+    let buffer = ffi::CRYPTO_BUFFER_new(
+        decompressed.as_ptr(),
+        decompressed.len(),
+        std::ptr::null_mut(),
+    );
+    if buffer.is_null() {
+        return 0;
+    }
+    *out = buffer;
+    1
 }
 
 fn apply_native_roots(

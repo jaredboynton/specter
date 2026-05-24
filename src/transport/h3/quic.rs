@@ -18,6 +18,7 @@ const INITIAL_SECRET_LEN: usize = 32;
 const AES_128_GCM_KEY_LEN: usize = 16;
 const AES_128_GCM_IV_LEN: usize = 12;
 const AES_GCM_TAG_LEN: usize = 16;
+const RETRY_INTEGRITY_TAG_LEN: usize = 16;
 const HEADER_PROTECTION_SAMPLE_LEN: usize = 16;
 const HEADER_PROTECTION_MASK_LEN: usize = 5;
 const MAX_PACKET_NUMBER: u64 = (1u64 << 62) - 1;
@@ -130,6 +131,22 @@ pub struct LongHeaderDatagramPacket {
     pub declared_remaining_len: usize,
     pub packet_number_offset: usize,
     pub packet: Bytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionNegotiationPacket {
+    pub destination_cid: ConnectionId,
+    pub source_cid: ConnectionId,
+    pub supported_versions: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryPacket {
+    pub version: u32,
+    pub destination_cid: ConnectionId,
+    pub source_cid: ConnectionId,
+    pub token: Bytes,
+    pub integrity_tag: [u8; RETRY_INTEGRITY_TAG_LEN],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1611,15 +1628,47 @@ pub fn split_long_header_datagram(datagram: &[u8]) -> Result<Vec<LongHeaderDatag
             0 => LongHeaderType::Initial,
             1 => LongHeaderType::ZeroRtt,
             2 => LongHeaderType::Handshake,
-            _ => {
-                return Err(Error::HttpProtocol(
-                    "QUIC Retry packet splitting is not supported yet".into(),
-                ))
-            }
+            _ => LongHeaderType::Retry,
         };
         let version = read_u32_at(datagram, &mut offset)?;
         let destination_cid = read_cid_at(datagram, &mut offset)?;
         let source_cid = read_cid_at(datagram, &mut offset)?;
+        if packet_type == LongHeaderType::Retry {
+            let declared_remaining_len = datagram.len().checked_sub(offset).ok_or_else(|| {
+                Error::HttpProtocol("QUIC Retry packet length underflow".into())
+            })?;
+            if declared_remaining_len < RETRY_INTEGRITY_TAG_LEN {
+                return Err(Error::HttpProtocol(
+                    "truncated QUIC Retry integrity tag".into(),
+                ));
+            }
+            let token_len = declared_remaining_len - RETRY_INTEGRITY_TAG_LEN;
+            let packet_number_offset = offset - packet_start;
+            let token = read_bytes_at(
+                datagram,
+                &mut offset,
+                token_len,
+                "truncated QUIC Retry token",
+            )?;
+            let _integrity_tag = read_bytes_at(
+                datagram,
+                &mut offset,
+                RETRY_INTEGRITY_TAG_LEN,
+                "truncated QUIC Retry integrity tag",
+            )?;
+
+            packets.push(LongHeaderDatagramPacket {
+                packet_type,
+                version,
+                destination_cid,
+                source_cid,
+                token,
+                declared_remaining_len,
+                packet_number_offset,
+                packet: Bytes::copy_from_slice(&datagram[packet_start..offset]),
+            });
+            continue;
+        }
         let token = if packet_type == LongHeaderType::Initial {
             let token_len =
                 usize::try_from(read_varint_at(datagram, &mut offset)?).map_err(|_| {
@@ -1714,6 +1763,93 @@ pub fn decode_long_header(bytes: &[u8]) -> Result<LongHeaderPacket> {
         packet_number,
         packet_number_len,
         payload_len: length - packet_number_len,
+    })
+}
+
+pub fn decode_version_negotiation_packet(bytes: &[u8]) -> Result<VersionNegotiationPacket> {
+    let mut input = Bytes::copy_from_slice(bytes);
+    if input.remaining() < 6 {
+        return Err(Error::HttpProtocol(
+            "truncated QUIC Version Negotiation packet".into(),
+        ));
+    }
+
+    let first = input.get_u8();
+    if first & HEADER_FORM_LONG == 0 {
+        return Err(Error::HttpProtocol("expected QUIC long header".into()));
+    }
+    let version = input.get_u32();
+    if version != 0 {
+        return Err(Error::HttpProtocol(
+            "expected QUIC Version Negotiation packet".into(),
+        ));
+    }
+    let destination_cid = get_cid(&mut input)?;
+    let source_cid = get_cid(&mut input)?;
+    if input.remaining() == 0 {
+        return Err(Error::HttpProtocol(
+            "QUIC Version Negotiation packet has no versions".into(),
+        ));
+    }
+    if input.remaining() % 4 != 0 {
+        return Err(Error::HttpProtocol(
+            "truncated QUIC Version Negotiation version list".into(),
+        ));
+    }
+
+    let mut supported_versions = Vec::with_capacity(input.remaining() / 4);
+    while input.has_remaining() {
+        supported_versions.push(input.get_u32());
+    }
+
+    Ok(VersionNegotiationPacket {
+        destination_cid,
+        source_cid,
+        supported_versions,
+    })
+}
+
+pub fn decode_retry_packet(bytes: &[u8]) -> Result<RetryPacket> {
+    let mut input = Bytes::copy_from_slice(bytes);
+    if input.remaining() < 1 + 4 + 1 + 1 + RETRY_INTEGRITY_TAG_LEN {
+        return Err(Error::HttpProtocol("truncated QUIC Retry packet".into()));
+    }
+
+    let first = input.get_u8();
+    if first & HEADER_FORM_LONG == 0 {
+        return Err(Error::HttpProtocol("expected QUIC long header".into()));
+    }
+    if first & FIXED_BIT == 0 {
+        return Err(Error::HttpProtocol("missing QUIC fixed bit".into()));
+    }
+    if (first & LONG_PACKET_TYPE_MASK) >> 4 != 3 {
+        return Err(Error::HttpProtocol("expected QUIC Retry packet".into()));
+    }
+    let version = input.get_u32();
+    if version == 0 {
+        return Err(Error::HttpProtocol(
+            "QUIC Retry packet cannot use version 0".into(),
+        ));
+    }
+    let destination_cid = get_cid(&mut input)?;
+    let source_cid = get_cid(&mut input)?;
+    if input.remaining() < RETRY_INTEGRITY_TAG_LEN {
+        return Err(Error::HttpProtocol(
+            "truncated QUIC Retry integrity tag".into(),
+        ));
+    }
+    let token_len = input.remaining() - RETRY_INTEGRITY_TAG_LEN;
+    let token = input.copy_to_bytes(token_len);
+    let integrity_tag = input.copy_to_bytes(RETRY_INTEGRITY_TAG_LEN);
+    let mut tag = [0u8; RETRY_INTEGRITY_TAG_LEN];
+    tag.copy_from_slice(&integrity_tag);
+
+    Ok(RetryPacket {
+        version,
+        destination_cid,
+        source_cid,
+        token,
+        integrity_tag: tag,
     })
 }
 

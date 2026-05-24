@@ -618,6 +618,10 @@ impl NativeQuicServerHandshake {
         self.client_application_keys.is_some() && self.server_application_keys.is_some()
     }
 
+    pub fn is_close_draining(&self) -> bool {
+        self.close_draining
+    }
+
     pub fn server_application_lost_packets(&self) -> Vec<u64> {
         self.server_application_loss_detector.lost_packets()
     }
@@ -790,6 +794,9 @@ impl NativeQuicServerHandshake {
     }
 
     pub fn open_client_application_packet(&mut self, packet: &[u8]) -> Result<Vec<QuicFrame>> {
+        if self.close_draining {
+            return Ok(Vec::new());
+        }
         let Some(client_application_keys) = &self.client_application_keys else {
             return Err(Error::Quic(
                 "native server application packet decryption is waiting for TLS application keys"
@@ -943,6 +950,9 @@ impl NativeQuicServerHandshake {
     }
 
     pub fn open_client_h3_event_packet(&mut self, packet: &[u8]) -> Result<Vec<ClientH3Event>> {
+        if self.close_draining {
+            return Ok(Vec::new());
+        }
         let mut events = Vec::new();
         for frame in self.open_client_application_packet(packet)? {
             match frame {
@@ -989,11 +999,14 @@ impl NativeQuicServerHandshake {
                     error_code,
                     frame_type,
                     reason,
-                } => events.push(ClientH3Event::ConnectionClose {
-                    error_code,
-                    frame_type,
-                    reason,
-                }),
+                } => {
+                    self.close_draining = true;
+                    events.push(ClientH3Event::ConnectionClose {
+                        error_code,
+                        frame_type,
+                        reason,
+                    });
+                }
                 QuicFrame::PathChallenge(data) => events.push(ClientH3Event::PathChallenge(data)),
                 QuicFrame::Padding
                 | QuicFrame::Ping
@@ -1482,6 +1495,10 @@ impl NativeQuicHandshake {
         self.client_application_keys.is_some() && self.server_application_keys.is_some()
     }
 
+    pub fn is_close_draining(&self) -> bool {
+        self.close_draining
+    }
+
     pub fn client_application_lost_packets(&self) -> Vec<u64> {
         self.client_application_loss_detector.lost_packets()
     }
@@ -1629,6 +1646,59 @@ impl NativeQuicHandshake {
             return Ok(None);
         }
 
+        let crypto_offset = self.client_handshake_crypto_offset;
+        let packet =
+            self.build_client_handshake_crypto_packet_at_offset(crypto_offset, crypto_data)?;
+        self.client_handshake_crypto_offset += packet.crypto_data.len() as u64;
+
+        Ok(Some(packet))
+    }
+
+    pub fn retransmit_pto_client_handshake_crypto_packets(
+        &mut self,
+        now: Instant,
+        pto: Duration,
+    ) -> Result<Vec<ClientHandshakePacket>> {
+        let expired_packets = self
+            .client_handshake_loss_detector
+            .pto_expired_packets(now, pto);
+        let mut retransmits = Vec::new();
+        for packet_number in expired_packets {
+            self.client_handshake_loss_detector
+                .retire_packet(packet_number);
+            let Some(sent) = self.client_handshake_sent_crypto.remove(&packet_number) else {
+                continue;
+            };
+            if sent.packet_type != LongHeaderType::Handshake {
+                continue;
+            }
+            retransmits.push(self.build_client_handshake_crypto_packet_at_offset_with_sent_at(
+                sent.crypto_offset,
+                sent.crypto_data,
+                now,
+            )?);
+        }
+        Ok(retransmits)
+    }
+
+    fn build_client_handshake_crypto_packet_at_offset(
+        &mut self,
+        crypto_offset: u64,
+        crypto_data: Bytes,
+    ) -> Result<ClientHandshakePacket> {
+        self.build_client_handshake_crypto_packet_at_offset_with_sent_at(
+            crypto_offset,
+            crypto_data,
+            Instant::now(),
+        )
+    }
+
+    fn build_client_handshake_crypto_packet_at_offset_with_sent_at(
+        &mut self,
+        crypto_offset: u64,
+        crypto_data: Bytes,
+        sent_at: Instant,
+    ) -> Result<ClientHandshakePacket> {
         let Some(client_handshake_keys) = &self.client_handshake_keys else {
             return Err(Error::Quic(
                 "native Handshake packet encryption is waiting for TLS Handshake keys".into(),
@@ -1638,7 +1708,7 @@ impl NativeQuicHandshake {
         let packet_number = self.next_client_handshake_packet_number;
         let packet_number_len = 2;
         let frame = encode_frame(&QuicFrame::Crypto {
-            offset: self.client_handshake_crypto_offset,
+            offset: crypto_offset,
             data: crypto_data.clone(),
         });
         let header = encode_long_header(&LongHeaderPacket {
@@ -1665,14 +1735,23 @@ impl NativeQuicHandshake {
         )?;
 
         self.next_client_handshake_packet_number += 1;
-        self.client_handshake_crypto_offset += crypto_data.len() as u64;
+        self.client_handshake_loss_detector
+            .on_packet_sent_at(packet_number, sent_at);
+        self.client_handshake_sent_crypto.insert(
+            packet_number,
+            SentCryptoPacket {
+                packet_type: LongHeaderType::Handshake,
+                crypto_offset,
+                crypto_data: crypto_data.clone(),
+            },
+        );
 
-        Ok(Some(ClientHandshakePacket {
+        Ok(ClientHandshakePacket {
             packet,
             packet_number,
             packet_number_offset,
             crypto_data,
-        }))
+        })
     }
 
     pub fn build_client_application_stream_packet(
@@ -1991,6 +2070,9 @@ impl NativeQuicHandshake {
     }
 
     pub fn open_server_application_packet(&mut self, packet: &[u8]) -> Result<Vec<QuicFrame>> {
+        if self.close_draining {
+            return Ok(Vec::new());
+        }
         let Some(server_application_keys) = &self.server_application_keys else {
             return Err(Error::Quic(
                 "native application packet decryption is waiting for TLS application keys".into(),
@@ -2062,6 +2144,9 @@ impl NativeQuicHandshake {
     }
 
     pub fn open_server_h3_event_packet(&mut self, packet: &[u8]) -> Result<Vec<ServerH3Event>> {
+        if self.close_draining {
+            return Ok(Vec::new());
+        }
         let mut events = Vec::new();
         for frame in self.open_server_application_packet(packet)? {
             match frame {
@@ -2098,11 +2183,14 @@ impl NativeQuicHandshake {
                     error_code,
                     frame_type,
                     reason,
-                } => events.push(ServerH3Event::ConnectionClose {
-                    error_code,
-                    frame_type,
-                    reason,
-                }),
+                } => {
+                    self.close_draining = true;
+                    events.push(ServerH3Event::ConnectionClose {
+                        error_code,
+                        frame_type,
+                        reason,
+                    });
+                }
                 QuicFrame::PathChallenge(data) => events.push(ServerH3Event::PathChallenge(data)),
                 QuicFrame::Padding
                 | QuicFrame::Ping
@@ -2200,6 +2288,9 @@ impl NativeQuicHandshake {
                     self.next_server_handshake_packet_number = opened.packet_number + 1;
 
                     for frame in decode_frames(&opened.payload)? {
+                        for packet_number in self.client_handshake_loss_detector.on_ack_frame(&frame)? {
+                            self.client_handshake_sent_crypto.remove(&packet_number);
+                        }
                         if let QuicFrame::Crypto { offset, data } = frame {
                             self.handshake_crypto.insert(offset, data)?;
                         }

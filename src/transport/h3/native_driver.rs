@@ -24,6 +24,9 @@ use crate::transport::h3::{
     H3TransportConfig, H3Tunnel, H3TunnelCredit, H3TunnelEvent, H3TunnelOutbound,
 };
 
+const H3_INITIAL_SEND_DATA_BUDGET: usize = 16 * 1024;
+const H3_MAX_SEND_DATA_BUDGET: usize = 256 * 1024;
+
 struct NotifyWake(Arc<Notify>);
 
 impl Wake for NotifyWake {
@@ -33,6 +36,115 @@ impl Wake for NotifyWake {
 
     fn wake_by_ref(self: &Arc<Self>) {
         self.0.notify_one();
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum H3SendClass {
+    RequestBody,
+    TunnelData,
+}
+
+impl H3SendClass {
+    fn other(self) -> Self {
+        match self {
+            Self::RequestBody => Self::TunnelData,
+            Self::TunnelData => Self::RequestBody,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct H3SendScheduler {
+    next_class: H3SendClass,
+    next_request_after: Option<u64>,
+    next_tunnel_after: Option<u64>,
+    data_budget: usize,
+}
+
+impl Default for H3SendScheduler {
+    fn default() -> Self {
+        Self {
+            next_class: H3SendClass::RequestBody,
+            next_request_after: None,
+            next_tunnel_after: None,
+            data_budget: H3_INITIAL_SEND_DATA_BUDGET,
+        }
+    }
+}
+
+impl H3SendScheduler {
+    fn next_classes(&self, has_request_body: bool, has_tunnel_data: bool) -> Vec<H3SendClass> {
+        match (has_request_body, has_tunnel_data) {
+            (true, true) => vec![self.next_class, self.next_class.other()],
+            (true, false) => vec![H3SendClass::RequestBody],
+            (false, true) => vec![H3SendClass::TunnelData],
+            (false, false) => Vec::new(),
+        }
+    }
+
+    fn ordered_streams(&self, class: H3SendClass, mut stream_ids: Vec<u64>) -> Vec<u64> {
+        stream_ids.sort_unstable();
+        let Some(after) = self.next_after(class) else {
+            return stream_ids;
+        };
+        let split_at = stream_ids
+            .iter()
+            .position(|stream_id| *stream_id > after)
+            .unwrap_or(0);
+        stream_ids.rotate_left(split_at);
+        stream_ids
+    }
+
+    fn record_stream_progress(&mut self, class: H3SendClass, stream_id: u64) {
+        self.next_class = class.other();
+        match class {
+            H3SendClass::RequestBody => self.next_request_after = Some(stream_id),
+            H3SendClass::TunnelData => self.next_tunnel_after = Some(stream_id),
+        }
+    }
+
+    fn data_budget(&self, available: usize) -> usize {
+        available.min(self.data_budget).max((available > 0) as usize)
+    }
+
+    fn record_data_sent(&mut self, sent: usize) {
+        if sent >= self.data_budget && self.data_budget < H3_MAX_SEND_DATA_BUDGET {
+            self.data_budget = self
+                .data_budget
+                .saturating_add(self.data_budget / 2)
+                .min(H3_MAX_SEND_DATA_BUDGET);
+        }
+    }
+
+    fn next_after(&self, class: H3SendClass) -> Option<u64> {
+        match class {
+            H3SendClass::RequestBody => self.next_request_after,
+            H3SendClass::TunnelData => self.next_tunnel_after,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct H3ReleasedReceiveCredit {
+    body_bytes: usize,
+    tunnel_bytes: usize,
+}
+
+impl H3ReleasedReceiveCredit {
+    fn new(body_bytes: usize, tunnel_bytes: usize) -> Self {
+        Self {
+            body_bytes,
+            tunnel_bytes,
+        }
+    }
+
+    fn total_bytes(self) -> usize {
+        self.body_bytes.saturating_add(self.tunnel_bytes)
+    }
+
+    fn has_credit(self) -> bool {
+        self.total_bytes() > 0
     }
 }
 
@@ -745,7 +857,8 @@ impl NativeH3Driver {
             if (released_body_credit || released_tunnel_credit) && !self.receive_backpressured() {
                 self.send_receive_flow_control_updates().await?;
             }
-            if self.last_activity.elapsed() > self.max_idle_timeout && !self.has_pending_work() {
+            let has_pending_work = self.has_pending_work();
+            if self.last_activity.elapsed() > self.max_idle_timeout && !has_pending_work {
                 self.send_connection_close(0x00, Bytes::from_static(b"Idle timeout"))
                     .await?;
                 return Ok(());
@@ -781,12 +894,10 @@ impl NativeH3Driver {
                         self.process_datagram(&buf[..len]).await?;
                     }
                 }
-                _ = tokio::time::sleep(remaining_idle) => {
-                    if !self.has_pending_work() {
-                        self.send_connection_close(0x00, Bytes::from_static(b"Idle timeout"))
-                            .await?;
-                        return Ok(());
-                    }
+                _ = tokio::time::sleep(remaining_idle), if !has_pending_work => {
+                    self.send_connection_close(0x00, Bytes::from_static(b"Idle timeout"))
+                        .await?;
+                    return Ok(());
                 }
                 _ = tokio::time::sleep(client_application_ack_delay), if client_application_ack_deadline.is_some() => {
                     self.send_delayed_application_ack().await?;
