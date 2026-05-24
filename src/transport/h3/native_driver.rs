@@ -2471,6 +2471,119 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_send_window_grows_toward_bdp_under_stable_rtt() {
+        let mut window = AdaptiveSendWindow::new();
+        let initial = window.current;
+
+        let bytes_in_window: usize = 8 * initial;
+        let chunk = 16 * 1024;
+        let mut sent = 0;
+        while sent < bytes_in_window {
+            window.record_data_sent(chunk);
+            sent += chunk;
+        }
+
+        let baseline = Duration::from_millis(20);
+        window.observe_rtt_sample(baseline, baseline);
+
+        assert!(
+            window.current > initial,
+            "send window must grow toward BDP after a stable RTT sample (current={}, initial={})",
+            window.current,
+            initial
+        );
+        assert!(
+            window.current <= window.ceiling,
+            "send window must never exceed the configured ceiling"
+        );
+    }
+
+    #[test]
+    fn adaptive_send_window_decays_after_loss_signal() {
+        let mut window = AdaptiveSendWindow::new();
+        window.current = 256 * 1024;
+
+        window.observe_loss();
+
+        assert!(
+            window.current < 256 * 1024,
+            "send window must decay after an observed loss epoch"
+        );
+        assert!(
+            window.current >= window.floor,
+            "send window must never decay below its configured floor"
+        );
+    }
+
+    #[test]
+    fn adaptive_send_window_decays_under_rtt_inflation() {
+        let mut window = AdaptiveSendWindow::new();
+        window.current = 256 * 1024;
+
+        let min_rtt = Duration::from_millis(10);
+        let inflated = Duration::from_millis(40);
+        window.observe_rtt_sample(inflated, min_rtt);
+
+        assert!(
+            window.current < 256 * 1024,
+            "send window must decay when smoothed_rtt inflates above the inflation threshold"
+        );
+        assert!(
+            window.current >= window.floor,
+            "send window must never decay below its configured floor"
+        );
+    }
+
+    #[test]
+    fn adaptive_send_window_caps_growth_at_ceiling() {
+        let mut window = AdaptiveSendWindow::new();
+        let stable = Duration::from_millis(10);
+
+        for _ in 0..32 {
+            window.record_data_sent(2 * window.ceiling);
+            window.observe_rtt_sample(stable, stable);
+        }
+
+        assert_eq!(
+            window.current, window.ceiling,
+            "send window must converge to ceiling under sustained large BDP samples"
+        );
+    }
+
+    #[test]
+    fn adaptive_send_window_growth_decay_then_recovery() {
+        let mut window = AdaptiveSendWindow::new();
+        let stable = Duration::from_millis(15);
+
+        for _ in 0..8 {
+            window.record_data_sent(window.ceiling);
+            window.observe_rtt_sample(stable, stable);
+        }
+        let after_growth = window.current;
+        assert!(
+            after_growth > H3_INITIAL_SEND_DATA_BUDGET,
+            "send window must grow from initial budget under sustained RTT samples"
+        );
+
+        window.observe_loss();
+        let after_loss = window.current;
+        assert!(
+            after_loss < after_growth,
+            "send window must decay below the growth peak after a loss"
+        );
+
+        for _ in 0..8 {
+            window.record_data_sent(window.ceiling);
+            window.observe_rtt_sample(stable, stable);
+        }
+        let after_recovery = window.current;
+        assert!(
+            after_recovery > after_loss,
+            "send window must climb again after stable post-loss RTT samples"
+        );
+    }
+
+    #[test]
     fn released_receive_credit_preserves_body_and_tunnel_byte_counts() {
         let credit = H3ReleasedReceiveCredit::new(17, 29);
 

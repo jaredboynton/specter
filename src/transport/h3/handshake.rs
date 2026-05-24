@@ -17,9 +17,7 @@ use crate::transport::h3::quic::{
     LongHeaderType, OpenedShortHeaderPacket, QuicAckTracker, QuicCloseState, QuicCryptoAssembler,
     QuicFrame, QuicLossDetector, QuicPacketKeyMaterial, QuicPathValidator, TransportParameter,
 };
-use crate::transport::h3::recovery::{
-    PacketNumberSpace, RecoveryState, SentPacketInfo,
-};
+use crate::transport::h3::recovery::RecoveryState;
 use crate::transport::h3::tls::{
     build_client_initial_packet_from_capture_with_size,
     build_client_initial_packet_from_capture_with_version_and_size, ClientInitialPacket,
@@ -31,6 +29,12 @@ use getrandom::fill as getrandom_fill;
 const QUIC_VERSION_1: u32 = 1;
 const INITIAL_PACKET_NUMBER_LEN: usize = 4;
 const AES_GCM_TAG_LEN: usize = 16;
+
+fn recovery_state_from_transport(params: &QuicTransportParams) -> RecoveryState {
+    let max_ack_delay = Duration::from_millis(params.max_ack_delay_ms);
+    let datagram = params.max_recv_udp_payload_size.max(1200) as u64;
+    RecoveryState::new(max_ack_delay, datagram)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessedServerInitial {
@@ -772,6 +776,7 @@ pub struct NativeQuicServerHandshake {
     server_application_sent_streams: BTreeMap<u64, SentApplicationStreamPacket>,
     server_initial_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     server_handshake_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
+    recovery: RecoveryState,
     next_client_initial_packet_number: u64,
     next_client_handshake_packet_number: u64,
     next_client_application_packet_number: u64,
@@ -863,6 +868,7 @@ impl NativeQuicServerHandshake {
             client_h3_stream_types: BTreeMap::new(),
             close_draining: false,
             close_state: QuicCloseState::default(),
+            recovery: recovery_state_from_transport(&fingerprint.transport),
         })
     }
 
@@ -934,6 +940,7 @@ impl NativeQuicServerHandshake {
             client_h3_stream_types: BTreeMap::new(),
             close_draining: false,
             close_state: QuicCloseState::default(),
+            recovery: recovery_state_from_transport(&fingerprint.transport),
         })
     }
 
@@ -2078,6 +2085,7 @@ impl NativeQuicHandshake {
             initial_ack_tracker: QuicAckTracker::default(),
             handshake_ack_tracker: QuicAckTracker::default(),
             application_ack_tracker: QuicAckTracker::default(),
+            client_initial_loss_detector: QuicLossDetector::default(),
             client_handshake_loss_detector: QuicLossDetector::default(),
             client_application_loss_detector: QuicLossDetector::default(),
             client_application_flow_control: QuicApplicationFlowControl::client(
@@ -2086,10 +2094,12 @@ impl NativeQuicHandshake {
             client_application_receive_flow_control: QuicReceiveFlowControl::client(
                 &fingerprint.transport,
             ),
+            client_initial_sent_crypto: BTreeMap::new(),
             client_handshake_sent_crypto: BTreeMap::new(),
             client_application_sent_streams: BTreeMap::new(),
             client_path_validator: QuicPathValidator::default(),
             server_transport_parameters_validated: false,
+            recovery: recovery_state_from_transport(&fingerprint.transport),
             next_client_initial_packet_number: 1,
             next_server_initial_packet_number: 0,
             next_server_handshake_packet_number: 0,
