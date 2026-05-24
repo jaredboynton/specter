@@ -24,6 +24,9 @@ const LOCAL_FIXTURE_CHUNK_COUNT: usize = 5;
 const LOCAL_FIXTURE_CHUNK_DELAY_MS: u64 = 1;
 const LOCAL_FIXTURE_H3_STREAM_SEGMENT_SIZE: usize = 1_200;
 const LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE: usize = 1_024;
+const LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES: usize = 32;
+const LOCAL_FIXTURE_TUNNEL_SLOW_CONSUMER_DELAY_MS: u64 = 25;
+const LOCAL_FIXTURE_TUNNEL_SLOW_READ_DELAY_MS: u64 = 1;
 const LOCAL_FIXTURE_TRANSPORT_PAYLOAD_SIZE: usize = 1_024;
 const QUINN_TRANSPORT_ALPN: &[u8] = b"specter-transport-bench";
 
@@ -79,6 +82,15 @@ struct FixtureEvent {
     message: String,
     datagram: Option<String>,
     app_ready: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FixtureErrorClassification {
+    level: &'static str,
+    kind: &'static str,
+    classification: &'static str,
+    category: &'static str,
+    fatal: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1264,16 +1276,19 @@ impl LocalNativeH3Connection {
                     if let Err(error) = self.process_datagram(&packet).await {
                         let datagram = describe_local_native_h3_datagram(&packet);
                         let app_ready = self.handshake.is_application_ready();
-                        let classification = classify_local_native_h3_packet_error(&error, app_ready);
+                        let classification =
+                            classify_local_native_h3_packet_error(&error, app_ready);
                         eprintln!(
-                            "local native H3 fixture packet error: {error}; {}; app_ready={}",
+                            "local native H3 fixture packet error: {error}; {}; app_ready={}; category={}; fatal={}",
                             datagram,
-                            app_ready
+                            app_ready,
+                            classification.category,
+                            classification.fatal
                         );
                         self.record_event(FixtureEvent {
                             client: self.client.clone(),
-                            level: "warn",
-                            kind: "packet_error",
+                            level: classification.level,
+                            kind: classification.kind,
                             classification: classification.classification,
                             category: classification.category,
                             fatal: classification.fatal,
@@ -1611,30 +1626,54 @@ fn describe_local_native_h3_datagram(packet: &[u8]) -> String {
 fn classify_local_native_h3_packet_error(
     error: &anyhow::Error,
     app_ready: bool,
-) -> PacketErrorClassification {
+) -> FixtureErrorClassification {
     let message = error.to_string();
     if message.contains("QUIC packet open failed") && app_ready {
-        PacketErrorClassification {
+        FixtureErrorClassification {
+            level: "warn",
+            kind: "packet_error",
             classification: "post_application_packet_open_error",
             category: "non_fatal_packet_open_after_application_ready",
             fatal: false,
         }
     } else if message.contains("QUIC packet open failed") {
-        PacketErrorClassification {
+        FixtureErrorClassification {
+            level: "error",
+            kind: "packet_error",
             classification: "handshake_packet_open_error",
             category: "fatal_packet_open_before_application_ready",
             fatal: true,
         }
-    } else if message.contains("Idle timeout") {
-        PacketErrorClassification {
+    } else if message.contains("Idle timeout") && app_ready {
+        FixtureErrorClassification {
+            level: "warn",
+            kind: "packet_error",
             classification: "idle_timeout",
-            category: "timeout",
+            category: "non_fatal_idle_timeout_after_application_ready",
+            fatal: false,
+        }
+    } else if message.contains("Idle timeout") {
+        FixtureErrorClassification {
+            level: "error",
+            kind: "packet_error",
+            classification: "idle_timeout",
+            category: "fatal_idle_timeout_before_application_ready",
             fatal: true,
         }
-    } else {
-        PacketErrorClassification {
+    } else if app_ready {
+        FixtureErrorClassification {
+            level: "warn",
+            kind: "packet_error",
             classification: "packet_error",
-            category: "unknown_packet_error",
+            category: "non_fatal_packet_error_after_application_ready",
+            fatal: false,
+        }
+    } else {
+        FixtureErrorClassification {
+            level: "error",
+            kind: "packet_error",
+            classification: "packet_error",
+            category: "fatal_packet_error_before_application_ready",
             fatal: true,
         }
     }
@@ -2614,14 +2653,17 @@ mod tests {
         p95_ttft_ns: f64,
         bytes_per_sec: f64,
     ) -> super::BenchmarkRow {
-        super::BenchmarkRow {
+        let mut row = super::BenchmarkRow {
             competitor_id: competitor_id.into(),
             status: "measured_pass".into(),
             p50_ttft_ns: Some(p50_ttft_ns),
             p95_ttft_ns: Some(p95_ttft_ns),
             bytes_per_sec: Some(bytes_per_sec),
             source: "test_fixture".into(),
-        }
+            ..super::BenchmarkRow::default()
+        };
+        super::apply_row_context(&mut row, None);
+        row
     }
 
     #[test]
@@ -2706,6 +2748,7 @@ mod tests {
             p95_ttft_ns: Some(200.0),
             bytes_per_sec: Some(300.0),
             source: "specter_native_adapter".into(),
+            ..super::BenchmarkRow::default()
         };
         let artifact =
             super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &[specter_row]);
@@ -2846,6 +2889,7 @@ mod tests {
             p95_ttft_ns: Some(200.0),
             bytes_per_sec: Some(300.0),
             source: "specter_native_adapter".into(),
+            ..super::BenchmarkRow::default()
         };
         let event = super::FixtureEvent {
             client: "h3_quinn".into(),
@@ -2876,6 +2920,14 @@ mod tests {
             "non_fatal_packet_open_after_application_ready"
         );
         assert!(!artifact.fixture_events[0].fatal);
+
+        let artifact_json = serde_json::to_value(&artifact).unwrap();
+        let event_json = &artifact_json["fixture_events"][0];
+        assert_eq!(
+            event_json["category"],
+            serde_json::json!("non_fatal_packet_open_after_application_ready")
+        );
+        assert_eq!(event_json["fatal"], serde_json::json!(false));
     }
 
     #[test]
