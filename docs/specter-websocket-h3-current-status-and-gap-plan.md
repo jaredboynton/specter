@@ -125,6 +125,7 @@ Specter status:
 - Retry/VN is no longer only packet parsing: the native client handshake now drives Retry-driven Initial restart (validate QUIC v1 integrity, swap DCID to the Retry SCID, regenerate Initial keys, replay CRYPTO from offset zero with the Retry token), VN-driven Initial restart (RFC9000 § 6.1–6.3 supported-version selection via `set_supported_versions`, regenerated source connection ID, full per-attempt state reset, `version_negotiation_failed` error on no overlap), RFC9000 § 17.2.5.1/.2 and § 6.1–6.3 loop guards (single Retry per attempt, late Retry discard once Initial/Handshake is observed, single VN response, VN listing the issued version discarded), and validates server CID transport parameters after Retry.
 - H3 scheduling is no longer FIFO-only: the native driver has request-body/tunnel class rotation, stream rotation, RTT/loss/BDP-aware adaptive DATA budgets, and H3Client slow-path admission now acquires origin-fair dispatcher tickets before fresh connects.
 - Outbound RFC9220 tunnel backpressure is no longer item-count-only: public sends acquire a byte budget, the driver tracks acquired credit, and permits are released per emitted DATA chunk or drained on completion.
+- Receive-window credit is no longer driven only by buffered inbound bytes: active streaming-response and RFC9220 tunnel reads now feed `record_client_stream_consumed` from public body/tunnel byte release and emit absolute MAX_DATA/MAX_STREAM_DATA from consumed-byte totals.
 - Client CONNECTION_CLOSE handling is no longer fire-and-forget: local idle/client-shutdown closes retain the protected close packet and replay it for inbound peer packets during a bounded drain window.
 - Native QUIC key update is no longer header-only: client/server 1-RTT read/write key phases rotate through derived next traffic secrets, retain previous keys for reordered old-phase packets, and enforce the RFC9001 local-update ACK gate.
 
@@ -139,7 +140,7 @@ Specter status:
 
 1. **Close drain completion:** peer close now enters event-level draining and local closes replay CONNECTION_CLOSE during a bounded drain window, but RFC-grade close/drain timing tied to PTO and broader server/migration close behavior remain incomplete.
 2. **0-RTT policy:** certificate compression, session-ticket capture/install helpers, `NativeH3SessionCache`, H3Client/session-cache wiring, TLS session replay, and 0-RTT early-data context setup exist, but native H3 still lacks safe end-to-end 0-RTT request send/replay policy.
-3. **Flow-control precision:** receive-window credit for active streaming responses is gated by public body-consumed bytes, while absolute MAX_DATA/MAX_STREAM_DATA values still come from the existing receive-threshold logic.
+3. **Flow-control precision:** preserve encoded H3 DATA-frame overhead in receive-credit accounting instead of releasing payload bytes only.
 
 ### P2
 
