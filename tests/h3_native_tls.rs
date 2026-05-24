@@ -151,7 +151,9 @@ fn native_tls_can_reject_invalid_replayed_session_ticket_before_clienthello() {
         false,
         b"not-a-der-session-ticket",
     ) {
-        Ok(_) => panic!("invalid replayed TLS session tickets must fail before ClientHello capture"),
+        Ok(_) => {
+            panic!("invalid replayed TLS session tickets must fail before ClientHello capture")
+        }
         Err(err) => err,
     };
 

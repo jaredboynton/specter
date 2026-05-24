@@ -137,8 +137,17 @@ pub fn native_h3_tls_capabilities(fingerprint: &TlsFingerprint) -> NativeH3TlsCa
 
 impl NativeQuicTlsSession {
     pub fn client(server_name: &str, fingerprint: &Http3Fingerprint) -> Result<Self> {
-        let mut session =
-            Self::new_client(server_name, fingerprint, None, None, true, &[], false, None, None)?;
+        let mut session = Self::new_client(
+            server_name,
+            fingerprint,
+            None,
+            None,
+            true,
+            &[],
+            false,
+            None,
+            None,
+        )?;
         session.drive_handshake("QUIC ClientHello capture handshake")?;
         if session.crypto_len(QuicEncryptionLevel::Initial) == 0 {
             return Err(Error::Tls(
@@ -500,11 +509,8 @@ impl NativeQuicTlsSession {
             }
             let context = native_h3_early_data_context(fingerprint, &transport_parameters);
             unsafe {
-                if SSL_set_quic_early_data_context(
-                    ssl.as_ptr(),
-                    context.as_ptr(),
-                    context.len(),
-                ) != 1
+                if SSL_set_quic_early_data_context(ssl.as_ptr(), context.as_ptr(), context.len())
+                    != 1
                 {
                     return Err(Error::Tls(
                         "failed to configure native H3 0-RTT early-data context".into(),
