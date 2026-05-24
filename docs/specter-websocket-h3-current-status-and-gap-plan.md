@@ -13,7 +13,7 @@ Specter now has credible proof for the H1/H2, RFC6455, and local same-fixture na
 - **Live Codex WSS vs tokio-tungstenite:** persisted n=50 artifact passes all samples and shows better Specter p95 tail, but median TTFT remains within/noisy against tungstenite.
 - **Native H3 HTTP comparator:** isolated comparator crate now has a release-grade n=30 proof at `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-n30.json` with real rows for `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest_h3`; optional transport-only `quinn_transport`/`s2n_quic_transport` rows are measured separately and fixture packet errors now carry stable `category`/`fatal` fields if they reappear.
 - **RFC9220 WebSocket-over-H3:** correctness/API exists as a raw byte tunnel. The same-fixture proof now includes Specter local rows for echo, client DATA+FIN/server FIN, and a slow-consumer tunnel plus concurrent H3 streaming workload. Third-party RFC9220 tunnel comparator rows are now explicit as pending (`quiche`, `tokio-quiche`) or unsupported/not comparable (`h3-quinn`, `reqwest`, `tokio-tungstenite`), so there is still no third-party RFC9220 throughput win claim.
-- **Native QUIC production readiness:** still not production-complete; PTO send-time tracking, client Handshake CRYPTO PTO retransmission, event-level peer-close draining, ACK_ECN frame handling, Retry/VN packet primitives, and path-validator helpers exist, but full packet-space recovery/backoff, Retry/VN handshake integration, complete close-drain timers/retransmit behavior, key update, ECN socket plumbing, and path migration remain gaps.
+- **Native QUIC production readiness:** still not production-complete; PTO send-time tracking, client Handshake CRYPTO PTO retransmission, event-level peer-close draining, bounded client CONNECTION_CLOSE replay, ACK_ECN frame handling, Retry/VN packet primitives, and path-validator helpers exist, but full packet-space recovery/backoff, Retry/VN handshake integration, RFC-grade close-drain timing, key update, ECN socket plumbing, and path migration remain gaps.
 
 ## Direct answers captured during audit
 
@@ -93,7 +93,7 @@ Specter status:
 - `codex_real_streaming`: live Codex SSE vs reqwest over HTTP/2, n=10 proof.
 - `codex_ws_streaming`: live Codex WSS vs tokio-tungstenite, n=50 proof, tail advantage but noisy medians.
 - `websocket_vs_fastwebsockets`: local H1 RFC6455 echo now includes fastwebsockets + tokio-tungstenite.
-- `native_h3_vs_rust_clients`: release-grade local native H3 artifact persists at `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-n30.json` with samples >=30, real required H3 comparator rows, and `superiority_gate.pass = true`.
+- `native_h3_vs_rust_clients`: release-grade local native H3 artifact persists at `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-n30.json`; it was produced from n=30 per-client runs, has real required H3 comparator rows, and has `superiority_gate.pass = true` even though some merged rows omit serialized `sample_count`.
 - `rfc9220_specter_rows`: Specter-local RFC9220 echo, close/FIN, and slow-consumer mixed rows are persisted at n=30 in the native H3 benchmark artifact.
 - `h3_fixture_classification`: fixture packet-open events now serialize stable `category` and `fatal` fields, and latest full proofs emit no packet-error events.
 
@@ -116,6 +116,7 @@ Specter status:
 - Specter RFC9220 local tunnel throughput/latency rows are no longer pending for echo, close/FIN, or slow-consumer mixed workloads; only third-party tunnel comparators, larger p99-scale samples, and a tunnel superiority claim remain open.
 - TLS certificate compression and raw ordered QUIC transport-parameter encoding are no longer silent gaps; native H3 ClientHello coverage now proves `compress_certificate` and raw ordered parameter emission.
 - H3 in-connection scheduling is no longer FIFO-only for request-body/tunnel DATA: the native driver has class/stream rotation and adaptive DATA budgets; pool/per-origin fairness and RTT/BDP-aware growth remain open.
+- Client CONNECTION_CLOSE handling is no longer fire-and-forget: local idle/client-shutdown closes retain the protected close packet and replay it for inbound peer packets during a bounded drain window.
 
 ## Native QUIC/H3 protocol gaps
 
@@ -128,7 +129,7 @@ Specter status:
 
 ### P1
 
-1. **Close drain completion:** peer close now enters event-level draining, but close/draining timers and close retransmission on inbound packets are not complete.
+1. **Close drain completion:** peer close now enters event-level draining and local closes replay CONNECTION_CLOSE during a bounded drain window, but RFC-grade close/drain timing tied to PTO and broader server/migration close behavior remain incomplete.
 2. **Key update:** key phase exists in headers, but no traffic-secret update state machine is implemented.
 3. **TLS resumption / 0-RTT:** certificate compression is wired, but native H3 still lacks session ticket capture/replay and 0-RTT send.
 4. **Outbound tunnel backpressure:** item-count bounded, not byte bounded.
