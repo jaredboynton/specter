@@ -133,13 +133,6 @@ struct RowContext {
     notes: Option<&'static str>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PacketErrorClassification {
-    classification: &'static str,
-    category: &'static str,
-    fatal: bool,
-}
-
 impl AdapterSample {
     fn new(ttft_ns: f64, total_ns: f64, bytes: u64) -> Self {
         Self {
@@ -1976,9 +1969,8 @@ async fn measure_specter_native_rfc9220_tunnel_mixed(
 ) -> anyhow::Result<BenchmarkRow> {
     let client = specter_rfc9220_client()?;
     for _ in 0..warmups {
-        let _ =
-            measure_specter_native_rfc9220_tunnel_mixed_once(&client, stream_url, tunnel_url)
-                .await?;
+        let _ = measure_specter_native_rfc9220_tunnel_mixed_once(&client, stream_url, tunnel_url)
+            .await?;
     }
 
     let mut measured = Vec::with_capacity(samples);
@@ -2067,7 +2059,8 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
     tunnel_url: &str,
 ) -> anyhow::Result<AdapterSample> {
     let payload = Bytes::from(vec![b'm'; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE]);
-    let expected_tunnel_bytes = LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES;
+    let expected_tunnel_bytes =
+        LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES;
     let start = Instant::now();
     let mut tunnel = tokio::time::timeout(ADAPTER_TIMEOUT, client.websocket_h3(tunnel_url).open())
         .await
@@ -2085,8 +2078,16 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
     let (stream_first_byte_ns, stream_bytes) =
         measure_specter_native_http3_stream_with_client(client, stream_url, start).await?;
 
+    tokio::time::sleep(Duration::from_millis(
+        LOCAL_FIXTURE_TUNNEL_SLOW_CONSUMER_DELAY_MS,
+    ))
+    .await;
     let mut echoed = 0usize;
     while echoed < expected_tunnel_bytes {
+        tokio::time::sleep(Duration::from_millis(
+            LOCAL_FIXTURE_TUNNEL_SLOW_READ_DELAY_MS,
+        ))
+        .await;
         let chunk = tokio::time::timeout(ADAPTER_TIMEOUT, tunnel.recv_bytes())
             .await
             .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 mixed tunnel drain timed out"))?
@@ -3138,21 +3139,41 @@ mod tests {
     }
 
     #[test]
-    fn artifact_surfaces_rfc9220_comparator_rows_as_pending_adapters() {
+    fn artifact_surfaces_rfc9220_comparator_capability_rows() {
         let artifact = super::artifact_with_competitor_artifacts(None, &Vec::<String>::new());
 
-        for competitor_id in [
-            "quiche_direct_rfc9220_tunnel",
-            "tokio_quiche_rfc9220_tunnel",
-            "h3_quinn_rfc9220_tunnel",
-            "reqwest_h3_rfc9220_tunnel",
+        for (competitor_id, expected_role, expected_status, expected_source) in [
+            (
+                "quiche_direct_rfc9220_tunnel",
+                "h3_tunnel_comparator",
+                "pending_adapter",
+                "native_h3_vs_rust_clients_harness",
+            ),
+            (
+                "tokio_quiche_rfc9220_tunnel",
+                "h3_tunnel_comparator",
+                "pending_adapter",
+                "native_h3_vs_rust_clients_harness",
+            ),
+            (
+                "h3_quinn_rfc9220_tunnel",
+                "unsupported_h3_tunnel_comparator",
+                "unsupported_by_client",
+                "capability_audit",
+            ),
+            (
+                "reqwest_h3_rfc9220_tunnel",
+                "unsupported_h3_tunnel_comparator",
+                "unsupported_by_client",
+                "capability_audit",
+            ),
         ] {
             let spec = artifact
                 .competitors
                 .iter()
                 .find(|spec| spec.id == competitor_id)
                 .unwrap_or_else(|| panic!("{competitor_id} spec should be explicit"));
-            assert_eq!(spec.role, "h3_tunnel_comparator");
+            assert_eq!(spec.role, expected_role);
             assert!(
                 !spec.required_for_superiority,
                 "{competitor_id} must not affect the HTTP/3 superiority gate"
@@ -3163,8 +3184,8 @@ mod tests {
                 .iter()
                 .find(|row| row.competitor_id == competitor_id)
                 .unwrap_or_else(|| panic!("{competitor_id} row should be explicit"));
-            assert_eq!(row.status, "pending_adapter");
-            assert_eq!(row.source, "native_h3_vs_rust_clients_harness");
+            assert_eq!(row.status, expected_status);
+            assert_eq!(row.source, expected_source);
         }
     }
 
