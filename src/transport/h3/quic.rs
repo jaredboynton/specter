@@ -1449,6 +1449,23 @@ pub fn encode_frame(frame: &QuicFrame) -> Bytes {
     out.freeze()
 }
 
+fn encode_ack_fields(
+    out: &mut BytesMut,
+    largest_acknowledged: u64,
+    ack_delay: u64,
+    first_ack_range: u64,
+    ranges: &[QuicAckRange],
+) {
+    put_varint(out, largest_acknowledged);
+    put_varint(out, ack_delay);
+    put_varint(out, ranges.len() as u64);
+    put_varint(out, first_ack_range);
+    for range in ranges {
+        put_varint(out, range.gap);
+        put_varint(out, range.ack_range_length);
+    }
+}
+
 pub fn decode_frame(bytes: &[u8]) -> Result<QuicFrame> {
     let mut input = Bytes::copy_from_slice(bytes);
     let frame = decode_frame_from(&mut input)?;

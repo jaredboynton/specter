@@ -821,9 +821,10 @@ impl NativeH3Driver {
     }
 
     fn tunnel_inbound_backpressured(&self) -> bool {
-        self.pending_tunnels.values().any(|tunnel| {
-            tunnel.is_inbound_backpressured(self.transport_config.streaming_body_buffer_slots)
-        })
+        !self.pending_tunnels.is_empty()
+            && self.pending_tunnels.values().all(|tunnel| {
+                tunnel.is_inbound_backpressured(self.transport_config.streaming_body_buffer_slots)
+            })
     }
 
     fn receive_backpressured(&self) -> bool {

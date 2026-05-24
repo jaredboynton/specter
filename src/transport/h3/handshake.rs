@@ -986,6 +986,7 @@ impl NativeQuicServerHandshake {
                 QuicFrame::Padding
                 | QuicFrame::Ping
                 | QuicFrame::Ack { .. }
+                | QuicFrame::AckEcn { .. }
                 | QuicFrame::Crypto { .. }
                 | QuicFrame::MaxData(_)
                 | QuicFrame::MaxStreamData { .. }
@@ -2091,6 +2092,7 @@ impl NativeQuicHandshake {
                 QuicFrame::Padding
                 | QuicFrame::Ping
                 | QuicFrame::Ack { .. }
+                | QuicFrame::AckEcn { .. }
                 | QuicFrame::Crypto { .. }
                 | QuicFrame::MaxData(_)
                 | QuicFrame::MaxStreamData { .. }
@@ -2368,7 +2370,10 @@ fn stream_initiator(stream_id: u64) -> u64 {
 }
 
 fn is_ack_eliciting_quic_frame(frame: &QuicFrame) -> bool {
-    !matches!(frame, QuicFrame::Padding | QuicFrame::Ack { .. })
+    !matches!(
+        frame,
+        QuicFrame::Padding | QuicFrame::Ack { .. } | QuicFrame::AckEcn { .. }
+    )
 }
 
 fn is_not_padding_frame(frame: &QuicFrame) -> bool {
