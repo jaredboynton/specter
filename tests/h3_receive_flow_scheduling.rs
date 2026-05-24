@@ -49,6 +49,28 @@ fn native_h3_driver_defers_receive_credit_while_streaming_bodies_are_backpressur
 }
 
 #[test]
+fn native_h3_tunnel_backpressure_waits_for_all_tunnels_before_pausing_receive() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let tunnel_backpressure = driver
+        .split("fn tunnel_inbound_backpressured(&self) -> bool")
+        .nth(1)
+        .expect("driver must have tunnel_inbound_backpressured")
+        .split("fn receive_backpressured")
+        .next()
+        .expect("tunnel_inbound_backpressured section");
+
+    assert!(
+        tunnel_backpressure.contains(".all(|tunnel|"),
+        "one slow RFC9220 tunnel must not pause socket reads while a sibling tunnel still has inbound capacity"
+    );
+    assert!(
+        !tunnel_backpressure.contains(".any(|tunnel|"),
+        "H3 tunnel receive backpressure must mirror streaming response sibling fairness, not any-tunnel blocking"
+    );
+}
+
+#[test]
 fn native_h3_driver_flushes_receive_credit_from_consumed_body_bytes() {
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
