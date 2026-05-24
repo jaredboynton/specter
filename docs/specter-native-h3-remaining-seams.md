@@ -145,7 +145,7 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 
 ## Closed gaps now tracked as regression guards
 
-- Native QUIC ACK_ECN frame encode/decode, counter validation, CE growth tracking, loss-detector ACK range handling, and CE-driven congestion response are implemented; remaining ECN work is outbound socket marking and PMTU/path probing policy.
+- Native QUIC ACK_ECN frame encode/decode, counter validation, CE growth tracking, loss-detector ACK range handling, and CE-driven congestion response are implemented; remaining ECN work is socket marking/reporting, ACK_ECN generation from received ECN marks, and PMTU/path probing policy.
 - Version Negotiation and Retry packet parsing, QUIC v1 Retry integrity validation, full client Retry/VN handshake integration (Retry-driven Initial restart with new DCID-derived keys and token attachment, VN-driven restart with regenerated SCID and chosen version, RFC9000 § 17.2.5.1/.2 and § 6.1–6.3 loop guards, `version_negotiation_failed` error on no overlap), and client PATH_CHALLENGE/PATH_RESPONSE token lifecycle handling are implemented; remaining work is full per-address path migration state.
 - QUIC send-time tracking, ACK-driven RTT/PTO estimator updates, client Initial/Handshake CRYPTO PTO retransmission, server Initial/Handshake CRYPTO PTO retransmission, client application-space PTO timer/retransmit, server application ACK-driven recovery and PTO STREAM retransmit core, mock/same-fixture server application loss-detection wake integration, event-level peer close draining, and bounded client/server `CONNECTION_CLOSE` replay/suppression are implemented; remaining recovery work is broader recovery soak/backoff validation.
 - Client/server same-fixture ACK decimation now has a `max_ack_delay_ms` timer path; remaining ACK work is browser-capture parity for tuned thresholds.
@@ -163,7 +163,7 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 
 ## Remaining gaps
 
-- Native QUIC still needs broader recovery soak/backoff validation, ECN socket marking, PMTU/path probing policy, and path migration/validation beyond the client token lifecycle.
+- Native QUIC still needs broader recovery soak/backoff validation, ECN socket marking/reporting plus ACK_ECN generation, PMTU/path probing policy, and path migration/validation beyond the client token lifecycle.
 - Browser-capture ACK parity remains open for per-browser/version ACK behavior and the tuned `ack_eliciting_threshold = 128` benchmark profile.
 - RFC9220/WebSocket-over-H3 still lacks p99-scale samples, third-party close/FIN and slow-consumer comparator rows, and a dedicated tunnel superiority gate/claim, even though low-level `quiche` and `tokio-quiche` raw tunnel echo comparator adapters now have n=30 rows.
 - TLS/H3 fingerprint gaps remain: explicit extension-list ordering beyond BoringSSL permutation policy, 0-RTT request send/replay policy, 0-RTT acceptance/rejection observability, and capture-derived raw transport-parameter presets.
@@ -212,6 +212,8 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --lib streaming_response_backpressure_does_not_pause_when_a_sibling_has_capacity -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-current-a cargo test --test h3_receive_flow_scheduling native_h3_driver_flushes_receive_credit_from_consumed_body_bytes -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-continue cargo test --test h3_native_recovery -- --nocapture`
+- `CARGO_TARGET_DIR=/tmp/specter-h3-ecn cargo test --test h3_native_recovery -- --nocapture`
+- `CARGO_TARGET_DIR=/tmp/specter-h3-ecn cargo test --test h3_receive_flow_scheduling native_h3_driver_decays_send_window_on_ack_ecn_congestion -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --lib reset_on_full_tunnel_inbound_is_queued_until_public_reader_frees_capacity -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --test h3_native_quic native_quic_ack_tracker_uses_max_ack_delay_timer_below_packet_threshold -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --test h3_quic_packet_parsing -- --nocapture`
