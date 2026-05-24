@@ -433,6 +433,18 @@ impl NativeMockH3Connection {
                         H3Frame::Data(data) => {
                             if !data.is_empty() {
                                 active = true;
+                                // The mock server consumes inbound DATA
+                                // bytes the moment it forwards them on
+                                // `evt_tx`; surface that drain to the
+                                // receive flow control so MAX_DATA /
+                                // MAX_STREAM_DATA emit the RFC 9000
+                                // Section 4 absolute "initial + consumed"
+                                // values rather than relying on a
+                                // wire-receive heuristic.
+                                self.handshake.record_server_stream_consumed(
+                                    event.stream_id,
+                                    data.len() as u64,
+                                )?;
                                 let _ = self
                                     .evt_tx
                                     .send(MockEvent::Data {
