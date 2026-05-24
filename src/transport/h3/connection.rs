@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
 use crate::error::{Error, Result};
-use crate::fingerprint::{Http3Fingerprint, TlsFingerprint};
+use crate::fingerprint::{Http3Fingerprint, QuicTransportParams, TlsFingerprint};
 use crate::transport::dns::DnsConfig;
 use crate::transport::h3::handle::H3Handle;
 use crate::transport::h3::handshake::NativeQuicHandshake;
@@ -72,7 +72,7 @@ impl H3Connection {
         } else {
             "[::]:0".parse().unwrap()
         };
-        let socket = Arc::new(bind_udp_socket(local_addr)?);
+        let socket = Arc::new(bind_udp_socket(local_addr, &fingerprint.transport)?);
 
         Self::connect_native(NativeH3Connect {
             host,
@@ -295,7 +295,16 @@ fn random_connection_id(len: usize) -> Result<ConnectionId> {
     ConnectionId::from_bytes(Bytes::from(bytes))
 }
 
-fn bind_udp_socket(local_addr: SocketAddr) -> Result<UdpSocket> {
+fn bind_udp_socket(local_addr: SocketAddr, transport: &QuicTransportParams) -> Result<UdpSocket> {
+    let socket = bind_socket2_udp_socket(local_addr, transport)?;
+    let std_socket: std::net::UdpSocket = socket.into();
+    UdpSocket::from_std(std_socket).map_err(Error::Io)
+}
+
+fn bind_socket2_udp_socket(
+    local_addr: SocketAddr,
+    transport: &QuicTransportParams,
+) -> Result<socket2::Socket> {
     let domain = if local_addr.is_ipv4() {
         socket2::Domain::IPV4
     } else {
@@ -305,10 +314,30 @@ fn bind_udp_socket(local_addr: SocketAddr) -> Result<UdpSocket> {
         .map_err(Error::Io)?;
     let _ = socket.set_recv_buffer_size(H3_UDP_SOCKET_BUFFER_BYTES);
     let _ = socket.set_send_buffer_size(H3_UDP_SOCKET_BUFFER_BYTES);
+    apply_udp_ecn_marking(&socket, local_addr, transport)?;
     socket.set_nonblocking(true).map_err(Error::Io)?;
     socket.bind(&local_addr.into()).map_err(Error::Io)?;
-    let std_socket: std::net::UdpSocket = socket.into();
-    UdpSocket::from_std(std_socket).map_err(Error::Io)
+    Ok(socket)
+}
+
+fn apply_udp_ecn_marking(
+    socket: &socket2::Socket,
+    local_addr: SocketAddr,
+    transport: &QuicTransportParams,
+) -> Result<()> {
+    let Some(codepoint) = transport.ecn_codepoint else {
+        return Ok(());
+    };
+    let tos_bits = codepoint.ip_tos_bits();
+    if local_addr.is_ipv4() {
+        socket.set_tos_v4(tos_bits).map_err(Error::Io)?;
+    } else {
+        #[cfg(unix)]
+        {
+            socket.set_tclass_v6(tos_bits).map_err(Error::Io)?;
+        }
+    }
+    Ok(())
 }
 
 fn parse_url(url: &str) -> Result<(String, u16, String)> {
@@ -323,4 +352,32 @@ fn parse_url(url: &str) -> Result<(String, u16, String)> {
     let port = u.port().unwrap_or(443);
     let path = u.path().to_string();
     Ok((host, port, path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fingerprint::http3::{QuicEcnCodepoint, QuicTransportParams};
+
+    #[test]
+    fn native_h3_udp_socket_leaves_ipv4_ecn_unmarked_by_default() {
+        let transport = QuicTransportParams::chrome();
+        let socket = bind_socket2_udp_socket("127.0.0.1:0".parse().unwrap(), &transport)
+            .expect("bind socket");
+
+        assert_eq!(socket.tos_v4().expect("ipv4 tos") & 0b11, 0);
+    }
+
+    #[test]
+    fn native_h3_udp_socket_applies_configured_ipv4_ecn_marking() {
+        let mut transport = QuicTransportParams::chrome();
+        transport.ecn_codepoint = Some(QuicEcnCodepoint::Ect0);
+        let socket = bind_socket2_udp_socket("127.0.0.1:0".parse().unwrap(), &transport)
+            .expect("bind socket");
+
+        assert_eq!(
+            socket.tos_v4().expect("ipv4 tos") & 0b11,
+            QuicEcnCodepoint::Ect0.ip_tos_bits()
+        );
+    }
 }

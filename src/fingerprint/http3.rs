@@ -114,6 +114,21 @@ impl RawQuicTransportParameter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QuicEcnCodepoint {
+    Ect0,
+    Ect1,
+}
+
+impl QuicEcnCodepoint {
+    pub fn ip_tos_bits(self) -> u32 {
+        match self {
+            Self::Ect0 => 0b10,
+            Self::Ect1 => 0b01,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QuicTransportParams {
     pub max_idle_timeout_ms: u64,
@@ -146,6 +161,7 @@ pub struct QuicTransportParams {
     pub relaxed_loss_threshold: bool,
     pub max_connection_window: u64,
     pub max_stream_window: u64,
+    pub ecn_codepoint: Option<QuicEcnCodepoint>,
 }
 
 impl QuicTransportParams {
@@ -181,6 +197,7 @@ impl QuicTransportParams {
             relaxed_loss_threshold: false,
             max_connection_window: 24 * 1024 * 1024,
             max_stream_window: 16 * 1024 * 1024,
+            ecn_codepoint: None,
         }
     }
 
@@ -226,7 +243,7 @@ impl QuicTransportParams {
             })
             .unwrap_or_else(|| "none".to_string());
         format!(
-            "idle={};recv_udp={};send_udp={};initial_dgram={};max_data={};bidi_local={};bidi_remote={};uni_data={};bidi_streams={};uni_streams={};ack_exp={};ack_delay={};ack_threshold={};cid_limit={};disable_migration={};disable_dcid_reuse={};grease={};additional={additional_transport_parameters};raw_ordered={raw_ordered_transport_parameters};max_datagram={:?};dcid_len={};scid_len={};amp={};rtt={};cwnd={};pacing={};max_pacing={:?};relaxed_loss={};conn_win={};stream_win={}",
+            "idle={};recv_udp={};send_udp={};initial_dgram={};max_data={};bidi_local={};bidi_remote={};uni_data={};bidi_streams={};uni_streams={};ack_exp={};ack_delay={};ack_threshold={};cid_limit={};disable_migration={};disable_dcid_reuse={};grease={};additional={additional_transport_parameters};raw_ordered={raw_ordered_transport_parameters};max_datagram={:?};dcid_len={};scid_len={};amp={};rtt={};cwnd={};pacing={};max_pacing={:?};relaxed_loss={};conn_win={};stream_win={};ecn={:?}",
             self.max_idle_timeout_ms,
             self.max_recv_udp_payload_size,
             self.max_send_udp_payload_size,
@@ -255,6 +272,7 @@ impl QuicTransportParams {
             self.relaxed_loss_threshold,
             self.max_connection_window,
             self.max_stream_window,
+            self.ecn_codepoint,
         )
     }
 }
