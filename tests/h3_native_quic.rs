@@ -14,6 +14,7 @@ use specter::transport::h3::quic::{
     QuicAckTracker, QuicCryptoAssembler, QuicFrame, QuicLossDetector, ShortHeaderPacket,
     TransportParameter,
 };
+use std::time::{Duration, Instant};
 
 #[test]
 fn native_quic_initial_header_round_trips_connection_ids_token_and_packet_number() {
@@ -603,6 +604,25 @@ fn native_quic_ack_tracker_defers_until_configured_packet_threshold() {
     assert!(!tracker.should_ack_after(1));
     tracker.observe(5);
     assert!(tracker.should_ack_after(1));
+}
+
+#[test]
+fn native_quic_ack_tracker_uses_max_ack_delay_timer_below_packet_threshold() {
+    let mut tracker = QuicAckTracker::default();
+    let first_observed = Instant::now();
+
+    tracker.observe_at(1, first_observed);
+
+    assert!(!tracker.should_ack_after_or_delay(
+        16,
+        Duration::from_millis(25),
+        first_observed + Duration::from_millis(24)
+    ));
+    assert!(tracker.should_ack_after_or_delay(
+        16,
+        Duration::from_millis(25),
+        first_observed + Duration::from_millis(25)
+    ));
 }
 
 #[test]

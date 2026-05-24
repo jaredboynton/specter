@@ -127,6 +127,28 @@ fn native_h3_driver_retries_flow_control_blocked_open_stream_data() {
 }
 
 #[test]
+fn native_h3_driver_schedules_timer_driven_delayed_application_acks() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let drive_loop = driver
+        .split("async fn drive_loop")
+        .nth(1)
+        .expect("driver must have drive_loop")
+        .split("fn has_pending_work")
+        .next()
+        .expect("drive_loop section");
+
+    assert!(
+        drive_loop.contains("client_application_ack_deadline"),
+        "native H3 driver must derive a delayed ACK deadline from max_ack_delay_ms"
+    );
+    assert!(
+        drive_loop.contains("send_delayed_application_ack().await?"),
+        "native H3 driver must wake on the delayed ACK timer even when ack_eliciting_threshold is not reached"
+    );
+}
+
+#[test]
 fn native_mock_h3_server_schedules_lost_application_stream_retransmits() {
     let mock_server = std::fs::read_to_string("tests/helpers/mock_h3_server.rs")
         .expect("native mock H3 server source");
