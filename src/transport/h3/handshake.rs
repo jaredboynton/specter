@@ -23,8 +23,8 @@ use crate::transport::h3::recovery::{
 use crate::transport::h3::tls::{
     build_client_initial_packet_from_capture_with_size,
     build_client_initial_packet_from_capture_with_version_and_size, ClientInitialPacket,
-    NativeH3SessionTicket, NativeQuicTlsSession, QuicEncryptionLevel, QuicSecretDirection,
-    QuicTlsSecret,
+    NativeH3HandshakeStatus, NativeH3SessionTicket, NativeQuicTlsSession, QuicEncryptionLevel,
+    QuicSecretDirection, QuicTlsSecret,
 };
 
 use getrandom::fill as getrandom_fill;
@@ -956,6 +956,20 @@ impl NativeQuicServerHandshake {
 
     pub fn is_application_ready(&self) -> bool {
         self.client_application_keys.is_some() && self.server_application_keys.is_some()
+    }
+
+    /// Native HTTP/3 TLS 1.3 resumption / QUIC 0-RTT status for this server
+    /// handshake. Server-side `EarlyAccepted` requires that the server
+    /// configured a matching `SSL_set_quic_early_data_context` per
+    /// RFC 9001 section 4.6.
+    pub fn handshake_status(&self) -> NativeH3HandshakeStatus {
+        self.tls.handshake_status()
+    }
+
+    /// BoringSSL `SSL_get_early_data_reason` code for diagnostic logging on
+    /// the server side. See `ssl_early_data_reason_t` in `openssl/ssl.h`.
+    pub fn early_data_reason(&self) -> u32 {
+        self.tls.early_data_reason()
     }
 
     pub fn is_close_draining(&self) -> bool {
@@ -2388,6 +2402,22 @@ impl NativeQuicHandshake {
 
     pub fn take_session_tickets(&mut self) -> Vec<NativeH3SessionTicket> {
         self.tls.take_session_tickets()
+    }
+
+    /// Native HTTP/3 TLS 1.3 resumption / QUIC 0-RTT status for this handshake.
+    ///
+    /// Combines `SSL_session_reused`, `SSL_early_data_accepted`, and the
+    /// per-session 0-RTT offer flag into [`NativeH3HandshakeStatus`]. Stable
+    /// once the handshake has produced application secrets per RFC 9001
+    /// section 4.6.
+    pub fn handshake_status(&self) -> NativeH3HandshakeStatus {
+        self.tls.handshake_status()
+    }
+
+    /// BoringSSL `SSL_get_early_data_reason` code (e.g. `ssl_early_data_accepted = 2`,
+    /// `ssl_early_data_quic_parameter_mismatch = 13`) for diagnostic logging.
+    pub fn early_data_reason(&self) -> u32 {
+        self.tls.early_data_reason()
     }
 
     pub fn client_initial(&self) -> &ClientInitialPacket {
