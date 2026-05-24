@@ -194,6 +194,17 @@ fn websocket_benchmark_declares_fastwebsockets_gate() {
     assert!(source.contains("tokio_tungstenite::connect_async"));
 }
 
+#[test]
+fn websocket_send_hot_path_reuses_frame_encode_buffer() {
+    let connection = std::fs::read_to_string("src/websocket/connection.rs").unwrap();
+    let frame = std::fs::read_to_string("src/websocket/frame.rs").unwrap();
+
+    assert!(connection.contains("write_buffer: BytesMut"));
+    assert!(connection.contains("encode_frame_into("));
+    assert!(frame.contains("pub(crate) fn encode_frame_into("));
+    assert!(!connection.contains("let bytes = encode_frame(opcode, payload"));
+}
+
 #[tokio::test]
 async fn test_h1_streaming_local() {
     let _ = tracing_subscriber::fmt()
