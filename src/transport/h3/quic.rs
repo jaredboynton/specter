@@ -436,7 +436,10 @@ impl QuicAckTracker {
 
     fn pending_ack_elapsed(&self, now: Instant) -> Option<Duration> {
         self.pending_ack
-            .then(|| self.first_pending_ack_at.map(|first| now.saturating_duration_since(first)))
+            .then(|| {
+                self.first_pending_ack_at
+                    .map(|first| now.saturating_duration_since(first))
+            })
             .flatten()
     }
 }

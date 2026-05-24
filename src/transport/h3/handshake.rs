@@ -1,6 +1,7 @@
 //! Native QUIC handshake state for HTTP/3.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 
@@ -879,6 +880,26 @@ impl NativeQuicServerHandshake {
         self.build_server_application_ack_packet()
     }
 
+    pub fn build_server_application_ack_packet_after_or_delay(
+        &mut self,
+        threshold: usize,
+        max_ack_delay: Duration,
+        now: Instant,
+    ) -> Result<Option<ServerApplicationAckPacket>> {
+        if !self
+            .client_application_ack_tracker
+            .should_ack_after_or_delay(threshold, max_ack_delay, now)
+        {
+            return Ok(None);
+        }
+        self.build_server_application_ack_packet()
+    }
+
+    pub fn server_application_ack_deadline(&self, max_ack_delay: Duration) -> Option<Instant> {
+        self.client_application_ack_tracker
+            .pending_ack_deadline(max_ack_delay)
+    }
+
     pub fn open_client_h3_stream_packet(
         &mut self,
         packet: &[u8],
@@ -1536,6 +1557,26 @@ impl NativeQuicHandshake {
             return Ok(None);
         }
         self.build_client_application_ack_packet()
+    }
+
+    pub fn build_client_application_ack_packet_after_or_delay(
+        &mut self,
+        threshold: usize,
+        max_ack_delay: Duration,
+        now: Instant,
+    ) -> Result<Option<ClientApplicationAckPacket>> {
+        if !self
+            .application_ack_tracker
+            .should_ack_after_or_delay(threshold, max_ack_delay, now)
+        {
+            return Ok(None);
+        }
+        self.build_client_application_ack_packet()
+    }
+
+    pub fn client_application_ack_deadline(&self, max_ack_delay: Duration) -> Option<Instant> {
+        self.application_ack_tracker
+            .pending_ack_deadline(max_ack_delay)
     }
 
     pub fn build_client_handshake_crypto_packet(

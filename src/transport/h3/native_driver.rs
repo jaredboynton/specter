@@ -750,6 +750,10 @@ impl NativeH3Driver {
                     .await?;
                 return Ok(());
             }
+            let client_application_ack_deadline = self.client_application_ack_deadline();
+            let client_application_ack_delay = client_application_ack_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
             let remaining_idle = self
                 .max_idle_timeout
                 .checked_sub(self.last_activity.elapsed())
@@ -783,6 +787,9 @@ impl NativeH3Driver {
                             .await?;
                         return Ok(());
                     }
+                }
+                _ = tokio::time::sleep(client_application_ack_delay), if client_application_ack_deadline.is_some() => {
+                    self.send_delayed_application_ack().await?;
                 }
                 _ = self.body_progress_notify.notified() => {
                     self.cancel_closed_streaming_bodies().await?;
@@ -823,6 +830,13 @@ impl NativeH3Driver {
         self.streaming_response_body_backpressured() || self.tunnel_inbound_backpressured()
     }
 
+    fn client_application_ack_deadline(&self) -> Option<Instant> {
+        self.handshake
+            .client_application_ack_deadline(Duration::from_millis(
+                self.fingerprint.transport.max_ack_delay_ms.max(1),
+            ))
+    }
+
     async fn send_preface(&mut self) -> Result<()> {
         for packet in self
             .handshake
@@ -852,6 +866,16 @@ impl NativeH3Driver {
             .handshake
             .build_client_receive_flow_control_update_packets()?
         {
+            self.socket
+                .send_to(packet.packet.as_ref(), self.peer_addr)
+                .await
+                .map_err(Error::Io)?;
+        }
+        Ok(())
+    }
+
+    async fn send_delayed_application_ack(&mut self) -> Result<()> {
+        if let Some(packet) = self.handshake.build_client_application_ack_packet()? {
             self.socket
                 .send_to(packet.packet.as_ref(), self.peer_addr)
                 .await
@@ -1376,9 +1400,14 @@ impl NativeH3Driver {
         }
 
         let events = self.handshake.open_server_h3_event_packet(datagram)?;
-        if let Some(packet) = self.handshake.build_client_application_ack_packet_after(
-            self.fingerprint.transport.ack_eliciting_threshold,
-        )? {
+        if let Some(packet) = self
+            .handshake
+            .build_client_application_ack_packet_after_or_delay(
+                self.fingerprint.transport.ack_eliciting_threshold,
+                Duration::from_millis(self.fingerprint.transport.max_ack_delay_ms.max(1)),
+                Instant::now(),
+            )?
+        {
             self.socket
                 .send_to(packet.packet.as_ref(), self.peer_addr)
                 .await
