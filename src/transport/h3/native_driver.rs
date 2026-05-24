@@ -871,6 +871,7 @@ impl NativeH3Driver {
             if self.last_activity.elapsed() > self.max_idle_timeout && !has_pending_work {
                 self.send_connection_close(0x00, Bytes::from_static(b"Idle timeout"))
                     .await?;
+                self.drain_connection_close(&mut buf).await?;
                 return Ok(());
             }
             let client_application_ack_deadline = self.client_application_ack_deadline();
@@ -893,6 +894,7 @@ impl NativeH3Driver {
                         None => {
                             self.send_connection_close(0x00, Bytes::from_static(b"Client shutdown"))
                                 .await?;
+                            self.drain_connection_close(&mut buf).await?;
                             return Ok(());
                         }
                     }
@@ -907,6 +909,7 @@ impl NativeH3Driver {
                 _ = tokio::time::sleep(remaining_idle), if !has_pending_work => {
                     self.send_connection_close(0x00, Bytes::from_static(b"Idle timeout"))
                         .await?;
+                    self.drain_connection_close(&mut buf).await?;
                     return Ok(());
                 }
                 _ = tokio::time::sleep(client_application_ack_delay), if client_application_ack_deadline.is_some() => {
@@ -1021,6 +1024,27 @@ impl NativeH3Driver {
                 .send_to(close_packet.as_ref(), self.peer_addr)
                 .await
                 .map_err(Error::Io)?;
+        }
+        Ok(())
+    }
+
+    async fn drain_connection_close(&mut self, buf: &mut [u8]) -> Result<()> {
+        if self.closing_connection_close_packet.is_none() {
+            return Ok(());
+        }
+
+        let drain_for = Duration::from_millis(self.fingerprint.transport.max_ack_delay_ms.max(1))
+            .min(self.max_idle_timeout);
+        let drain_deadline = Instant::now() + drain_for;
+        while let Some(remaining) = drain_deadline.checked_duration_since(Instant::now()) {
+            match tokio::time::timeout(remaining, self.socket.recv_from(buf)).await {
+                Ok(Ok((_, from))) if from == self.peer_addr => {
+                    self.replay_connection_close().await?;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => return Err(Error::Io(error)),
+                Err(_) => break,
+            }
         }
         Ok(())
     }

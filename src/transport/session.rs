@@ -1,7 +1,8 @@
 //! TLS session resumption and caching.
 //!
-//! Implements session ticket caching for TLS 1.2 and TLS 1.3 session resumption.
-//! Browsers cache session tickets to enable 0-RTT (early data) and faster handshakes.
+//! Implements generic session ticket caching for TLS 1.2 and TLS 1.3 session resumption.
+//! Browsers cache session tickets to enable 0-RTT (early data) and faster handshakes, but
+//! native HTTP/3 does not yet wire this cache into the QUIC TLS handshake.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

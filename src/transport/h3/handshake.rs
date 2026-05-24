@@ -9,9 +9,10 @@ use crate::error::{Error, Result};
 use crate::fingerprint::{Http3Fingerprint, QuicTransportParams, TlsFingerprint};
 use crate::transport::h3::native;
 use crate::transport::h3::quic::{
-    decode_frames, derive_initial_key_material, encode_frame, encode_long_header,
-    open_long_header_packet, open_short_header_packet, protect_long_header_packet,
-    protect_short_header_packet, split_long_header_datagram, ConnectionId, LongHeaderPacket,
+    build_initial_crypto_packet, decode_frames, decode_version_negotiation_packet,
+    derive_initial_key_material, encode_frame, encode_long_header, open_long_header_packet,
+    open_short_header_packet, protect_long_header_packet, protect_short_header_packet,
+    split_long_header_datagram, validate_retry_integrity_tag_v1, ConnectionId, LongHeaderPacket,
     LongHeaderType, QuicAckTracker, QuicCryptoAssembler, QuicFrame, QuicLossDetector,
     QuicPacketKeyMaterial, QuicPathValidator,
 };
@@ -19,6 +20,10 @@ use crate::transport::h3::tls::{
     build_client_initial_packet_from_capture_with_size, ClientInitialPacket, NativeQuicTlsSession,
     QuicEncryptionLevel, QuicSecretDirection, QuicTlsSecret,
 };
+
+const QUIC_VERSION_1: u32 = 1;
+const INITIAL_PACKET_NUMBER_LEN: usize = 4;
+const AES_GCM_TAG_LEN: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessedServerInitial {
@@ -484,8 +489,11 @@ impl QuicReceiveFlowControl {
 
 pub struct NativeQuicHandshake {
     client_initial: ClientInitialPacket,
+    pending_client_initial: Option<ClientInitialPacket>,
     tls: NativeQuicTlsSession,
     fingerprint: Http3Fingerprint,
+    original_destination_cid: ConnectionId,
+    retry_source_cid: Option<ConnectionId>,
     destination_cid: ConnectionId,
     source_cid: ConnectionId,
     client_initial_keys: QuicPacketKeyMaterial,
@@ -1419,8 +1427,11 @@ impl NativeQuicHandshake {
 
         Ok(Self {
             client_initial,
+            pending_client_initial: None,
             tls,
             fingerprint: fingerprint.clone(),
+            original_destination_cid: destination_cid.clone(),
+            retry_source_cid: None,
             destination_cid,
             source_cid,
             client_initial_keys: initial_keys.client,
@@ -1464,6 +1475,10 @@ impl NativeQuicHandshake {
 
     pub fn client_initial(&self) -> &ClientInitialPacket {
         &self.client_initial
+    }
+
+    pub fn take_pending_client_initial(&mut self) -> Option<ClientInitialPacket> {
+        self.pending_client_initial.take()
     }
 
     pub fn install_tls_secrets(&mut self, secrets: &[QuicTlsSecret]) -> Result<()> {
@@ -2257,6 +2272,10 @@ impl NativeQuicHandshake {
         &mut self,
         datagram: &[u8],
     ) -> Result<Vec<ProcessedServerInitial>> {
+        if is_version_negotiation_datagram(datagram) {
+            return self.process_version_negotiation_datagram(datagram);
+        }
+
         let mut processed = Vec::new();
         for packet in split_long_header_datagram(datagram)? {
             match packet.packet_type {
@@ -2340,11 +2359,161 @@ impl NativeQuicHandshake {
                         }
                     }
                 }
-                LongHeaderType::ZeroRtt | LongHeaderType::Retry => {}
+                LongHeaderType::Retry => {
+                    self.process_retry_packet(packet.packet.as_ref())?;
+                }
+                LongHeaderType::ZeroRtt => {}
             }
         }
 
         Ok(processed)
+    }
+
+    fn process_version_negotiation_datagram(
+        &self,
+        datagram: &[u8],
+    ) -> Result<Vec<ProcessedServerInitial>> {
+        let packet = decode_version_negotiation_packet(datagram)?;
+        if packet.destination_cid != self.source_cid || packet.source_cid != self.destination_cid {
+            return Ok(Vec::new());
+        }
+        if packet.supported_versions.contains(&QUIC_VERSION_1) {
+            return Ok(Vec::new());
+        }
+        Err(Error::Quic(
+            "native H3 server did not offer QUIC version 1".into(),
+        ))
+    }
+
+    fn process_retry_packet(&mut self, retry_packet: &[u8]) -> Result<()> {
+        if self.retry_source_cid.is_some() {
+            return Err(Error::Quic(
+                "native H3 received more than one QUIC Retry packet".into(),
+            ));
+        }
+
+        let retry = validate_retry_integrity_tag_v1(&self.original_destination_cid, retry_packet)?;
+        if retry.destination_cid != self.source_cid {
+            return Err(Error::Quic(
+                "native H3 Retry destination CID does not match client source CID".into(),
+            ));
+        }
+
+        let retry_keys = derive_initial_key_material(retry.source_cid.as_bytes())?;
+        let packet_number = self.next_client_initial_packet_number;
+        let retry_initial = build_client_initial_packet_with_token(
+            &self.fingerprint,
+            self.client_initial.crypto_data.clone(),
+            self.client_initial.transport_parameters.clone(),
+            self.client_initial.secrets.clone(),
+            retry.source_cid.clone(),
+            self.source_cid.clone(),
+            retry.token,
+            packet_number,
+        )?;
+
+        self.destination_cid = retry.source_cid.clone();
+        self.retry_source_cid = Some(retry.source_cid);
+        self.client_initial_keys = retry_keys.client;
+        self.server_initial_keys = retry_keys.server;
+        self.client_initial = retry_initial.clone();
+        self.pending_client_initial = Some(retry_initial);
+        self.next_client_initial_packet_number = packet_number + 1;
+        Ok(())
+    }
+}
+
+fn is_version_negotiation_datagram(datagram: &[u8]) -> bool {
+    datagram.len() >= 5
+        && datagram[0] & 0x80 != 0
+        && u32::from_be_bytes([datagram[1], datagram[2], datagram[3], datagram[4]]) == 0
+}
+
+fn build_client_initial_packet_with_token(
+    fingerprint: &Http3Fingerprint,
+    crypto_data: Bytes,
+    transport_parameters: Bytes,
+    secrets: Vec<QuicTlsSecret>,
+    destination_cid: ConnectionId,
+    source_cid: ConnectionId,
+    token: Bytes,
+    packet_number: u64,
+) -> Result<ClientInitialPacket> {
+    let header_len_without_length = 1
+        + 4
+        + 1
+        + destination_cid.as_bytes().len()
+        + 1
+        + source_cid.as_bytes().len()
+        + varint_len(token.len() as u64)
+        + token.len();
+    let padded_plaintext_len = initial_plaintext_len(
+        header_len_without_length,
+        crypto_data.len(),
+        fingerprint.transport.initial_datagram_size,
+    );
+    let payload_len = padded_plaintext_len + AES_GCM_TAG_LEN;
+    let header = encode_long_header(&LongHeaderPacket {
+        packet_type: LongHeaderType::Initial,
+        version: QUIC_VERSION_1,
+        destination_cid: destination_cid.clone(),
+        source_cid,
+        token,
+        packet_number,
+        packet_number_len: INITIAL_PACKET_NUMBER_LEN,
+        payload_len,
+    })?;
+    let packet_number_offset = header
+        .len()
+        .checked_sub(INITIAL_PACKET_NUMBER_LEN)
+        .ok_or_else(|| Error::HttpProtocol("invalid QUIC Initial header length".into()))?;
+    let keys = derive_initial_key_material(destination_cid.as_bytes())?;
+    let packet = build_initial_crypto_packet(
+        &keys.client,
+        packet_number,
+        &header,
+        packet_number_offset,
+        INITIAL_PACKET_NUMBER_LEN,
+        &crypto_data,
+        padded_plaintext_len,
+    )?;
+
+    Ok(ClientInitialPacket {
+        packet,
+        header,
+        packet_number_offset,
+        crypto_data,
+        transport_parameters,
+        secrets,
+    })
+}
+
+fn initial_plaintext_len(
+    header_len_without_length: usize,
+    crypto_data_len: usize,
+    initial_datagram_size: usize,
+) -> usize {
+    let target_datagram_len = initial_datagram_size.max(1200);
+    let crypto_frame_len = 1 + 1 + varint_len(crypto_data_len as u64) + crypto_data_len;
+    let mut padded_len = crypto_frame_len;
+    loop {
+        let payload_len = padded_len + AES_GCM_TAG_LEN;
+        let header_len = header_len_without_length
+            + varint_len((payload_len + INITIAL_PACKET_NUMBER_LEN) as u64)
+            + INITIAL_PACKET_NUMBER_LEN;
+        if header_len + payload_len >= target_datagram_len {
+            return padded_len;
+        }
+        padded_len = target_datagram_len - header_len - AES_GCM_TAG_LEN;
+    }
+}
+
+fn varint_len(value: u64) -> usize {
+    match value {
+        0..=0x3f => 1,
+        0x40..=0x3fff => 2,
+        0x4000..=0x3fff_ffff => 4,
+        _ => 8,
     }
 }
 

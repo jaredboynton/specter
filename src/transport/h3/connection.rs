@@ -147,6 +147,12 @@ impl H3Connection {
                         continue;
                     }
                     let processed_packets = handshake.process_server_datagram(&buf[..len])?;
+                    if let Some(packet) = handshake.take_pending_client_initial() {
+                        socket
+                            .send_to(packet.packet.as_ref(), peer_addr)
+                            .await
+                            .map_err(Error::Io)?;
+                    }
                     if let Some(packet) = handshake.build_client_initial_ack_packet()? {
                         socket
                             .send_to(packet.packet.as_ref(), peer_addr)
