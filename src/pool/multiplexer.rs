@@ -61,16 +61,25 @@ pub struct OriginKey {
     pub is_https: bool,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct OriginFairQueue {
+#[derive(Debug, Clone)]
+pub struct OriginFairQueue<K = PoolKey> {
     order: VecDeque<OriginKey>,
-    queues: HashMap<OriginKey, VecDeque<PoolKey>>,
+    queues: HashMap<OriginKey, VecDeque<K>>,
     len: usize,
 }
 
-impl OriginFairQueue {
-    pub fn push(&mut self, key: PoolKey) {
-        let origin = key.origin_key();
+impl<K> Default for OriginFairQueue<K> {
+    fn default() -> Self {
+        Self {
+            order: VecDeque::new(),
+            queues: HashMap::new(),
+            len: 0,
+        }
+    }
+}
+
+impl<K> OriginFairQueue<K> {
+    pub fn push_with_origin(&mut self, origin: OriginKey, key: K) {
         let queue = self.queues.entry(origin.clone()).or_default();
         if queue.is_empty() {
             self.order.push_back(origin);
@@ -79,7 +88,7 @@ impl OriginFairQueue {
         self.len += 1;
     }
 
-    pub fn pop_next(&mut self) -> Option<PoolKey> {
+    pub fn pop_next(&mut self) -> Option<K> {
         while let Some(origin) = self.order.pop_front() {
             let Some((key, has_more)) = self.pop_origin_front(&origin) else {
                 continue;
@@ -103,10 +112,17 @@ impl OriginFairQueue {
         self.len == 0
     }
 
-    fn pop_origin_front(&mut self, origin: &OriginKey) -> Option<(PoolKey, bool)> {
+    fn pop_origin_front(&mut self, origin: &OriginKey) -> Option<(K, bool)> {
         let queue = self.queues.get_mut(origin)?;
         let key = queue.pop_front()?;
         Some((key, !queue.is_empty()))
+    }
+}
+
+impl OriginFairQueue<PoolKey> {
+    pub fn push(&mut self, key: PoolKey) {
+        let origin = key.origin_key();
+        self.push_with_origin(origin, key);
     }
 }
 
