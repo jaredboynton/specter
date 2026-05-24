@@ -678,6 +678,9 @@ impl NativeQuicTlsSession {
 
         let state = Arc::new(Mutex::new(CaptureState::default()));
         ssl.replace_ex_data(capture_index(), state.clone());
+        unsafe {
+            SSL_set_early_data_enabled(ssl.as_ptr(), 1);
+        }
 
         let transport_parameters = match (
             original_destination_connection_id,
@@ -693,6 +696,8 @@ impl NativeQuicTlsSession {
             }
             _ => encode_transport_parameters(&fingerprint.transport),
         };
+        let server_early_data_context =
+            native_h3_early_data_context(fingerprint, &transport_parameters);
         unsafe {
             if ffi::SSL_set_quic_method(ssl.as_ptr(), quic_method()) != 1 {
                 return Err(Error::Tls(
@@ -707,6 +712,16 @@ impl NativeQuicTlsSession {
             {
                 return Err(Error::Tls(
                     "failed to set QUIC server transport parameters".into(),
+                ));
+            }
+            if SSL_set_quic_early_data_context(
+                ssl.as_ptr(),
+                server_early_data_context.as_ptr(),
+                server_early_data_context.len(),
+            ) != 1
+            {
+                return Err(Error::Tls(
+                    "failed to set QUIC server 0-RTT early-data context".into(),
                 ));
             }
             ffi::SSL_set_accept_state(ssl.as_ptr());

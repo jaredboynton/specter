@@ -344,9 +344,25 @@ impl QuicApplicationFlowControl {
     }
 }
 
+// QUIC receive flow control.
+//
+// RFC 9000 Section 4 specifies that MAX_DATA and MAX_STREAM_DATA frames
+// (encodings in Sections 19.9 and 19.10) carry the *absolute* maximum the
+// receiver is willing to accept on the connection or stream, not a delta.
+// Per RFC 9000 Section 4.1, "a receiver MUST close the connection with an
+// error of type FLOW_CONTROL_ERROR if the sender violates the advertised
+// connection or stream data limits", and Section 4.2 ties window growth to
+// the receiver's application drain rate so that buffers stay bounded.
+//
+// We therefore derive every advertised absolute value from
+// `initial_max_*data + bytes_consumed_by_application`, and only *gate* the
+// emission of those frames so we are not putting one frame per byte on the
+// wire. The on-wire receive path (`observe_stream_frame`) is kept purely as
+// an enforcement check against the limit we have already advertised.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QuicReceiveFlowControl {
     local_initiator: u64,
+    initial_max_data: u64,
     max_data: u64,
     max_connection_window: u64,
     received_data: u64,
@@ -356,8 +372,13 @@ struct QuicReceiveFlowControl {
     max_stream_window: u64,
     stream_received: BTreeMap<u64, u64>,
     stream_data_overrides: BTreeMap<u64, u64>,
+    connection_consumed: u64,
+    stream_consumed: BTreeMap<u64, u64>,
+    last_announced_max_data: u64,
+    last_announced_max_stream_data: BTreeMap<u64, u64>,
     pending_max_data: Option<u64>,
     pending_max_stream_data: BTreeMap<u64, u64>,
+    connection_update_threshold: u64,
 }
 
 impl QuicReceiveFlowControl {
@@ -370,12 +391,21 @@ impl QuicReceiveFlowControl {
     }
 
     fn new(local_initiator: u64, local_transport: &QuicTransportParams) -> Self {
+        let initial_max_data = local_transport.initial_max_data;
+        let max_connection_window = local_transport
+            .max_connection_window
+            .max(initial_max_data);
+        // Emit MAX_DATA when the absolute value we would announce has grown
+        // by at least half of the originally negotiated initial window since
+        // the last announcement. This keeps the same "half-window" cadence
+        // that the previous receive-threshold logic used, but applied to the
+        // app-consumed counter that RFC 9000 Section 4 requires.
+        let connection_update_threshold = (initial_max_data / 2).max(1);
         Self {
             local_initiator,
-            max_data: local_transport.initial_max_data,
-            max_connection_window: local_transport
-                .max_connection_window
-                .max(local_transport.initial_max_data),
+            initial_max_data,
+            max_data: initial_max_data,
+            max_connection_window,
             received_data: 0,
             initial_max_stream_data_bidi_local: local_transport.initial_max_stream_data_bidi_local,
             initial_max_stream_data_bidi_remote: local_transport
@@ -384,8 +414,13 @@ impl QuicReceiveFlowControl {
             max_stream_window: local_transport.max_stream_window,
             stream_received: BTreeMap::new(),
             stream_data_overrides: BTreeMap::new(),
+            connection_consumed: 0,
+            stream_consumed: BTreeMap::new(),
+            last_announced_max_data: initial_max_data,
+            last_announced_max_stream_data: BTreeMap::new(),
             pending_max_data: None,
             pending_max_stream_data: BTreeMap::new(),
+            connection_update_threshold,
         }
     }
 
@@ -422,9 +457,88 @@ impl QuicReceiveFlowControl {
         self.received_data = next_received_data;
         self.stream_received
             .insert(stream_id, previous_stream_received.max(data_end));
-        self.maybe_queue_connection_window_update();
-        self.maybe_queue_stream_window_update(stream_id)?;
         Ok(())
+    }
+
+    // Record the bytes the application has drained off a stream's public body
+    // (or RFC 9220 tunnel inbound channel). Per RFC 9000 Section 4.1/4.2 the
+    // absolute MAX_DATA / MAX_STREAM_DATA values are
+    //   initial_max_data + sum(bytes_consumed_by_application across streams)
+    //   initial_max_stream_data[kind] + bytes_consumed_for_this_stream
+    // and we only enqueue a frame when the value crosses the gating
+    // threshold relative to the last announced value.
+    fn record_stream_consumed(&mut self, stream_id: u64, len: u64) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let initial_stream_limit = self.initial_stream_data_limit(stream_id)?;
+        let stream_window = self.max_stream_window.max(initial_stream_limit);
+        let stream_threshold = (initial_stream_limit / 2).max(1);
+
+        let stream_total = self
+            .stream_consumed
+            .get(&stream_id)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(len)
+            .ok_or_else(|| {
+                Error::HttpProtocol("QUIC receive flow control consumed overflow".into())
+            })?;
+        self.stream_consumed.insert(stream_id, stream_total);
+
+        self.connection_consumed = self
+            .connection_consumed
+            .checked_add(len)
+            .ok_or_else(|| {
+                Error::HttpProtocol("QUIC receive flow control connection consumed overflow".into())
+            })?;
+
+        let stream_announced = *self
+            .last_announced_max_stream_data
+            .get(&stream_id)
+            .unwrap_or(&initial_stream_limit);
+        let stream_absolute = initial_stream_limit
+            .checked_add(stream_total)
+            .unwrap_or(u64::MAX)
+            .min(stream_window);
+        if stream_absolute > stream_announced
+            && stream_absolute - stream_announced >= stream_threshold
+        {
+            self.pending_max_stream_data
+                .insert(stream_id, stream_absolute);
+            self.stream_data_overrides
+                .insert(stream_id, stream_absolute);
+            self.last_announced_max_stream_data
+                .insert(stream_id, stream_absolute);
+        }
+
+        let connection_absolute = self
+            .initial_max_data
+            .checked_add(self.connection_consumed)
+            .unwrap_or(u64::MAX)
+            .min(self.max_connection_window);
+        if connection_absolute > self.last_announced_max_data
+            && connection_absolute - self.last_announced_max_data
+                >= self.connection_update_threshold
+        {
+            self.pending_max_data = Some(connection_absolute);
+            self.max_data = connection_absolute;
+            self.last_announced_max_data = connection_absolute;
+        }
+        Ok(())
+    }
+
+    // Drop per-stream bookkeeping when a stream is closed. RFC 9000 Section
+    // 4.1 keeps the connection-level counter monotonic across stream
+    // lifetimes, so we never decrement `connection_consumed`; only the
+    // per-stream maps are released so completed streams cannot double-count.
+    fn release_stream(&mut self, stream_id: u64) {
+        self.stream_consumed.remove(&stream_id);
+        self.last_announced_max_stream_data.remove(&stream_id);
+        self.pending_max_stream_data.remove(&stream_id);
+        self.stream_received.remove(&stream_id);
+        self.stream_data_overrides.remove(&stream_id);
     }
 
     fn take_update_frames(&mut self) -> Vec<QuicFrame> {
@@ -443,38 +557,14 @@ impl QuicReceiveFlowControl {
         frames
     }
 
-    fn maybe_queue_connection_window_update(&mut self) {
-        if self.max_data >= self.max_connection_window {
-            return;
-        }
-        let remaining = self.max_data.saturating_sub(self.received_data);
-        if remaining <= self.max_data / 2 {
-            self.max_data = self.max_connection_window;
-            self.pending_max_data = Some(self.max_data);
-        }
-    }
-
-    fn maybe_queue_stream_window_update(&mut self, stream_id: u64) -> Result<()> {
-        let current_limit = self.stream_data_limit(stream_id)?;
-        let max_stream_window = self.max_stream_window.max(current_limit);
-        if current_limit >= max_stream_window {
-            return Ok(());
-        }
-        let received = *self.stream_received.get(&stream_id).unwrap_or(&0);
-        let remaining = current_limit.saturating_sub(received);
-        if remaining <= current_limit / 2 {
-            self.stream_data_overrides
-                .insert(stream_id, max_stream_window);
-            self.pending_max_stream_data
-                .insert(stream_id, max_stream_window);
-        }
-        Ok(())
-    }
-
     fn stream_data_limit(&self, stream_id: u64) -> Result<u64> {
         if let Some(max_stream_data) = self.stream_data_overrides.get(&stream_id) {
             return Ok(*max_stream_data);
         }
+        self.initial_stream_data_limit(stream_id)
+    }
+
+    fn initial_stream_data_limit(&self, stream_id: u64) -> Result<u64> {
         if is_bidirectional_stream(stream_id) {
             if stream_initiator(stream_id) == self.local_initiator {
                 Ok(self.initial_max_stream_data_bidi_local)
@@ -2404,6 +2494,7 @@ impl NativeQuicHandshake {
                         self.next_server_initial_packet_number,
                     )?;
                     self.destination_cid = packet.source_cid.clone();
+                    self.server_initial_or_handshake_seen = true;
                     self.initial_ack_tracker.observe(opened.packet_number);
                     self.next_server_initial_packet_number = opened.packet_number + 1;
 
@@ -2444,6 +2535,7 @@ impl NativeQuicHandshake {
                         packet.packet_number_offset,
                         self.next_server_handshake_packet_number,
                     )?;
+                    self.server_initial_or_handshake_seen = true;
                     self.handshake_ack_tracker.observe(opened.packet_number);
                     self.next_server_handshake_packet_number = opened.packet_number + 1;
 
