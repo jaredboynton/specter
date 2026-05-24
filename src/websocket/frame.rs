@@ -230,16 +230,31 @@ pub(crate) fn encode_frame_into(
     out.extend_from_slice(&key);
     let payload_start = out.len();
     out.extend_from_slice(payload);
-    let masked_payload = &mut out[payload_start..];
-    let mut chunks = masked_payload.chunks_exact_mut(4);
-    for chunk in &mut chunks {
-        chunk[0] ^= key[0];
-        chunk[1] ^= key[1];
-        chunk[2] ^= key[2];
-        chunk[3] ^= key[3];
+    mask_payload_words(&mut out[payload_start..], key);
+}
+
+#[inline]
+fn mask_payload_words(payload: &mut [u8], key: [u8; 4]) {
+    const WORD_BYTES: usize = std::mem::size_of::<usize>();
+    let mut key_word_bytes = [0u8; WORD_BYTES];
+    for (index, byte) in key_word_bytes.iter_mut().enumerate() {
+        *byte = key[index & 3];
     }
-    for (index, byte) in chunks.into_remainder().iter_mut().enumerate() {
-        *byte ^= key[index];
+    let key_word = usize::from_ne_bytes(key_word_bytes);
+
+    let word_bytes = payload.len() / WORD_BYTES * WORD_BYTES;
+    let mut offset = 0;
+    while offset < word_bytes {
+        // SAFETY: `offset < word_bytes <= payload.len()`, and unaligned reads/writes are used.
+        unsafe {
+            let ptr = payload.as_mut_ptr().add(offset).cast::<usize>();
+            ptr.write_unaligned(ptr.read_unaligned() ^ key_word);
+        }
+        offset += WORD_BYTES;
+    }
+
+    for (index, byte) in payload[word_bytes..].iter_mut().enumerate() {
+        *byte ^= key[(word_bytes + index) & 3];
     }
 }
 

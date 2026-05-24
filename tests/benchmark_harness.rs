@@ -202,6 +202,8 @@ fn websocket_send_hot_path_reuses_frame_encode_buffer() {
     assert!(connection.contains("write_buffer: BytesMut"));
     assert!(connection.contains("encode_frame_into("));
     assert!(frame.contains("pub(crate) fn encode_frame_into("));
+    assert!(frame.contains("fn mask_payload_words("));
+    assert!(frame.contains("write_unaligned(ptr.read_unaligned() ^ key_word)"));
     assert!(!connection.contains("let bytes = encode_frame(opcode, payload"));
 }
 
