@@ -1,7 +1,7 @@
 //! Browser header presets for HTTP requests.
 //!
 //! Supported Chrome versions: 142, 143, 144, 145, 146, 147, 148
-//! Supported Firefox versions: 133
+//! Supported Firefox versions: 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, ESR 115, ESR 128, ESR 140
 
 use crate::cookie::CookieJar;
 use http::HeaderMap;
@@ -883,7 +883,10 @@ impl From<HeaderMap> for Headers {
 /// JA4H (JA4 for HTTP) fingerprints HTTP clients based on:
 /// - Header order
 /// - Header names (normalized to lowercase)
-/// - Header values (normalized)
+///
+/// This implementation is intentionally header-name/order based and does not
+/// include header values in the hash. Firefox version differences that only
+/// change the User-Agent value are not JA4H-distinguishable here.
 ///
 /// This type preserves exact header order for fingerprint accuracy.
 #[derive(Debug, Clone)]
@@ -904,8 +907,9 @@ impl OrderedHeaders {
     }
 
     /// Create Firefox navigation headers with exact order.
+    /// Uses Firefox 151 (latest implemented release) by default.
     pub fn firefox_navigation() -> Self {
-        Self::new(headers_to_owned(firefox_133_headers()))
+        Self::new(headers_to_owned(firefox_151_headers()))
     }
 
     /// Get headers as vector.
@@ -966,14 +970,9 @@ impl From<OrderedHeaders> for Vec<(String, String)> {
     }
 }
 
-/// Firefox 133 browser headers for page navigation.
-/// Firefox does NOT send Sec-Ch-Ua headers (Client Hints).
-pub fn firefox_133_headers() -> Vec<(&'static str, &'static str)> {
+fn firefox_navigation_headers(ua: &'static str) -> Vec<(&'static str, &'static str)> {
     vec![
-        (
-            "User-Agent",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
-        ),
+        ("User-Agent", ua),
         (
             "Accept",
             "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -989,13 +988,9 @@ pub fn firefox_133_headers() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Firefox 133 headers for AJAX/API requests.
-pub fn firefox_133_ajax_headers() -> Vec<(&'static str, &'static str)> {
+fn firefox_ajax_headers(ua: &'static str) -> Vec<(&'static str, &'static str)> {
     vec![
-        (
-            "User-Agent",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
-        ),
+        ("User-Agent", ua),
         ("Accept", "application/json, text/plain, */*"),
         ("Accept-Language", "en-US,en;q=0.5"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
@@ -1007,13 +1002,9 @@ pub fn firefox_133_ajax_headers() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Firefox 133 headers for form submissions.
-pub fn firefox_133_form_headers() -> Vec<(&'static str, &'static str)> {
+fn firefox_form_headers(ua: &'static str) -> Vec<(&'static str, &'static str)> {
     vec![
-        (
-            "User-Agent",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
-        ),
+        ("User-Agent", ua),
         (
             "Accept",
             "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -1028,3 +1019,178 @@ pub fn firefox_133_form_headers() -> Vec<(&'static str, &'static str)> {
         ("Connection", "keep-alive"),
     ]
 }
+
+macro_rules! firefox_header_set {
+    ($headers_fn:ident, $ajax_fn:ident, $form_fn:ident, $ua:literal, $label:literal) => {
+        #[doc = concat!("Firefox ", $label, " browser headers for page navigation.")]
+        #[doc = "Firefox does NOT send Sec-Ch-Ua headers (Client Hints)."]
+        pub fn $headers_fn() -> Vec<(&'static str, &'static str)> {
+            firefox_navigation_headers($ua)
+        }
+
+        #[doc = concat!("Firefox ", $label, " headers for AJAX/API requests.")]
+        pub fn $ajax_fn() -> Vec<(&'static str, &'static str)> {
+            firefox_ajax_headers($ua)
+        }
+
+        #[doc = concat!("Firefox ", $label, " headers for form submissions.")]
+        pub fn $form_fn() -> Vec<(&'static str, &'static str)> {
+            firefox_form_headers($ua)
+        }
+    };
+}
+
+firefox_header_set!(
+    firefox_133_headers,
+    firefox_133_ajax_headers,
+    firefox_133_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
+    "133"
+);
+firefox_header_set!(
+    firefox_134_headers,
+    firefox_134_ajax_headers,
+    firefox_134_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0",
+    "134"
+);
+firefox_header_set!(
+    firefox_135_headers,
+    firefox_135_ajax_headers,
+    firefox_135_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0",
+    "135"
+);
+firefox_header_set!(
+    firefox_136_headers,
+    firefox_136_ajax_headers,
+    firefox_136_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:136.0) Gecko/20100101 Firefox/136.0",
+    "136"
+);
+firefox_header_set!(
+    firefox_137_headers,
+    firefox_137_ajax_headers,
+    firefox_137_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0",
+    "137"
+);
+firefox_header_set!(
+    firefox_138_headers,
+    firefox_138_ajax_headers,
+    firefox_138_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:138.0) Gecko/20100101 Firefox/138.0",
+    "138"
+);
+firefox_header_set!(
+    firefox_139_headers,
+    firefox_139_ajax_headers,
+    firefox_139_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:139.0) Gecko/20100101 Firefox/139.0",
+    "139"
+);
+firefox_header_set!(
+    firefox_140_headers,
+    firefox_140_ajax_headers,
+    firefox_140_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:140.0) Gecko/20100101 Firefox/140.0",
+    "140"
+);
+firefox_header_set!(
+    firefox_141_headers,
+    firefox_141_ajax_headers,
+    firefox_141_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:141.0) Gecko/20100101 Firefox/141.0",
+    "141"
+);
+firefox_header_set!(
+    firefox_142_headers,
+    firefox_142_ajax_headers,
+    firefox_142_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:142.0) Gecko/20100101 Firefox/142.0",
+    "142"
+);
+firefox_header_set!(
+    firefox_143_headers,
+    firefox_143_ajax_headers,
+    firefox_143_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) Gecko/20100101 Firefox/143.0",
+    "143"
+);
+firefox_header_set!(
+    firefox_144_headers,
+    firefox_144_ajax_headers,
+    firefox_144_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:144.0) Gecko/20100101 Firefox/144.0",
+    "144"
+);
+firefox_header_set!(
+    firefox_145_headers,
+    firefox_145_ajax_headers,
+    firefox_145_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:145.0) Gecko/20100101 Firefox/145.0",
+    "145"
+);
+firefox_header_set!(
+    firefox_146_headers,
+    firefox_146_ajax_headers,
+    firefox_146_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:146.0) Gecko/20100101 Firefox/146.0",
+    "146"
+);
+firefox_header_set!(
+    firefox_147_headers,
+    firefox_147_ajax_headers,
+    firefox_147_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0",
+    "147"
+);
+firefox_header_set!(
+    firefox_148_headers,
+    firefox_148_ajax_headers,
+    firefox_148_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0",
+    "148"
+);
+firefox_header_set!(
+    firefox_149_headers,
+    firefox_149_ajax_headers,
+    firefox_149_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:149.0) Gecko/20100101 Firefox/149.0",
+    "149"
+);
+firefox_header_set!(
+    firefox_150_headers,
+    firefox_150_ajax_headers,
+    firefox_150_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0",
+    "150"
+);
+firefox_header_set!(
+    firefox_151_headers,
+    firefox_151_ajax_headers,
+    firefox_151_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:151.0) Gecko/20100101 Firefox/151.0",
+    "151"
+);
+firefox_header_set!(
+    firefox_esr_115_headers,
+    firefox_esr_115_ajax_headers,
+    firefox_esr_115_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.14; rv:115.0) Gecko/20100101 Firefox/115.0",
+    "115 ESR"
+);
+firefox_header_set!(
+    firefox_esr_128_headers,
+    firefox_esr_128_ajax_headers,
+    firefox_esr_128_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "128 ESR"
+);
+firefox_header_set!(
+    firefox_esr_140_headers,
+    firefox_esr_140_ajax_headers,
+    firefox_esr_140_form_headers,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:140.0) Gecko/20100101 Firefox/140.0",
+    "140 ESR"
+);
