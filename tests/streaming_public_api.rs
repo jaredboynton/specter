@@ -84,15 +84,27 @@ async fn handle_h1_connection(mut stream: TcpStream, logs: Arc<Mutex<Vec<H1Log>>
         let cookie_header = request
             .lines()
             .find(|line| line.to_ascii_lowercase().starts_with("cookie:"))
-            .map(|line| line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string());
+            .map(|line| {
+                line.split_once(':')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            });
         let auth_header = request
             .lines()
             .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
-            .map(|line| line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string());
+            .map(|line| {
+                line.split_once(':')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            });
         let content_length = request
             .lines()
             .find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
-            .and_then(|line| line.splitn(2, ':').nth(1))
+            .and_then(|line| line.split_once(':').map(|x| x.1))
             .and_then(|v| v.trim().parse::<usize>().ok())
             .unwrap_or(0);
         buffer.drain(..header_end);

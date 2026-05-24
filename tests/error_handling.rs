@@ -176,15 +176,10 @@ async fn test_tls_handshake_failure() {
     let port = listener.local_addr().unwrap().port();
 
     tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((mut stream, _)) => {
-                    // Send garbage that is not a valid TLS ServerHello.
-                    let _ = stream.write_all(b"This is not TLS").await;
-                    drop(stream);
-                }
-                Err(_) => break,
-            }
+        while let Ok((mut stream, _)) = listener.accept().await {
+            // Send garbage that is not a valid TLS ServerHello.
+            let _ = stream.write_all(b"This is not TLS").await;
+            drop(stream);
         }
     });
 

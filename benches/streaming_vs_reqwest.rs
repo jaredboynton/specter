@@ -1190,8 +1190,10 @@ pub(crate) fn corrected_client_overhead_duration(
 fn payload_schedule_ms() -> Vec<u64> {
     let mut schedule = Vec::with_capacity(BENCH_CHUNK_COUNT);
     schedule.push(0);
-    schedule
-        .extend(std::iter::repeat(BENCH_CHUNK_DELAY_MS).take(BENCH_CHUNK_COUNT.saturating_sub(1)));
+    schedule.extend(std::iter::repeat_n(
+        BENCH_CHUNK_DELAY_MS,
+        BENCH_CHUNK_COUNT.saturating_sub(1),
+    ));
     schedule
 }
 

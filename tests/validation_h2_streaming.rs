@@ -1093,12 +1093,9 @@ async fn rst_stream_error_is_scoped_to_reset_stream() {
     let mut err1_observed = false;
     if let Ok((_resp, mut rx)) = res1 {
         // May get headers ok, but reading chunk should fail
-        match rx.recv().await {
-            Some(Err(e)) => {
-                err1_observed = true;
-                assert!(e.to_string().contains("reset") || e.to_string().contains("Stream reset"));
-            }
-            _ => {}
+        if let Some(Err(e)) = rx.recv().await {
+            err1_observed = true;
+            assert!(e.to_string().contains("reset") || e.to_string().contains("Stream reset"));
         }
     } else {
         err1_observed = true;
@@ -1207,7 +1204,7 @@ async fn goaway_refreshes_pool_without_data_loss() {
 
     // Stream 1
     let (resp1, mut rx1) = client
-        .get(&format!("{}/stream-1", url))
+        .get(format!("{}/stream-1", url))
         .send_streaming()
         .await
         .unwrap();
@@ -1215,7 +1212,7 @@ async fn goaway_refreshes_pool_without_data_loss() {
 
     // Stream 2 (will trigger GOAWAY after it's opened)
     let (resp2, mut rx2) = client
-        .get(&format!("{}/stream-2", url))
+        .get(format!("{}/stream-2", url))
         .send_streaming()
         .await
         .unwrap();
@@ -1236,7 +1233,7 @@ async fn goaway_refreshes_pool_without_data_loss() {
 
     // Stream 3 - should trigger a new connection!
     let (resp3, mut rx3) = client
-        .get(&format!("{}/stream-3", url))
+        .get(format!("{}/stream-3", url))
         .send_streaming()
         .await
         .unwrap();
@@ -1337,7 +1334,7 @@ async fn dropped_receiver_does_not_poison_h2_pool() {
         .unwrap();
 
     let (resp1, rx1) = client
-        .get(&format!("{}/dropped", url))
+        .get(format!("{}/dropped", url))
         .send_streaming()
         .await
         .unwrap();
@@ -1351,7 +1348,7 @@ async fn dropped_receiver_does_not_poison_h2_pool() {
 
     // Follow-up request should succeed on the same client!
     let (resp2, mut rx2) = client
-        .get(&format!("{}/followup", url))
+        .get(format!("{}/followup", url))
         .send_streaming()
         .await
         .unwrap();
@@ -1454,7 +1451,7 @@ async fn backpressured_receiver_drop_cancels_full_body_channel() {
         .unwrap();
 
     let (resp1, rx1) = client
-        .get(&format!("{}/backpressured-drop", url))
+        .get(format!("{}/backpressured-drop", url))
         .send_streaming()
         .await
         .unwrap();
@@ -1478,7 +1475,7 @@ async fn backpressured_receiver_drop_cancels_full_body_channel() {
     .expect("driver should send RST_STREAM(CANCEL) after a full body channel receiver is dropped");
 
     let (resp2, mut rx2) = client
-        .get(&format!("{}/followup-after-backpressure-drop", url))
+        .get(format!("{}/followup-after-backpressure-drop", url))
         .send_streaming()
         .await
         .unwrap();
@@ -1577,7 +1574,7 @@ async fn flow_control_windows_advance_during_large_streams() {
         .unwrap();
 
     let (resp, mut rx) = client
-        .get(&format!("{}/large", url))
+        .get(format!("{}/large", url))
         .send_streaming()
         .await
         .unwrap();
@@ -1672,7 +1669,7 @@ async fn slow_consumer_backpressure_does_not_deadlock_other_streams() {
 
     // Start slow stream (stream 1)
     let (resp1, mut rx1) = client
-        .get(&format!("{}/slow", url))
+        .get(format!("{}/slow", url))
         .send_streaming()
         .await
         .unwrap();
@@ -1680,7 +1677,7 @@ async fn slow_consumer_backpressure_does_not_deadlock_other_streams() {
 
     // Start fast stream (stream 2)
     let (resp2, mut rx2) = client
-        .get(&format!("{}/fast", url))
+        .get(format!("{}/fast", url))
         .send_streaming()
         .await
         .unwrap();
@@ -1805,13 +1802,10 @@ async fn streaming_timeouts_are_enforced_per_phase() {
         .unwrap();
 
     let res1 = client1
-        .get(&format!("{}/ttfb-delayed", url))
+        .get(format!("{}/ttfb-delayed", url))
         .send_streaming()
         .await;
-    let ttfb_failed = match res1 {
-        Err(specter::Error::TtfbTimeout(_)) => true,
-        _ => false,
-    };
+    let ttfb_failed = matches!(res1, Err(specter::Error::TtfbTimeout(_)));
     assert!(ttfb_failed, "Should fail with TtfbTimeout");
 
     // 2. ReadIdle Timeout test
@@ -1823,17 +1817,14 @@ async fn streaming_timeouts_are_enforced_per_phase() {
         .unwrap();
 
     let (resp2, mut rx2) = client2
-        .get(&format!("{}/read-delayed", url))
+        .get(format!("{}/read-delayed", url))
         .send_streaming()
         .await
         .unwrap();
     assert_eq!(resp2.status().as_u16(), 200);
     assert_eq!(rx2.recv().await.unwrap().unwrap(), Bytes::from("chunk-1"));
     let res2_chunk2 = rx2.recv().await;
-    let read_idle_failed = match res2_chunk2 {
-        Some(Err(specter::Error::ReadIdleTimeout(_))) => true,
-        _ => false,
-    };
+    let read_idle_failed = matches!(res2_chunk2, Some(Err(specter::Error::ReadIdleTimeout(_))));
     assert!(read_idle_failed, "Should fail with ReadIdleTimeout");
 
     // 3. Verify sibling stream is unaffected and reusable
@@ -1844,7 +1835,7 @@ async fn streaming_timeouts_are_enforced_per_phase() {
         .unwrap();
 
     let (resp3, mut rx3) = client3
-        .get(&format!("{}/sibling", url))
+        .get(format!("{}/sibling", url))
         .send_streaming()
         .await
         .unwrap();
@@ -2060,7 +2051,7 @@ async fn stale_h2_pool_entries_are_evicted_before_reuse() {
         .unwrap();
 
     let (resp1, mut rx1) = client
-        .get(&format!("{}/kill-conn", url))
+        .get(format!("{}/kill-conn", url))
         .send_streaming()
         .await
         .unwrap();
@@ -2070,7 +2061,7 @@ async fn stale_h2_pool_entries_are_evicted_before_reuse() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let (resp2, mut rx2) = client
-        .get(&format!("{}/fresh-conn", url))
+        .get(format!("{}/fresh-conn", url))
         .send_streaming()
         .await
         .unwrap();
@@ -2646,7 +2637,7 @@ async fn h2_pool_reuse_preserves_fingerprint_settings() {
         .unwrap();
 
     let (resp_ff1, mut rx_ff1) = client_firefox
-        .get(&format!("{}/stream-ff-1", url))
+        .get(format!("{}/stream-ff-1", url))
         .send_streaming()
         .await
         .unwrap();
@@ -2654,7 +2645,7 @@ async fn h2_pool_reuse_preserves_fingerprint_settings() {
     assert_eq!(rx_ff1.recv().await.unwrap().unwrap(), Bytes::from("ok"));
 
     let (resp_ff2, mut rx_ff2) = client_firefox
-        .get(&format!("{}/stream-ff-2", url))
+        .get(format!("{}/stream-ff-2", url))
         .send_streaming()
         .await
         .unwrap();
@@ -2670,7 +2661,7 @@ async fn h2_pool_reuse_preserves_fingerprint_settings() {
         .unwrap();
 
     let (resp_ch1, mut rx_ch1) = client_chrome
-        .get(&format!("{}/stream-ch-1", url))
+        .get(format!("{}/stream-ch-1", url))
         .send_streaming()
         .await
         .unwrap();
