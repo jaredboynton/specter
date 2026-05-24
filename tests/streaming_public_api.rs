@@ -277,14 +277,12 @@ async fn public_streaming_api_is_transport_neutral_for_h1_h2_h3() {
                 };
                 let (_len, frame_type, flags, stream_id, _payload) = frame;
                 match frame_type {
-                    0x04 => {
-                        if flags & 0x01 == 0 && !settings_sent {
-                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
-                                .await
-                                .unwrap();
-                            conn.send_settings_ack().await.unwrap();
-                            settings_sent = true;
-                        }
+                    0x04 if flags & 0x01 == 0 && !settings_sent => {
+                        conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                            .await
+                            .unwrap();
+                        conn.send_settings_ack().await.unwrap();
+                        settings_sent = true;
                     }
                     0x01 => {
                         let resp = encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);

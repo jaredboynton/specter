@@ -68,14 +68,12 @@ async fn inline_path_streams_two_sequential_requests_on_one_connection() {
                 };
                 let (_len, frame_type, flags, stream_id, _payload) = frame;
                 match frame_type {
-                    0x04 => {
-                        if flags & 0x01 == 0 && !settings_sent {
-                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
-                                .await
-                                .unwrap();
-                            conn.send_settings_ack().await.unwrap();
-                            settings_sent = true;
-                        }
+                    0x04 if flags & 0x01 == 0 && !settings_sent => {
+                        conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                            .await
+                            .unwrap();
+                        conn.send_settings_ack().await.unwrap();
+                        settings_sent = true;
                     }
                     0x01 => {
                         observations.headers_count.fetch_add(1, Ordering::Relaxed);
@@ -171,14 +169,12 @@ async fn inline_path_falls_back_when_request_body_present() {
                 };
                 let (_len, frame_type, flags, stream_id, payload) = frame;
                 match frame_type {
-                    0x04 => {
-                        if flags & 0x01 == 0 && !settings_sent {
-                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
-                                .await
-                                .unwrap();
-                            conn.send_settings_ack().await.unwrap();
-                            settings_sent = true;
-                        }
+                    0x04 if flags & 0x01 == 0 && !settings_sent => {
+                        conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                            .await
+                            .unwrap();
+                        conn.send_settings_ack().await.unwrap();
+                        settings_sent = true;
                     }
                     0x01 => {
                         let response_headers =
@@ -256,14 +252,12 @@ async fn concurrent_inline_attempts_serialize_with_fallback() {
                 };
                 let (_len, frame_type, flags, stream_id, _payload) = frame;
                 match frame_type {
-                    0x04 => {
-                        if flags & 0x01 == 0 && !settings_sent {
-                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
-                                .await
-                                .unwrap();
-                            conn.send_settings_ack().await.unwrap();
-                            settings_sent = true;
-                        }
+                    0x04 if flags & 0x01 == 0 && !settings_sent => {
+                        conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                            .await
+                            .unwrap();
+                        conn.send_settings_ack().await.unwrap();
+                        settings_sent = true;
                     }
                     0x01 => {
                         {
@@ -397,14 +391,12 @@ async fn inline_path_handles_dropped_receiver() {
                 };
                 let (_len, frame_type, flags, stream_id, _payload) = frame;
                 match frame_type {
-                    0x04 => {
-                        if flags & 0x01 == 0 && !settings_sent {
-                            conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
-                                .await
-                                .unwrap();
-                            conn.send_settings_ack().await.unwrap();
-                            settings_sent = true;
-                        }
+                    0x04 if flags & 0x01 == 0 && !settings_sent => {
+                        conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                            .await
+                            .unwrap();
+                        conn.send_settings_ack().await.unwrap();
+                        settings_sent = true;
                     }
                     0x01 => {
                         request_stream_id = Some(stream_id);
@@ -416,10 +408,8 @@ async fn inline_path_handles_dropped_receiver() {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         let _ = conn.send_data(stream_id, b"after-drop", false).await;
                     }
-                    0x03 => {
-                        if Some(stream_id) == request_stream_id {
-                            rst_seen.notify_one();
-                        }
+                    0x03 if Some(stream_id) == request_stream_id => {
+                        rst_seen.notify_one();
                     }
                     _ => {}
                 }
