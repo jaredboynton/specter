@@ -135,7 +135,7 @@ where
     loop {
         // Read request with timeout to detect connection close
         let mut buf = [0u8; 8192];
-        let read_result = timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
+        let read_result = timeout(Duration::from_secs(2), stream.read(&mut buf)).await;
 
         let n = match read_result {
             Ok(Ok(n)) => n,
@@ -200,7 +200,7 @@ async fn handle_connection_with_shared_counter(
 ) {
     loop {
         let mut buf = [0u8; 8192];
-        let read_result = timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
+        let read_result = timeout(Duration::from_secs(2), stream.read(&mut buf)).await;
 
         let n = match read_result {
             Ok(Ok(n)) => n,
@@ -268,7 +268,7 @@ async fn handle_connection_with_limit(mut stream: TcpStream, max_requests: usize
         }
 
         let mut buf = [0u8; 8192];
-        let read_result = timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
+        let read_result = timeout(Duration::from_secs(2), stream.read(&mut buf)).await;
 
         let n = match read_result {
             Ok(Ok(n)) => n,

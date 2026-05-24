@@ -96,14 +96,14 @@ async fn test_real_streaming_nghttp2() {
     });
 
     // Wait for both tasks with timeout
-    let (total_bytes, chunk_count) = timeout(Duration::from_secs(30), async {
+    let (total_bytes, chunk_count) = timeout(Duration::from_secs(15), async {
         // Wait for driver to finish (which signals stream end)
         let _ = driver_handle.await;
         // Then get results from reader
         reader_handle.await.expect("Reader task should complete")
     })
     .await
-    .expect("Streaming should complete within 30 seconds");
+    .expect("Streaming should complete within 15 seconds");
 
     // Verify we received data in chunks
     assert!(total_bytes > 0, "Should have received some bytes");
@@ -269,12 +269,12 @@ async fn test_streaming_larger_response() {
         }
     });
 
-    let chunk_sizes = timeout(Duration::from_secs(60), async {
+    let chunk_sizes = timeout(Duration::from_secs(15), async {
         let _ = driver_handle.await;
         reader_handle.await.expect("Reader should complete")
     })
     .await
-    .expect("Should complete within 60 seconds");
+    .expect("Should complete within 15 seconds");
 
     let total_bytes: usize = chunk_sizes.iter().sum();
     let chunk_count = chunk_sizes.len();

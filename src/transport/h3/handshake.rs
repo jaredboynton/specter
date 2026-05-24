@@ -695,7 +695,7 @@ impl NativeQuicServerHandshake {
             &self.server_initial_keys,
             &self.client_source_cid,
             &self.server_source_cid,
-            &self.client_initial_ack_tracker,
+            &mut self.client_initial_ack_tracker,
             self.next_server_initial_packet_number,
         )?;
         if packet.is_some() {
@@ -718,7 +718,7 @@ impl NativeQuicServerHandshake {
             server_handshake_keys,
             &self.client_source_cid,
             &self.server_source_cid,
-            &self.client_handshake_ack_tracker,
+            &mut self.client_handshake_ack_tracker,
             self.next_server_handshake_packet_number,
         )?;
         if packet.is_some() {
@@ -856,6 +856,7 @@ impl NativeQuicServerHandshake {
             false,
             &frame,
         )?;
+        self.client_application_ack_tracker.mark_ack_sent();
         self.next_server_application_packet_number += 1;
 
         Ok(Some(ServerApplicationAckPacket {
@@ -1449,7 +1450,7 @@ impl NativeQuicHandshake {
             &self.client_initial_keys,
             &self.destination_cid,
             &self.source_cid,
-            &self.initial_ack_tracker,
+            &mut self.initial_ack_tracker,
             self.next_client_initial_packet_number,
         )?;
         if packet.is_some() {
@@ -1472,7 +1473,7 @@ impl NativeQuicHandshake {
             client_handshake_keys,
             &self.destination_cid,
             &self.source_cid,
-            &self.handshake_ack_tracker,
+            &mut self.handshake_ack_tracker,
             self.next_client_handshake_packet_number,
         )?;
         if packet.is_some() {
@@ -1504,6 +1505,7 @@ impl NativeQuicHandshake {
             false,
             &frame,
         )?;
+        self.application_ack_tracker.mark_ack_sent();
         self.next_client_application_packet_number += 1;
 
         Ok(Some(ClientApplicationAckPacket {
@@ -2305,7 +2307,7 @@ fn build_ack_packet(
     keys: &QuicPacketKeyMaterial,
     destination_cid: &ConnectionId,
     source_cid: &ConnectionId,
-    tracker: &QuicAckTracker,
+    tracker: &mut QuicAckTracker,
     packet_number: u64,
 ) -> Result<Option<ClientAckPacket>> {
     if tracker.is_empty() {
@@ -2336,6 +2338,7 @@ fn build_ack_packet(
         packet_number_len,
         &frame,
     )?;
+    tracker.mark_ack_sent();
 
     Ok(Some(ClientAckPacket {
         packet,

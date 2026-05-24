@@ -81,7 +81,7 @@ async fn test_read_timeout_ttfb() {
             // Hold the connection open but never write anything.
             tokio::spawn(async move {
                 let _held = stream;
-                tokio::time::sleep(Duration::from_secs(3600)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
             });
         }
     });
@@ -225,7 +225,7 @@ async fn test_combined_timeouts() {
             let (stream, _) = listener.accept().await.unwrap();
             tokio::spawn(async move {
                 let _held = stream;
-                tokio::time::sleep(Duration::from_secs(3600)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
             });
         }
     });

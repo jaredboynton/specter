@@ -1,10 +1,16 @@
 use boring::ssl::SslAcceptor;
 use bytes::{Bytes, BytesMut};
 use specter::transport::h2::HpackDecoder;
+use std::future::Future;
+use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use tokio::time::timeout;
+
+const TEST_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A mock HTTP/2 server for testing edge cases and protocol violations.
 /// Allows scripting specific frame sequences to test client robustness.
@@ -76,12 +82,17 @@ impl MockH2Server {
                 let handler_clone = Arc::clone(&handler);
                 let acceptor_clone = acceptor.clone();
                 tokio::spawn(async move {
-                    match tokio_boring::accept(&acceptor_clone, stream).await {
-                        Ok(tls_stream) => {
+                    match timeout(
+                        TEST_IO_TIMEOUT,
+                        tokio_boring::accept(&acceptor_clone, stream),
+                    )
+                    .await
+                    {
+                        Ok(Ok(tls_stream)) => {
                             let conn = MockH2Connection::new(tls_stream);
                             handler_clone(conn).await;
                         }
-                        Err(_e) => {
+                        Ok(Err(_)) | Err(_) => {
                             // Handshake failure or expected error
                         }
                     }
@@ -149,6 +160,15 @@ impl DecodedHeadersFrame {
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Unpin> AsyncReadWrite for T {}
 
+async fn io_timeout<T, Fut>(future: Fut) -> io::Result<T>
+where
+    Fut: Future<Output = io::Result<T>>,
+{
+    timeout(TEST_IO_TIMEOUT, future)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "mock H2 helper I/O timed out"))?
+}
+
 impl MockH2Connection {
     fn new<S>(stream: S) -> Self
     where
@@ -165,7 +185,7 @@ impl MockH2Connection {
     pub async fn read_preface(&self) -> std::io::Result<()> {
         let mut stream = self.stream.lock().await;
         let mut preface = [0u8; 24];
-        stream.read_exact(&mut preface).await?;
+        io_timeout(stream.read_exact(&mut preface)).await?;
 
         const EXPECTED_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
         if preface.as_slice() != EXPECTED_PREFACE {
@@ -181,7 +201,7 @@ impl MockH2Connection {
     pub async fn read_frame_header(&self) -> std::io::Result<(u32, u8, u8, u32)> {
         let mut stream = self.stream.lock().await;
         let mut header = [0u8; 9];
-        stream.read_exact(&mut header).await?;
+        io_timeout(stream.read_exact(&mut header)).await?;
 
         let length = u32::from_be_bytes([0, header[0], header[1], header[2]]);
         let frame_type = header[3];
@@ -201,7 +221,7 @@ impl MockH2Connection {
     pub async fn read_payload(&self, length: u32) -> std::io::Result<Bytes> {
         let mut stream = self.stream.lock().await;
         let mut payload = vec![0u8; length as usize];
-        stream.read_exact(&mut payload).await?;
+        io_timeout(stream.read_exact(&mut payload)).await?;
         Ok(Bytes::from(payload))
     }
 
@@ -278,8 +298,8 @@ impl MockH2Connection {
 
         frame.extend_from_slice(payload);
 
-        stream.write_all(&frame).await?;
-        stream.flush().await
+        io_timeout(stream.write_all(&frame)).await?;
+        io_timeout(stream.flush()).await
     }
 
     /// Send SETTINGS frame (frame type 0x04).

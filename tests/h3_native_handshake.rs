@@ -4,21 +4,21 @@ use specter::transport::h3::handshake::{
     ClientH3Event, NativeQuicHandshake, NativeQuicServerHandshake, ServerH3Event,
 };
 use specter::transport::h3::native::{
+    H3Frame, H3Header, H3Setting, H3StreamType, H3UnidirectionalStream,
     decode_frame as decode_h3_frame, decode_header_block, decode_unidirectional_stream,
     encode_fingerprint_settings_payload, encode_frame as encode_h3_frame, encode_header_block,
-    encode_unidirectional_stream, H3Frame, H3Header, H3Setting, H3StreamType,
-    H3UnidirectionalStream,
+    encode_unidirectional_stream,
 };
 use specter::transport::h3::native_driver::{
     NativeH3DriverState, NativeH3Event, NativeH3Response, NativeH3StreamingResponseEvent,
     NativeH3TunnelEvent,
 };
 use specter::transport::h3::quic::{
-    decode_frames, derive_initial_key_material, derive_packet_key_material_from_secret,
-    encode_frame, encode_initial_header, encode_long_header, initial_crypto_plaintext,
-    open_long_header_packet, open_short_header_packet, protect_long_header_packet,
-    protect_short_header_packet, split_long_header_datagram, ConnectionId, LongHeaderPacket,
-    LongHeaderType, QuicFrame,
+    ConnectionId, LongHeaderPacket, LongHeaderType, QuicFrame, decode_frames,
+    derive_initial_key_material, derive_packet_key_material_from_secret, encode_frame,
+    encode_initial_header, encode_long_header, initial_crypto_plaintext, open_long_header_packet,
+    open_short_header_packet, protect_long_header_packet, protect_short_header_packet,
+    split_long_header_datagram,
 };
 use specter::transport::h3::tls::{QuicEncryptionLevel, QuicSecretDirection, QuicTlsSecret};
 use specter::{DnsConfig, H3Backend, H3Client};
@@ -397,9 +397,11 @@ fn native_h3_server_handshake_packetizes_handshake_done() {
         .open_server_application_packet(packet.packet.as_ref())
         .unwrap();
 
-    assert!(frames
-        .iter()
-        .any(|frame| matches!(frame, QuicFrame::HandshakeDone)));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, QuicFrame::HandshakeDone))
+    );
 }
 
 #[test]
@@ -468,15 +470,21 @@ fn native_h3_server_handshake_opens_client_request_stream_packet() {
         panic!("request stream should start with HEADERS");
     };
     let headers = decode_header_block(block.as_ref()).unwrap();
-    assert!(headers
-        .iter()
-        .any(|header| header.name() == ":method" && header.value() == "POST"));
-    assert!(headers
-        .iter()
-        .any(|header| header.name() == ":path" && header.value() == "/native?fixture=1"));
-    assert!(headers
-        .iter()
-        .any(|header| header.name() == "user-agent" && header.value() == "specter-native"));
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.name() == ":method" && header.value() == "POST")
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.name() == ":path" && header.value() == "/native?fixture=1")
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.name() == "user-agent" && header.value() == "specter-native")
+    );
     assert_eq!(
         events[0].frames[1],
         H3Frame::Data(Bytes::from_static(b"hello"))
@@ -1210,10 +1218,12 @@ fn native_h3_client_applies_server_max_data_to_unblock_flow_control() {
         .open_server_application_packet(max_data.packet.as_ref())
         .unwrap();
 
-    assert!(client
-        .build_client_application_stream_packet(0, Bytes::from_static(b"four"), false)
-        .unwrap()
-        .is_some());
+    assert!(
+        client
+            .build_client_application_stream_packet(0, Bytes::from_static(b"four"), false)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -1262,10 +1272,12 @@ fn native_h3_client_applies_server_max_streams_to_unblock_bidirectional_streams(
         .open_server_application_packet(max_streams.packet.as_ref())
         .unwrap();
 
-    assert!(client
-        .build_client_application_stream_packet(4, Bytes::from_static(b"two"), false)
-        .unwrap()
-        .is_some());
+    assert!(
+        client
+            .build_client_application_stream_packet(4, Bytes::from_static(b"two"), false)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -1296,6 +1308,56 @@ fn native_h3_request_retry_after_streams_blocked_reuses_blocked_stream_id() {
         .build_client_h3_request_packet(&http::Method::GET, &uri, &[], None)
         .unwrap();
     assert_eq!(retry.stream_id, 4);
+}
+
+#[test]
+fn native_h3_data_retry_after_stream_data_blocked_reuses_blocked_offset() {
+    let mut fingerprint = Http3Fingerprint::chrome();
+    fingerprint.transport.initial_max_data = 4096;
+    fingerprint.transport.initial_max_stream_data_bidi_remote = 96;
+    let (_, mut client, mut server) =
+        completed_native_server_handshake_with_fingerprint(fingerprint);
+    let uri: http::Uri = "https://localhost/native".parse().unwrap();
+
+    let request = client
+        .build_client_h3_request_start_packet(&http::Method::POST, &uri, &[], None, false)
+        .unwrap();
+    let first_data = client
+        .build_client_h3_data_packet(request.stream_id, Bytes::from_static(b"ok"), false)
+        .unwrap()
+        .unwrap();
+    server
+        .open_client_h3_event_packet(request.packet.as_ref())
+        .unwrap();
+    server
+        .open_client_h3_event_packet(first_data.packet.as_ref())
+        .unwrap();
+
+    client
+        .build_client_h3_data_packet(request.stream_id, Bytes::from(vec![b'x'; 128]), false)
+        .expect_err("oversized DATA must block behind peer stream data limit");
+
+    let max_stream_data = server
+        .build_server_max_stream_data_packet(request.stream_id, 512)
+        .unwrap();
+    client
+        .open_server_application_packet(max_stream_data.packet.as_ref())
+        .unwrap();
+
+    let retry = client
+        .build_client_h3_data_packet(request.stream_id, Bytes::from_static(b"retry"), false)
+        .unwrap()
+        .unwrap();
+    let opened = server
+        .open_client_h3_event_packet(retry.packet.as_ref())
+        .unwrap();
+
+    assert!(matches!(
+        opened.as_slice(),
+        [ClientH3Event::Stream(event)]
+            if event.stream_id == request.stream_id
+                && event.frames.iter().any(|frame| matches!(frame, H3Frame::Data(data) if data.as_ref() == b"retry"))
+    ));
 }
 
 #[test]
@@ -1545,11 +1607,13 @@ fn native_h3_handshake_exposes_single_client_initial_packet() {
     .unwrap();
 
     assert!(handshake.client_initial().packet.len() >= 1200);
-    assert!(handshake
-        .client_initial()
-        .crypto_data
-        .windows(3)
-        .any(|window| window == b"\x02h3"));
+    assert!(
+        handshake
+            .client_initial()
+            .crypto_data
+            .windows(3)
+            .any(|window| window == b"\x02h3")
+    );
 }
 
 #[test]
@@ -2164,10 +2228,12 @@ fn native_h3_handshake_does_not_ack_application_ack_only_packet() {
 
     handshake.open_server_application_packet(&packet).unwrap();
 
-    assert!(handshake
-        .build_client_application_ack_packet()
-        .unwrap()
-        .is_none());
+    assert!(
+        handshake
+            .build_client_application_ack_packet()
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -2411,12 +2477,16 @@ fn native_h3_handshake_packetizes_client_request_streams_with_bidi_ids() {
         panic!("request stream must begin with HEADERS");
     };
     let headers = decode_header_block(block).unwrap();
-    assert!(headers
-        .iter()
-        .any(|header| header.name() == ":path" && header.value() == "/search?q=h3"));
-    assert!(headers
-        .iter()
-        .any(|header| header.name() == "user-agent" && header.value() == "specter-native"));
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.name() == ":path" && header.value() == "/search?q=h3")
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.name() == "user-agent" && header.value() == "specter-native")
+    );
 }
 
 #[test]
@@ -3003,15 +3073,21 @@ fn native_h3_handshake_packetizes_websocket_connect_without_fin() {
         panic!("CONNECT stream must begin with HEADERS");
     };
     let headers = decode_header_block(block).unwrap();
-    assert!(headers
-        .iter()
-        .any(|header| header.name() == ":method" && header.value() == "CONNECT"));
-    assert!(headers
-        .iter()
-        .any(|header| header.name() == ":protocol" && header.value() == "websocket"));
-    assert!(headers
-        .iter()
-        .any(|header| header.name() == "sec-websocket-protocol" && header.value() == "chat"));
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.name() == ":method" && header.value() == "CONNECT")
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.name() == ":protocol" && header.value() == "websocket")
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.name() == "sec-websocket-protocol" && header.value() == "chat")
+    );
 }
 
 #[test]

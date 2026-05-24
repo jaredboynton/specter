@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::error::{Error, Result};
 use crate::fingerprint::Http3Fingerprint;
@@ -18,7 +18,7 @@ use crate::transport::h3::command::{DriverCommand, StreamResponse, StreamingHead
 use crate::transport::h3::handle::H3Handle;
 use crate::transport::h3::handshake::{NativeQuicHandshake, ServerH3Event, ServerH3StreamEvent};
 use crate::transport::h3::native::{
-    decode_header_block, H3Frame, H3Header, H3Setting, H3StreamType,
+    H3Frame, H3Header, H3Setting, H3StreamType, decode_header_block,
 };
 use crate::transport::h3::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 
@@ -555,6 +555,7 @@ struct NativeDriverTunnelState {
     response_tx: Option<oneshot::Sender<Result<H3Tunnel>>>,
     outbound_tx: Option<mpsc::Sender<H3TunnelOutbound>>,
     outbound_rx: Option<mpsc::Receiver<H3TunnelOutbound>>,
+    pending_outbound: VecDeque<H3TunnelOutbound>,
     inbound_tx: mpsc::Sender<Result<H3TunnelEvent>>,
     inbound_rx: Option<mpsc::Receiver<Result<H3TunnelEvent>>>,
     opened: bool,
@@ -568,6 +569,7 @@ impl NativeDriverTunnelState {
             response_tx: Some(response_tx),
             outbound_tx: Some(outbound_tx),
             outbound_rx: Some(outbound_rx),
+            pending_outbound: VecDeque::new(),
             inbound_tx,
             inbound_rx: Some(inbound_rx),
             opened: false,
@@ -655,6 +657,7 @@ impl NativeH3Driver {
         ];
         loop {
             self.flush_request_stream_bodies().await?;
+            self.flush_pending_tunnel_data().await?;
             self.flush_streaming_responses();
             if self.last_activity.elapsed() > self.max_idle_timeout && !self.has_pending_work() {
                 self.send_connection_close(0x00, Bytes::from_static(b"Idle timeout"))
@@ -983,19 +986,61 @@ impl NativeH3Driver {
     }
 
     async fn send_tunnel_data(&mut self, stream_id: u64, outbound: H3TunnelOutbound) -> Result<()> {
-        if !self.pending_tunnels.contains_key(&stream_id) {
+        let Some(tunnel) = self.pending_tunnels.get_mut(&stream_id) else {
             return Ok(());
-        }
-        if let Some(packet) =
-            self.handshake
-                .build_client_h3_data_packet(stream_id, outbound.bytes, outbound.fin)?
-        {
-            self.socket
-                .send_to(packet.packet.as_ref(), self.peer_addr)
-                .await
-                .map_err(Error::Io)?;
+        };
+        tunnel.pending_outbound.push_back(outbound);
+        self.flush_tunnel_data(stream_id).await
+    }
+
+    async fn flush_pending_tunnel_data(&mut self) -> Result<()> {
+        let stream_ids = self
+            .pending_tunnels
+            .iter()
+            .filter_map(|(stream_id, tunnel)| {
+                (!tunnel.pending_outbound.is_empty()).then_some(*stream_id)
+            })
+            .collect::<Vec<_>>();
+        for stream_id in stream_ids {
+            self.flush_tunnel_data(stream_id).await?;
         }
         Ok(())
+    }
+
+    async fn flush_tunnel_data(&mut self, stream_id: u64) -> Result<()> {
+        loop {
+            let Some(outbound) = self
+                .pending_tunnels
+                .get(&stream_id)
+                .and_then(|tunnel| tunnel.pending_outbound.front().cloned())
+            else {
+                return Ok(());
+            };
+
+            let packet = match self.handshake.build_client_h3_data_packet(
+                stream_id,
+                outbound.bytes.clone(),
+                outbound.fin,
+            ) {
+                Ok(packet) => packet,
+                Err(error) if is_flow_control_blocked_error(&error) => {
+                    self.send_flow_control_blocked_packet().await?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+
+            if let Some(packet) = packet {
+                self.socket
+                    .send_to(packet.packet.as_ref(), self.peer_addr)
+                    .await
+                    .map_err(Error::Io)?;
+            }
+
+            if let Some(tunnel) = self.pending_tunnels.get_mut(&stream_id) {
+                tunnel.pending_outbound.pop_front();
+            }
+        }
     }
 
     async fn flush_request_stream_bodies(&mut self) -> Result<()> {
@@ -1106,11 +1151,19 @@ impl NativeH3Driver {
                         if already_sent_end {
                             return Ok(());
                         }
-                        if let Some(packet) = self.handshake.build_client_h3_data_packet(
+                        let packet = match self.handshake.build_client_h3_data_packet(
                             stream_id,
                             Bytes::new(),
                             true,
-                        )? {
+                        ) {
+                            Ok(packet) => packet,
+                            Err(error) if is_flow_control_blocked_error(&error) => {
+                                self.send_flow_control_blocked_packet().await?;
+                                return Ok(());
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        if let Some(packet) = packet {
                             self.socket
                                 .send_to(packet.packet.as_ref(), self.peer_addr)
                                 .await
@@ -1142,10 +1195,19 @@ impl NativeH3Driver {
                 )
             };
             let remaining = chunk.slice(offset..);
-            if let Some(packet) =
-                self.handshake
-                    .build_client_h3_data_packet(stream_id, remaining.clone(), false)?
-            {
+            let packet = match self.handshake.build_client_h3_data_packet(
+                stream_id,
+                remaining.clone(),
+                false,
+            ) {
+                Ok(packet) => packet,
+                Err(error) if is_flow_control_blocked_error(&error) => {
+                    self.send_flow_control_blocked_packet().await?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(packet) = packet {
                 self.socket
                     .send_to(packet.packet.as_ref(), self.peer_addr)
                     .await
@@ -1197,27 +1259,6 @@ impl NativeH3Driver {
         }
 
         let events = self.handshake.open_server_h3_event_packet(datagram)?;
-        if native_h3_driver_trace_enabled() {
-            let streams = events
-                .iter()
-                .filter_map(|event| match event {
-                    ServerH3Event::Stream(event) => Some(format!(
-                        "stream={} frames={} fin={}",
-                        event.stream_id,
-                        event.frames.len(),
-                        event.fin
-                    )),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            eprintln!(
-                "native H3 driver datagram len={} events={} {}",
-                datagram.len(),
-                events.len(),
-                streams
-            );
-        }
         if let Some(packet) = self.handshake.build_client_application_ack_packet()? {
             self.socket
                 .send_to(packet.packet.as_ref(), self.peer_addr)
@@ -1423,26 +1464,14 @@ impl NativeH3Driver {
         };
         match event {
             NativeH3StreamingResponseEvent::Headers { status, headers } => {
-                if native_h3_driver_trace_enabled() {
-                    eprintln!("native H3 driver headers stream={stream_id} status={status}");
-                }
                 if let Some(headers_tx) = stream.headers_tx.take() {
                     let _ = headers_tx.send(Ok((status, headers)));
                 }
             }
             NativeH3StreamingResponseEvent::Data(bytes) => {
-                if native_h3_driver_trace_enabled() {
-                    eprintln!(
-                        "native H3 driver data stream={stream_id} len={}",
-                        bytes.len()
-                    );
-                }
                 push_streaming_body(stream, bytes);
             }
             NativeH3StreamingResponseEvent::Finished => {
-                if native_h3_driver_trace_enabled() {
-                    eprintln!("native H3 driver finished stream={stream_id}");
-                }
                 stream.finished = true;
             }
             NativeH3StreamingResponseEvent::GoAway { .. } => {
@@ -1584,10 +1613,6 @@ fn push_streaming_body(stream: &mut NativeDriverStreamingResponseState, bytes: B
             stream.finished = true;
         }
     }
-}
-
-fn native_h3_driver_trace_enabled() -> bool {
-    std::env::var_os("SPECTER_NATIVE_H3_DRIVER_TRACE").is_some()
 }
 
 fn is_enable_connect_protocol(setting: &H3Setting) -> bool {

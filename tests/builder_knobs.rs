@@ -212,7 +212,7 @@ async fn pool_idle_timeout_long_allows_h1_reuse() {
 
     let client = Client::builder()
         .prefer_http2(false)
-        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_idle_timeout(Duration::from_secs(5))
         .build()
         .unwrap();
 

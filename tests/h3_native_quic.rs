@@ -565,6 +565,25 @@ fn native_quic_ack_tracker_ignores_duplicate_packets() {
 }
 
 #[test]
+fn native_quic_ack_tracker_clears_pending_ack_without_forgetting_ranges() {
+    let mut tracker = QuicAckTracker::default();
+    tracker.observe(3);
+    tracker.observe(2);
+    assert!(!tracker.is_empty());
+
+    let frame = tracker.to_ack_frame(0).unwrap();
+    tracker.mark_ack_sent();
+
+    assert!(tracker.is_empty());
+    assert_eq!(tracker.to_ack_frame(0).unwrap(), frame);
+
+    tracker.observe(3);
+    assert!(tracker.is_empty());
+    tracker.observe(4);
+    assert!(!tracker.is_empty());
+}
+
+#[test]
 fn native_quic_loss_detector_marks_packets_lost_by_reordering_threshold() {
     let mut detector = QuicLossDetector::default();
     detector.on_packet_sent(1);

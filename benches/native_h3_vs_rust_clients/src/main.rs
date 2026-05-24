@@ -865,12 +865,6 @@ impl LocalNativeH3Connection {
         let retransmits = self
             .handshake
             .retransmit_lost_server_application_stream_packets()?;
-        if !retransmits.is_empty() && local_native_fixture_trace_enabled() {
-            eprintln!(
-                "local native H3 fixture retransmits server packets count={}",
-                retransmits.len()
-            );
-        }
         for packet in retransmits {
             self.send_packet(packet.packet).await?;
         }
@@ -927,10 +921,6 @@ impl LocalNativeH3Connection {
             .map(|header| header.value())
             .unwrap_or("/");
 
-        if local_native_fixture_trace_enabled() {
-            eprintln!("local native H3 fixture request stream={stream_id} path={path}");
-        }
-
         if path == "/health" {
             self.send_response_packet(
                 stream_id,
@@ -981,12 +971,6 @@ impl LocalNativeH3Connection {
         let packet = self
             .handshake
             .build_server_h3_response_packet(stream_id, headers, body, fin)?;
-        if local_native_fixture_trace_enabled() {
-            eprintln!(
-                "local native H3 fixture response headers stream={stream_id} pn={}",
-                packet.packet_number
-            );
-        }
         self.send_packet(packet.packet).await
     }
 
@@ -1006,16 +990,7 @@ impl LocalNativeH3Connection {
                 Bytes::copy_from_slice(chunk),
                 fin,
             )?;
-            if fin && local_native_fixture_trace_enabled() {
-                eprintln!(
-                    "local native H3 fixture response final data stream={stream_id} pn={}",
-                    packet.packet_number
-                );
-            }
             self.send_packet(packet.packet).await?;
-        }
-        if response_fin && local_native_fixture_trace_enabled() {
-            eprintln!("local native H3 fixture response finished stream={stream_id}");
         }
         Ok(())
     }
@@ -1052,10 +1027,6 @@ fn local_native_h3_server_connection_id(
         "bench-h3-{index:08x}"
     )))
     .expect("local fixture server connection id must fit QUIC CID limits")
-}
-
-fn local_native_fixture_trace_enabled() -> bool {
-    std::env::var_os("SPECTER_NATIVE_H3_BENCH_TRACE").is_some()
 }
 
 fn describe_local_native_h3_datagram(packet: &[u8]) -> String {
@@ -1835,15 +1806,22 @@ mod tests {
     }
 
     #[test]
-    fn local_native_fixture_plan_covers_default_required_h3_clients() {
-        let mut expected = vec![
+    fn local_native_fixture_plan_includes_feature_enabled_clients() {
+        #[cfg(not(feature = "reqwest-h3"))]
+        let expected = vec![
             "specter_native",
             "quiche_direct",
             "tokio_quiche",
             "h3_quinn",
         ];
         #[cfg(feature = "reqwest-h3")]
-        expected.push("reqwest_h3");
+        let expected = vec![
+            "specter_native",
+            "quiche_direct",
+            "tokio_quiche",
+            "h3_quinn",
+            "reqwest_h3",
+        ];
 
         assert_eq!(super::local_native_fixture_measurement_plan(), expected);
     }

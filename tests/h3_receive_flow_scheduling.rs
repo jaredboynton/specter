@@ -47,6 +47,21 @@ fn native_h3_driver_requeues_flow_control_blocked_new_stream_commands() {
 }
 
 #[test]
+fn native_h3_driver_retries_flow_control_blocked_open_stream_data() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+
+    assert!(
+        driver.contains("flush_pending_tunnel_data"),
+        "native H3 driver must retry queued RFC9220 tunnel DATA after MAX_DATA/MAX_STREAM_DATA"
+    );
+    assert!(
+        driver.contains("send_flow_control_blocked_packet"),
+        "native H3 driver must emit BLOCKED frames instead of failing open-stream DATA sends"
+    );
+}
+
+#[test]
 fn native_mock_h3_server_schedules_lost_application_stream_retransmits() {
     let mock_server = std::fs::read_to_string("tests/helpers/mock_h3_server.rs")
         .expect("native mock H3 server source");

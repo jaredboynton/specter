@@ -183,7 +183,7 @@ async fn handle_connection(id: usize, mut stream: TcpStream, logs: Arc<Mutex<Vec
                 tokio::time::sleep(Duration::from_millis(30)).await;
                 stream.write_all(b"early-2").await.unwrap();
                 stream.flush().await.unwrap();
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 return;
             }
             _ => write_fixed(&mut stream, &[b"ok"]).await,
