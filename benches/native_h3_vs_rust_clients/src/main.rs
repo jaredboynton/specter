@@ -6,7 +6,7 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -31,6 +31,7 @@ struct Artifact {
     audited_at: &'static str,
     competitors: Vec<CompetitorSpec>,
     rows: Vec<BenchmarkRow>,
+    fixture_events: Vec<FixtureEvent>,
     superiority_gate: SuperiorityGate,
 }
 
@@ -52,6 +53,23 @@ struct BenchmarkRow {
     p95_ttft_ns: Option<f64>,
     bytes_per_sec: Option<f64>,
     source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FixtureEvent {
+    client: String,
+    level: &'static str,
+    kind: &'static str,
+    classification: &'static str,
+    message: String,
+    datagram: Option<String>,
+    app_ready: Option<bool>,
+}
+
+#[derive(Debug, Default)]
+struct LocalFixtureMeasurements {
+    rows: Vec<BenchmarkRow>,
+    fixture_events: Vec<FixtureEvent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -442,6 +460,20 @@ fn artifact_with_competitor_rows<S: AsRef<str>>(
     competitor_artifact_jsons: &[S],
     measured_competitor_rows: &[BenchmarkRow],
 ) -> Artifact {
+    artifact_with_competitor_rows_and_fixture_events(
+        specter_streaming_artifact_json,
+        competitor_artifact_jsons,
+        measured_competitor_rows,
+        Vec::new(),
+    )
+}
+
+fn artifact_with_competitor_rows_and_fixture_events<S: AsRef<str>>(
+    specter_streaming_artifact_json: Option<&str>,
+    competitor_artifact_jsons: &[S],
+    measured_competitor_rows: &[BenchmarkRow],
+    fixture_events: Vec<FixtureEvent>,
+) -> Artifact {
     let imported_competitor_rows = competitor_artifact_jsons
         .iter()
         .flat_map(|artifact_json| competitor_rows_from_artifact(artifact_json.as_ref()))
@@ -458,6 +490,7 @@ fn artifact_with_competitor_rows<S: AsRef<str>>(
         competitors: competitor_specs(),
         superiority_gate: superiority_gate(&rows),
         rows,
+        fixture_events,
     }
 }
 
@@ -493,18 +526,19 @@ async fn main() -> anyhow::Result<()> {
         .map(fs::read_to_string)
         .collect::<Result<Vec<_>, _>>()?;
     let mut measured_competitor_rows = Vec::new();
+    let mut fixture_events = Vec::new();
     if args
         .iter()
         .any(|arg| arg == "--measure-local-native-fixture")
     {
-        measured_competitor_rows.extend(
-            measure_local_native_fixture(
-                option_usize(&args, "--warmups", 3)?,
-                option_usize(&args, "--samples", 30)?,
-                option_value(&args, "--measure-local-native-fixture-client").as_deref(),
-            )
-            .await?,
-        );
+        let measurements = measure_local_native_fixture(
+            option_usize(&args, "--warmups", 3)?,
+            option_usize(&args, "--samples", 30)?,
+            option_value(&args, "--measure-local-native-fixture-client").as_deref(),
+        )
+        .await?;
+        measured_competitor_rows.extend(measurements.rows);
+        fixture_events.extend(measurements.fixture_events);
     }
     if let Some(url) = option_value(&args, "--measure-specter-native-url") {
         measured_competitor_rows.push(
@@ -553,10 +587,11 @@ async fn main() -> anyhow::Result<()> {
             .await?,
         );
     }
-    let artifact = artifact_with_competitor_rows(
+    let artifact = artifact_with_competitor_rows_and_fixture_events(
         specter_streaming_artifact_json.as_deref(),
         &competitor_artifact_jsons,
         &measured_competitor_rows,
+        fixture_events,
     );
 
     if args.iter().any(|arg| arg == "--list") {
@@ -589,10 +624,11 @@ async fn measure_local_native_fixture(
     warmups: usize,
     samples: usize,
     selected_client: Option<&str>,
-) -> anyhow::Result<Vec<BenchmarkRow>> {
+) -> anyhow::Result<LocalFixtureMeasurements> {
     let mut rows = Vec::new();
+    let mut fixture_events = Vec::new();
     for client in local_native_fixture_measurement_plan_for(selected_client)? {
-        let fixture = LocalNativeH3Fixture::start().await?;
+        let fixture = LocalNativeH3Fixture::start(client).await?;
         let url = fixture.stream_url();
         let row = match client {
             "specter_native" => measure_specter_native(url, warmups, samples).await,
@@ -604,30 +640,50 @@ async fn measure_local_native_fixture(
             other => anyhow::bail!("unknown local native fixture client {other}"),
         }
         .with_context(|| format!("local native fixture {client} measurement failed"))?;
+        fixture_events.extend(fixture.events());
         rows.push(row);
     }
-    Ok(rows)
+    Ok(LocalFixtureMeasurements {
+        rows,
+        fixture_events,
+    })
 }
 
 struct LocalNativeH3Fixture {
     url: String,
     task: tokio::task::JoinHandle<()>,
+    events: Arc<Mutex<Vec<FixtureEvent>>>,
 }
 
 impl LocalNativeH3Fixture {
-    async fn start() -> anyhow::Result<Self> {
+    async fn start(client: &str) -> anyhow::Result<Self> {
         let (cert_pem, key_pem) = generate_local_fixture_cert_pem()?;
         let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await?);
         let port = socket.local_addr()?.port();
-        let task = tokio::spawn(run_local_native_h3_fixture(socket, cert_pem, key_pem));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let task = tokio::spawn(run_local_native_h3_fixture(
+            socket,
+            cert_pem,
+            key_pem,
+            client.to_string(),
+            events.clone(),
+        ));
         Ok(Self {
             url: format!("https://127.0.0.1:{port}/stream"),
             task,
+            events,
         })
     }
 
     fn stream_url(&self) -> &str {
         &self.url
+    }
+
+    fn events(&self) -> Vec<FixtureEvent> {
+        self.events
+            .lock()
+            .map(|events| events.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -686,6 +742,8 @@ async fn run_local_native_h3_fixture(
     socket: Arc<tokio::net::UdpSocket>,
     cert_pem: Vec<u8>,
     key_pem: Vec<u8>,
+    client: String,
+    events: Arc<Mutex<Vec<FixtureEvent>>>,
 ) {
     use specter::transport::h3::quic::{split_long_header_datagram, LongHeaderType};
 
@@ -719,6 +777,8 @@ async fn run_local_native_h3_fixture(
                     rx,
                     cert_pem.clone(),
                     key_pem.clone(),
+                    client.clone(),
+                    events.clone(),
                     first.destination_cid.clone(),
                     first.source_cid.clone(),
                     server_source_cid,
@@ -755,6 +815,8 @@ fn spawn_local_native_h3_connection(
     rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     cert_pem: Vec<u8>,
     key_pem: Vec<u8>,
+    client: String,
+    events: Arc<Mutex<Vec<FixtureEvent>>>,
     client_destination_cid: specter::transport::h3::quic::ConnectionId,
     client_source_cid: specter::transport::h3::quic::ConnectionId,
     server_source_cid: specter::transport::h3::quic::ConnectionId,
@@ -783,6 +845,8 @@ fn spawn_local_native_h3_connection(
             rx,
             response_tx,
             response_rx,
+            client,
+            events,
         }
         .run()
         .await;
@@ -805,6 +869,8 @@ struct LocalNativeH3Connection {
     rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     response_tx: tokio::sync::mpsc::Sender<LocalNativeH3Response>,
     response_rx: tokio::sync::mpsc::Receiver<LocalNativeH3Response>,
+    client: String,
+    events: Arc<Mutex<Vec<FixtureEvent>>>,
 }
 
 impl LocalNativeH3Connection {
@@ -823,11 +889,24 @@ impl LocalNativeH3Connection {
                 packet = self.rx.recv() => {
                     let Some(packet) = packet else { break };
                     if let Err(error) = self.process_datagram(&packet).await {
+                        let datagram = describe_local_native_h3_datagram(&packet);
+                        let app_ready = self.handshake.is_application_ready();
+                        let classification =
+                            classify_local_native_h3_packet_error(&error, app_ready);
                         eprintln!(
                             "local native H3 fixture packet error: {error}; {}; app_ready={}",
-                            describe_local_native_h3_datagram(&packet),
-                            self.handshake.is_application_ready()
+                            datagram,
+                            app_ready
                         );
+                        self.record_event(FixtureEvent {
+                            client: self.client.clone(),
+                            level: "warn",
+                            kind: "packet_error",
+                            classification,
+                            message: error.to_string(),
+                            datagram: Some(datagram),
+                            app_ready: Some(app_ready),
+                        });
                     }
                 }
                 response = self.response_rx.recv() => {
@@ -837,6 +916,12 @@ impl LocalNativeH3Connection {
                     }
                 }
             }
+        }
+    }
+
+    fn record_event(&self, event: FixtureEvent) {
+        if let Ok(mut events) = self.events.lock() {
+            events.push(event);
         }
     }
 
@@ -1101,6 +1186,19 @@ fn describe_local_native_h3_datagram(packet: &[u8]) -> String {
         packet.len(),
         &packet[1..1 + prefix_len]
     )
+}
+
+fn classify_local_native_h3_packet_error(error: &anyhow::Error, app_ready: bool) -> &'static str {
+    let message = error.to_string();
+    if message.contains("QUIC packet open failed") && app_ready {
+        "post_application_packet_open_error"
+    } else if message.contains("QUIC packet open failed") {
+        "handshake_packet_open_error"
+    } else if message.contains("Idle timeout") {
+        "idle_timeout"
+    } else {
+        "packet_error"
+    }
 }
 
 async fn measure_specter_native(
@@ -1899,6 +1997,54 @@ mod tests {
     }
 
     #[test]
+    fn local_native_fixture_classifies_packet_open_errors_by_phase() {
+        let error = anyhow::anyhow!("QUIC packet open failed: unknown BoringSSL error");
+
+        assert_eq!(
+            super::classify_local_native_h3_packet_error(&error, true),
+            "post_application_packet_open_error"
+        );
+        assert_eq!(
+            super::classify_local_native_h3_packet_error(&error, false),
+            "handshake_packet_open_error"
+        );
+    }
+
+    #[test]
+    fn artifact_emits_fixture_events_for_packet_error_audit() {
+        let specter_row = super::BenchmarkRow {
+            competitor_id: "specter_native".into(),
+            status: "measured_pass".into(),
+            p50_ttft_ns: Some(100.0),
+            p95_ttft_ns: Some(200.0),
+            bytes_per_sec: Some(300.0),
+            source: "specter_native_adapter".into(),
+        };
+        let event = super::FixtureEvent {
+            client: "h3_quinn".into(),
+            level: "warn",
+            kind: "packet_error",
+            classification: "post_application_packet_open_error",
+            message: "QUIC packet open failed".into(),
+            datagram: Some("len=1200 short_prefix=[]".into()),
+            app_ready: Some(true),
+        };
+
+        let artifact = super::artifact_with_competitor_rows_and_fixture_events(
+            None,
+            &Vec::<String>::new(),
+            &[specter_row],
+            vec![event],
+        );
+
+        assert_eq!(artifact.fixture_events.len(), 1);
+        assert_eq!(
+            artifact.fixture_events[0].classification,
+            "post_application_packet_open_error"
+        );
+    }
+
+    #[test]
     fn local_native_fixture_routes_short_header_by_registered_server_connection_id() {
         let registered = vec![b"srv-cid-a".to_vec(), b"srv-cid-bbb".to_vec()];
         let mut packet = vec![0x40];
@@ -2006,7 +2152,9 @@ mod tests {
 
     #[tokio::test]
     async fn specter_native_local_fixture_reuses_streaming_connection_for_multiple_samples() {
-        let fixture = super::LocalNativeH3Fixture::start().await.unwrap();
+        let fixture = super::LocalNativeH3Fixture::start("specter_native")
+            .await
+            .unwrap();
         let client = specter::Client::builder()
             .danger_accept_invalid_certs(true)
             .h3_backend(specter::H3Backend::Native)
