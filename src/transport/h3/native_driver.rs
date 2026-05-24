@@ -735,10 +735,10 @@ impl NativeH3Driver {
     }
 
     fn streaming_response_body_backpressured(&self) -> bool {
-        let pending_body_limit = self.transport_config.streaming_body_buffer_slots;
-        self.pending_streaming_responses
-            .values()
-            .any(|stream| stream.is_body_backpressured(pending_body_limit))
+        streaming_response_bodies_backpressured(
+            &self.pending_streaming_responses,
+            self.transport_config.streaming_body_buffer_slots,
+        )
     }
 
     async fn send_preface(&mut self) -> Result<()> {
@@ -1649,6 +1649,16 @@ fn push_streaming_body(stream: &mut NativeDriverStreamingResponseState, bytes: B
     }
 }
 
+fn streaming_response_bodies_backpressured(
+    streams: &HashMap<u64, NativeDriverStreamingResponseState>,
+    pending_body_limit: usize,
+) -> bool {
+    !streams.is_empty()
+        && streams
+            .values()
+            .all(|stream| stream.is_body_backpressured(pending_body_limit))
+}
+
 fn is_enable_connect_protocol(setting: &H3Setting) -> bool {
     matches!(setting, H3Setting::EnableConnectProtocol(value) if *value == 1)
 }
@@ -1673,6 +1683,29 @@ mod tests {
         assert!(
             stream.is_body_backpressured(1),
             "full public body slot plus full pending queue should pause socket reads"
+        );
+    }
+
+    #[test]
+    fn streaming_response_backpressure_does_not_pause_when_a_sibling_has_capacity() {
+        let (blocked_headers_tx, _blocked_headers_rx) = oneshot::channel();
+        let blocked_body = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 1);
+        let mut blocked =
+            NativeDriverStreamingResponseState::new(blocked_headers_tx, blocked_body, None);
+        push_streaming_body(&mut blocked, Bytes::from_static(b"blocked-public"));
+        push_streaming_body(&mut blocked, Bytes::from_static(b"blocked-pending"));
+
+        let (open_headers_tx, _open_headers_rx) = oneshot::channel();
+        let open_body = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 1);
+        let open = NativeDriverStreamingResponseState::new(open_headers_tx, open_body, None);
+
+        let mut streams = HashMap::new();
+        streams.insert(0, blocked);
+        streams.insert(4, open);
+
+        assert!(
+            !streaming_response_bodies_backpressured(&streams, 1),
+            "one slow stream must not pause socket reads while a sibling can still receive"
         );
     }
 }

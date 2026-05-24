@@ -115,6 +115,20 @@ impl H3Handle {
     /// Send an HTTP/3 request and return response headers before the body is complete.
     ///
     /// Response DATA frames are delivered incrementally through the returned receiver.
+    pub async fn send_streaming(
+        &self,
+        method: http::Method,
+        uri: &http::Uri,
+        headers: Vec<(String, String)>,
+        body: RequestBody,
+    ) -> Result<Response> {
+        self.send_streaming_request(method, uri, headers, body, H3BodyTimeouts::default())
+            .await
+    }
+
+    /// Send an HTTP/3 request and return response headers before the body is complete.
+    ///
+    /// Response DATA frames are delivered incrementally through the returned receiver.
     pub async fn send_streaming_request(
         &self,
         method: http::Method,
