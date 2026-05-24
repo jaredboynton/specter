@@ -633,6 +633,9 @@ impl NativeQuicTlsSession {
         let mut builder = SslContext::builder(SslMethod::tls_server()).map_err(|err| {
             Error::Tls(format!("failed to create QUIC TLS server context: {err}"))
         })?;
+        unsafe {
+            SSL_CTX_set_early_data_enabled(builder.as_ptr(), 1);
+        }
         builder
             .set_min_proto_version(Some(SslVersion::TLS1_3))
             .map_err(|err| {

@@ -2489,26 +2489,44 @@ impl NativeQuicHandshake {
     }
 
     fn process_version_negotiation_datagram(
-        &self,
+        &mut self,
         datagram: &[u8],
     ) -> Result<Vec<ProcessedServerInitial>> {
         let packet = decode_version_negotiation_packet(datagram)?;
         if packet.destination_cid != self.source_cid || packet.source_cid != self.destination_cid {
             return Ok(Vec::new());
         }
-        if packet.supported_versions.contains(&QUIC_VERSION_1) {
+        if self.vn_received {
             return Ok(Vec::new());
         }
-        Err(Error::Quic(
-            "native H3 server did not offer QUIC version 1".into(),
-        ))
+        if packet
+            .supported_versions
+            .contains(&self.client_initial_version)
+        {
+            return Ok(Vec::new());
+        }
+
+        let chosen_version = self
+            .supported_versions
+            .iter()
+            .copied()
+            .find(|version| packet.supported_versions.contains(version));
+        let Some(chosen_version) = chosen_version else {
+            return Err(Error::Quic(
+                "version_negotiation_failed: native H3 client and server share no supported QUIC version".into(),
+            ));
+        };
+
+        self.restart_for_version_negotiation(chosen_version)?;
+        Ok(Vec::new())
     }
 
     fn process_retry_packet(&mut self, retry_packet: &[u8]) -> Result<()> {
-        if self.retry_source_cid.is_some() {
-            return Err(Error::Quic(
-                "native H3 received more than one QUIC Retry packet".into(),
-            ));
+        if self.retry_received {
+            return Ok(());
+        }
+        if self.server_initial_or_handshake_seen {
+            return Ok(());
         }
 
         let retry = validate_retry_integrity_tag_v1(&self.original_destination_cid, retry_packet)?;
@@ -2517,10 +2535,20 @@ impl NativeQuicHandshake {
                 "native H3 Retry destination CID does not match client source CID".into(),
             ));
         }
+        if retry.source_cid.as_bytes() == self.original_destination_cid.as_bytes() {
+            return Err(Error::Quic(
+                "native H3 Retry source CID matches the client's original destination CID".into(),
+            ));
+        }
+        if retry.token.is_empty() {
+            return Err(Error::Quic(
+                "native H3 Retry packet contained an empty token".into(),
+            ));
+        }
 
         let retry_keys = derive_initial_key_material(retry.source_cid.as_bytes())?;
         let packet_number = self.next_client_initial_packet_number;
-        let retry_initial = build_client_initial_packet_with_token(
+        let retry_initial = build_client_initial_packet_with_token_and_version(
             &self.fingerprint,
             self.client_initial.crypto_data.clone(),
             self.client_initial.transport_parameters.clone(),
@@ -2529,15 +2557,86 @@ impl NativeQuicHandshake {
             self.source_cid.clone(),
             retry.token,
             packet_number,
+            self.client_initial_version,
         )?;
 
         self.destination_cid = retry.source_cid.clone();
         self.retry_source_cid = Some(retry.source_cid);
+        self.retry_received = true;
         self.client_initial_keys = retry_keys.client;
         self.server_initial_keys = retry_keys.server;
         self.client_initial = retry_initial.clone();
         self.pending_client_initial = Some(retry_initial);
         self.next_client_initial_packet_number = packet_number + 1;
+        Ok(())
+    }
+
+    fn restart_for_version_negotiation(&mut self, chosen_version: u32) -> Result<()> {
+        let new_source_cid = random_connection_id(self.source_cid.as_bytes().len())?;
+        let mut new_tls =
+            NativeQuicTlsSession::client_with_initial_source_connection_id_and_verify_peer(
+                &self.server_name,
+                &self.fingerprint,
+                &new_source_cid,
+                self.tls_fingerprint.as_ref(),
+                self.verify_peer,
+                &self.root_certs,
+                self.use_platform_roots,
+            )?;
+        let captured = new_tls.take_client_initial();
+        let new_initial = build_client_initial_packet_from_capture_with_version_and_size(
+            captured,
+            self.destination_cid.clone(),
+            new_source_cid.clone(),
+            chosen_version,
+            self.fingerprint.transport.initial_datagram_size,
+        )?;
+        let initial_keys = derive_initial_key_material(self.destination_cid.as_bytes())?;
+
+        self.tls = new_tls;
+        self.source_cid = new_source_cid;
+        self.client_initial_version = chosen_version;
+        self.vn_received = true;
+        self.retry_received = false;
+        self.retry_source_cid = None;
+        self.server_initial_or_handshake_seen = false;
+        self.server_transport_parameters_validated = false;
+        self.close_draining = false;
+        self.client_initial = new_initial.clone();
+        self.pending_client_initial = Some(new_initial);
+        self.client_initial_keys = initial_keys.client;
+        self.server_initial_keys = initial_keys.server;
+        self.client_handshake_keys = None;
+        self.server_handshake_keys = None;
+        self.client_application_keys = None;
+        self.server_application_keys = None;
+        self.initial_crypto = QuicCryptoAssembler::default();
+        self.handshake_crypto = QuicCryptoAssembler::default();
+        self.initial_ack_tracker = QuicAckTracker::default();
+        self.handshake_ack_tracker = QuicAckTracker::default();
+        self.application_ack_tracker = QuicAckTracker::default();
+        self.client_handshake_loss_detector = QuicLossDetector::default();
+        self.client_application_loss_detector = QuicLossDetector::default();
+        self.client_application_flow_control =
+            QuicApplicationFlowControl::client(&self.fingerprint.transport);
+        self.client_application_receive_flow_control =
+            QuicReceiveFlowControl::client(&self.fingerprint.transport);
+        self.client_handshake_sent_crypto.clear();
+        self.client_application_sent_streams.clear();
+        self.client_path_validator = QuicPathValidator::default();
+        self.next_client_initial_packet_number = 1;
+        self.next_server_initial_packet_number = 0;
+        self.next_server_handshake_packet_number = 0;
+        self.next_client_handshake_packet_number = 0;
+        self.next_server_application_packet_number = 0;
+        self.next_client_application_packet_number = 0;
+        self.next_client_bidirectional_stream_id = 0;
+        self.next_client_unidirectional_stream_id = 2;
+        self.client_handshake_crypto_offset = 0;
+        self.client_stream_offsets.clear();
+        self.server_h3_stream_buffers.clear();
+        self.server_h3_stream_buffer_offsets.clear();
+        self.server_h3_stream_types.clear();
         Ok(())
     }
 

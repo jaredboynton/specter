@@ -2015,6 +2015,81 @@ fn native_h3_client_retransmits_unacked_handshake_crypto_after_pto() {
     ));
 }
 
+#[test]
+fn native_h3_server_retransmits_unacked_initial_and_handshake_crypto_after_pto() {
+    let fingerprint = Http3Fingerprint::chrome();
+    let client_destination_cid = ConnectionId::from_static(b"server-dcid");
+    let client_source_cid = ConnectionId::from_static(b"client-scid");
+    let server_source_cid = ConnectionId::from_static(b"native-server-cid");
+    let mut client = NativeQuicHandshake::client_with_verify_peer(
+        "localhost",
+        &fingerprint,
+        client_destination_cid.clone(),
+        client_source_cid.clone(),
+        false,
+    )
+    .unwrap();
+    let (cert_pem, key_pem) = helpers::tls::cached_cert_and_key_pem();
+    let mut server = NativeQuicServerHandshake::new(
+        &fingerprint,
+        &cert_pem,
+        &key_pem,
+        client_destination_cid.clone(),
+        client_source_cid,
+        server_source_cid,
+    )
+    .unwrap();
+    let server_flight = server
+        .process_client_initial(client.client_initial().packet.as_ref())
+        .unwrap();
+    let server_handshake_keys = server_flight
+        .secrets
+        .iter()
+        .find(|secret| {
+            secret.direction == QuicSecretDirection::Write
+                && secret.level == QuicEncryptionLevel::Handshake
+        })
+        .unwrap()
+        .packet_key_material()
+        .unwrap();
+
+    let retransmits = server
+        .retransmit_pto_server_crypto_packets(Instant::now(), Duration::ZERO)
+        .unwrap();
+
+    assert_eq!(retransmits.len(), 2);
+    assert_eq!(retransmits[0].packet_type, LongHeaderType::Initial);
+    assert_eq!(retransmits[0].packet_number, server_flight.packets[0].packet_number + 1);
+    assert_eq!(retransmits[0].crypto_data, server_flight.packets[0].crypto_data);
+    assert_eq!(retransmits[1].packet_type, LongHeaderType::Handshake);
+    assert_eq!(retransmits[1].packet_number, server_flight.packets[1].packet_number + 1);
+    assert_eq!(retransmits[1].crypto_data, server_flight.packets[1].crypto_data);
+
+    let initial_keys = derive_initial_key_material(client_destination_cid.as_bytes()).unwrap();
+    let opened_initial = open_long_header_packet(
+        &initial_keys.server,
+        &retransmits[0].packet,
+        retransmits[0].packet_number_offset,
+        retransmits[0].packet_number,
+    )
+    .unwrap();
+    assert!(matches!(
+        &decode_frames(&opened_initial.payload).unwrap()[0],
+        QuicFrame::Crypto { offset: 0, data } if data == &retransmits[0].crypto_data
+    ));
+    let opened_handshake = open_long_header_packet(
+        &server_handshake_keys,
+        &retransmits[1].packet,
+        retransmits[1].packet_number_offset,
+        retransmits[1].packet_number,
+    )
+    .unwrap();
+    assert!(matches!(
+        &decode_frames(&opened_handshake.payload).unwrap()[0],
+        QuicFrame::Crypto { offset: 0, data } if data == &retransmits[1].crypto_data
+    ));
+}
+
 #[tokio::test]
 async fn native_h3_backend_sends_client_initial_datagram_before_timeout() {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
