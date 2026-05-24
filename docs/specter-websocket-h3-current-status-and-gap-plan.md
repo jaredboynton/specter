@@ -131,7 +131,7 @@ Specter status:
 
 1. **ACK_ECN / ECN plumbing:** ACK_ECN frame encode/decode and loss-detector range handling exist; ECN socket/counter plumbing is still missing.
 2. **Path validation/migration:** PATH_CHALLENGE response exists, but CID inventory, path candidate validation, migration, anti-amplification, and PATH_RESPONSE validation are incomplete.
-3. **Fingerprinting gaps:** cert compression, resumption, 0-RTT, raw ordered transport-parameter list capture/replay.
+3. **Fingerprinting gaps:** TLS certificate compression is wired into the native H3 ClientHello (`src/transport/h3/tls.rs`) and raw-ordered transport-parameter encode is in place; resumption (session ticket capture/replay), 0-RTT send, and raw-ordered transport-parameter capture from observed peers remain.
 
 ## Recommended next execution plan
 
