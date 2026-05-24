@@ -3478,7 +3478,10 @@ impl NativeQuicHandshake {
     }
 
     pub fn open_server_application_packet(&mut self, packet: &[u8]) -> Result<Vec<QuicFrame>> {
-        if self.close_draining {
+        // RFC9000 § 10.2: stop decrypting peer packets once we are draining;
+        // closing-phase decryption is preserved so we can still apply the
+        // § 10.2 MAY-optimisation (closing -> draining on peer CONNECTION_CLOSE).
+        if self.close_state.is_draining() {
             return Ok(Vec::new());
         }
         let Some(server_application_keys) = self.server_application_keys.as_ref() else {
