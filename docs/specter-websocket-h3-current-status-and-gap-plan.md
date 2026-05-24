@@ -116,7 +116,7 @@ Specter status:
 - `quinn_transport` and `s2n_quic_transport` are no longer pending adapters; both have transport-only echo rows and are explicitly outside the H3 superiority gate.
 - Specter RFC9220 local tunnel throughput/latency rows and low-level `quiche`/`tokio-quiche` raw tunnel comparator rows are no longer pending; only larger p99-scale samples, unsupported higher-level client capability rows, and a dedicated tunnel superiority gate remain open.
 - TLS certificate compression and raw ordered QUIC transport-parameter encoding are no longer silent gaps; native H3 ClientHello coverage now proves `compress_certificate`, raw ordered parameter emission, and dynamic connection-ID placeholder substitution inside raw ordered parameter lists.
-- TLS extension-order behavior is no longer an evidence-free gap: native H3 honors deterministic-vs-browser-permuted ClientHello generation policy. Session-ticket capture/replay, `NativeH3SessionCache`, H3Client cache injection/access, connection-establishment session lookup/eviction fallback, driver-side ticket drain, TLS `Resumed` status, and 0-RTT `EarlyAccepted`/`EarlyRejected` status reporting are now regression-tested; the remaining high-level gap is safe end-to-end 0-RTT request send/replay policy.
+- TLS extension-order behavior is no longer an evidence-free gap: native H3 honors deterministic-vs-browser-permuted ClientHello generation policy. Session-ticket capture/replay, `NativeH3SessionCache`, H3Client cache injection/access, connection-establishment session lookup/eviction fallback, driver-side ticket drain, TLS-level 0-RTT accept/reject status, non-0RTT replay suppression, and 0-RTT early-data context helpers also exist; the remaining high-level gap is safe end-to-end 0-RTT request send/replay policy with connection/H3Client-level acceptance propagation.
 - ACK_ECN is no longer just parse/round-trip coverage: native loss detection validates counters, tracks CE growth, disables ECN on invalid counters, and reduces congestion window on CE growth; only socket marking/reporting, ACK_ECN generation from received ECN marks, and probing policy remain open.
 - RTT sampling is no longer a disconnected helper: newly ACKed largest sent packets update the native loss detector's latest/min/smoothed RTT, RTT variance, and PTO estimate.
 - Client Initial PTO replay is no longer just a helper: H3 connection establishment records Initial sends, arms the loss-detection timer, retransmits Initial CRYPTO on PTO, retires ACKed Initial CRYPTO, and releases recovery bytes-in-flight on Initial ACKs.
@@ -140,14 +140,14 @@ Specter status:
 
 ### P1
 
-1. **0-RTT policy:** certificate compression, session-ticket capture/install helpers, `NativeH3SessionCache`, H3Client/session-cache wiring, TLS session replay, resumed-status reporting, 0-RTT early-data context setup, and `EarlyAccepted`/`EarlyRejected` observability exist, but native H3 still lacks safe end-to-end 0-RTT request send/replay policy.
+1. **0-RTT policy:** certificate compression, session-ticket capture/install helpers, `NativeH3SessionCache`, H3Client/session-cache wiring, TLS session replay, non-0RTT replay suppression, TLS-level accept/reject status, and 0-RTT early-data context setup exist, but native H3 still lacks safe end-to-end 0-RTT request send/replay policy and connection/H3Client-level acceptance propagation.
 
 ### P2
 
 1. **ACK_ECN / ECN plumbing:** ACK_ECN frame encode/decode, counter validation, invalid-counter ECN disablement, and CE-driven congestion response exist; ECN socket marking/reporting, ACK_ECN generation from received ECN marks, and PMTU/path probing policy are still missing.
 2. **Path validation/migration:** client PATH_CHALLENGE packetization and matching PATH_RESPONSE validation exist, but CID inventory, per-address migration/path state, server-side lifecycle, and anti-amplification behavior remain incomplete.
 3. **Browser ACK parity:** threshold+timer support and ACK Delay encoding now have focused test coverage; browser/version capture parity for the tuned threshold remains open.
-4. **Fingerprinting capture gaps:** capture-derived raw transport-parameter presets, explicit extension-list ordering beyond BoringSSL permutation policy, and full H3 0-RTT replay-policy integration remain open.
+4. **Fingerprinting capture gaps:** capture-derived raw transport-parameter presets, explicit extension-list ordering beyond BoringSSL permutation policy, and full H3 0-RTT request replay-policy integration remain open.
 
 ## Recommended next execution plan
 
