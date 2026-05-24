@@ -268,6 +268,95 @@ async fn h2_request_stream_10mb_under_backpressure() {
 }
 
 #[tokio::test]
+async fn h2_request_stream_batches_ready_small_chunks() {
+    init_validation_dir();
+    let (acceptor, ca_cert) = h2_acceptor();
+    let server = MockH2Server::new().await.unwrap();
+    let url = server.url_tls();
+    let data_frame_count = Arc::new(AtomicUsize::new(0));
+    let total_received = Arc::new(AtomicUsize::new(0));
+    let data_frame_count_server = data_frame_count.clone();
+    let total_received_server = total_received.clone();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| {
+        let data_frame_count = data_frame_count_server.clone();
+        let total_received = total_received_server.clone();
+        async move {
+            server_handshake(&conn).await;
+            let mut encoder = Encoder::new();
+            let mut stream_id = 0;
+            loop {
+                let Ok((_, frame_type, flags, sid, payload)) =
+                    timeout(Duration::from_secs(3), conn.read_frame())
+                        .await
+                        .unwrap()
+                else {
+                    break;
+                };
+                match frame_type {
+                    0x01 => stream_id = sid,
+                    0x00 => {
+                        data_frame_count.fetch_add(1, Ordering::SeqCst);
+                        total_received.fetch_add(payload.len(), Ordering::SeqCst);
+                        if flags & 0x01 != 0 {
+                            send_ok_headers(&conn, &mut encoder, stream_id).await;
+                            conn.send_data(stream_id, b"batched", true).await.unwrap();
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let client = h2_client(ca_cert);
+    let polls = Arc::new(AtomicUsize::new(0));
+    let stream = CountingChunks::new(1024, 5, polls);
+    let mut response = timeout(
+        Duration::from_secs(5),
+        client
+            .post(format!("{}/batched", url))
+            .body_stream_sized(stream, 5 * 1024)
+            .send_streaming(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        response
+            .body_mut()
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap(),
+        Bytes::from_static(b"batched")
+    );
+    assert_eq!(total_received.load(Ordering::SeqCst), 5 * 1024);
+    assert_eq!(
+        data_frame_count.load(Ordering::SeqCst),
+        1,
+        "ready 5x1024B upload chunks should coalesce into one DATA frame with END_STREAM"
+    );
+
+    fs::write(
+        "target/validation/h2/VAL-H2-REQ-STREAM-005.json",
+        serde_json::to_string_pretty(&json!({
+            "request_chunks": 5,
+            "request_chunk_bytes": 1024,
+            "data_frame_count": data_frame_count.load(Ordering::SeqCst),
+            "total_request_bytes": total_received.load(Ordering::SeqCst),
+            "batched_ready_small_chunks": true
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
 async fn h2_request_stream_mid_stream_cancellation() {
     init_validation_dir();
     let (acceptor, ca_cert) = h2_acceptor();

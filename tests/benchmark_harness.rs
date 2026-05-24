@@ -48,13 +48,29 @@ fn streaming_benchmark_declares_enforceable_request_body_streaming_gate() {
     assert!(source.contains("reqwest::Body::wrap_stream"));
     assert!(source.contains("RequestBuilder::body_stream_sized -> send_streaming"));
     assert!(source.contains("run_real_request_body_measurement"));
+    assert!(source.contains("--response-body-streaming"));
     assert!(source.contains("--request-body-streaming"));
     assert!(source.contains("--self-test-request-threshold-failure"));
+    assert!(source.contains(
+        "request_body_transfer_duration(offsets.first().copied(), response_headers_offset_ns)"
+    ));
+    assert!(source.contains("client_overhead_unclamped_duration_ns"));
+    assert!(source.contains("client_overhead_denominator_floor_count"));
+    assert!(source.contains("client_write_overhead_unclamped_duration_ns"));
+    assert!(source.contains("client_write_overhead_denominator_floor_count"));
     assert!(source.contains("throughput_improvement_pct >= 5.0"));
     assert!(source.contains("ttft_wilcoxon_signed_rank_p_value < 0.01"));
     assert!(source.contains("throughput_wilcoxon_signed_rank_p_value < 0.01"));
     assert!(source.contains("request_payload_schedule_ms()"));
     assert!(source.contains("BENCH_REQ_BODY_LEN"));
+    assert!(source.contains("response status/headers"));
+    assert!(!source.contains("producer-bottlenecked"));
+    assert!(!source.contains(
+        "Throughput numbers (median, Wilcoxon, p95) remain in the JSON as audit-only telemetry"
+    ));
+    assert!(!source.contains(
+        "request_body_transfer_duration(offsets.first().copied(), response_complete_time)"
+    ));
 }
 
 #[test]
@@ -70,7 +86,8 @@ fn thresholded_streaming_benchmark_uses_delayed_multi_chunk_workload() {
         "corrected_client_overhead_duration(body_transfer_duration, payload_schedule_duration)"
     ));
     assert!(source.contains("throughput_values.push(bytes as f64 / denominator);"));
-    assert!(source.contains("throughput_timing_window: \"corrected client overhead: first observed body byte through final observed body byte minus sum(payload_schedule_ms); identical for reqwest and Specter\""));
+    assert!(source.contains("response rows use first observed response body byte through final observed response body byte"));
+    assert!(source.contains("request rows use first yielded request body chunk through response headers/upload-complete"));
     assert!(source.contains("throughput_improvement_pct >= 5.0"));
     assert!(source.contains("p95_throughput_regression_pct <= 5.0"));
     assert!(source.contains("body_transfer_duration_ns"));
@@ -97,6 +114,14 @@ fn benchmark_fixtures_use_monotonic_deadline_spin_wait_pacing() {
     assert!(
         !source.contains(&pattern),
         "benchmark fixture must not call tokio::time::sleep for inter-chunk pacing; use pace_chunk_until against a monotonic deadline anchored on Instant",
+    );
+    assert!(
+        source.contains("cx.waker().wake_by_ref();"),
+        "request-body producer pacing must yield through the task waker before spin-waiting near the monotonic deadline",
+    );
+    assert!(
+        !source.contains("sleep: Option<Pin<Box<tokio::time::Sleep>>>"),
+        "request-body producer must not use tokio::time::Sleep for inter-chunk pacing",
     );
 
     assert!(
@@ -176,11 +201,24 @@ async fn test_h1_streaming_local() {
 
 #[tokio::test]
 async fn test_h2_streaming_local() {
+    // This test asserts that hitting 3202 with no fixture running fails fast.
+    // Skip if a benchmark run happens to be using 3202 concurrently in the same
+    // process group (TIME_WAIT or active listener) so it doesn't flake the suite.
+    use std::net::{SocketAddr, TcpStream};
+    if TcpStream::connect_timeout(
+        &SocketAddr::from(([127, 0, 0, 1], 3202)),
+        std::time::Duration::from_millis(50),
+    )
+    .is_ok()
+    {
+        eprintln!("skipping test_h2_streaming_local: a fixture is already on 3202");
+        return;
+    }
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter("debug")
         .try_init();
 
-    // Start H2 server in background task
     let client = Client::builder()
         .danger_accept_invalid_certs(true)
         .prefer_http2(true)

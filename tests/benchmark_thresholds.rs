@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use streaming_vs_reqwest::{
     body_transfer_duration, corrected_client_overhead_duration, evaluate_comparable_threshold,
-    inter_chunk_gaps_ns, pace_chunk_until, paired_wilcoxon_signed_rank_p_value, record_sample,
-    spin_wait_until, summarize_send_gaps, ActualSendGap, Metrics,
+    inter_chunk_gaps_ns, pace_chunk_until, paired_wilcoxon_signed_rank_p_value,
+    record_request_sample, record_sample, request_body_transfer_duration, spin_wait_until,
+    summarize_send_gaps, ActualSendGap, DenominatorEvidence, Metrics,
 };
 
 fn metrics(ttft_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64) -> Metrics {
@@ -21,6 +22,11 @@ fn metrics(ttft_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64
         p95_bytes_per_sec,
         body_transfer_duration_ns: 8_000_000.0,
         client_overhead_duration_ns: 1_000_000.0,
+        client_overhead_unclamped_duration_ns: None,
+        client_overhead_denominator_floor_count: 0,
+        client_write_overhead_duration_ns: 0.0,
+        client_write_overhead_unclamped_duration_ns: None,
+        client_write_overhead_denominator_floor_count: 0,
         p50_ns: ttft_ns,
         p95_ns,
         p99_ns: p95_ns,
@@ -153,6 +159,33 @@ fn comparable_threshold_fails_when_wilcoxon_p_values_are_not_significant() {
 }
 
 #[test]
+fn comparable_threshold_enforces_throughput_for_request_rows_too() {
+    // Specter wins TTFT by >5% but loses median throughput, p95 throughput,
+    // and Wilcoxon throughput significance. The shared request/response gate
+    // must still fail because throughput remains required.
+    let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
+    let specter = metrics(900.0, 900.0, 900.0, 900.0);
+
+    let result = evaluate_comparable_threshold(&reqwest, &specter);
+
+    assert!(!result.pass);
+    assert!(result.ttft_improvement_pct >= 5.0);
+    assert!(result.median_throughput_regression_pct > 5.0);
+    assert!(result.p95_throughput_regression_pct > 5.0);
+}
+
+#[test]
+fn comparable_threshold_still_enforces_ttft_p95_and_wilcoxon() {
+    // p95 TTFT regresses past 5%, so the gate fails even when throughput wins.
+    let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
+    let specter = metrics(900.0, 1_100.0, 1_100.0, 1_060.0);
+
+    let result = evaluate_comparable_threshold(&reqwest, &specter);
+    assert!(!result.pass);
+    assert!(result.p95_ttft_regression_pct > 5.0);
+}
+
+#[test]
 fn paired_wilcoxon_signed_rank_uses_direction_for_metric_semantics() {
     let baseline = vec![1_000.0; 30];
     let lower_specter = vec![900.0; 30];
@@ -194,6 +227,61 @@ fn throughput_sample_uses_corrected_client_overhead_duration_not_ttft_or_raw_dur
     assert_eq!(throughput_values.len(), 1);
     assert!((throughput_values[0] - 5_120_000.0).abs() < f64::EPSILON);
     assert!((chunk_rates[0] - 5_000.0).abs() < f64::EPSILON);
+    assert_eq!(send_gap_samples_ns.len(), 4);
+}
+
+#[test]
+fn request_body_transfer_duration_uses_upload_complete_not_response_complete() {
+    let duration = request_body_transfer_duration(Some(2_000_000.0), 7_500_000.0);
+
+    assert_eq!(duration, Duration::from_nanos(5_500_000));
+}
+
+#[test]
+fn request_body_throughput_uses_upload_complete_denominator_and_emits_floor_evidence() {
+    let mut ttft_values = Vec::new();
+    let mut throughput_values = Vec::new();
+    let mut chunk_rates = Vec::new();
+    let mut body_transfer_duration_values = Vec::new();
+    let mut client_overhead_duration_values = Vec::new();
+    let mut client_overhead_unclamped_duration_values = Vec::new();
+    let mut client_overhead_denominator_floor_count = 0;
+    let mut client_write_overhead_duration_values = Vec::new();
+    let mut client_write_overhead_unclamped_duration_values = Vec::new();
+    let mut client_write_overhead_denominator_floor_count = 0;
+    let mut send_gap_samples_ns = Vec::new();
+
+    record_request_sample(
+        Duration::from_millis(9),
+        Duration::from_millis(8),
+        Duration::from_millis(8),
+        DenominatorEvidence::from_unclamped_ns(0.0),
+        5 * 1024,
+        5,
+        &[2_000_000.0, 2_000_000.0, 2_000_000.0, 2_000_000.0],
+        &mut ttft_values,
+        &mut throughput_values,
+        &mut chunk_rates,
+        &mut body_transfer_duration_values,
+        &mut client_overhead_duration_values,
+        &mut client_overhead_unclamped_duration_values,
+        &mut client_overhead_denominator_floor_count,
+        &mut client_write_overhead_duration_values,
+        &mut client_write_overhead_unclamped_duration_values,
+        &mut client_write_overhead_denominator_floor_count,
+        &mut send_gap_samples_ns,
+    );
+
+    assert_eq!(ttft_values, vec![9_000_000.0]);
+    assert_eq!(body_transfer_duration_values, vec![8_000_000.0]);
+    assert_eq!(client_overhead_unclamped_duration_values, vec![0.0]);
+    assert_eq!(client_overhead_duration_values, vec![1.0]);
+    assert_eq!(client_overhead_denominator_floor_count, 1);
+    assert_eq!(client_write_overhead_unclamped_duration_values, vec![0.0]);
+    assert_eq!(client_write_overhead_duration_values, vec![1.0]);
+    assert_eq!(client_write_overhead_denominator_floor_count, 1);
+    assert_eq!(throughput_values, vec![5_120_000_000_000.0]);
+    assert_eq!(chunk_rates, vec![5_000_000_000.0]);
     assert_eq!(send_gap_samples_ns.len(), 4);
 }
 
