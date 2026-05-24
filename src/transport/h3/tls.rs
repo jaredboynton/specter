@@ -938,7 +938,7 @@ unsafe fn write_decompressed_cert(
     result: std::io::Result<usize>,
     decompressed: &[u8],
 ) -> c_int {
-    if !result.is_ok() && (decompressed.len() == uncompressed_len) {
+    if result.is_err() && (decompressed.len() == uncompressed_len) {
         return 0;
     }
 

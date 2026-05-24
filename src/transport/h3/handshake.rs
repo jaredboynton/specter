@@ -778,6 +778,7 @@ pub struct NativeQuicServerHandshake {
     server_application_flow_control: QuicApplicationFlowControl,
     server_application_receive_flow_control: QuicReceiveFlowControl,
     server_application_sent_streams: BTreeMap<u64, SentApplicationStreamPacket>,
+    server_application_recovery_lost_packets: Vec<u64>,
     server_initial_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     server_handshake_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     recovery: RecoveryState,
@@ -846,6 +847,7 @@ impl NativeQuicServerHandshake {
                 &fingerprint.transport,
             ),
             server_application_sent_streams: BTreeMap::new(),
+            server_application_recovery_lost_packets: Vec::new(),
             server_initial_sent_crypto: BTreeMap::new(),
             server_handshake_sent_crypto: BTreeMap::new(),
             next_client_initial_packet_number: 0,
@@ -918,6 +920,7 @@ impl NativeQuicServerHandshake {
                 &fingerprint.transport,
             ),
             server_application_sent_streams: BTreeMap::new(),
+            server_application_recovery_lost_packets: Vec::new(),
             server_initial_sent_crypto: BTreeMap::new(),
             server_handshake_sent_crypto: BTreeMap::new(),
             next_client_initial_packet_number: 0,
@@ -962,6 +965,60 @@ impl NativeQuicServerHandshake {
 
     pub fn close_state_mut(&mut self) -> &mut QuicCloseState {
         &mut self.close_state
+    }
+
+    /// Read-only access to the RFC9002 packet-space recovery state for tests
+    /// and the H3 driver loss-detection timer wakeup on the server side.
+    pub fn recovery(&self) -> &RecoveryState {
+        &self.recovery
+    }
+
+    /// Driver hook: when the server-side loss detection timer fires, call
+    /// this to declare time-threshold losses (RFC9002 § 6.1.2) or schedule a
+    /// PTO probe in the earliest in-flight space.
+    pub fn on_loss_detection_timeout(&mut self, now: Instant) -> LossDetectionOutcome {
+        self.recovery.on_loss_detection_timeout(now)
+    }
+
+    /// Next loss-detection timer deadline on the server side.
+    pub fn loss_detection_timer(&self) -> Option<Instant> {
+        self.recovery.loss_detection_timer()
+    }
+
+    /// Server-side PTO duration (RFC9002 § 6.2.1) applied to the Application
+    /// space after handshake confirmation.
+    pub fn application_pto(&self) -> Duration {
+        self.recovery.current_pto()
+    }
+
+    /// Retransmit server application stream packets whose PTO has expired.
+    /// Mirrors the client-side `retransmit_pto_client_application_stream_packets`.
+    pub fn retransmit_pto_server_application_stream_packets(
+        &mut self,
+        now: Instant,
+        pto_timeout: Duration,
+    ) -> Result<Vec<ServerApplicationPacket>> {
+        let expired_packets = self
+            .server_application_loss_detector
+            .pto_expired_packets(now, pto_timeout);
+        let mut expired_packets = expired_packets;
+        expired_packets.sort_unstable();
+        expired_packets.dedup();
+        let mut retransmits = Vec::new();
+        for packet_number in expired_packets {
+            self.server_application_loss_detector
+                .retire_packet(packet_number);
+            let Some(sent) = self.server_application_sent_streams.remove(&packet_number) else {
+                continue;
+            };
+            retransmits.push(self.build_server_application_stream_packet_at_offset(
+                sent.stream_id,
+                sent.stream_offset,
+                sent.data,
+                sent.fin,
+            )?);
+        }
+        Ok(retransmits)
     }
 
     /// RFC9000 § 10.2 closing: called by the server driver after emitting a
@@ -1119,12 +1176,61 @@ impl NativeQuicServerHandshake {
         self.server_application_loss_detector.lost_packets()
     }
 
+    pub fn recovery(&self) -> &RecoveryState {
+        &self.recovery
+    }
+
+    pub fn loss_detection_timer(&self) -> Option<Instant> {
+        self.recovery.loss_detection_timer()
+    }
+
+    pub fn on_loss_detection_timeout(&mut self, now: Instant) -> LossDetectionOutcome {
+        self.recovery.on_loss_detection_timeout(now)
+    }
+
+    pub fn application_pto(&self) -> Duration {
+        self.recovery.current_pto()
+    }
+
+    pub fn application_pto_timeout(&self) -> Duration {
+        let max_ack_delay = self.recovery.max_ack_delay();
+        let backoff = 1u32 << self.recovery.pto_count().min(31);
+        self.recovery
+            .current_pto()
+            .saturating_add(max_ack_delay.saturating_mul(backoff))
+    }
+
     pub fn retransmit_lost_server_application_stream_packets(
         &mut self,
     ) -> Result<Vec<ServerApplicationPacket>> {
-        let lost_packets = self.server_application_loss_detector.lost_packets();
+        let mut lost_packets = self.server_application_loss_detector.lost_packets();
+        lost_packets.extend(self.server_application_recovery_lost_packets.drain(..));
+        self.retransmit_server_application_stream_packets(lost_packets)
+    }
+
+    pub fn retransmit_pto_server_application_stream_packets(
+        &mut self,
+        now: Instant,
+        pto_timeout: Duration,
+    ) -> Result<Vec<ServerApplicationPacket>> {
+        let expired_packets = self
+            .server_application_loss_detector
+            .pto_expired_packets(now, pto_timeout);
+        self.retransmit_server_application_stream_packets(expired_packets)
+    }
+
+    fn retransmit_server_application_stream_packets<I>(
+        &mut self,
+        packet_numbers: I,
+    ) -> Result<Vec<ServerApplicationPacket>>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut packet_numbers = packet_numbers.into_iter().collect::<Vec<_>>();
+        packet_numbers.sort_unstable();
+        packet_numbers.dedup();
         let mut retransmits = Vec::new();
-        for packet_number in lost_packets {
+        for packet_number in packet_numbers {
             self.server_application_loss_detector
                 .retire_packet(packet_number);
             let Some(sent) = self.server_application_sent_streams.remove(&packet_number) else {
@@ -1161,6 +1267,15 @@ impl NativeQuicServerHandshake {
 
             for frame in decode_frames(&opened.payload)? {
                 for packet_number in self.server_initial_loss_detector.on_ack_frame(&frame)? {
+                    self.server_initial_sent_crypto.remove(&packet_number);
+                }
+                let outcome = self.recovery.on_ack_received(
+                    PacketNumberSpace::Initial,
+                    &frame,
+                    self.tls.fingerprint.transport.ack_delay_exponent,
+                    Instant::now(),
+                )?;
+                for (packet_number, _) in outcome.newly_acked {
                     self.server_initial_sent_crypto.remove(&packet_number);
                 }
                 if let QuicFrame::Crypto { offset, data } = frame {
@@ -1272,6 +1387,15 @@ impl NativeQuicServerHandshake {
                 for packet_number in self.server_handshake_loss_detector.on_ack_frame(&frame)? {
                     self.server_handshake_sent_crypto.remove(&packet_number);
                 }
+                let outcome = self.recovery.on_ack_received(
+                    PacketNumberSpace::Handshake,
+                    &frame,
+                    self.tls.fingerprint.transport.ack_delay_exponent,
+                    Instant::now(),
+                )?;
+                for (packet_number, _) in outcome.newly_acked {
+                    self.server_handshake_sent_crypto.remove(&packet_number);
+                }
                 if let QuicFrame::Crypto { offset, data } = frame {
                     self.client_handshake_crypto.insert(offset, data)?;
                 }
@@ -1333,6 +1457,24 @@ impl NativeQuicServerHandshake {
             for packet_number in self.server_application_loss_detector.on_ack_frame(frame)? {
                 self.server_application_sent_streams.remove(&packet_number);
                 self.application_key_update.note_packet_acked(packet_number);
+            }
+            if matches!(frame, QuicFrame::Ack { .. } | QuicFrame::AckEcn { .. }) {
+                let outcome = self.recovery.on_ack_received(
+                    PacketNumberSpace::Application,
+                    frame,
+                    self.tls.fingerprint.transport.ack_delay_exponent,
+                    now,
+                )?;
+                for (packet_number, _) in outcome.newly_acked {
+                    self.server_application_sent_streams.remove(&packet_number);
+                    self.application_key_update.note_packet_acked(packet_number);
+                }
+                self.server_application_recovery_lost_packets.extend(
+                    outcome
+                        .lost
+                        .into_iter()
+                        .map(|(packet_number, _)| packet_number),
+                );
             }
             match frame {
                 QuicFrame::MaxData(max_data) => {
@@ -1722,9 +1864,11 @@ impl NativeQuicServerHandshake {
             match (secret.direction, secret.level) {
                 (QuicSecretDirection::Read, QuicEncryptionLevel::Handshake) => {
                     self.client_handshake_keys = Some(secret.packet_key_material()?);
+                    self.recovery.set_has_handshake_keys(true);
                 }
                 (QuicSecretDirection::Write, QuicEncryptionLevel::Handshake) => {
                     self.server_handshake_keys = Some(secret.packet_key_material()?);
+                    self.recovery.set_has_handshake_keys(true);
                 }
                 (QuicSecretDirection::Read, QuicEncryptionLevel::Application) => {
                     let keys = secret.packet_key_material()?;
@@ -1740,6 +1884,11 @@ impl NativeQuicServerHandshake {
                 }
                 _ => {}
             }
+        }
+        if self.is_application_ready() && !self.recovery.handshake_complete() {
+            self.recovery.discard_space(PacketNumberSpace::Initial);
+            self.recovery.discard_space(PacketNumberSpace::Handshake);
+            self.recovery.mark_handshake_complete();
         }
         Ok(())
     }
@@ -1774,6 +1923,11 @@ impl NativeQuicServerHandshake {
         )?;
         self.server_initial_loss_detector
             .on_packet_sent_at(packet_number, sent_at);
+        self.recovery.on_packet_sent(
+            PacketNumberSpace::Initial,
+            packet_number,
+            SentPacketInfo::new(sent_at, packet.packet.len(), true, true),
+        );
         self.server_initial_sent_crypto.insert(
             packet_number,
             SentCryptoPacket {
@@ -1869,6 +2023,11 @@ impl NativeQuicServerHandshake {
         )?;
         self.server_handshake_loss_detector
             .on_packet_sent_at(packet_number, sent_at);
+        self.recovery.on_packet_sent(
+            PacketNumberSpace::Handshake,
+            packet_number,
+            SentPacketInfo::new(sent_at, packet.packet.len(), true, true),
+        );
         self.server_handshake_sent_crypto.insert(
             packet_number,
             SentCryptoPacket {
@@ -1939,8 +2098,10 @@ impl NativeQuicServerHandshake {
             &frame,
         )?;
 
+        let now = Instant::now();
+        let packet_size = packet.len();
         self.server_application_loss_detector
-            .on_packet_sent(packet_number);
+            .on_packet_sent_at(packet_number, now);
         self.server_application_sent_streams.insert(
             packet_number,
             SentApplicationStreamPacket {
@@ -1949,6 +2110,11 @@ impl NativeQuicServerHandshake {
                 fin,
                 data: data.clone(),
             },
+        );
+        self.recovery.on_packet_sent(
+            PacketNumberSpace::Application,
+            packet_number,
+            SentPacketInfo::new(now, packet_size, true, true),
         );
         self.next_server_application_packet_number += 1;
 
@@ -1983,8 +2149,15 @@ impl NativeQuicServerHandshake {
             self.write_key_phase,
             &frame,
         )?;
+        let now = Instant::now();
+        let packet_size = packet.len();
         self.server_application_loss_detector
-            .on_packet_sent(packet_number);
+            .on_packet_sent_at(packet_number, now);
+        self.recovery.on_packet_sent(
+            PacketNumberSpace::Application,
+            packet_number,
+            SentPacketInfo::new(now, packet_size, true, true),
+        );
         self.next_server_application_packet_number += 1;
 
         Ok(ServerApplicationControlPacket {
@@ -2531,7 +2704,7 @@ impl NativeQuicHandshake {
         &mut self,
     ) -> Result<Vec<ClientApplicationPacket>> {
         let mut lost_packets = self.client_application_loss_detector.lost_packets();
-        lost_packets.extend(self.client_application_recovery_lost_packets.drain(..));
+        lost_packets.append(&mut self.client_application_recovery_lost_packets);
         self.retransmit_client_application_stream_packets(lost_packets)
     }
 
