@@ -2,17 +2,18 @@ use bytes::Bytes;
 use specter::fingerprint::QuicTransportParams;
 use specter::transport::h3::quic::{
     build_initial_crypto_packet, decode_frame, decode_frames, decode_long_header,
-    decode_transport_parameters, derive_initial_key_material,
+    decode_retry_packet, decode_transport_parameters, decode_version_negotiation_packet,
+    derive_initial_key_material,
     derive_packet_key_material_from_secret, encode_frame, encode_initial_header,
     encode_long_header, encode_server_transport_parameters, encode_short_header,
     encode_transport_parameters, encode_transport_parameters_with_initial_source_connection_id,
     header_protection_mask, initial_crypto_plaintext, open_initial_packet, open_long_header_packet,
     open_packet_payload, open_protected_initial_packet, open_short_header_packet,
     protect_initial_packet, protect_long_header, protect_long_header_packet,
-    protect_short_header_packet, recover_packet_number, seal_packet_payload,
-    split_long_header_datagram, ConnectionId, LongHeaderPacket, LongHeaderType, QuicAckRange,
-    QuicAckTracker, QuicCryptoAssembler, QuicFrame, QuicLossDetector, ShortHeaderPacket,
-    TransportParameter,
+    protect_short_header_packet, recover_packet_number, retry_integrity_tag_v1,
+    seal_packet_payload, split_long_header_datagram, validate_retry_integrity_tag_v1, ConnectionId,
+    LongHeaderPacket, LongHeaderType, QuicAckRange, QuicAckTracker, QuicCryptoAssembler,
+    QuicFrame, QuicLossDetector, QuicPathValidator, ShortHeaderPacket, TransportParameter,
 };
 use std::time::{Duration, Instant};
 
@@ -80,6 +81,99 @@ fn native_quic_splits_coalesced_long_header_datagrams() {
 }
 
 #[test]
+fn native_quic_decodes_version_negotiation_packet_without_fixed_bit() {
+    let mut packet = vec![0x80, 0, 0, 0, 0, 8];
+    packet.extend_from_slice(b"clientid");
+    packet.push(7);
+    packet.extend_from_slice(b"server1");
+    packet.extend_from_slice(&1u32.to_be_bytes());
+    packet.extend_from_slice(&0xff00_001du32.to_be_bytes());
+
+    let decoded = decode_version_negotiation_packet(&packet).unwrap();
+
+    assert_eq!(decoded.destination_cid, ConnectionId::from_static(b"clientid"));
+    assert_eq!(decoded.source_cid, ConnectionId::from_static(b"server1"));
+    assert_eq!(decoded.supported_versions, vec![1, 0xff00_001d]);
+}
+
+#[test]
+fn native_quic_version_negotiation_rejects_truncated_version_list() {
+    let mut packet = vec![0xc0, 0, 0, 0, 0, 0, 0];
+    packet.extend_from_slice(&[0, 0, 1]);
+
+    let err = decode_version_negotiation_packet(&packet).expect_err("truncated version fails");
+
+    assert!(err.to_string().contains("supported version"));
+}
+
+#[test]
+fn native_quic_decodes_retry_packet_and_validates_rfc9001_integrity_tag() {
+    let original_dcid =
+        ConnectionId::from_bytes(Bytes::from(hex::decode("8394c8f03e515708").unwrap())).unwrap();
+    let retry = hex::decode(
+        "\
+        ff000000010008f067a5502a4262b574\
+        6f6b656e04a265ba2eff4d829058fb3f\
+        0f2496ba\
+    ",
+    )
+    .unwrap();
+
+    let decoded = decode_retry_packet(&retry).unwrap();
+    let validated = validate_retry_integrity_tag_v1(&original_dcid, &retry).unwrap();
+
+    assert_eq!(decoded, validated);
+    assert_eq!(validated.version, 1);
+    assert_eq!(validated.destination_cid.as_bytes(), b"");
+    assert_eq!(
+        validated.source_cid.as_bytes(),
+        hex::decode("f067a5502a4262b5").unwrap().as_slice()
+    );
+    assert_eq!(validated.token, Bytes::from_static(b"token"));
+    assert_eq!(
+        hex::encode(validated.integrity_tag),
+        "04a265ba2eff4d829058fb3f0f2496ba"
+    );
+}
+
+#[test]
+fn native_quic_retry_integrity_rejects_corrupted_tag() {
+    let original_dcid =
+        ConnectionId::from_bytes(Bytes::from(hex::decode("8394c8f03e515708").unwrap())).unwrap();
+    let mut retry = hex::decode(
+        "\
+        ff000000010008f067a5502a4262b574\
+        6f6b656e04a265ba2eff4d829058fb3f\
+        0f2496ba\
+    ",
+    )
+    .unwrap();
+    *retry.last_mut().unwrap() ^= 0x01;
+
+    let err =
+        validate_retry_integrity_tag_v1(&original_dcid, &retry).expect_err("bad tag must fail");
+
+    assert!(err.to_string().contains("Retry integrity tag"));
+}
+
+#[test]
+fn native_quic_retry_integrity_tag_matches_rfc9001_vector() {
+    let original_dcid =
+        ConnectionId::from_bytes(Bytes::from(hex::decode("8394c8f03e515708").unwrap())).unwrap();
+    let retry_without_tag = hex::decode(
+        "\
+        ff000000010008f067a5502a4262b574\
+        6f6b656e\
+    ",
+    )
+    .unwrap();
+
+    let tag = retry_integrity_tag_v1(&original_dcid, &retry_without_tag).unwrap();
+
+    assert_eq!(hex::encode(tag), "04a265ba2eff4d829058fb3f0f2496ba");
+}
+
+#[test]
 fn native_quic_short_header_round_trips_stream_payload() {
     let keys = derive_packet_key_material_from_secret(Bytes::from_static(&[0x99; 32])).unwrap();
     let destination_cid = ConnectionId::from_static(b"client-cid");
@@ -103,6 +197,25 @@ fn native_quic_short_header_round_trips_stream_payload() {
         &frames[0],
         QuicFrame::Stream { stream_id: 0, data, .. } if data == b"h3-preface".as_slice()
     ));
+}
+
+#[test]
+fn native_quic_path_validator_only_accepts_matching_path_response() {
+    let challenge = *b"12345678";
+    let mut validator = QuicPathValidator::default();
+
+    assert_eq!(
+        validator.path_challenge(challenge),
+        QuicFrame::PathChallenge(challenge)
+    );
+    assert_eq!(validator.pending_count(), 1);
+    assert!(!validator.on_path_response(*b"87654321"));
+    assert!(!validator.is_validated(&challenge));
+
+    assert!(validator.on_path_response(challenge));
+    assert!(validator.is_validated(&challenge));
+    assert_eq!(validator.pending_count(), 0);
+    assert!(!validator.on_path_response(challenge));
 }
 
 #[test]

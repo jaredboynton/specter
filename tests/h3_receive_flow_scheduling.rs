@@ -222,6 +222,10 @@ fn native_h3_driver_treats_pending_delayed_ack_as_pending_work() {
         has_pending_work.contains("client_application_ack_deadline().is_some()"),
         "native H3 idle handling must not close while a delayed ACK is pending"
     );
+    assert!(
+        driver.contains("_ = tokio::time::sleep(remaining_idle), if !has_pending_work =>"),
+        "native H3 idle sleep must be disabled while delayed ACK or other work is pending"
+    );
 }
 
 #[test]
