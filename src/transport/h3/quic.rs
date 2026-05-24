@@ -541,6 +541,14 @@ fn encode_ack_delay(delay: Duration, ack_delay_exponent: u64) -> u64 {
     scaled.min(u64::MAX as u128) as u64
 }
 
+fn duration_abs_diff(left: Duration, right: Duration) -> Duration {
+    if left >= right {
+        left - right
+    } else {
+        right - left
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AckRange {
     start: u64,
@@ -751,15 +759,28 @@ impl QuicLossDetector {
     }
 
     pub fn on_ack_frame(&mut self, frame: &QuicFrame) -> Result<Vec<u64>> {
-        let (largest_acknowledged, first_ack_range, ranges, ecn_counts) = match frame {
+        self.on_ack_frame_at(frame, Instant::now())
+    }
+
+    pub fn on_ack_frame_at(&mut self, frame: &QuicFrame, now: Instant) -> Result<Vec<u64>> {
+        let (largest_acknowledged, ack_delay_raw, first_ack_range, ranges, ecn_counts) = match frame
+        {
             QuicFrame::Ack {
                 largest_acknowledged,
+                ack_delay,
                 first_ack_range,
                 ranges,
                 ..
-            } => (*largest_acknowledged, *first_ack_range, ranges, None),
+            } => (
+                *largest_acknowledged,
+                *ack_delay,
+                *first_ack_range,
+                ranges,
+                None,
+            ),
             QuicFrame::AckEcn {
                 largest_acknowledged,
+                ack_delay,
                 first_ack_range,
                 ranges,
                 ect0_count,
@@ -768,6 +789,7 @@ impl QuicLossDetector {
                 ..
             } => (
                 *largest_acknowledged,
+                *ack_delay,
                 *first_ack_range,
                 ranges,
                 Some(EcnCounters {
@@ -811,8 +833,29 @@ impl QuicLossDetector {
             self.validate_ack_ecn_counts(ecn_counts, newly_acked)?;
         }
 
+        // RFC9002 § 5.1: take an RTT sample only when the largest acknowledged
+        // packet number is newly acknowledged and was sent locally. Save the
+        // sent_at before we retire it via on_ack_range below.
+        let largest_newly_acked = !self.acked.contains(&largest_acknowledged)
+            && self.sent.contains(&largest_acknowledged);
+        let largest_sent_at = if largest_newly_acked {
+            self.sent_at.get(&largest_acknowledged).copied()
+        } else {
+            None
+        };
+
         for (largest_acknowledged, ack_range_length) in decoded_ranges {
             self.on_ack_range(largest_acknowledged, ack_range_length)?;
+        }
+
+        if let Some(sent_at) = largest_sent_at {
+            let ack_delay = decode_ack_delay(ack_delay_raw, self.peer_ack_delay_exponent)
+                .min(self.max_ack_delay);
+            self.observe_rtt_sample(sent_at, now, ack_delay);
+            self.largest_acked = Some(match self.largest_acked {
+                Some(current) => current.max(largest_acknowledged),
+                None => largest_acknowledged,
+            });
         }
 
         Ok(acked_packets)
