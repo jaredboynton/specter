@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 use bytes::Bytes;
 use fastwebsockets::{Frame, OpCode, Payload, Role};
+use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use specter::{Client, Message};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -17,6 +18,7 @@ const DEFAULT_PAYLOAD_BYTES: usize = 1024;
 struct Artifact {
     benchmark: &'static str,
     fastwebsockets_version: &'static str,
+    tokio_tungstenite_version: &'static str,
     workload: Workload,
     rows: Vec<Row>,
     comparison: Comparison,
@@ -42,7 +44,9 @@ struct Row {
 #[derive(Serialize)]
 struct Comparison {
     specter_vs_fastwebsockets_messages_per_sec_pct: f64,
+    specter_vs_tungstenite_messages_per_sec_pct: f64,
     pass_match_or_exceed: bool,
+    pass_tungstenite_match_or_exceed: bool,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -65,21 +69,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (addr, server_task) = start_echo_server().await?;
     let payload = Bytes::from(vec![0x5a; payload_bytes]);
     let fast = run_fastwebsockets(addr, warmup_messages, messages, &payload).await?;
+    let tungstenite = run_tungstenite(addr, warmup_messages, messages, &payload).await?;
     let specter = run_specter(addr, warmup_messages, messages, payload.clone()).await?;
 
-    let pct = if fast.messages_per_sec > 0.0 {
-        ((specter.messages_per_sec - fast.messages_per_sec) / fast.messages_per_sec) * 100.0
-    } else {
-        0.0
-    };
+    let fast_pct = percentage_delta(specter.messages_per_sec, fast.messages_per_sec);
+    let tungstenite_pct = percentage_delta(specter.messages_per_sec, tungstenite.messages_per_sec);
     let comparison = Comparison {
-        specter_vs_fastwebsockets_messages_per_sec_pct: pct,
+        specter_vs_fastwebsockets_messages_per_sec_pct: fast_pct,
+        specter_vs_tungstenite_messages_per_sec_pct: tungstenite_pct,
         pass_match_or_exceed: specter.messages_per_sec >= fast.messages_per_sec,
+        pass_tungstenite_match_or_exceed: specter.messages_per_sec >= tungstenite.messages_per_sec,
     };
 
     let artifact = Artifact {
         benchmark: "websocket_vs_fastwebsockets",
         fastwebsockets_version: "0.10.0",
+        tokio_tungstenite_version: "0.24",
         workload: Workload {
             protocol: "h1_rfc6455",
             messages,
@@ -87,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             payload_bytes,
             echo_server: "fastwebsockets::WebSocket<Role::Server>",
         },
-        rows: vec![fast, specter],
+        rows: vec![fast, tungstenite, specter],
         comparison,
     };
 
@@ -99,7 +104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     server_task.abort();
 
-    if require_thresholds && !artifact.comparison.pass_match_or_exceed {
+    if require_thresholds
+        && (!artifact.comparison.pass_match_or_exceed
+            || !artifact.comparison.pass_tungstenite_match_or_exceed)
+    {
         std::process::exit(1);
     }
 
@@ -269,6 +277,34 @@ async fn run_fastwebsockets(
     Ok(row("fastwebsockets", elapsed, messages, payload.len()))
 }
 
+async fn run_tungstenite(
+    addr: std::net::SocketAddr,
+    warmup_messages: usize,
+    messages: usize,
+    payload: &[u8],
+) -> Result<Row, Box<dyn std::error::Error>> {
+    use tokio_tungstenite::tungstenite::Message as TungMessage;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/socket")).await?;
+
+    for _ in 0..warmup_messages {
+        ws.send(TungMessage::Binary(payload.to_vec())).await?;
+        let _ = ws.next().await.transpose()?;
+    }
+
+    let started = Instant::now();
+    for _ in 0..messages {
+        ws.send(TungMessage::Binary(payload.to_vec())).await?;
+        match ws.next().await.transpose()? {
+            Some(TungMessage::Binary(bytes)) if bytes.as_slice() == payload => {}
+            other => return Err(format!("unexpected tokio-tungstenite echo frame: {other:?}").into()),
+        }
+    }
+    let elapsed = started.elapsed();
+    ws.close(None).await?;
+    Ok(row("tokio-tungstenite", elapsed, messages, payload.len()))
+}
+
 fn row(client: &'static str, elapsed: Duration, messages: usize, payload_bytes: usize) -> Row {
     let seconds = elapsed.as_secs_f64();
     Row {
@@ -276,5 +312,13 @@ fn row(client: &'static str, elapsed: Duration, messages: usize, payload_bytes: 
         elapsed_ns: elapsed.as_nanos(),
         messages_per_sec: messages as f64 / seconds,
         bytes_per_sec: (messages * payload_bytes) as f64 / seconds,
+    }
+}
+
+fn percentage_delta(candidate: f64, baseline: f64) -> f64 {
+    if baseline > 0.0 {
+        ((candidate - baseline) / baseline) * 100.0
+    } else {
+        0.0
     }
 }
