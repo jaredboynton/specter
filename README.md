@@ -244,6 +244,20 @@ The request-body benchmark uses a fixed `5 x 1024B` body schedule, `2ms` inter-c
 
 See [`docs/benchmarks/2026-05-24-streaming/`](docs/benchmarks/2026-05-24-streaming/) for the summary, raw JSON artifacts, exact commands, and RFC 8441 coexistence proof. These are deterministic local benchmark results, not a claim that every network or workload is faster.
 
+### Local native HTTP/3 vs Rust H3 clients
+
+Specter's native HTTP/3 path also has a local same-fixture comparator matrix against `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest` HTTP/3. The n=30 artifact [`2026-05-24-full-local-n30.json`](docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-n30.json) passes the H3 superiority gate with all required comparator rows present:
+
+| Client | Role | p50 TTFT | p95 TTFT | Throughput |
+| --- | --- | ---: | ---: | ---: |
+| Specter native H3 | HTTP/3 client | 0.137 ms | 0.268 ms | 10.24 MB/s |
+| h3-quinn | HTTP/3 client | 0.366 ms | 0.887 ms | 8.56 MB/s |
+| reqwest_h3 | HTTP/3 client | 0.384 ms | 0.920 ms | 8.84 MB/s |
+| quiche direct | HTTP/3 client | 2.72 ms | 2.80 ms | 7.87 MB/s |
+| tokio-quiche | HTTP/3 client | 3.32 ms | 3.52 ms | 6.81 MB/s |
+
+That same artifact includes Specter RFC 9220 WebSocket-over-H3 tunnel echo, close/FIN, and mixed slow-consumer rows. Third-party RFC 9220 tunnel comparator adapters are tracked as pending or unsupported capability rows, so the published H3 win is for HTTP/3 request/response workloads, not a cross-client RFC 9220 tunnel superiority claim. Native QUIC production hardening remains active work for PTO/recovery, Retry/VN handshake integration, key update, close drain, and full path validation.
+
 ### Local WebSocket echo vs fastwebsockets and tokio-tungstenite
 
 Specter also ships a local RFC 6455 echo benchmark, [`benches/websocket_vs_fastwebsockets.rs`](benches/websocket_vs_fastwebsockets.rs), against `fastwebsockets 0.10.0` and `tokio-tungstenite 0.24`.
