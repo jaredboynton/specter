@@ -46,6 +46,8 @@ unsafe extern "C" {
     fn SSL_early_data_accepted(ssl: *const ffi::SSL) -> c_int;
     fn SSL_session_reused(ssl: *const ffi::SSL) -> c_int;
     fn SSL_get_early_data_reason(ssl: *const ffi::SSL) -> u32;
+    fn SSL_process_quic_post_handshake(ssl: *mut ffi::SSL) -> c_int;
+    fn SSL_SESSION_early_data_capable(session: *const ffi::SSL_SESSION) -> c_int;
 }
 
 const QUIC_VERSION_1: u32 = 1;
@@ -82,6 +84,7 @@ pub struct ClientInitialPacket {
 pub struct NativeH3SessionTicket {
     pub der: Bytes,
     pub timeout_secs: u32,
+    pub max_early_data: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -375,6 +378,37 @@ impl NativeQuicTlsSession {
         Ok(session)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn client_with_initial_source_connection_id_and_replayed_session(
+        server_name: &str,
+        fingerprint: &Http3Fingerprint,
+        initial_source_connection_id: &ConnectionId,
+        tls_fingerprint: Option<&TlsFingerprint>,
+        verify_peer: bool,
+        root_certs: &[Vec<u8>],
+        use_platform_roots: bool,
+        session_ticket_der: &[u8],
+    ) -> Result<Self> {
+        let mut session = Self::new_client(
+            server_name,
+            fingerprint,
+            Some(initial_source_connection_id),
+            tls_fingerprint,
+            verify_peer,
+            root_certs,
+            use_platform_roots,
+            Some(session_ticket_der),
+            None,
+        )?;
+        session.drive_handshake("QUIC ClientHello capture handshake")?;
+        if session.crypto_len(QuicEncryptionLevel::Initial) == 0 {
+            return Err(Error::Tls(
+                "QUIC ClientHello capture produced no CRYPTO data".into(),
+            ));
+        }
+        Ok(session)
+    }
+
     pub fn provide_crypto(&mut self, level: QuicEncryptionLevel, data: &[u8]) -> Result<()> {
         unsafe {
             if ffi::SSL_provide_quic_data(
@@ -385,6 +419,14 @@ impl NativeQuicTlsSession {
             ) != 1
             {
                 return Err(Error::Tls("failed to provide server CRYPTO data".into()));
+            }
+            if level == QuicEncryptionLevel::Application {
+                if SSL_process_quic_post_handshake(self.ssl.as_ptr()) != 1 {
+                    return Err(Error::Tls(
+                        "failed to process native H3 TLS post-handshake CRYPTO data".into(),
+                    ));
+                }
+                return Ok(());
             }
         }
         self.drive_handshake("server CRYPTO")
@@ -525,6 +567,13 @@ impl NativeQuicTlsSession {
                     state.session_tickets.push(NativeH3SessionTicket {
                         der: Bytes::from(der),
                         timeout_secs: session.timeout(),
+                        max_early_data: if unsafe {
+                            SSL_SESSION_early_data_capable(session.as_ptr()) != 0
+                        } {
+                            u32::MAX
+                        } else {
+                            0
+                        },
                     });
                 }
             }

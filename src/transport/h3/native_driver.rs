@@ -20,6 +20,7 @@ use crate::transport::h3::handshake::{NativeQuicHandshake, ServerH3Event, Server
 use crate::transport::h3::native::{
     decode_header_block, H3Frame, H3Header, H3Setting, H3StreamType,
 };
+use crate::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
 use crate::transport::h3::{
     H3TransportConfig, H3Tunnel, H3TunnelCredit, H3TunnelEvent, H3TunnelOutbound,
 };
@@ -668,6 +669,8 @@ pub fn spawn_native_h3_driver(
     max_idle_timeout_ms: u64,
     initial_datagram: Option<Bytes>,
     transport_config: H3TransportConfig,
+    session_cache: NativeH3SessionCache,
+    session_cache_key: NativeH3SessionCacheKey,
 ) -> Result<H3Handle> {
     let (command_tx, command_rx) = mpsc::channel(32);
     let is_draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -689,6 +692,8 @@ pub fn spawn_native_h3_driver(
         closing_connection_close_packet: None,
         body_progress_notify: body_progress_notify.clone(),
         transport_config: transport_config.normalized(),
+        session_cache,
+        session_cache_key,
         max_idle_timeout: Duration::from_millis(max_idle_timeout_ms.max(1)),
         last_activity: Instant::now(),
         initial_datagram,
@@ -725,6 +730,8 @@ struct NativeH3Driver {
     closing_connection_close_packet: Option<Bytes>,
     body_progress_notify: Arc<Notify>,
     transport_config: H3TransportConfig,
+    session_cache: NativeH3SessionCache,
+    session_cache_key: NativeH3SessionCacheKey,
     max_idle_timeout: Duration,
     last_activity: Instant,
     initial_datagram: Option<Bytes>,
@@ -1873,6 +1880,7 @@ impl NativeH3Driver {
 
         if datagram.first().is_some_and(|first| first & 0x80 != 0) {
             let processed_packets = self.handshake.process_server_datagram(datagram)?;
+            self.drain_session_tickets();
             if let Some(packet) = self.handshake.build_client_initial_ack_packet()? {
                 self.socket
                     .send_to(packet.packet.as_ref(), self.peer_addr)
@@ -1900,6 +1908,7 @@ impl NativeH3Driver {
         }
 
         let events = self.handshake.open_server_h3_event_packet(datagram)?;
+        self.drain_session_tickets();
         if let Some(packet) = self
             .handshake
             .build_client_application_ack_packet_after_or_delay(
@@ -1944,6 +1953,17 @@ impl NativeH3Driver {
         }
         self.process_pending_commands().await?;
         Ok(())
+    }
+
+    fn drain_session_tickets(&mut self) {
+        for ticket in self.handshake.take_session_tickets() {
+            self.session_cache.insert(
+                self.session_cache_key.clone(),
+                ticket.der,
+                ticket.max_early_data,
+                Some(Duration::from_secs(ticket.timeout_secs as u64)),
+            );
+        }
     }
 
     fn apply_h3_event(&mut self, event: ServerH3Event) -> Result<()> {

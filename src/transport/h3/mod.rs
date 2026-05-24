@@ -47,6 +47,7 @@ use crate::pool::multiplexer::OriginKey;
 use crate::request::RequestBody;
 use crate::response::Response;
 use crate::transport::dns::DnsConfig;
+use crate::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -127,6 +128,7 @@ pub struct H3Client {
     use_platform_roots: bool,
     backend: H3Backend,
     transport_config: H3TransportConfig,
+    session_cache: NativeH3SessionCache,
     max_idle_timeout: Option<u64>,
     dns_config: DnsConfig,
     pool: Arc<RwLock<HashMap<H3PoolKey, H3Handle>>>,
@@ -157,6 +159,7 @@ impl H3Client {
             use_platform_roots: false,
             backend: H3Backend::Native,
             transport_config: H3TransportConfig::default(),
+            session_cache: NativeH3SessionCache::new(),
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
@@ -175,6 +178,7 @@ impl H3Client {
             use_platform_roots: false,
             backend: H3Backend::Native,
             transport_config: H3TransportConfig::default(),
+            session_cache: NativeH3SessionCache::new(),
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
@@ -248,6 +252,18 @@ impl H3Client {
     /// Configured per-tunnel outbound byte budget.
     pub fn tunnel_outbound_byte_budget(&self) -> usize {
         self.transport_config.tunnel_outbound_byte_budget
+    }
+
+    /// Replace the shared native H3 TLS session cache used for session resumption.
+    pub fn with_native_session_cache(mut self, cache: NativeH3SessionCache) -> Self {
+        self.clear_hot_handle();
+        self.session_cache = cache;
+        self
+    }
+
+    /// Shared native H3 TLS session cache used for session resumption.
+    pub fn native_session_cache(&self) -> NativeH3SessionCache {
+        self.session_cache.clone()
     }
 
     /// Set a custom idle timeout (in milliseconds)
@@ -531,6 +547,8 @@ impl H3Client {
             self.use_platform_roots,
             &self.dns_config,
             self.transport_config,
+            self.session_cache.clone(),
+            self.session_cache_key(&key),
         )
         .await?;
         let hot_key = key.clone();
@@ -556,6 +574,15 @@ impl H3Client {
             ),
             root_store: root_store_pool_key(&self.root_certs, self.use_platform_roots),
         })
+    }
+
+    fn session_cache_key(&self, key: &H3PoolKey) -> NativeH3SessionCacheKey {
+        NativeH3SessionCacheKey::new(
+            key.host.clone(),
+            self.http3_fingerprint.alpn_protocols.clone(),
+            key.verify_peer,
+            Some(format!("{};{}", key.fingerprint, key.root_store)),
+        )
     }
 }
 

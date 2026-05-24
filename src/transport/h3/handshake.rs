@@ -23,7 +23,8 @@ use crate::transport::h3::recovery::{
 use crate::transport::h3::tls::{
     build_client_initial_packet_from_capture_with_size,
     build_client_initial_packet_from_capture_with_version_and_size, ClientInitialPacket,
-    NativeQuicTlsSession, QuicEncryptionLevel, QuicSecretDirection, QuicTlsSecret,
+    NativeH3SessionTicket, NativeQuicTlsSession, QuicEncryptionLevel, QuicSecretDirection,
+    QuicTlsSecret,
 };
 
 use getrandom::fill as getrandom_fill;
@@ -710,7 +711,6 @@ pub struct NativeQuicHandshake {
     server_initial_or_handshake_seen: bool,
     original_destination_cid: ConnectionId,
     retry_source_cid: Option<ConnectionId>,
-    client_initial_token: Bytes,
     destination_cid: ConnectionId,
     source_cid: ConnectionId,
     client_initial_keys: QuicPacketKeyMaterial,
@@ -2023,6 +2023,33 @@ impl NativeQuicHandshake {
         )
     }
 
+    // Cross-agent compatibility shim for the sibling P1 session-resumption
+    // worker. Until `SSL_SESSION` install lands, this delegates to the
+    // non-resuming constructor; the session DER is accepted but unused.
+    #[allow(clippy::too_many_arguments)]
+    pub fn client_with_tls_fingerprint_and_session(
+        server_name: &str,
+        fingerprint: &Http3Fingerprint,
+        tls_fingerprint: Option<&TlsFingerprint>,
+        destination_cid: ConnectionId,
+        source_cid: ConnectionId,
+        verify_peer: bool,
+        root_certs: &[Vec<u8>],
+        use_platform_roots: bool,
+        _session_der: Option<&[u8]>,
+    ) -> Result<Self> {
+        Self::client_with_tls_fingerprint(
+            server_name,
+            fingerprint,
+            tls_fingerprint,
+            destination_cid,
+            source_cid,
+            verify_peer,
+            root_certs,
+            use_platform_roots,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn client_with_tls_fingerprint(
         server_name: &str,
@@ -2069,7 +2096,6 @@ impl NativeQuicHandshake {
             server_initial_or_handshake_seen: false,
             original_destination_cid: destination_cid.clone(),
             retry_source_cid: None,
-            client_initial_token: Bytes::new(),
             destination_cid,
             source_cid,
             client_initial_keys: initial_keys.client,
@@ -2120,6 +2146,110 @@ impl NativeQuicHandshake {
             close_draining: false,
             close_state: QuicCloseState::default(),
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn client_with_replayed_session_ticket(
+        server_name: &str,
+        fingerprint: &Http3Fingerprint,
+        tls_fingerprint: Option<&TlsFingerprint>,
+        destination_cid: ConnectionId,
+        source_cid: ConnectionId,
+        verify_peer: bool,
+        root_certs: &[Vec<u8>],
+        use_platform_roots: bool,
+        session_ticket_der: &[u8],
+    ) -> Result<Self> {
+        let initial_keys = derive_initial_key_material(destination_cid.as_bytes())?;
+        let mut tls =
+            NativeQuicTlsSession::client_with_initial_source_connection_id_and_replayed_session(
+                server_name,
+                fingerprint,
+                &source_cid,
+                tls_fingerprint,
+                verify_peer,
+                root_certs,
+                use_platform_roots,
+                session_ticket_der,
+            )?;
+        let client_initial = build_client_initial_packet_from_capture_with_size(
+            tls.take_client_initial(),
+            destination_cid.clone(),
+            source_cid.clone(),
+            fingerprint.transport.initial_datagram_size,
+        )?;
+
+        Ok(Self {
+            client_initial,
+            pending_client_initial: None,
+            tls,
+            fingerprint: fingerprint.clone(),
+            server_name: server_name.to_string(),
+            tls_fingerprint: tls_fingerprint.cloned(),
+            verify_peer,
+            root_certs: root_certs.to_vec(),
+            use_platform_roots,
+            supported_versions: vec![QUIC_VERSION_1],
+            client_initial_version: QUIC_VERSION_1,
+            retry_received: false,
+            vn_received: false,
+            server_initial_or_handshake_seen: false,
+            original_destination_cid: destination_cid.clone(),
+            retry_source_cid: None,
+            destination_cid,
+            source_cid,
+            client_initial_keys: initial_keys.client,
+            server_initial_keys: initial_keys.server,
+            client_handshake_keys: None,
+            server_handshake_keys: None,
+            client_application_keys: None,
+            server_application_keys: None,
+            client_application_next_keys: None,
+            server_application_next_keys: None,
+            server_application_previous: None,
+            write_key_phase: false,
+            read_key_phase: false,
+            application_key_update: OneRttKeyUpdate::default(),
+            initial_crypto: QuicCryptoAssembler::default(),
+            handshake_crypto: QuicCryptoAssembler::default(),
+            initial_ack_tracker: QuicAckTracker::default(),
+            handshake_ack_tracker: QuicAckTracker::default(),
+            application_ack_tracker: QuicAckTracker::default(),
+            client_initial_loss_detector: QuicLossDetector::default(),
+            client_handshake_loss_detector: QuicLossDetector::default(),
+            client_application_loss_detector: QuicLossDetector::default(),
+            client_application_flow_control: QuicApplicationFlowControl::client(
+                &fingerprint.transport,
+            ),
+            client_application_receive_flow_control: QuicReceiveFlowControl::client(
+                &fingerprint.transport,
+            ),
+            client_initial_sent_crypto: BTreeMap::new(),
+            client_handshake_sent_crypto: BTreeMap::new(),
+            client_application_sent_streams: BTreeMap::new(),
+            client_path_validator: QuicPathValidator::default(),
+            server_transport_parameters_validated: false,
+            recovery: recovery_state_from_transport(&fingerprint.transport),
+            next_client_initial_packet_number: 1,
+            next_server_initial_packet_number: 0,
+            next_server_handshake_packet_number: 0,
+            next_client_handshake_packet_number: 0,
+            next_server_application_packet_number: 0,
+            next_client_application_packet_number: 0,
+            next_client_bidirectional_stream_id: 0,
+            next_client_unidirectional_stream_id: 2,
+            client_handshake_crypto_offset: 0,
+            client_stream_offsets: BTreeMap::new(),
+            server_h3_stream_buffers: BTreeMap::new(),
+            server_h3_stream_buffer_offsets: BTreeMap::new(),
+            server_h3_stream_types: BTreeMap::new(),
+            close_draining: false,
+            close_state: QuicCloseState::default(),
+        })
+    }
+
+    pub fn take_session_tickets(&mut self) -> Vec<NativeH3SessionTicket> {
+        self.tls.take_session_tickets()
     }
 
     pub fn client_initial(&self) -> &ClientInitialPacket {
@@ -3447,7 +3577,6 @@ impl NativeQuicHandshake {
 
         let retry_keys = derive_initial_key_material(retry.source_cid.as_bytes())?;
         let packet_number = self.next_client_initial_packet_number;
-        let retry_token = retry.token.clone();
         let retry_initial = build_client_initial_packet_with_token_and_version(
             &self.fingerprint,
             self.client_initial.crypto_data.clone(),
@@ -3455,14 +3584,13 @@ impl NativeQuicHandshake {
             self.client_initial.secrets.clone(),
             retry.source_cid.clone(),
             self.source_cid.clone(),
-            retry_token.clone(),
+            retry.token,
             packet_number,
             self.client_initial_version,
         )?;
 
         self.destination_cid = retry.source_cid.clone();
         self.retry_source_cid = Some(retry.source_cid);
-        self.client_initial_token = retry_token;
         self.retry_received = true;
         self.client_initial_keys = retry_keys.client;
         self.server_initial_keys = retry_keys.server;
@@ -3500,7 +3628,6 @@ impl NativeQuicHandshake {
         self.vn_received = true;
         self.retry_received = false;
         self.retry_source_cid = None;
-        self.client_initial_token = Bytes::new();
         self.server_initial_or_handshake_seen = false;
         self.server_transport_parameters_validated = false;
         self.close_draining = false;

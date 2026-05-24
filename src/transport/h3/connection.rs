@@ -11,6 +11,8 @@ use crate::transport::dns::DnsConfig;
 use crate::transport::h3::handle::H3Handle;
 use crate::transport::h3::handshake::NativeQuicHandshake;
 use crate::transport::h3::quic::ConnectionId;
+use crate::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
+use crate::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
 use crate::transport::h3::H3TransportConfig;
 
 use crate::transport::h3::native_driver::spawn_native_h3_driver;
@@ -33,6 +35,8 @@ struct NativeH3Connect {
     root_certs: Vec<Vec<u8>>,
     use_platform_roots: bool,
     transport_config: H3TransportConfig,
+    session_cache: NativeH3SessionCache,
+    session_cache_key: NativeH3SessionCacheKey,
 }
 
 impl H3Connection {
@@ -49,6 +53,8 @@ impl H3Connection {
         use_platform_roots: bool,
         dns_config: &DnsConfig,
         transport_config: H3TransportConfig,
+        session_cache: NativeH3SessionCache,
+        session_cache_key: NativeH3SessionCacheKey,
     ) -> Result<H3Handle> {
         let (host, port, _path) = parse_url(url)?;
 
@@ -79,6 +85,8 @@ impl H3Connection {
             root_certs,
             use_platform_roots,
             transport_config,
+            session_cache,
+            session_cache_key,
         })
         .await
     }
@@ -95,12 +103,15 @@ impl H3Connection {
             root_certs,
             use_platform_roots,
             transport_config,
+            session_cache,
+            session_cache_key,
         } = request;
         let destination_cid =
             random_connection_id(fingerprint.transport.destination_connection_id_len)?;
         let source_cid = random_connection_id(fingerprint.transport.source_connection_id_len)?;
 
-        let mut handshake = NativeQuicHandshake::client_with_tls_fingerprint(
+        let cached_session = session_cache.get(&session_cache_key);
+        let mut handshake = match NativeQuicHandshake::client_with_tls_fingerprint_and_session(
             &host,
             &fingerprint,
             tls_fingerprint.as_ref(),
@@ -109,12 +120,31 @@ impl H3Connection {
             verify_peer,
             &root_certs,
             use_platform_roots,
-        )?;
+            cached_session.as_ref().map(|entry| entry.der.as_ref()),
+        ) {
+            Ok(handshake) => handshake,
+            Err(err) if cached_session.is_some() => {
+                session_cache.evict(&session_cache_key);
+                NativeQuicHandshake::client_with_tls_fingerprint(
+                    &host,
+                    &fingerprint,
+                    tls_fingerprint.as_ref(),
+                    random_connection_id(fingerprint.transport.destination_connection_id_len)?,
+                    random_connection_id(fingerprint.transport.source_connection_id_len)?,
+                    verify_peer,
+                    &root_certs,
+                    use_platform_roots,
+                )
+                .map_err(|_| err)?
+            }
+            Err(err) => return Err(err),
+        };
 
         socket
             .send_to(handshake.client_initial().packet.as_ref(), peer_addr)
             .await
             .map_err(Error::Io)?;
+        handshake.record_client_initial_sent_at(Instant::now());
 
         let deadline = Instant::now() + Duration::from_millis(max_idle_timeout.max(1));
         let mut buf = vec![0u8; fingerprint.transport.max_recv_udp_payload_size.max(1200)];
@@ -125,12 +155,15 @@ impl H3Connection {
                 return Err(Error::Timeout("native H3 handshake timeout".into()));
             }
 
-            match tokio::time::timeout(
-                remaining.min(Duration::from_millis(25)),
-                socket.recv_from(&mut buf),
-            )
-            .await
-            {
+            let loss_detection_wait = handshake
+                .loss_detection_timer()
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            let recv_wait = loss_detection_wait
+                .unwrap_or_else(|| Duration::from_millis(25))
+                .min(Duration::from_millis(25))
+                .min(remaining);
+
+            match tokio::time::timeout(recv_wait, socket.recv_from(&mut buf)).await {
                 Ok(Ok((len, from))) if from == peer_addr => {
                     if buf[..len].first().is_some_and(|first| first & 0x80 == 0) {
                         if handshake.is_application_ready() {
@@ -142,6 +175,8 @@ impl H3Connection {
                                 max_idle_timeout,
                                 Some(Bytes::copy_from_slice(&buf[..len])),
                                 transport_config,
+                                session_cache.clone(),
+                                session_cache_key.clone(),
                             );
                         }
                         continue;
@@ -152,6 +187,7 @@ impl H3Connection {
                             .send_to(packet.packet.as_ref(), peer_addr)
                             .await
                             .map_err(Error::Io)?;
+                        handshake.record_client_initial_sent_at(Instant::now());
                     }
                     if let Some(packet) = handshake.build_client_initial_ack_packet()? {
                         socket
@@ -184,14 +220,67 @@ impl H3Connection {
                             max_idle_timeout,
                             None,
                             transport_config,
+                            session_cache.clone(),
+                            session_cache_key.clone(),
                         );
                     }
                 }
                 Ok(Ok(_)) => {}
                 Ok(Err(err)) => return Err(Error::Io(err)),
-                Err(_) => {}
+                Err(_) => {
+                    Self::handle_client_loss_detection_timeout(
+                        &mut handshake,
+                        socket.as_ref(),
+                        peer_addr,
+                    )
+                    .await?;
+                }
             }
         }
+    }
+
+    async fn handle_client_loss_detection_timeout(
+        handshake: &mut NativeQuicHandshake,
+        socket: &UdpSocket,
+        peer_addr: SocketAddr,
+    ) -> Result<()> {
+        let Some(timer) = handshake.loss_detection_timer() else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if now < timer {
+            return Ok(());
+        }
+
+        let pto = handshake.application_pto();
+        match handshake.on_loss_detection_timeout(now) {
+            LossDetectionOutcome::Pto {
+                space: PacketNumberSpace::Initial,
+            } => {
+                for packet in handshake.retransmit_pto_client_initial_crypto_packets(now, pto)? {
+                    socket
+                        .send_to(packet.packet.as_ref(), peer_addr)
+                        .await
+                        .map_err(Error::Io)?;
+                }
+            }
+            LossDetectionOutcome::Pto {
+                space: PacketNumberSpace::Handshake,
+            } => {
+                for packet in handshake.retransmit_pto_client_handshake_crypto_packets(now, pto)? {
+                    socket
+                        .send_to(packet.packet.as_ref(), peer_addr)
+                        .await
+                        .map_err(Error::Io)?;
+                }
+            }
+            LossDetectionOutcome::Pto {
+                space: PacketNumberSpace::Application,
+            }
+            | LossDetectionOutcome::Loss { .. }
+            | LossDetectionOutcome::Idle => {}
+        }
+        Ok(())
     }
 }
 
