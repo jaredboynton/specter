@@ -113,6 +113,20 @@ fn native_h3_driver_flushes_receive_credit_from_consumed_body_bytes() {
         .split("}")
         .next()
         .expect("body progress branch body");
+    let released_body_credits = driver
+        .split("async fn apply_released_body_credits")
+        .nth(1)
+        .expect("driver must have apply_released_body_credits")
+        .split("fn apply_released_tunnel_credits")
+        .next()
+        .expect("apply_released_body_credits section");
+    let released_tunnel_credits = driver
+        .split("fn apply_released_tunnel_credits")
+        .nth(1)
+        .expect("driver must have apply_released_tunnel_credits")
+        .split("async fn send_stream_cancel")
+        .next()
+        .expect("apply_released_tunnel_credits section");
 
     assert!(
         driver.contains("apply_released_body_credits"),
@@ -125,6 +139,15 @@ fn native_h3_driver_flushes_receive_credit_from_consumed_body_bytes() {
     assert!(
         body_progress.contains("apply_released_body_credits().await?"),
         "body progress must apply consumed body-byte credit before flushing receive-window updates"
+    );
+    assert!(
+        released_body_credits.contains("record_client_stream_consumed(stream_id, released as u64)"),
+        "body byte release must update QUIC receive credit for the exact stream that the user consumed"
+    );
+    assert!(
+        released_tunnel_credits
+            .contains("record_client_stream_consumed(stream_id, released as u64)"),
+        "RFC9220 tunnel byte release must update QUIC receive credit for the exact CONNECT stream"
     );
 }
 
