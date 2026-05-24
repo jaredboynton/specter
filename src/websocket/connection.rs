@@ -9,7 +9,7 @@ use url::Url;
 use crate::transport::connector::MaybeHttpsStream;
 use crate::websocket::error::{WebSocketError, WebSocketResult};
 use crate::websocket::frame::{
-    decode_frame, encode_frame, FrameConfig, FrameDecoder, MaskRng, OpCode,
+    decode_frame, encode_frame_into, FrameConfig, FrameDecoder, MaskRng, OpCode,
 };
 use crate::websocket::message::{CloseFrame, Message};
 use crate::websocket::WebSocketConfig;
@@ -23,6 +23,7 @@ pub struct WebSocket {
     url: Url,
     protocol: Option<String>,
     read_buffer: BytesMut,
+    write_buffer: BytesMut,
     frame_config: FrameConfig,
     read_timeout: Option<Duration>,
     write_timeout: Option<Duration>,
@@ -51,6 +52,7 @@ impl WebSocket {
             url,
             protocol,
             read_buffer,
+            write_buffer: BytesMut::with_capacity(READ_CHUNK_SIZE),
             frame_config: FrameConfig::new(config.max_frame_size, config.max_message_size),
             read_timeout: config.read_timeout,
             write_timeout: config.write_timeout,
@@ -172,12 +174,12 @@ impl WebSocket {
                 ),
             ));
         }
-        let bytes = encode_frame(opcode, payload, &mut self.mask_rng);
+        encode_frame_into(opcode, payload, &mut self.mask_rng, &mut self.write_buffer);
         Self::io_with_timeout(
             &self.url,
             self.write_timeout,
             "write",
-            self.stream.write_all(&bytes),
+            self.stream.write_all(&self.write_buffer),
         )
         .await
     }

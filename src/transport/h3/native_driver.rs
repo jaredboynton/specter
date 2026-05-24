@@ -575,6 +575,7 @@ struct NativeDriverTunnelState {
 }
 
 impl NativeDriverTunnelState {
+    #[cfg(test)]
     fn new(response_tx: oneshot::Sender<Result<H3Tunnel>>) -> Self {
         Self::new_with_notify(response_tx, Arc::new(Notify::new()))
     }

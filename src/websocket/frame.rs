@@ -204,6 +204,19 @@ impl FrameDecoder {
 #[inline]
 pub(crate) fn encode_frame(opcode: OpCode, payload: &[u8], mask_rng: &mut MaskRng) -> Bytes {
     let mut out = BytesMut::with_capacity(14 + payload.len());
+    encode_frame_into(opcode, payload, mask_rng, &mut out);
+    out.freeze()
+}
+
+#[inline]
+pub(crate) fn encode_frame_into(
+    opcode: OpCode,
+    payload: &[u8],
+    mask_rng: &mut MaskRng,
+    out: &mut BytesMut,
+) {
+    out.clear();
+    out.reserve(14 + payload.len());
     out.extend_from_slice(&[0x80 | opcode as u8]);
 
     // Client frames are always masked per RFC 6455 §5.3.
@@ -235,8 +248,6 @@ pub(crate) fn encode_frame(opcode: OpCode, payload: &[u8], mask_rng: &mut MaskRn
     for (index, byte) in chunks.into_remainder().iter_mut().enumerate() {
         *byte ^= key[index];
     }
-
-    out.freeze()
 }
 
 #[inline]
