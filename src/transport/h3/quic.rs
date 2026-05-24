@@ -560,14 +560,6 @@ fn duration_abs_diff(a: Duration, b: Duration) -> Duration {
     }
 }
 
-fn duration_abs_diff(left: Duration, right: Duration) -> Duration {
-    if left >= right {
-        left - right
-    } else {
-        right - left
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AckRange {
     start: u64,
