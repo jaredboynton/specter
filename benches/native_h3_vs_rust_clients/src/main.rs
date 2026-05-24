@@ -294,7 +294,11 @@ fn local_native_fixture_measurement_plan_for(
 ) -> anyhow::Result<Vec<&'static str>> {
     let plan = local_native_fixture_measurement_plan();
     if let Some(selected_client) = selected_client {
-        if let Some(client) = plan.iter().copied().find(|client| *client == selected_client) {
+        if let Some(client) = plan
+            .iter()
+            .copied()
+            .find(|client| *client == selected_client)
+        {
             return Ok(vec![client]);
         }
         anyhow::bail!("unknown local native fixture client {selected_client}");
@@ -489,11 +493,12 @@ async fn main() -> anyhow::Result<()> {
         .map(fs::read_to_string)
         .collect::<Result<Vec<_>, _>>()?;
     let mut measured_competitor_rows = Vec::new();
-    if args.iter().any(|arg| arg == "--measure-local-native-fixture") {
-        let fixture = LocalNativeH3Fixture::start().await?;
+    if args
+        .iter()
+        .any(|arg| arg == "--measure-local-native-fixture")
+    {
         measured_competitor_rows.extend(
             measure_local_native_fixture(
-                fixture.stream_url(),
                 option_usize(&args, "--warmups", 3)?,
                 option_usize(&args, "--samples", 30)?,
                 option_value(&args, "--measure-local-native-fixture-client").as_deref(),
@@ -581,13 +586,14 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn measure_local_native_fixture(
-    url: &str,
     warmups: usize,
     samples: usize,
     selected_client: Option<&str>,
 ) -> anyhow::Result<Vec<BenchmarkRow>> {
     let mut rows = Vec::new();
     for client in local_native_fixture_measurement_plan_for(selected_client)? {
+        let fixture = LocalNativeH3Fixture::start().await?;
+        let url = fixture.stream_url();
         let row = match client {
             "specter_native" => measure_specter_native(url, warmups, samples).await,
             "quiche_direct" => measure_quiche_direct(url, warmups, samples),
@@ -859,7 +865,10 @@ impl LocalNativeH3Connection {
         if let Some(packet) = self.handshake.build_server_application_ack_packet()? {
             self.send_packet(packet.packet).await?;
         }
-        for packet in self.handshake.build_server_receive_flow_control_update_packets()? {
+        for packet in self
+            .handshake
+            .build_server_receive_flow_control_update_packets()?
+        {
             self.send_packet(packet.packet).await?;
         }
         let retransmits = self
@@ -904,7 +913,8 @@ impl LocalNativeH3Connection {
         for frame in event.frames {
             if let specter::transport::h3::native::H3Frame::Headers(block) = frame {
                 let headers = specter::transport::h3::native::decode_header_block(block.as_ref())?;
-                self.handle_request_headers(event.stream_id, headers).await?;
+                self.handle_request_headers(event.stream_id, headers)
+                    .await?;
             }
         }
         Ok(())
@@ -1020,9 +1030,7 @@ fn route_local_native_h3_connection_id(
     None
 }
 
-fn local_native_h3_server_connection_id(
-    index: u64,
-) -> specter::transport::h3::quic::ConnectionId {
+fn local_native_h3_server_connection_id(index: u64) -> specter::transport::h3::quic::ConnectionId {
     specter::transport::h3::quic::ConnectionId::from_bytes(Bytes::from(format!(
         "bench-h3-{index:08x}"
     )))
@@ -1650,14 +1658,22 @@ async fn measure_reqwest_h3(
         .build()?;
 
     for _ in 0..warmups {
-        let response = client.get(url).version(http::Version::HTTP_3).send().await?;
+        let response = client
+            .get(url)
+            .version(http::Version::HTTP_3)
+            .send()
+            .await?;
         let _ = response.bytes().await?;
     }
 
     let mut measured = Vec::with_capacity(samples);
     for _ in 0..samples {
         let start = std::time::Instant::now();
-        let mut response = client.get(url).version(http::Version::HTTP_3).send().await?;
+        let mut response = client
+            .get(url)
+            .version(http::Version::HTTP_3)
+            .send()
+            .await?;
         if !response.status().is_success() {
             anyhow::bail!(
                 "reqwest_h3 received non-success status {}",
@@ -1873,7 +1889,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let cert_path = std::env::temp_dir().join(format!("specter_native_h3_cert_test_{stamp}.crt"));
+        let cert_path =
+            std::env::temp_dir().join(format!("specter_native_h3_cert_test_{stamp}.crt"));
         std::fs::write(&cert_path, cert_pem).unwrap();
         let output = std::process::Command::new("openssl")
             .args([
@@ -1908,7 +1925,10 @@ mod tests {
             .map(|suite| suite.suite())
             .collect::<Vec<_>>();
 
-        assert_eq!(suites, vec![super::rustls::CipherSuite::TLS13_AES_128_GCM_SHA256]);
+        assert_eq!(
+            suites,
+            vec![super::rustls::CipherSuite::TLS13_AES_128_GCM_SHA256]
+        );
     }
 
     #[cfg(feature = "reqwest-h3")]
@@ -1922,7 +1942,10 @@ mod tests {
             .map(|suite| suite.suite())
             .collect::<Vec<_>>();
 
-        assert_eq!(suites, vec![super::rustls::CipherSuite::TLS13_AES_128_GCM_SHA256]);
+        assert_eq!(
+            suites,
+            vec![super::rustls::CipherSuite::TLS13_AES_128_GCM_SHA256]
+        );
         assert_eq!(config.alpn_protocols, vec![b"h3".to_vec()]);
     }
 
