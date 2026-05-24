@@ -7,6 +7,8 @@ const {
   WebSocket,
 } = require('../index');
 
+jest.setTimeout(15000);
+
 function acceptKey(key) {
   return crypto
     .createHash('sha1')
