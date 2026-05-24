@@ -229,6 +229,13 @@ pub struct QuicAckRange {
     pub ack_range_length: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QuicEcnMark {
+    Ect0,
+    Ect1,
+    Ce,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuicFrame {
     Padding,
@@ -387,6 +394,9 @@ pub struct QuicAckTracker {
     pending_ack: bool,
     pending_ack_count: usize,
     first_pending_ack_at: Option<Instant>,
+    ect0_count: u64,
+    ect1_count: u64,
+    ce_count: u64,
 }
 
 impl QuicAckTracker {
@@ -395,6 +405,24 @@ impl QuicAckTracker {
     }
 
     pub fn observe_at(&mut self, packet_number: u64, now: Instant) {
+        self.observe_new_at(packet_number, now);
+    }
+
+    pub fn observe_ecn(&mut self, packet_number: u64, mark: QuicEcnMark) {
+        self.observe_ecn_at(packet_number, mark, Instant::now());
+    }
+
+    pub fn observe_ecn_at(&mut self, packet_number: u64, mark: QuicEcnMark, now: Instant) {
+        if self.observe_new_at(packet_number, now) {
+            match mark {
+                QuicEcnMark::Ect0 => self.ect0_count = self.ect0_count.saturating_add(1),
+                QuicEcnMark::Ect1 => self.ect1_count = self.ect1_count.saturating_add(1),
+                QuicEcnMark::Ce => self.ce_count = self.ce_count.saturating_add(1),
+            }
+        }
+    }
+
+    fn observe_new_at(&mut self, packet_number: u64, now: Instant) -> bool {
         if packet_number <= MAX_PACKET_NUMBER && self.received.insert(packet_number) {
             self.received_at.insert(packet_number, now);
             if !self.pending_ack {
@@ -402,7 +430,9 @@ impl QuicAckTracker {
             }
             self.pending_ack = true;
             self.pending_ack_count = self.pending_ack_count.saturating_add(1);
+            return true;
         }
+        false
     }
 
     pub fn is_empty(&self) -> bool {
@@ -459,12 +489,24 @@ impl QuicAckTracker {
             previous_end = range.end;
         }
 
-        Ok(QuicFrame::Ack {
-            largest_acknowledged,
-            ack_delay,
-            first_ack_range,
-            ranges: additional_ranges,
-        })
+        if self.has_ecn_counts() {
+            Ok(QuicFrame::AckEcn {
+                largest_acknowledged,
+                ack_delay,
+                first_ack_range,
+                ranges: additional_ranges,
+                ect0_count: self.ect0_count,
+                ect1_count: self.ect1_count,
+                ce_count: self.ce_count,
+            })
+        } else {
+            Ok(QuicFrame::Ack {
+                largest_acknowledged,
+                ack_delay,
+                first_ack_range,
+                ranges: additional_ranges,
+            })
+        }
     }
 
     pub fn to_ack_frame_with_delay(
@@ -520,6 +562,10 @@ impl QuicAckTracker {
         }
 
         ranges
+    }
+
+    fn has_ecn_counts(&self) -> bool {
+        self.ect0_count > 0 || self.ect1_count > 0 || self.ce_count > 0
     }
 
     fn pending_ack_elapsed(&self, now: Instant) -> Option<Duration> {
