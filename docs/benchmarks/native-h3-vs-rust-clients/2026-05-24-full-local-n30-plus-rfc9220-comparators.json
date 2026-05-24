@@ -136,9 +136,9 @@
     {
       "competitor_id": "specter_native",
       "status": "measured_pass",
-      "p50_ttft_ns": 645459.0,
-      "p95_ttft_ns": 1886375.0,
-      "bytes_per_sec": 9264129.980809951,
+      "p50_ttft_ns": 700458.0,
+      "p95_ttft_ns": 1911958.0,
+      "bytes_per_sec": 9297400.238292035,
       "source": "specter_native_adapter",
       "protocol": "h3",
       "workload": "http3_streaming_get",
@@ -148,9 +148,9 @@
     {
       "competitor_id": "specter_native_rfc9220_tunnel",
       "status": "measured_pass",
-      "p50_ttft_ns": 1960333.0,
-      "p95_ttft_ns": 4177916.0,
-      "bytes_per_sec": 480174.45338109403,
+      "p50_ttft_ns": 2761959.0,
+      "p95_ttft_ns": 4586375.0,
+      "bytes_per_sec": 400330.9924134931,
       "source": "specter_native_rfc9220_tunnel_adapter",
       "protocol": "h3_rfc9220",
       "workload": "websocket_over_h3_raw_tunnel_echo",
@@ -161,9 +161,9 @@
     {
       "competitor_id": "specter_native_rfc9220_tunnel_close",
       "status": "measured_pass",
-      "p50_ttft_ns": 3135458.0,
-      "p95_ttft_ns": 5558125.0,
-      "bytes_per_sec": 313776.49489858357,
+      "p50_ttft_ns": 2948042.0,
+      "p95_ttft_ns": 5129083.0,
+      "bytes_per_sec": 355629.83032741037,
       "source": "specter_native_rfc9220_tunnel_close_adapter",
       "protocol": "h3_rfc9220",
       "workload": "websocket_over_h3_raw_tunnel_close_fin",
@@ -174,9 +174,9 @@
     {
       "competitor_id": "specter_native_rfc9220_tunnel_mixed",
       "status": "measured_pass",
-      "p50_ttft_ns": 40299500.0,
-      "p95_ttft_ns": 67320792.0,
-      "bytes_per_sec": 760904.6239855305,
+      "p50_ttft_ns": 36992583.0,
+      "p95_ttft_ns": 90341917.0,
+      "bytes_per_sec": 729361.6789516952,
       "source": "specter_native_rfc9220_tunnel_mixed_adapter",
       "protocol": "h3_rfc9220",
       "workload": "slow_consumer_tunnel_plus_http3_streaming",
@@ -187,9 +187,9 @@
     {
       "competitor_id": "quiche_direct_rfc9220_tunnel",
       "status": "measured_pass",
-      "p50_ttft_ns": 2963625.0,
-      "p95_ttft_ns": 3071958.0,
-      "bytes_per_sec": 345870.3257615466,
+      "p50_ttft_ns": 2889167.0,
+      "p95_ttft_ns": 3050875.0,
+      "bytes_per_sec": 354013.0706189122,
       "source": "quiche_direct_rfc9220_tunnel_adapter",
       "protocol": "h3_rfc9220",
       "workload": "websocket_over_h3_raw_tunnel_echo",
@@ -200,9 +200,9 @@
     {
       "competitor_id": "tokio_quiche_rfc9220_tunnel",
       "status": "measured_pass",
-      "p50_ttft_ns": 3430709.0,
-      "p95_ttft_ns": 3683000.0,
-      "bytes_per_sec": 295882.0158133527,
+      "p50_ttft_ns": 3269250.0,
+      "p95_ttft_ns": 3789916.0,
+      "bytes_per_sec": 307343.29881307157,
       "source": "tokio_quiche_rfc9220_tunnel_adapter",
       "protocol": "h3_rfc9220",
       "workload": "websocket_over_h3_raw_tunnel_echo",
@@ -237,9 +237,9 @@
     {
       "competitor_id": "quiche_direct",
       "status": "measured_pass",
-      "p50_ttft_ns": 3026875.0,
-      "p95_ttft_ns": 3155333.0,
-      "bytes_per_sec": 7238328.16343834,
+      "p50_ttft_ns": 3070958.0,
+      "p95_ttft_ns": 3580583.0,
+      "bytes_per_sec": 7174359.923595753,
       "source": "quiche_direct_adapter",
       "protocol": "h3",
       "workload": "http3_streaming_get",
@@ -249,9 +249,9 @@
     {
       "competitor_id": "tokio_quiche",
       "status": "measured_pass",
-      "p50_ttft_ns": 3554666.0,
-      "p95_ttft_ns": 4088875.0,
-      "bytes_per_sec": 6551428.542112574,
+      "p50_ttft_ns": 3507708.0,
+      "p95_ttft_ns": 4327000.0,
+      "bytes_per_sec": 6411625.964264415,
       "source": "tokio_quiche_adapter",
       "protocol": "h3",
       "workload": "http3_streaming_get",
@@ -261,9 +261,9 @@
     {
       "competitor_id": "h3_quinn",
       "status": "measured_pass",
-      "p50_ttft_ns": 3881000.0,
-      "p95_ttft_ns": 12439500.0,
-      "bytes_per_sec": 4979910.611820316,
+      "p50_ttft_ns": 4990791.0,
+      "p95_ttft_ns": 16531792.0,
+      "bytes_per_sec": 4647615.824142448,
       "source": "h3_quinn_adapter",
       "protocol": "h3",
       "workload": "http3_streaming_get",
@@ -272,14 +272,15 @@
     },
     {
       "competitor_id": "reqwest_h3",
-      "status": "pending_adapter",
-      "p50_ttft_ns": null,
-      "p95_ttft_ns": null,
-      "bytes_per_sec": null,
-      "source": "native_h3_vs_rust_clients_harness",
+      "status": "measured_pass",
+      "p50_ttft_ns": 1931792.0,
+      "p95_ttft_ns": 10706875.0,
+      "bytes_per_sec": 5491854.301409295,
+      "source": "reqwest_h3_adapter",
       "protocol": "h3",
       "workload": "http3_streaming_get",
-      "payload_bytes": 81920
+      "payload_bytes": 81920,
+      "sample_count": 30
     },
     {
       "competitor_id": "tokio_tungstenite_rfc9220",
@@ -308,9 +309,9 @@
     {
       "competitor_id": "quinn_transport",
       "status": "measured_pass",
-      "p50_ttft_ns": 137291.0,
-      "p95_ttft_ns": 179875.0,
-      "bytes_per_sec": 7226183.058129138,
+      "p50_ttft_ns": 135000.0,
+      "p95_ttft_ns": 209625.0,
+      "bytes_per_sec": 6878764.903430829,
       "source": "quinn_transport_adapter",
       "protocol": "quic",
       "workload": "bidirectional_echo_transport",
@@ -333,10 +334,10 @@
   ],
   "fixture_events": [],
   "superiority_gate": {
-    "status": "incomplete",
-    "pass": false,
-    "reason": "no_h3_superiority_claim_without_all_required_rows",
-    "fastest_non_specter_h3_client": "quiche_direct",
+    "status": "pass",
+    "pass": true,
+    "reason": "specter_native_is_faster_than_required_h3_competitors",
+    "fastest_non_specter_h3_client": "reqwest_h3",
     "no_h3_superiority_claim_without_all_required_rows": true,
     "required_h3_clients": [
       "quiche_direct",
@@ -344,8 +345,6 @@
       "h3_quinn",
       "reqwest_h3"
     ],
-    "missing_required_rows": [
-      "reqwest_h3"
-    ]
+    "missing_required_rows": []
   }
 }
