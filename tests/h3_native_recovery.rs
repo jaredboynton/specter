@@ -136,7 +136,11 @@ fn rfc9002_recovery_pto_doubles_on_each_timeout_until_ack_resets_it() {
         )
         .expect("ack");
     assert_eq!(recovery.pto_count(), 0);
-    assert_eq!(recovery.current_pto(), initial_pto);
+    assert_eq!(
+        recovery.current_pto(),
+        Duration::from_millis(150),
+        "ACK must reset PTO backoff while retaining the fresh RTT sample"
+    );
 }
 
 #[test]
