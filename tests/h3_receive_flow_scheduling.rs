@@ -175,6 +175,13 @@ fn native_h3_driver_retains_connection_close_for_draining_replay() {
         .split("fn apply_h3_event")
         .next()
         .expect("process_datagram section");
+    let drive_loop = driver
+        .split("async fn drive_loop")
+        .nth(1)
+        .expect("driver must have drive_loop")
+        .split("fn has_pending_work")
+        .next()
+        .expect("drive_loop section");
 
     assert!(
         driver_fields.contains("closing_connection_close_packet: Option<Bytes>"),
@@ -191,6 +198,10 @@ fn native_h3_driver_retains_connection_close_for_draining_replay() {
     assert!(
         process_datagram.contains("replay_connection_close().await?"),
         "draining native H3 driver must replay CONNECTION_CLOSE on inbound peer packets instead of processing them"
+    );
+    assert!(
+        drive_loop.matches("drain_connection_close(&mut buf).await?").count() >= 2,
+        "local idle/client-shutdown closes must remain in a bounded drain window and replay CONNECTION_CLOSE before driver exit"
     );
 }
 

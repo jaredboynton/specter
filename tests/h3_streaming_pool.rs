@@ -1,11 +1,51 @@
 use bytes::Bytes;
+use specter::pool::multiplexer::{OriginFairQueue, PoolKey};
 use specter::transport::h3::{H3Backend, H3Client};
-use specter::RequestBody;
+use specter::{FingerprintProfile, PseudoHeaderOrder, RequestBody};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 mod helpers;
 use helpers::mock_h3_server::{MockEvent, MockH3Server};
+
+#[test]
+fn h3_pool_origin_fair_queue_rotates_fingerprint_variants_by_origin() {
+    let alpha_chrome = PoolKey::new(
+        "alpha.example".to_string(),
+        443,
+        true,
+        FingerprintProfile::Chrome142,
+        PseudoHeaderOrder::Chrome,
+    );
+    let alpha_firefox = PoolKey::new(
+        "alpha.example".to_string(),
+        443,
+        true,
+        FingerprintProfile::Firefox142,
+        PseudoHeaderOrder::Firefox,
+    );
+    let beta_chrome = PoolKey::new(
+        "beta.example".to_string(),
+        443,
+        true,
+        FingerprintProfile::Chrome142,
+        PseudoHeaderOrder::Chrome,
+    );
+    let mut queue = OriginFairQueue::default();
+
+    queue.push(alpha_chrome.clone());
+    queue.push(alpha_firefox.clone());
+    queue.push(beta_chrome.clone());
+
+    assert_eq!(queue.pop_next(), Some(alpha_chrome));
+    assert_eq!(
+        queue.pop_next(),
+        Some(beta_chrome),
+        "pool-level H3 scheduling must not drain one origin's fingerprint variants before another origin gets a turn"
+    );
+    assert_eq!(queue.pop_next(), Some(alpha_firefox));
+    assert!(queue.is_empty());
+}
 
 #[tokio::test]
 async fn h3_client_reuses_pooled_connection_for_same_authority() {
