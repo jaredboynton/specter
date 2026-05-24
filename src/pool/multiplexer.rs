@@ -571,4 +571,43 @@ mod tests {
         let stats = pool.stats().await;
         assert_eq!(stats.total_connections, 0);
     }
+
+    #[test]
+    fn origin_fair_queue_rotates_ready_origins_before_same_origin_reuse() {
+        let alpha_chrome = PoolKey::new(
+            "alpha.example".to_string(),
+            443,
+            true,
+            FingerprintProfile::Chrome142,
+            PseudoHeaderOrder::Chrome,
+        );
+        let alpha_firefox = PoolKey::new(
+            "alpha.example".to_string(),
+            443,
+            true,
+            FingerprintProfile::Firefox142,
+            PseudoHeaderOrder::Firefox,
+        );
+        let beta_chrome = PoolKey::new(
+            "beta.example".to_string(),
+            443,
+            true,
+            FingerprintProfile::Chrome142,
+            PseudoHeaderOrder::Chrome,
+        );
+        let mut queue = OriginFairQueue::default();
+
+        queue.push(alpha_chrome.clone());
+        queue.push(alpha_firefox.clone());
+        queue.push(beta_chrome.clone());
+
+        assert_eq!(queue.pop_next(), Some(alpha_chrome));
+        assert_eq!(
+            queue.pop_next(),
+            Some(beta_chrome),
+            "pool-level scheduling must give another ready origin a turn before reusing alpha"
+        );
+        assert_eq!(queue.pop_next(), Some(alpha_firefox));
+        assert!(queue.is_empty());
+    }
 }
