@@ -143,6 +143,15 @@ pub enum CertCompression {
     None,
 }
 
+/// Native TLS extension-order behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsExtensionOrderBehavior {
+    /// Let BoringSSL apply browser-like extension permutation.
+    BrowserPermuted,
+    /// Disable BoringSSL extension permutation so repeated captures are stable.
+    Deterministic,
+}
+
 pub const NATIVE_H3_SESSION_RESUMPTION_UNSUPPORTED_REASON: &str =
     "native H3 does not yet wire BoringSSL session tickets into the QUIC handshake";
 pub const NATIVE_H3_ZERO_RTT_UNSUPPORTED_REASON: &str =
@@ -202,6 +211,8 @@ pub struct TlsFingerprint {
     pub extensions: Vec<u16>,
     /// Extension order (for JA3 fingerprint).
     pub extension_order: Vec<u16>,
+    /// Native extension-order behavior for ClientHello generation.
+    pub extension_order_behavior: TlsExtensionOrderBehavior,
     /// Enable GREASE values.
     pub grease: bool,
     /// Certificate compression algorithm (compress_certificate extension).
@@ -221,6 +232,7 @@ impl Default for TlsFingerprint {
             curves: vec![],
             extensions: vec![],
             extension_order: vec![],
+            extension_order_behavior: TlsExtensionOrderBehavior::Deterministic,
             grease: true,
             cert_compression: CertCompression::None,
             enable_kyber: false,
@@ -238,6 +250,7 @@ impl TlsFingerprint {
             curves: CHROME_CURVES.to_vec(),
             extensions: CHROME_EXTENSION_IDS.to_vec(),
             extension_order: CHROME_EXTENSION_IDS.to_vec(),
+            extension_order_behavior: TlsExtensionOrderBehavior::BrowserPermuted,
             grease: true,
             cert_compression: CertCompression::Brotli,
             enable_kyber: true,
@@ -295,6 +308,7 @@ impl TlsFingerprint {
             curves: FIREFOX_CURVES.to_vec(),
             extensions: FIREFOX_EXTENSION_IDS.to_vec(),
             extension_order: FIREFOX_EXTENSION_IDS.to_vec(),
+            extension_order_behavior: TlsExtensionOrderBehavior::BrowserPermuted,
             grease: false,                           // Firefox does NOT use GREASE
             cert_compression: CertCompression::None, // Firefox does not use certificate compression
             enable_kyber: false,                     // Firefox requires manual flag for Kyber
@@ -311,6 +325,11 @@ impl TlsFingerprint {
         NativeH3TlsCapabilities::current()
     }
 
+    /// Native HTTP/3 ClientHello extension-order behavior for this TLS fingerprint.
+    pub fn native_h3_extension_order_behavior(&self) -> TlsExtensionOrderBehavior {
+        self.extension_order_behavior
+    }
+
     /// Stable, explicit-field key suitable for use as a connection-pool discriminator.
     ///
     /// Unlike `format!("{self:?}")`, this representation enumerates each
@@ -322,8 +341,12 @@ impl TlsFingerprint {
             CertCompression::Zlib => "zlib",
             CertCompression::None => "none",
         };
+        let extension_order_behavior = match self.extension_order_behavior {
+            TlsExtensionOrderBehavior::BrowserPermuted => "browser-permuted",
+            TlsExtensionOrderBehavior::Deterministic => "deterministic",
+        };
         format!(
-            "ciphers={}|sigalgs={}|curves={}|exts={}|order={}|grease={}|cc={}|kyber={}",
+            "ciphers={}|sigalgs={}|curves={}|exts={}|order={}|order_behavior={}|grease={}|cc={}|kyber={}",
             self.cipher_list.join(","),
             self.sigalgs.join(","),
             self.curves.join(","),
@@ -337,6 +360,7 @@ impl TlsFingerprint {
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
+            extension_order_behavior,
             self.grease,
             cert_compression,
             self.enable_kyber,
