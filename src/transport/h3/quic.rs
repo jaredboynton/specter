@@ -541,6 +541,25 @@ fn encode_ack_delay(delay: Duration, ack_delay_exponent: u64) -> u64 {
     scaled.min(u64::MAX as u128) as u64
 }
 
+/// RFC9002 § 5.3 / RFC9000 § 19.3: decode an ACK frame ack_delay back into a
+/// `Duration` of microseconds shifted left by `ack_delay_exponent`.
+fn decode_ack_delay(ack_delay: u64, ack_delay_exponent: u64) -> Duration {
+    if ack_delay_exponent >= u64::BITS as u64 {
+        return Duration::ZERO;
+    }
+    let micros = (ack_delay as u128) << ack_delay_exponent;
+    let capped = micros.min(u64::MAX as u128) as u64;
+    Duration::from_micros(capped)
+}
+
+fn duration_abs_diff(a: Duration, b: Duration) -> Duration {
+    if a >= b {
+        a - b
+    } else {
+        b - a
+    }
+}
+
 fn duration_abs_diff(left: Duration, right: Duration) -> Duration {
     if left >= right {
         left - right
