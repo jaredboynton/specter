@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "specters"
 version = "3.2.0"
-description = "Python bindings for Specter HTTP, WebSocket, HTTP/2, and HTTP/3 tunnel client"
+description = "Python bindings for Specter, a Chrome-accurate HTTP client with TLS, HTTP/1.1, HTTP/2, HTTP/3, and WebSocket fingerprinting. Improved TTFT/TPS over reqwest for LLM providers."
 readme = "README_PYPI.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -23,7 +23,14 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-keywords = ["http", "http3", "fingerprint", "tls", "client", "async"]
+keywords = ["http", "http2", "http3", "tls", "fingerprint", "chrome", "browser", "impersonate", "websocket", "client", "async", "scraping", "llm", "streaming", "sse", "ttft"]
+
+[project.urls]
+Homepage = "https://github.com/jaredboynton/specter"
+Repository = "https://github.com/jaredboynton/specter"
+Documentation = "https://github.com/jaredboynton/specter#readme"
+Issues = "https://github.com/jaredboynton/specter/issues"
+Changelog = "https://github.com/jaredboynton/specter/releases"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "maturin"]

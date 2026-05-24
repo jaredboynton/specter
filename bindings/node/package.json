@@ -1,7 +1,7 @@
 {
   "name": "specters",
   "version": "3.2.0",
-  "description": "Node.js bindings for Specter HTTP, WebSocket, HTTP/2, and HTTP/3 tunnel client",
+  "description": "Node.js bindings for Specter, a Chrome-accurate HTTP client with TLS, HTTP/1.1, HTTP/2, HTTP/3, and WebSocket fingerprinting. Improved TTFT/TPS over reqwest for LLM providers.",
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
@@ -46,12 +46,22 @@
   },
   "keywords": [
     "http",
+    "http2",
     "http3",
-    "fingerprint",
     "tls",
+    "fingerprint",
+    "chrome",
+    "browser",
+    "impersonate",
+    "websocket",
     "client",
     "async",
-    "native"
+    "native",
+    "scraping",
+    "llm",
+    "streaming",
+    "sse",
+    "ttft"
   ],
   "author": "Jared Boynton",
   "license": "MIT",
