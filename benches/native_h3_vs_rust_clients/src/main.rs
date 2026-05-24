@@ -2200,20 +2200,25 @@ async fn measure_quiche_direct_rfc9220_tunnel(
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    for _ in 0..warmups {
-        let _ = measure_quiche_direct_rfc9220_tunnel_once(url)?;
-    }
+    let url = url.to_owned();
+    tokio::task::spawn_blocking(move || {
+        for _ in 0..warmups {
+            let _ = measure_quiche_direct_rfc9220_tunnel_once(&url)?;
+        }
 
-    let mut measured = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        measured.push(measure_quiche_direct_rfc9220_tunnel_once(url)?);
-    }
+        let mut measured = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            measured.push(measure_quiche_direct_rfc9220_tunnel_once(&url)?);
+        }
 
-    Ok(quiche_direct_rfc9220_tunnel_row_from_samples(&measured))
+        Ok(quiche_direct_rfc9220_tunnel_row_from_samples(&measured))
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("quiche RFC 9220 blocking task failed: {error}"))?
 }
 
 fn measure_quiche_direct_rfc9220_tunnel_once(url: &str) -> anyhow::Result<AdapterSample> {
-    let url = url::Url::parse(url)?;
+    let url = parse_rfc9220_network_url(url)?;
     let peer_addr = url
         .socket_addrs(|| Some(443))?
         .into_iter()
@@ -2301,7 +2306,8 @@ fn measure_quiche_direct_rfc9220_tunnel_once(url: &str) -> anyhow::Result<Adapte
         if let Some(http3) = h3_conn.as_mut() {
             if !req_sent {
                 let opened_stream_id = http3.send_request(&mut conn, &request_headers, false)?;
-                let written = http3.send_body(&mut conn, opened_stream_id, payload.as_ref(), true)?;
+                let written =
+                    http3.send_body(&mut conn, opened_stream_id, payload.as_ref(), true)?;
                 if written != payload.len() {
                     anyhow::bail!(
                         "quiche RFC 9220 partial tunnel write: expected {}, wrote {}",
@@ -2349,9 +2355,7 @@ fn measure_quiche_direct_rfc9220_tunnel_once(url: &str) -> anyhow::Result<Adapte
                     Ok((_, quiche::h3::Event::PriorityUpdate | quiche::h3::Event::GoAway)) => {}
                     Err(quiche::h3::Error::Done) => break,
                     Err(err) => {
-                        return Err(anyhow::anyhow!(
-                            "quiche RFC 9220 h3 poll failed: {err:?}"
-                        ));
+                        return Err(anyhow::anyhow!("quiche RFC 9220 h3 poll failed: {err:?}"));
                     }
                 }
             }
@@ -2400,7 +2404,7 @@ async fn measure_tokio_quiche_rfc9220_tunnel(
 async fn measure_tokio_quiche_rfc9220_tunnel_once(url: &str) -> anyhow::Result<AdapterSample> {
     use tokio_quiche::http3::driver::{ClientH3Event, H3Event, NewClientRequest, OutboundFrame};
 
-    let url = url::Url::parse(url)?;
+    let url = parse_rfc9220_network_url(url)?;
     let peer_addr = url
         .socket_addrs(|| Some(443))?
         .into_iter()
@@ -2445,17 +2449,23 @@ async fn measure_tokio_quiche_rfc9220_tunnel_once(url: &str) -> anyhow::Result<A
         .clone();
     raw_sender
         .try_send(OutboundFrame::Body(payload.clone(), true))
-        .map_err(|error| {
-            anyhow::anyhow!("tokio_quiche RFC 9220 body send failed: {error:?}")
-        })?;
+        .map_err(|error| anyhow::anyhow!("tokio_quiche RFC 9220 body send failed: {error:?}"))?;
 
     loop {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            anyhow::bail!("tokio_quiche RFC 9220 timed out after {:?}", ADAPTER_TIMEOUT);
+            anyhow::bail!(
+                "tokio_quiche RFC 9220 timed out after {:?}",
+                ADAPTER_TIMEOUT
+            );
         };
         let event = tokio::time::timeout(remaining, controller.event_receiver_mut().recv())
             .await
-            .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 timed out after {:?}", ADAPTER_TIMEOUT))?
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "tokio_quiche RFC 9220 timed out after {:?}",
+                    ADAPTER_TIMEOUT
+                )
+            })?
             .ok_or_else(|| anyhow::anyhow!("tokio_quiche RFC 9220 event stream closed"))?;
 
         match event {
@@ -2536,6 +2546,13 @@ async fn read_tokio_quiche_rfc9220_tunnel_echo(
 
 fn rfc9220_tunnel_payload(byte: u8) -> Bytes {
     Bytes::from(vec![byte; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE])
+}
+
+fn parse_rfc9220_network_url(url: &str) -> anyhow::Result<url::Url> {
+    if let Some(rest) = url.strip_prefix("wss://") {
+        return Ok(url::Url::parse(&format!("https://{rest}"))?);
+    }
+    Ok(url::Url::parse(url)?)
 }
 
 fn rfc9220_request_path(url: &url::Url) -> String {
