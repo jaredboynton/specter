@@ -5,6 +5,7 @@ use specter::fingerprint::Http3Fingerprint;
 use specter::transport::h3::handshake::{ClientH3Event, NativeQuicServerHandshake};
 use specter::transport::h3::native::{decode_header_block, encode_frame, H3Frame, H3Header};
 use specter::transport::h3::quic::{split_long_header_datagram, ConnectionId, LongHeaderType};
+use specter::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -258,6 +259,10 @@ impl NativeMockH3Connection {
             let server_application_ack_delay = server_application_ack_deadline
                 .map(|deadline| deadline.saturating_duration_since(Instant::now()))
                 .unwrap_or(Duration::ZERO);
+            let server_loss_detection_deadline = self.server_loss_detection_deadline();
+            let server_loss_detection_delay = server_loss_detection_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
             tokio::select! {
                 biased;
                 _ = tokio::time::sleep(idle_remaining) => {
@@ -275,6 +280,11 @@ impl NativeMockH3Connection {
                 _ = tokio::time::sleep(server_application_ack_delay), if server_application_ack_deadline.is_some() => {
                     if let Err(err) = self.send_delayed_application_ack().await {
                         tracing::debug!("native mock H3 delayed ACK error: {}", err);
+                    }
+                }
+                _ = tokio::time::sleep(server_loss_detection_delay), if server_loss_detection_deadline.is_some() => {
+                    if let Err(err) = self.handle_loss_detection_timeout().await {
+                        tracing::debug!("native mock H3 loss detection error: {}", err);
                     }
                 }
                 packet = self.rx.recv() => {
@@ -380,6 +390,48 @@ impl NativeMockH3Connection {
             .server_application_ack_deadline(Duration::from_millis(
                 self.fingerprint.transport.max_ack_delay_ms,
             ))
+    }
+
+    fn server_loss_detection_deadline(&self) -> Option<Instant> {
+        self.handshake.loss_detection_timer()
+    }
+
+    async fn handle_loss_detection_timeout(&mut self) -> specter::Result<()> {
+        let Some(timer) = self.handshake.loss_detection_timer() else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if now < timer {
+            return Ok(());
+        }
+        let pto = self.handshake.application_pto();
+        match self.handshake.on_loss_detection_timeout(now) {
+            LossDetectionOutcome::Pto {
+                space: PacketNumberSpace::Application,
+            } => {
+                for packet in self
+                    .handshake
+                    .retransmit_pto_server_application_stream_packets(now, pto)?
+                {
+                    self.send_packet(packet.packet).await?;
+                }
+            }
+            LossDetectionOutcome::Loss {
+                space: PacketNumberSpace::Application,
+                ..
+            } => {
+                for packet in self
+                    .handshake
+                    .retransmit_lost_server_application_stream_packets()?
+                {
+                    self.send_packet(packet.packet).await?;
+                }
+            }
+            LossDetectionOutcome::Pto { .. }
+            | LossDetectionOutcome::Loss { .. }
+            | LossDetectionOutcome::Idle => {}
+        }
+        Ok(())
     }
 
     async fn send_delayed_application_ack(&mut self) -> specter::Result<()> {
