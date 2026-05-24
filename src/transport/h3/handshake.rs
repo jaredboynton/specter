@@ -739,6 +739,7 @@ pub struct NativeQuicHandshake {
     client_handshake_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     client_application_sent_streams: BTreeMap<u64, SentApplicationStreamPacket>,
     client_application_recovery_lost_packets: Vec<u64>,
+    client_application_ecn_congestion: bool,
     client_path_validator: QuicPathValidator,
     server_transport_parameters_validated: bool,
     recovery: RecoveryState,
@@ -2286,6 +2287,7 @@ impl NativeQuicHandshake {
             client_handshake_sent_crypto: BTreeMap::new(),
             client_application_sent_streams: BTreeMap::new(),
             client_application_recovery_lost_packets: Vec::new(),
+            client_application_ecn_congestion: false,
             client_path_validator: QuicPathValidator::default(),
             server_transport_parameters_validated: false,
             recovery: recovery_state_from_transport(&fingerprint.transport),
@@ -2387,6 +2389,7 @@ impl NativeQuicHandshake {
             client_handshake_sent_crypto: BTreeMap::new(),
             client_application_sent_streams: BTreeMap::new(),
             client_application_recovery_lost_packets: Vec::new(),
+            client_application_ecn_congestion: false,
             client_path_validator: QuicPathValidator::default(),
             server_transport_parameters_validated: false,
             recovery: recovery_state_from_transport(&fingerprint.transport),
@@ -2672,6 +2675,10 @@ impl NativeQuicHandshake {
 
     pub fn client_application_lost_packets(&self) -> Vec<u64> {
         self.client_application_loss_detector.lost_packets()
+    }
+
+    pub fn take_client_application_ecn_congestion(&mut self) -> bool {
+        std::mem::take(&mut self.client_application_ecn_congestion)
     }
 
     /// Smoothed RTT observed on the application packet number space, as
@@ -3528,6 +3535,9 @@ impl NativeQuicHandshake {
                         .into_iter()
                         .map(|(packet_number, _)| packet_number),
                 );
+                if outcome.ecn_congestion {
+                    self.client_application_ecn_congestion = true;
+                }
             }
             match frame {
                 QuicFrame::MaxData(max_data) => {
