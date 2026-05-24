@@ -349,6 +349,12 @@ impl H3Client {
         handle.open_websocket_tunnel(uri, headers).await
     }
 
+    /// Resolve a reusable HTTP/3 handle for low-overhead repeated requests to one URL.
+    pub async fn handle(&self, url: &str) -> Result<H3Handle> {
+        let (handle, _, _) = self.resolve_handle_for_request(url).await?;
+        Ok(handle)
+    }
+
     fn cached_hot_handle(&self, url: &str) -> Option<(H3PoolKey, H3Handle)> {
         let hot = self.hot_handle.read().ok()?.clone()?;
         if hot.url == url && !hot.handle.is_closed() && !hot.handle.is_draining() {
