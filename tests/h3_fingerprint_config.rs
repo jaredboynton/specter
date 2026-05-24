@@ -4,6 +4,7 @@ use specter::fingerprint::{
     TlsFingerprint,
 };
 use specter::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
+use specter::transport::h3::tls::NativeH3HandshakeStatus;
 use specter::{Client, H3Backend, H3Client};
 use std::time::Duration;
 
@@ -164,4 +165,15 @@ fn h3_client_exposes_shared_native_h3_session_cache_for_resumption() {
     cloned.native_session_cache().clear();
 
     assert!(client.native_session_cache().is_empty());
+}
+
+#[test]
+fn h3_client_exposes_last_native_handshake_status_for_zero_rtt_policy() {
+    let client = H3Client::new();
+
+    assert_eq!(
+        client.last_native_handshake_status(),
+        NativeH3HandshakeStatus::None
+    );
+    assert_eq!(client.last_native_early_data_reason(), 0);
 }

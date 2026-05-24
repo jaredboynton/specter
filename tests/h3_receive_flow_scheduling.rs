@@ -494,6 +494,32 @@ fn native_h3_driver_decays_send_window_on_ack_ecn_congestion() {
 }
 
 #[test]
+fn native_h3_driver_propagates_tls_handshake_status_to_handle() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let spawn_driver = driver
+        .split("pub fn spawn_native_h3_driver")
+        .nth(1)
+        .expect("driver must have spawn_native_h3_driver")
+        .split("struct NativeH3Driver")
+        .next()
+        .expect("spawn_native_h3_driver section");
+
+    assert!(
+        spawn_driver.contains("handshake.handshake_status()"),
+        "native H3 must snapshot TLS resumption / 0-RTT status before moving the handshake into the driver"
+    );
+    assert!(
+        spawn_driver.contains("NativeH3HandshakeReport"),
+        "native H3 handle must receive a structured handshake report for caller replay policy"
+    );
+    assert!(
+        spawn_driver.contains("new_with_transport_config_and_native_handshake_report"),
+        "native H3 driver must attach the handshake report to the returned H3Handle"
+    );
+}
+
+#[test]
 fn native_mock_h3_server_schedules_timer_driven_delayed_application_acks() {
     let mock_server = std::fs::read_to_string("tests/helpers/mock_h3_server.rs")
         .expect("native mock H3 server source");
