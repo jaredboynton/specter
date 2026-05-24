@@ -10,7 +10,7 @@ repos:
         types: [rust]
         pass_filenames: false
         stages: [pre-commit]
-        always_run: false
+        always_run: true
 
       # Pre-push: full validation
       # Verifies formatting hasn't regressed (safety check)
