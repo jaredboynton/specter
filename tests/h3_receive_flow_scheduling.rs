@@ -32,7 +32,7 @@ fn native_h3_driver_defers_receive_credit_while_streaming_bodies_are_backpressur
         "native H3 driver must apply response DATA to bounded body queues before advertising more receive credit"
     );
     assert!(
-        process_datagram.contains("if !self.streaming_response_body_backpressured()"),
+        process_datagram.contains("!self.streaming_response_body_backpressured()"),
         "native H3 driver must not advertise more receive credit while every streaming body is backpressured"
     );
     assert!(

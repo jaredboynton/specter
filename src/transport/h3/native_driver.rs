@@ -668,6 +668,10 @@ impl NativeH3Driver {
             self.flush_request_stream_bodies().await?;
             self.flush_pending_tunnel_data().await?;
             self.flush_streaming_responses();
+            let released_body_credit = self.apply_released_body_credits().await?;
+            if released_body_credit && !self.streaming_response_body_backpressured() {
+                self.send_receive_flow_control_updates().await?;
+            }
             if self.last_activity.elapsed() > self.max_idle_timeout && !self.has_pending_work() {
                 self.send_connection_close(0x00, Bytes::from_static(b"Idle timeout"))
                     .await?;
@@ -711,7 +715,8 @@ impl NativeH3Driver {
                     self.cancel_closed_streaming_bodies().await?;
                     self.flush_request_stream_bodies().await?;
                     self.flush_streaming_responses();
-                    if !self.streaming_response_body_backpressured() {
+                    let released_body_credit = self.apply_released_body_credits().await?;
+                    if released_body_credit && !self.streaming_response_body_backpressured() {
                         self.send_receive_flow_control_updates().await?;
                     }
                 }
@@ -1304,7 +1309,11 @@ impl NativeH3Driver {
         }
         self.cancel_closed_streaming_bodies().await?;
         self.flush_streaming_responses();
-        if !self.streaming_response_body_backpressured() {
+        let released_body_credit = self.apply_released_body_credits().await?;
+        let has_streaming_responses = !self.pending_streaming_responses.is_empty();
+        if (!has_streaming_responses || released_body_credit)
+            && !self.streaming_response_body_backpressured()
+        {
             self.send_receive_flow_control_updates().await?;
         }
         self.process_pending_commands().await?;
@@ -1446,6 +1455,40 @@ impl NativeH3Driver {
             self.pending_streaming_responses.remove(&stream_id);
         }
         Ok(())
+    }
+
+    async fn apply_released_body_credits(&mut self) -> Result<bool> {
+        let stream_ids = self
+            .pending_streaming_responses
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut released_body_credit = false;
+
+        for stream_id in stream_ids {
+            let (released, closed) = self
+                .pending_streaming_responses
+                .get(&stream_id)
+                .map(|stream| {
+                    (
+                        stream.body_shared.take_released_recv_bytes(),
+                        stream.body_shared.is_closed(),
+                    )
+                })
+                .unwrap_or((0, false));
+
+            if closed {
+                self.send_stream_cancel(stream_id).await?;
+                self.pending_streaming_responses.remove(&stream_id);
+                continue;
+            }
+
+            if released > 0 {
+                released_body_credit = true;
+            }
+        }
+
+        Ok(released_body_credit)
     }
 
     async fn send_stream_cancel(&mut self, stream_id: u64) -> Result<()> {
