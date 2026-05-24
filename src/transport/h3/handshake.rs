@@ -2884,6 +2884,7 @@ impl NativeQuicHandshake {
             &frame,
         )?;
 
+        let packet_size = packet.len();
         self.next_client_handshake_packet_number += 1;
         self.client_handshake_loss_detector
             .on_packet_sent_at(packet_number, sent_at);
@@ -2894,6 +2895,11 @@ impl NativeQuicHandshake {
                 crypto_offset,
                 crypto_data: crypto_data.clone(),
             },
+        );
+        self.recovery.on_packet_sent(
+            PacketNumberSpace::Handshake,
+            packet_number,
+            SentPacketInfo::new(sent_at, packet_size, true, true),
         );
 
         Ok(ClientHandshakePacket {
@@ -3450,6 +3456,20 @@ impl NativeQuicHandshake {
                     self.next_server_initial_packet_number = opened.packet_number + 1;
 
                     for frame in decode_frames(&opened.payload)? {
+                        for packet_number in
+                            self.client_initial_loss_detector.on_ack_frame(&frame)?
+                        {
+                            self.client_initial_sent_crypto.remove(&packet_number);
+                        }
+                        let outcome = self.recovery.on_ack_received(
+                            PacketNumberSpace::Initial,
+                            &frame,
+                            self.fingerprint.transport.ack_delay_exponent,
+                            Instant::now(),
+                        )?;
+                        for (packet_number, _) in outcome.newly_acked {
+                            self.client_initial_sent_crypto.remove(&packet_number);
+                        }
                         if let QuicFrame::Crypto { offset, data } = frame {
                             self.initial_crypto.insert(offset, data)?;
                         }
@@ -3494,6 +3514,15 @@ impl NativeQuicHandshake {
                         for packet_number in
                             self.client_handshake_loss_detector.on_ack_frame(&frame)?
                         {
+                            self.client_handshake_sent_crypto.remove(&packet_number);
+                        }
+                        let outcome = self.recovery.on_ack_received(
+                            PacketNumberSpace::Handshake,
+                            &frame,
+                            self.fingerprint.transport.ack_delay_exponent,
+                            Instant::now(),
+                        )?;
+                        for (packet_number, _) in outcome.newly_acked {
                             self.client_handshake_sent_crypto.remove(&packet_number);
                         }
                         if let QuicFrame::Crypto { offset, data } = frame {
@@ -3610,6 +3639,9 @@ impl NativeQuicHandshake {
         self.client_initial = retry_initial.clone();
         self.pending_client_initial = Some(retry_initial);
         self.next_client_initial_packet_number = packet_number + 1;
+        self.client_initial_loss_detector = QuicLossDetector::default();
+        self.client_initial_sent_crypto.clear();
+        self.recovery = recovery_state_from_transport(&self.fingerprint.transport);
         Ok(())
     }
 
@@ -3657,15 +3689,18 @@ impl NativeQuicHandshake {
         self.initial_ack_tracker = QuicAckTracker::default();
         self.handshake_ack_tracker = QuicAckTracker::default();
         self.application_ack_tracker = QuicAckTracker::default();
+        self.client_initial_loss_detector = QuicLossDetector::default();
         self.client_handshake_loss_detector = QuicLossDetector::default();
         self.client_application_loss_detector = QuicLossDetector::default();
         self.client_application_flow_control =
             QuicApplicationFlowControl::client(&self.fingerprint.transport);
         self.client_application_receive_flow_control =
             QuicReceiveFlowControl::client(&self.fingerprint.transport);
+        self.client_initial_sent_crypto.clear();
         self.client_handshake_sent_crypto.clear();
         self.client_application_sent_streams.clear();
         self.client_path_validator = QuicPathValidator::default();
+        self.recovery = recovery_state_from_transport(&self.fingerprint.transport);
         self.next_client_initial_packet_number = 1;
         self.next_server_initial_packet_number = 0;
         self.next_server_handshake_packet_number = 0;

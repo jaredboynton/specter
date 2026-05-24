@@ -166,3 +166,264 @@ impl H3Tunnel {
         credit.driver_notify.notify_one();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex as TokioMutex;
+    use tokio::time::{sleep, timeout};
+
+    /// Drives the outbound side of a tunnel: drain the unbounded channel and
+    /// hand each chunk to the driver-side credit-release callback under a
+    /// configurable per-chunk delay. The release path mirrors what
+    /// `flush_tunnel_data_once` does on the wire send path - it never returns
+    /// more than `acquired_credit` worth of permits per outbound, so this is a
+    /// faithful stand-in for the byte-bounded backpressure contract.
+    struct OutboundDrainer {
+        outbound_rx: TokioMutex<mpsc::UnboundedReceiver<H3TunnelOutbound>>,
+        credit: Arc<H3TunnelCredit>,
+        chunk_size: usize,
+        per_chunk_delay: Duration,
+        peak_in_flight: Arc<AtomicUsize>,
+    }
+
+    impl OutboundDrainer {
+        fn new(
+            outbound_rx: mpsc::UnboundedReceiver<H3TunnelOutbound>,
+            credit: Arc<H3TunnelCredit>,
+            chunk_size: usize,
+            per_chunk_delay: Duration,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                outbound_rx: TokioMutex::new(outbound_rx),
+                credit,
+                chunk_size,
+                per_chunk_delay,
+                peak_in_flight: Arc::new(AtomicUsize::new(0)),
+            })
+        }
+
+        async fn run(self: Arc<Self>) -> Vec<H3TunnelOutbound> {
+            let mut collected = Vec::new();
+            let mut rx = self.outbound_rx.lock().await;
+            while let Some(outbound) = rx.recv().await {
+                let budget = self.credit.send_budget;
+                let acquired = outbound.bytes.len().min(budget);
+
+                // Observe peak in-flight as bytes that have been admitted past the
+                // semaphore but not yet released back to it.
+                let in_flight = budget - self.credit.available_send_permits();
+                self.peak_in_flight
+                    .fetch_max(in_flight, AtomicOrdering::SeqCst);
+
+                let mut released = 0usize;
+                let total = outbound.bytes.len();
+                if total == 0 {
+                    // close_send: no credit was acquired, nothing to release.
+                    collected.push(outbound.clone());
+                    if outbound.fin {
+                        // signal the test that the producer is done
+                        return collected;
+                    }
+                    continue;
+                }
+                let mut offset = 0usize;
+                while offset < total {
+                    let chunk = self.chunk_size.min(total - offset);
+                    if !self.per_chunk_delay.is_zero() {
+                        sleep(self.per_chunk_delay).await;
+                    }
+                    let release_now = chunk.min(acquired.saturating_sub(released));
+                    if release_now > 0 {
+                        self.credit.release_send_bytes(release_now);
+                        released = released.saturating_add(release_now);
+                    }
+                    offset += chunk;
+                }
+                if released < acquired {
+                    self.credit.release_send_bytes(acquired - released);
+                }
+                collected.push(outbound);
+            }
+            collected
+        }
+    }
+
+    fn make_tunnel(
+        budget: usize,
+    ) -> (
+        H3Tunnel,
+        mpsc::UnboundedReceiver<H3TunnelOutbound>,
+        Arc<H3TunnelCredit>,
+    ) {
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<H3TunnelOutbound>();
+        let (_inbound_tx, inbound_rx) = mpsc::channel::<Result<H3TunnelEvent>>(1);
+        let credit = H3TunnelCredit::new(Arc::new(Notify::new()), budget);
+        let tunnel = H3Tunnel::new_with_credit(outbound_tx, inbound_rx, credit.clone());
+        (tunnel, outbound_rx, credit)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_larger_than_budget_blocks_until_consumer_drains() {
+        let budget = 64 * 1024;
+        let (tunnel, outbound_rx, credit) = make_tunnel(budget);
+
+        // 4x budget producer payload; drainer releases credit a fraction at a time.
+        let payload_size = 4 * budget;
+        let payload = Bytes::from(vec![0x42u8; payload_size]);
+
+        let drainer = OutboundDrainer::new(
+            outbound_rx,
+            credit.clone(),
+            budget / 8,
+            Duration::from_millis(1),
+        );
+        let drainer_clone = drainer.clone();
+        let drainer_handle = tokio::spawn(async move { drainer_clone.run().await });
+
+        let send_started = std::time::Instant::now();
+        timeout(
+            Duration::from_secs(5),
+            tunnel.send_bytes(payload.clone(), false),
+        )
+        .await
+        .expect("first send_bytes must complete once consumer drains the queue")
+        .expect("send_bytes returned an error");
+
+        // A producer issuing a second send must have waited for the drainer to
+        // refund enough credit before it can acquire its own permits. With the
+        // drainer's per-chunk delay this is strictly nonzero work.
+        let payload_b = Bytes::from(vec![0x21u8; budget / 2]);
+        timeout(Duration::from_secs(5), tunnel.send_bytes(payload_b, true))
+            .await
+            .expect("second send_bytes must eventually complete")
+            .expect("second send_bytes returned an error");
+
+        let collected = drainer_handle.await.expect("drainer task did not panic");
+        assert_eq!(
+            collected.len(),
+            2,
+            "drainer should observe exactly the two outbounds the producer queued"
+        );
+        assert_eq!(collected[0].bytes.len(), payload_size);
+        assert!(collected[1].fin);
+        // Sanity: the entire send round did real time work because the drainer
+        // gated each chunk on a small delay; if backpressure was item-bounded
+        // we would have completed essentially instantly.
+        assert!(
+            send_started.elapsed() >= Duration::from_millis(1),
+            "byte-credit backpressure should make the producer observe the drainer's pacing"
+        );
+    }
+
+    #[tokio::test(start_paused = false)]
+    async fn two_producers_respect_total_byte_budget() {
+        let budget = 8 * 1024;
+        let (tunnel, outbound_rx, credit) = make_tunnel(budget);
+        let tunnel = Arc::new(tunnel);
+
+        // Slow drainer so the producers actually contend for credit.
+        let drainer =
+            OutboundDrainer::new(outbound_rx, credit.clone(), 512, Duration::from_millis(2));
+        let peak_in_flight = drainer.peak_in_flight.clone();
+        let drainer_clone = drainer.clone();
+        let drainer_handle = tokio::spawn(async move { drainer_clone.run().await });
+
+        let producer_a = {
+            let tunnel = tunnel.clone();
+            tokio::spawn(async move {
+                for _ in 0..6 {
+                    tunnel
+                        .send_bytes(Bytes::from(vec![1u8; 2 * 1024]), false)
+                        .await
+                        .expect("producer A send_bytes");
+                }
+            })
+        };
+        let producer_b = {
+            let tunnel = tunnel.clone();
+            tokio::spawn(async move {
+                for _ in 0..6 {
+                    tunnel
+                        .send_bytes(Bytes::from(vec![2u8; 2 * 1024]), false)
+                        .await
+                        .expect("producer B send_bytes");
+                }
+            })
+        };
+
+        producer_a.await.expect("producer A did not panic");
+        producer_b.await.expect("producer B did not panic");
+
+        // Send a final empty fin so the drainer exits.
+        tunnel
+            .send_bytes(Bytes::new(), true)
+            .await
+            .expect("final fin send");
+        drainer_handle.await.expect("drainer did not panic");
+
+        let observed_peak = peak_in_flight.load(AtomicOrdering::SeqCst);
+        assert!(
+            observed_peak <= budget,
+            "peak in-flight bytes {observed_peak} must not exceed the configured budget {budget}",
+        );
+        // Sanity check that the producers actually shared the pipe (otherwise the
+        // assertion above is uninteresting).
+        assert!(
+            observed_peak >= 2 * 1024,
+            "peak in-flight should be at least one full producer chunk (was {observed_peak})",
+        );
+    }
+
+    #[tokio::test(start_paused = false)]
+    async fn close_send_works_when_budget_is_exhausted() {
+        let budget = 4 * 1024;
+        let (tunnel, mut outbound_rx, credit) = make_tunnel(budget);
+
+        // Drain all permits without ever returning them so the budget is exhausted.
+        let drained = credit
+            .send_semaphore
+            .clone()
+            .try_acquire_many_owned(budget as u32)
+            .expect("must reserve every permit");
+        std::mem::forget(drained);
+        assert_eq!(credit.available_send_permits(), 0);
+
+        // close_send is fin-only and must not block on the byte-credit semaphore.
+        timeout(Duration::from_secs(2), tunnel.close_send())
+            .await
+            .expect("close_send must not block on the credit semaphore when budget is exhausted")
+            .expect("close_send returned an error");
+
+        let queued = outbound_rx
+            .recv()
+            .await
+            .expect("close_send must enqueue an outbound with fin");
+        assert!(queued.bytes.is_empty(), "close_send must send empty bytes");
+        assert!(queued.fin, "close_send must mark the outbound as fin");
+        // Nothing else should be in the queue.
+        assert!(outbound_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn release_send_bytes_is_capped_at_send_budget() {
+        let budget = 16 * 1024;
+        let credit = H3TunnelCredit::new(Arc::new(Notify::new()), budget);
+        // Drain everything.
+        let permit = credit
+            .send_semaphore
+            .clone()
+            .try_acquire_many_owned(budget as u32)
+            .expect("reserve every permit");
+        std::mem::forget(permit);
+        assert_eq!(credit.available_send_permits(), 0);
+
+        // Releasing 4x the budget must not push the semaphore above its
+        // configured ceiling; otherwise the per-tunnel cap would lose meaning.
+        credit.release_send_bytes(4 * budget);
+        assert_eq!(credit.available_send_permits(), budget);
+    }
+}

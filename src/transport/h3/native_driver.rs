@@ -2757,6 +2757,13 @@ mod tests {
             body_progress_notify: Arc::new(Notify::new()),
             send_scheduler: H3SendScheduler::default(),
             transport_config: H3TransportConfig::default(),
+            session_cache: crate::transport::h3::session_cache::NativeH3SessionCache::new(),
+            session_cache_key: crate::transport::h3::session_cache::NativeH3SessionCacheKey::new(
+                "localhost",
+                std::iter::empty::<Vec<u8>>(),
+                false,
+                None,
+            ),
             max_idle_timeout: Duration::from_secs(1),
             last_activity: Instant::now(),
             initial_datagram: None,
