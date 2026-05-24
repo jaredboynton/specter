@@ -131,10 +131,37 @@ class TestClientBuilder:
             specter.FingerprintProfile.Chrome148,
             specter.FingerprintProfile.Firefox133,
             specter.FingerprintProfile.NoFingerprint,
+            specter.FingerprintProfile.Firefox134,
+            specter.FingerprintProfile.Firefox135,
+            specter.FingerprintProfile.Firefox136,
+            specter.FingerprintProfile.Firefox137,
+            specter.FingerprintProfile.Firefox138,
+            specter.FingerprintProfile.Firefox139,
+            specter.FingerprintProfile.Firefox140,
+            specter.FingerprintProfile.Firefox141,
+            specter.FingerprintProfile.Firefox142,
+            specter.FingerprintProfile.Firefox143,
+            specter.FingerprintProfile.Firefox144,
+            specter.FingerprintProfile.Firefox145,
+            specter.FingerprintProfile.Firefox146,
+            specter.FingerprintProfile.Firefox147,
+            specter.FingerprintProfile.Firefox148,
+            specter.FingerprintProfile.Firefox149,
+            specter.FingerprintProfile.Firefox150,
+            specter.FingerprintProfile.Firefox151,
+            specter.FingerprintProfile.FirefoxEsr115,
+            specter.FingerprintProfile.FirefoxEsr128,
+            specter.FingerprintProfile.FirefoxEsr140,
         ):
             builder = specter.Client.builder()
             builder.fingerprint(profile)
             assert builder.build() is not None
+
+    def test_fingerprint_profile_numeric_values(self):
+        assert specter.FingerprintProfile.Chrome142 == 0
+        assert specter.FingerprintProfile.Firefox133 == 7
+        assert specter.FingerprintProfile.NoFingerprint == 8
+        assert specter.FingerprintProfile.Firefox140 != specter.FingerprintProfile.FirefoxEsr140
 
     def test_protocol_and_cookie_options(self):
         jar = specter.CookieJar()

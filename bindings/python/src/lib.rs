@@ -125,6 +125,83 @@ pub enum FingerprintProfile {
     /// No fingerprinting - use default TLS settings
     /// Note: Named NoFingerprint instead of None because None is a reserved keyword in Python
     NoFingerprint,
+    /// Firefox 134 on macOS
+    Firefox134,
+    /// Firefox 135 on macOS
+    Firefox135,
+    /// Firefox 136 on macOS
+    Firefox136,
+    /// Firefox 137 on macOS
+    Firefox137,
+    /// Firefox 138 on macOS
+    Firefox138,
+    /// Firefox 139 on macOS
+    Firefox139,
+    /// Firefox 140 on macOS
+    Firefox140,
+    /// Firefox 141 on macOS
+    Firefox141,
+    /// Firefox 142 on macOS
+    Firefox142,
+    /// Firefox 143 on macOS
+    Firefox143,
+    /// Firefox 144 on macOS
+    Firefox144,
+    /// Firefox 145 on macOS
+    Firefox145,
+    /// Firefox 146 on macOS
+    Firefox146,
+    /// Firefox 147 on macOS
+    Firefox147,
+    /// Firefox 148 on macOS
+    Firefox148,
+    /// Firefox 149 on macOS
+    Firefox149,
+    /// Firefox 150 on macOS
+    Firefox150,
+    /// Firefox 151 on macOS
+    Firefox151,
+    /// Firefox 115 ESR on legacy macOS
+    FirefoxEsr115,
+    /// Firefox 128 ESR on macOS
+    FirefoxEsr128,
+    /// Firefox 140 ESR on macOS
+    FirefoxEsr140,
+}
+
+fn to_rust_fingerprint_profile(profile: FingerprintProfile) -> RustFingerprintProfile {
+    match profile {
+        FingerprintProfile::Chrome142 => RustFingerprintProfile::Chrome142,
+        FingerprintProfile::Chrome143 => RustFingerprintProfile::Chrome143,
+        FingerprintProfile::Chrome144 => RustFingerprintProfile::Chrome144,
+        FingerprintProfile::Chrome145 => RustFingerprintProfile::Chrome145,
+        FingerprintProfile::Chrome146 => RustFingerprintProfile::Chrome146,
+        FingerprintProfile::Chrome147 => RustFingerprintProfile::Chrome147,
+        FingerprintProfile::Chrome148 => RustFingerprintProfile::Chrome148,
+        FingerprintProfile::Firefox133 => RustFingerprintProfile::Firefox133,
+        FingerprintProfile::NoFingerprint => RustFingerprintProfile::None,
+        FingerprintProfile::Firefox134 => RustFingerprintProfile::Firefox134,
+        FingerprintProfile::Firefox135 => RustFingerprintProfile::Firefox135,
+        FingerprintProfile::Firefox136 => RustFingerprintProfile::Firefox136,
+        FingerprintProfile::Firefox137 => RustFingerprintProfile::Firefox137,
+        FingerprintProfile::Firefox138 => RustFingerprintProfile::Firefox138,
+        FingerprintProfile::Firefox139 => RustFingerprintProfile::Firefox139,
+        FingerprintProfile::Firefox140 => RustFingerprintProfile::Firefox140,
+        FingerprintProfile::Firefox141 => RustFingerprintProfile::Firefox141,
+        FingerprintProfile::Firefox142 => RustFingerprintProfile::Firefox142,
+        FingerprintProfile::Firefox143 => RustFingerprintProfile::Firefox143,
+        FingerprintProfile::Firefox144 => RustFingerprintProfile::Firefox144,
+        FingerprintProfile::Firefox145 => RustFingerprintProfile::Firefox145,
+        FingerprintProfile::Firefox146 => RustFingerprintProfile::Firefox146,
+        FingerprintProfile::Firefox147 => RustFingerprintProfile::Firefox147,
+        FingerprintProfile::Firefox148 => RustFingerprintProfile::Firefox148,
+        FingerprintProfile::Firefox149 => RustFingerprintProfile::Firefox149,
+        FingerprintProfile::Firefox150 => RustFingerprintProfile::Firefox150,
+        FingerprintProfile::Firefox151 => RustFingerprintProfile::Firefox151,
+        FingerprintProfile::FirefoxEsr115 => RustFingerprintProfile::FirefoxEsr115,
+        FingerprintProfile::FirefoxEsr128 => RustFingerprintProfile::FirefoxEsr128,
+        FingerprintProfile::FirefoxEsr140 => RustFingerprintProfile::FirefoxEsr140,
+    }
 }
 
 /// HTTP version preference.
@@ -473,17 +550,7 @@ impl RequestBuilder {
 impl ClientBuilder {
     /// Set the fingerprint profile.
     fn fingerprint(&mut self, profile: FingerprintProfile) -> PyResult<()> {
-        let rust_profile = match profile {
-            FingerprintProfile::Chrome142 => RustFingerprintProfile::Chrome142,
-            FingerprintProfile::Chrome143 => RustFingerprintProfile::Chrome143,
-            FingerprintProfile::Chrome144 => RustFingerprintProfile::Chrome144,
-            FingerprintProfile::Chrome145 => RustFingerprintProfile::Chrome145,
-            FingerprintProfile::Chrome146 => RustFingerprintProfile::Chrome146,
-            FingerprintProfile::Chrome147 => RustFingerprintProfile::Chrome147,
-            FingerprintProfile::Chrome148 => RustFingerprintProfile::Chrome148,
-            FingerprintProfile::Firefox133 => RustFingerprintProfile::Firefox133,
-            FingerprintProfile::NoFingerprint => RustFingerprintProfile::None,
-        };
+        let rust_profile = to_rust_fingerprint_profile(profile);
         // Since RustClientBuilder is not Clone, we need to take ownership
         // We use std::mem::replace to work around this
         let old = std::mem::replace(&mut self.inner, RustClient::builder());
@@ -1054,4 +1121,65 @@ pub fn specter(m: &Bound<'_, PyModule>) -> PyResult<()> {
     websocket_h2::register(m)?;
     websocket_h3::register(m)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{to_rust_fingerprint_profile, FingerprintProfile};
+    use specter::FingerprintProfile as RustFingerprintProfile;
+
+    #[test]
+    fn fingerprint_profile_numeric_values_remain_compatible() {
+        assert_eq!(FingerprintProfile::Chrome142 as i32, 0);
+        assert_eq!(FingerprintProfile::Firefox133 as i32, 7);
+        assert_eq!(FingerprintProfile::NoFingerprint as i32, 8);
+    }
+
+    #[test]
+    fn fingerprint_profile_mapping_covers_firefox_versions_and_esr() {
+        let cases = [
+            (FingerprintProfile::Chrome142, RustFingerprintProfile::Chrome142),
+            (FingerprintProfile::Chrome148, RustFingerprintProfile::Chrome148),
+            (FingerprintProfile::Firefox133, RustFingerprintProfile::Firefox133),
+            (FingerprintProfile::NoFingerprint, RustFingerprintProfile::None),
+            (FingerprintProfile::Firefox134, RustFingerprintProfile::Firefox134),
+            (FingerprintProfile::Firefox135, RustFingerprintProfile::Firefox135),
+            (FingerprintProfile::Firefox136, RustFingerprintProfile::Firefox136),
+            (FingerprintProfile::Firefox137, RustFingerprintProfile::Firefox137),
+            (FingerprintProfile::Firefox138, RustFingerprintProfile::Firefox138),
+            (FingerprintProfile::Firefox139, RustFingerprintProfile::Firefox139),
+            (FingerprintProfile::Firefox140, RustFingerprintProfile::Firefox140),
+            (FingerprintProfile::Firefox141, RustFingerprintProfile::Firefox141),
+            (FingerprintProfile::Firefox142, RustFingerprintProfile::Firefox142),
+            (FingerprintProfile::Firefox143, RustFingerprintProfile::Firefox143),
+            (FingerprintProfile::Firefox144, RustFingerprintProfile::Firefox144),
+            (FingerprintProfile::Firefox145, RustFingerprintProfile::Firefox145),
+            (FingerprintProfile::Firefox146, RustFingerprintProfile::Firefox146),
+            (FingerprintProfile::Firefox147, RustFingerprintProfile::Firefox147),
+            (FingerprintProfile::Firefox148, RustFingerprintProfile::Firefox148),
+            (FingerprintProfile::Firefox149, RustFingerprintProfile::Firefox149),
+            (FingerprintProfile::Firefox150, RustFingerprintProfile::Firefox150),
+            (FingerprintProfile::Firefox151, RustFingerprintProfile::Firefox151),
+            (
+                FingerprintProfile::FirefoxEsr115,
+                RustFingerprintProfile::FirefoxEsr115,
+            ),
+            (
+                FingerprintProfile::FirefoxEsr128,
+                RustFingerprintProfile::FirefoxEsr128,
+            ),
+            (
+                FingerprintProfile::FirefoxEsr140,
+                RustFingerprintProfile::FirefoxEsr140,
+            ),
+        ];
+
+        for (python_profile, rust_profile) in cases {
+            assert_eq!(to_rust_fingerprint_profile(python_profile), rust_profile);
+        }
+        assert_ne!(
+            FingerprintProfile::Firefox140 as i32,
+            FingerprintProfile::FirefoxEsr140 as i32
+        );
+    }
 }
