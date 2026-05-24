@@ -8,11 +8,12 @@ use url::Url;
 
 use crate::transport::connector::MaybeHttpsStream;
 use crate::websocket::error::{WebSocketError, WebSocketResult};
-use crate::websocket::frame::{decode_frame, encode_frame, FrameConfig, FrameDecoder, OpCode};
+use crate::websocket::frame::{decode_frame, encode_frame, FrameConfig, FrameDecoder, MaskRng, OpCode};
 use crate::websocket::message::{CloseFrame, Message};
 use crate::websocket::WebSocketConfig;
 
 const READ_CHUNK_SIZE: usize = 16 * 1024;
+const INITIAL_READ_CAPACITY: usize = 16 * 1024;
 
 #[derive(Debug)]
 pub struct WebSocket {
@@ -24,6 +25,7 @@ pub struct WebSocket {
     read_timeout: Option<Duration>,
     write_timeout: Option<Duration>,
     decoder: FrameDecoder,
+    mask_rng: MaskRng,
     close_sent: bool,
     close_received: bool,
 }
@@ -36,15 +38,22 @@ impl WebSocket {
         config: WebSocketConfig,
         initial_read_buffer: Bytes,
     ) -> Self {
+        // Pre-allocate the read buffer so the first frame doesn't pay the
+        // grow-from-zero cost. Carries over any bytes left in the handshake
+        // buffer (typically empty).
+        let mut read_buffer =
+            BytesMut::with_capacity(INITIAL_READ_CAPACITY.max(initial_read_buffer.len()));
+        read_buffer.extend_from_slice(&initial_read_buffer);
         Self {
             stream,
             url,
             protocol,
-            read_buffer: BytesMut::from(&initial_read_buffer[..]),
+            read_buffer,
             frame_config: FrameConfig::new(config.max_frame_size, config.max_message_size),
             read_timeout: config.read_timeout,
             write_timeout: config.write_timeout,
             decoder: FrameDecoder::new(),
+            mask_rng: MaskRng::new(),
             close_sent: false,
             close_received: false,
         }
@@ -161,7 +170,7 @@ impl WebSocket {
                 ),
             ));
         }
-        let bytes = encode_frame(opcode, payload, true)?;
+        let bytes = encode_frame(opcode, payload, &mut self.mask_rng);
         Self::io_with_timeout(
             &self.url,
             self.write_timeout,

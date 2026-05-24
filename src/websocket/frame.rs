@@ -3,6 +3,58 @@ use bytes::{Buf, Bytes, BytesMut};
 use crate::websocket::error::{WebSocketError, WebSocketResult};
 use crate::websocket::message::{CloseFrame, Message};
 
+/// CSPRNG-backed source of WebSocket masking keys.
+///
+/// RFC 6455 §10.3 requires the masking key to come from a strong source of
+/// entropy that is not predictable. Calling `getrandom::fill` per frame is
+/// a kernel syscall per outgoing frame; instead we refill a 256-byte buffer
+/// from the OS CSPRNG once every 64 frames and slice 4-byte masks out of it.
+///
+/// The kernel still supplies all bytes; we just amortise the syscall cost
+/// across many frames. The mask is never reused and remains unpredictable
+/// to a network observer.
+pub(crate) struct MaskRng {
+    cache: [u8; 256],
+    pos: usize,
+}
+
+impl MaskRng {
+    pub(crate) fn new() -> Self {
+        let mut cache = [0u8; 256];
+        getrandom::fill(&mut cache).expect("getrandom seed for WebSocket mask rng");
+        Self { cache, pos: 0 }
+    }
+
+    #[inline]
+    pub(crate) fn next_mask(&mut self) -> [u8; 4] {
+        if self.pos + 4 > self.cache.len() {
+            getrandom::fill(&mut self.cache)
+                .expect("getrandom refill for WebSocket mask rng");
+            self.pos = 0;
+        }
+        let mask = [
+            self.cache[self.pos],
+            self.cache[self.pos + 1],
+            self.cache[self.pos + 2],
+            self.cache[self.pos + 3],
+        ];
+        self.pos += 4;
+        mask
+    }
+}
+
+impl Default for MaskRng {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for MaskRng {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MaskRng").finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FrameConfig {
     pub max_frame_size: usize,
@@ -64,6 +116,7 @@ impl FrameDecoder {
         Self::default()
     }
 
+    #[inline]
     pub(crate) fn decode_message(
         &mut self,
         url: &url::Url,
@@ -149,11 +202,13 @@ impl FrameDecoder {
     }
 }
 
-pub(crate) fn encode_frame(opcode: OpCode, payload: &[u8], mask: bool) -> WebSocketResult<Bytes> {
+#[inline]
+pub(crate) fn encode_frame(opcode: OpCode, payload: &[u8], mask_rng: &mut MaskRng) -> Bytes {
     let mut out = BytesMut::with_capacity(14 + payload.len());
     out.extend_from_slice(&[0x80 | opcode as u8]);
 
-    let mask_bit = if mask { 0x80 } else { 0 };
+    // Client frames are always masked per RFC 6455 §5.3.
+    let mask_bit = 0x80_u8;
     match payload.len() {
         0..=125 => out.extend_from_slice(&[mask_bit | payload.len() as u8]),
         126..=65535 => {
@@ -166,33 +221,26 @@ pub(crate) fn encode_frame(opcode: OpCode, payload: &[u8], mask: bool) -> WebSoc
         }
     }
 
-    if mask {
-        let mut key = [0_u8; 4];
-        getrandom::fill(&mut key).map_err(|e| WebSocketError::Protocol {
-            url: String::new(),
-            message: format!("failed to generate frame mask: {e}"),
-        })?;
-        out.extend_from_slice(&key);
-        let payload_start = out.len();
-        out.extend_from_slice(payload);
-        let masked_payload = &mut out[payload_start..];
-        let mut chunks = masked_payload.chunks_exact_mut(4);
-        for chunk in &mut chunks {
-            chunk[0] ^= key[0];
-            chunk[1] ^= key[1];
-            chunk[2] ^= key[2];
-            chunk[3] ^= key[3];
-        }
-        for (index, byte) in chunks.into_remainder().iter_mut().enumerate() {
-            *byte ^= key[index];
-        }
-    } else {
-        out.extend_from_slice(payload);
+    let key = mask_rng.next_mask();
+    out.extend_from_slice(&key);
+    let payload_start = out.len();
+    out.extend_from_slice(payload);
+    let masked_payload = &mut out[payload_start..];
+    let mut chunks = masked_payload.chunks_exact_mut(4);
+    for chunk in &mut chunks {
+        chunk[0] ^= key[0];
+        chunk[1] ^= key[1];
+        chunk[2] ^= key[2];
+        chunk[3] ^= key[3];
+    }
+    for (index, byte) in chunks.into_remainder().iter_mut().enumerate() {
+        *byte ^= key[index];
     }
 
-    Ok(out.freeze())
+    out.freeze()
 }
 
+#[inline]
 pub(crate) fn decode_frame(
     url: &url::Url,
     buffer: &mut BytesMut,
