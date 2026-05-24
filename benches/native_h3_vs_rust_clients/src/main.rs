@@ -1727,6 +1727,7 @@ impl LocalNativeH3Connection {
         if bytes.is_empty() && !fin {
             return Ok(());
         }
+        let consumed_len = bytes.len() as u64;
         self.response_tx
             .send(LocalNativeH3Response {
                 stream_id,
@@ -1735,6 +1736,14 @@ impl LocalNativeH3Connection {
             })
             .await
             .map_err(|_| anyhow::anyhow!("local native H3 fixture response queue closed"))?;
+        if consumed_len > 0 {
+            // Per RFC 9000 Section 4 the absolute MAX_DATA / MAX_STREAM_DATA
+            // we are willing to advertise is `initial + consumed`. The local
+            // fixture consumes inbound DATA on the same task it forwards on,
+            // so we record the drain here for the receive-window emitter.
+            self.handshake
+                .record_server_stream_consumed(stream_id, consumed_len)?;
+        }
         if fin {
             self.tunnel_streams.remove(&stream_id);
         }
