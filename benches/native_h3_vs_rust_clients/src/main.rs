@@ -4,7 +4,7 @@ use std::fs;
 use std::future::poll_fn;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -598,9 +598,7 @@ async fn main() -> anyhow::Result<()> {
         let cert_path = option_value(&args, "--s2n-quic-cert")
             .map(PathBuf::from)
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--measure-s2n-quic-transport-url requires --s2n-quic-cert"
-                )
+                anyhow::anyhow!("--measure-s2n-quic-transport-url requires --s2n-quic-cert")
             })?;
         measured_competitor_rows.push(
             measure_s2n_quic_transport(
@@ -1261,7 +1259,8 @@ impl LocalNativeH3Connection {
                 specter::transport::h3::native::H3Frame::Headers(block) => {
                     let headers =
                         specter::transport::h3::native::decode_header_block(block.as_ref())?;
-                    self.handle_request_headers(event.stream_id, headers).await?;
+                    self.handle_request_headers(event.stream_id, headers)
+                        .await?;
                 }
                 specter::transport::h3::native::H3Frame::Data(bytes) => {
                     self.handle_request_data(event.stream_id, bytes, event.fin)
@@ -1629,7 +1628,9 @@ async fn measure_quinn_transport(
     Ok(quinn_transport_row_from_samples(&measured))
 }
 
-async fn measure_quinn_transport_once(connection: &quinn::Connection) -> anyhow::Result<AdapterSample> {
+async fn measure_quinn_transport_once(
+    connection: &quinn::Connection,
+) -> anyhow::Result<AdapterSample> {
     let payload = Bytes::from(vec![b'q'; LOCAL_FIXTURE_TRANSPORT_PAYLOAD_SIZE]);
     let start = Instant::now();
     let (mut send, mut recv) = tokio::time::timeout(ADAPTER_TIMEOUT, connection.open_bi())
@@ -1703,9 +1704,7 @@ async fn measure_s2n_quic_transport(
     _samples: usize,
     _cert_path: &Path,
 ) -> anyhow::Result<BenchmarkRow> {
-    anyhow::bail!(
-        "--measure-s2n-quic-transport-url requires --features s2n-quic-transport"
-    )
+    anyhow::bail!("--measure-s2n-quic-transport-url requires --features s2n-quic-transport")
 }
 
 #[cfg(feature = "s2n-quic-transport")]
@@ -2556,25 +2555,18 @@ mod tests {
 
     #[test]
     fn local_native_fixture_plan_includes_feature_enabled_clients() {
-        #[cfg(not(feature = "reqwest-h3"))]
-        let expected = vec![
+        let mut expected = vec![
             "specter_native",
             "quiche_direct",
             "tokio_quiche",
             "h3_quinn",
-            "quinn_transport",
-            "specter_native_rfc9220_tunnel",
         ];
         #[cfg(feature = "reqwest-h3")]
-        let expected = vec![
-            "specter_native",
-            "quiche_direct",
-            "tokio_quiche",
-            "h3_quinn",
-            "quinn_transport",
-            "reqwest_h3",
-            "specter_native_rfc9220_tunnel",
-        ];
+        expected.push("reqwest_h3");
+        expected.push("quinn_transport");
+        #[cfg(feature = "s2n-quic-transport")]
+        expected.push("s2n_quic_transport");
+        expected.push("specter_native_rfc9220_tunnel");
 
         assert_eq!(super::local_native_fixture_measurement_plan(), expected);
     }
@@ -2778,6 +2770,24 @@ mod tests {
         assert_eq!(row.source, "quinn_transport_adapter");
     }
 
+    #[test]
+    fn s2n_quic_transport_adapter_row_uses_measured_samples() {
+        let samples = vec![
+            super::AdapterSample::new(40.0, 400.0, 4_000),
+            super::AdapterSample::new(10.0, 100.0, 1_000),
+            super::AdapterSample::new(20.0, 200.0, 2_000),
+        ];
+
+        let row = super::s2n_quic_transport_row_from_samples(&samples);
+
+        assert_eq!(row.competitor_id, "s2n_quic_transport");
+        assert_eq!(row.status, "measured_pass");
+        assert_eq!(row.p50_ttft_ns, Some(20.0));
+        assert_eq!(row.p95_ttft_ns, Some(40.0));
+        assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
+        assert_eq!(row.source, "s2n_quic_transport_adapter");
+    }
+
     #[tokio::test]
     async fn specter_native_local_fixture_reuses_streaming_connection_for_multiple_samples() {
         let fixture = super::LocalNativeH3Fixture::start("specter_native")
@@ -2834,6 +2844,23 @@ mod tests {
         assert_eq!(row.competitor_id, "quinn_transport");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "quinn_transport_adapter");
+        assert!(row.p50_ttft_ns.is_some());
+        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
+    }
+
+    #[cfg(feature = "s2n-quic-transport")]
+    #[tokio::test]
+    async fn s2n_quic_transport_fixture_measures_bidirectional_echo() {
+        let fixture = super::LocalS2nQuicTransportFixture::start().await.unwrap();
+
+        let row = super::measure_s2n_quic_transport(fixture.url(), 0, 1, fixture.cert_path())
+            .await
+            .unwrap();
+
+        assert_eq!(row.competitor_id, "s2n_quic_transport");
+        assert_eq!(row.status, "measured_pass");
+        assert_eq!(row.source, "s2n_quic_transport_adapter");
         assert!(row.p50_ttft_ns.is_some());
         assert!(row.p95_ttft_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));

@@ -47,6 +47,8 @@ fn native_h3_competitor_benchmark_is_isolated_and_covers_known_fast_clients() {
         "--measure-tokio-quiche-url",
         "--measure-h3-quinn-url",
         "--measure-reqwest-h3-url",
+        "--measure-s2n-quic-transport-url",
+        "--s2n-quic-cert",
         "streaming_vs_reqwest_h3_artifact",
         "fastest_non_specter_h3_client",
         "no_h3_superiority_claim_without_all_required_rows",
