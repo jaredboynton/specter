@@ -210,51 +210,83 @@ pub(crate) fn encode_frame_into(
 ) {
     out.clear();
     out.reserve(14 + payload.len());
-    out.extend_from_slice(&[0x80 | opcode as u8]);
-
-    // Client frames are always masked per RFC 6455 §5.3.
-    let mask_bit = 0x80_u8;
-    match payload.len() {
-        0..=125 => out.extend_from_slice(&[mask_bit | payload.len() as u8]),
-        126..=65535 => {
-            out.extend_from_slice(&[mask_bit | 126]);
-            out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-        }
-        _ => {
-            out.extend_from_slice(&[mask_bit | 127]);
-            out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
-        }
-    }
 
     let key = mask_rng.next_mask();
-    out.extend_from_slice(&key);
-    let payload_start = out.len();
-    out.extend_from_slice(payload);
-    mask_payload_words(&mut out[payload_start..], key);
+
+    // Build the entire 2-14 byte header in a stack array and write it in
+    // one extend_from_slice call instead of 3-4. Saves per-call bounds
+    // checks and BytesMut len updates on the hot path.
+    let mask_bit = 0x80_u8;
+    let mut hdr = [0u8; 14];
+    hdr[0] = 0x80 | opcode as u8;
+    let hdr_len = match payload.len() {
+        0..=125 => {
+            hdr[1] = mask_bit | (payload.len() as u8);
+            hdr[2..6].copy_from_slice(&key);
+            6
+        }
+        126..=65535 => {
+            hdr[1] = mask_bit | 126;
+            hdr[2..4].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+            hdr[4..8].copy_from_slice(&key);
+            8
+        }
+        _ => {
+            hdr[1] = mask_bit | 127;
+            hdr[2..10].copy_from_slice(&(payload.len() as u64).to_be_bytes());
+            hdr[10..14].copy_from_slice(&key);
+            14
+        }
+    };
+    out.extend_from_slice(&hdr[..hdr_len]);
+
+    // Fuse the payload copy with the XOR mask: a single pass reads from
+    // `payload`, XORs with the key word, and writes into the reserved tail
+    // of `out`. Previously this was two passes: extend_from_slice (one
+    // memcpy) followed by mask_payload_words (one read+write over the same
+    // region). Halves the memory bandwidth consumed by the payload on every
+    // frame; meaningful for 1KB+ payloads where this is the dominant cost.
+    extend_masked(out, payload, key);
 }
 
 #[inline]
-fn mask_payload_words(payload: &mut [u8], key: [u8; 4]) {
+fn extend_masked(out: &mut BytesMut, payload: &[u8], key: [u8; 4]) {
     const WORD_BYTES: usize = std::mem::size_of::<usize>();
+    let len = payload.len();
+    let prev_len = out.len();
+    debug_assert!(out.capacity() >= prev_len + len);
+
     let mut key_word_bytes = [0u8; WORD_BYTES];
     for (index, byte) in key_word_bytes.iter_mut().enumerate() {
         *byte = key[index & 3];
     }
     let key_word = usize::from_ne_bytes(key_word_bytes);
 
-    let word_bytes = payload.len() / WORD_BYTES * WORD_BYTES;
-    let mut offset = 0;
-    while offset < word_bytes {
-        // SAFETY: `offset < word_bytes <= payload.len()`, and unaligned reads/writes are used.
-        unsafe {
-            let ptr = payload.as_mut_ptr().add(offset).cast::<usize>();
-            ptr.write_unaligned(ptr.read_unaligned() ^ key_word);
-        }
-        offset += WORD_BYTES;
-    }
+    let word_chunks = len / WORD_BYTES;
+    let aligned = word_chunks * WORD_BYTES;
 
-    for (index, byte) in payload[word_bytes..].iter_mut().enumerate() {
-        *byte ^= key[(word_bytes + index) & 3];
+    // SAFETY: caller reserved `len` bytes past prev_len. We write the
+    // entire region before calling set_len, so no uninitialised bytes are
+    // ever exposed. Unaligned word reads/writes are explicitly used.
+    unsafe {
+        let src = payload.as_ptr();
+        let dst = out.as_mut_ptr().add(prev_len);
+
+        let mut offset = 0;
+        while offset < aligned {
+            let src_word = src.add(offset).cast::<usize>().read_unaligned();
+            dst.add(offset)
+                .cast::<usize>()
+                .write_unaligned(src_word ^ key_word);
+            offset += WORD_BYTES;
+        }
+
+        while offset < len {
+            *dst.add(offset) = *src.add(offset) ^ key[offset & 3];
+            offset += 1;
+        }
+
+        out.set_len(prev_len + len);
     }
 }
 
