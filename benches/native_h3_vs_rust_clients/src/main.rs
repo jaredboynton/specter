@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::future::poll_fn;
@@ -23,6 +23,7 @@ const LOCAL_FIXTURE_CHUNK_SIZE: usize = 16 * 1024;
 const LOCAL_FIXTURE_CHUNK_COUNT: usize = 5;
 const LOCAL_FIXTURE_CHUNK_DELAY_MS: u64 = 1;
 const LOCAL_FIXTURE_H3_STREAM_SEGMENT_SIZE: usize = 1_200;
+const LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE: usize = 1_024;
 
 #[derive(Debug, Serialize)]
 struct Artifact {
@@ -125,6 +126,14 @@ fn competitor_specs() -> Vec<CompetitorSpec> {
             role: "candidate",
             required_for_superiority: true,
             invocation_notes: "Specter native H3 backend; no quiche in the package graph.",
+        },
+        CompetitorSpec {
+            id: "specter_native_rfc9220_tunnel",
+            crate_name: "specters",
+            version: specter_package_version(),
+            role: "h3_tunnel_workload",
+            required_for_superiority: false,
+            invocation_notes: "Specter native RFC 9220 WebSocket-over-H3 tunnel echo workload.",
         },
         CompetitorSpec {
             id: "quiche_direct",
@@ -265,6 +274,14 @@ fn specter_native_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
     adapter_row_from_samples("specter_native", "specter_native_adapter", samples)
 }
 
+fn specter_native_rfc9220_tunnel_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
+    adapter_row_from_samples(
+        "specter_native_rfc9220_tunnel",
+        "specter_native_rfc9220_tunnel_adapter",
+        samples,
+    )
+}
+
 #[cfg(test)]
 fn tokio_quiche_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
     adapter_row_from_samples("tokio_quiche", "tokio_quiche_adapter", samples)
@@ -294,6 +311,7 @@ fn local_native_fixture_measurement_plan() -> Vec<&'static str> {
             "h3_quinn",
         ];
         plan.push("reqwest_h3");
+        plan.push("specter_native_rfc9220_tunnel");
         plan
     }
     #[cfg(not(feature = "reqwest-h3"))]
@@ -303,6 +321,7 @@ fn local_native_fixture_measurement_plan() -> Vec<&'static str> {
             "quiche_direct",
             "tokio_quiche",
             "h3_quinn",
+            "specter_native_rfc9220_tunnel",
         ]
     }
 }
@@ -550,6 +569,16 @@ async fn main() -> anyhow::Result<()> {
             .await?,
         );
     }
+    if let Some(url) = option_value(&args, "--measure-specter-native-rfc9220-tunnel-url") {
+        measured_competitor_rows.push(
+            measure_specter_native_rfc9220_tunnel(
+                &url,
+                option_usize(&args, "--warmups", 3)?,
+                option_usize(&args, "--samples", 30)?,
+            )
+            .await?,
+        );
+    }
     if let Some(url) = option_value(&args, "--measure-reqwest-h3-url") {
         measured_competitor_rows.push(
             measure_reqwest_h3(
@@ -637,6 +666,10 @@ async fn measure_local_native_fixture(
             "h3_quinn" => measure_h3_quinn(url, warmups, samples).await,
             #[cfg(feature = "reqwest-h3")]
             "reqwest_h3" => measure_reqwest_h3(url, warmups, samples).await,
+            "specter_native_rfc9220_tunnel" => {
+                let tunnel_url = fixture.tunnel_url();
+                measure_specter_native_rfc9220_tunnel(&tunnel_url, warmups, samples).await
+            }
             other => anyhow::bail!("unknown local native fixture client {other}"),
         }
         .with_context(|| format!("local native fixture {client} measurement failed"))?;
@@ -677,6 +710,12 @@ impl LocalNativeH3Fixture {
 
     fn stream_url(&self) -> &str {
         &self.url
+    }
+
+    fn tunnel_url(&self) -> String {
+        self.url
+            .replacen("https://", "wss://", 1)
+            .replacen("/stream", "/tunnel", 1)
     }
 
     fn events(&self) -> Vec<FixtureEvent> {
@@ -847,6 +886,7 @@ fn spawn_local_native_h3_connection(
             response_rx,
             client,
             events,
+            tunnel_streams: HashSet::new(),
         }
         .run()
         .await;
@@ -871,6 +911,7 @@ struct LocalNativeH3Connection {
     response_rx: tokio::sync::mpsc::Receiver<LocalNativeH3Response>,
     client: String,
     events: Arc<Mutex<Vec<FixtureEvent>>>,
+    tunnel_streams: HashSet<u64>,
 }
 
 impl LocalNativeH3Connection {
@@ -1033,10 +1074,17 @@ impl LocalNativeH3Connection {
         };
 
         for frame in event.frames {
-            if let specter::transport::h3::native::H3Frame::Headers(block) = frame {
-                let headers = specter::transport::h3::native::decode_header_block(block.as_ref())?;
-                self.handle_request_headers(event.stream_id, headers)
-                    .await?;
+            match frame {
+                specter::transport::h3::native::H3Frame::Headers(block) => {
+                    let headers =
+                        specter::transport::h3::native::decode_header_block(block.as_ref())?;
+                    self.handle_request_headers(event.stream_id, headers).await?;
+                }
+                specter::transport::h3::native::H3Frame::Data(bytes) => {
+                    self.handle_request_data(event.stream_id, bytes, event.fin)
+                        .await?;
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -1052,8 +1100,20 @@ impl LocalNativeH3Connection {
             .find(|header| header.name() == ":path")
             .map(|header| header.value())
             .unwrap_or("/");
+        let method = headers
+            .iter()
+            .find(|header| header.name() == ":method")
+            .map(|header| header.value());
+        let protocol = headers
+            .iter()
+            .find(|header| header.name() == ":protocol")
+            .map(|header| header.value());
 
-        if path == "/health" {
+        if method == Some("CONNECT") && protocol == Some("websocket") {
+            self.tunnel_streams.insert(stream_id);
+            self.send_response_packet(stream_id, "application/octet-stream", None, false)
+                .await?;
+        } else if path == "/health" {
             self.send_response_packet(
                 stream_id,
                 "text/plain",
@@ -1085,6 +1145,32 @@ impl LocalNativeH3Connection {
                     }
                 }
             });
+        }
+        Ok(())
+    }
+
+    async fn handle_request_data(
+        &mut self,
+        stream_id: u64,
+        bytes: Bytes,
+        fin: bool,
+    ) -> anyhow::Result<()> {
+        if !self.tunnel_streams.contains(&stream_id) {
+            return Ok(());
+        }
+        if bytes.is_empty() && !fin {
+            return Ok(());
+        }
+        self.response_tx
+            .send(LocalNativeH3Response {
+                stream_id,
+                bytes,
+                fin,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("local native H3 fixture response queue closed"))?;
+        if fin {
+            self.tunnel_streams.remove(&stream_id);
         }
         Ok(())
     }
@@ -1266,6 +1352,62 @@ async fn measure_specter_native_once(
         start.elapsed().as_nanos() as f64,
         bytes,
     ))
+}
+
+async fn measure_specter_native_rfc9220_tunnel(
+    url: &str,
+    warmups: usize,
+    samples: usize,
+) -> anyhow::Result<BenchmarkRow> {
+    let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
+    fingerprint.transport.ack_eliciting_threshold = 128;
+    let client = specter::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .h3_backend(specter::H3Backend::Native)
+        .h3_fingerprint(fingerprint)
+        .prefer_http2(false)
+        .h3_upgrade(false)
+        .total_timeout(ADAPTER_TIMEOUT)
+        .build()?;
+
+    for _ in 0..warmups {
+        let _ = measure_specter_native_rfc9220_tunnel_once(&client, url).await?;
+    }
+
+    let mut measured = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        measured.push(measure_specter_native_rfc9220_tunnel_once(&client, url).await?);
+    }
+
+    Ok(specter_native_rfc9220_tunnel_row_from_samples(&measured))
+}
+
+async fn measure_specter_native_rfc9220_tunnel_once(
+    client: &specter::Client,
+    url: &str,
+) -> anyhow::Result<AdapterSample> {
+    let payload = Bytes::from(vec![b'w'; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE]);
+    let start = Instant::now();
+    let mut tunnel = tokio::time::timeout(ADAPTER_TIMEOUT, client.websocket_h3(url).open())
+        .await
+        .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel open timed out"))??;
+
+    tunnel.send_bytes(payload.clone(), false).await?;
+
+    let echoed = tokio::time::timeout(ADAPTER_TIMEOUT, tunnel.recv_bytes())
+        .await
+        .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel echo timed out"))?
+        .ok_or_else(|| anyhow::anyhow!("specter_native RFC 9220 tunnel closed before echo"))??;
+    if echoed.len() != payload.len() {
+        anyhow::bail!(
+            "specter_native RFC 9220 tunnel echo length mismatch: expected {}, got {}",
+            payload.len(),
+            echoed.len()
+        );
+    }
+
+    let total_ns = start.elapsed().as_nanos() as f64;
+    Ok(AdapterSample::new(total_ns, total_ns, echoed.len() as u64))
 }
 
 async fn measure_tokio_quiche(
@@ -1974,6 +2116,7 @@ mod tests {
             "quiche_direct",
             "tokio_quiche",
             "h3_quinn",
+            "specter_native_rfc9220_tunnel",
         ];
         #[cfg(feature = "reqwest-h3")]
         let expected = vec![
@@ -1982,6 +2125,7 @@ mod tests {
             "tokio_quiche",
             "h3_quinn",
             "reqwest_h3",
+            "specter_native_rfc9220_tunnel",
         ];
 
         assert_eq!(super::local_native_fixture_measurement_plan(), expected);
@@ -2150,6 +2294,24 @@ mod tests {
         assert_eq!(row.source, "reqwest_h3_adapter");
     }
 
+    #[test]
+    fn specter_native_rfc9220_tunnel_adapter_row_uses_measured_samples() {
+        let samples = vec![
+            super::AdapterSample::new(40.0, 400.0, 4_000),
+            super::AdapterSample::new(10.0, 100.0, 1_000),
+            super::AdapterSample::new(20.0, 200.0, 2_000),
+        ];
+
+        let row = super::specter_native_rfc9220_tunnel_row_from_samples(&samples);
+
+        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel");
+        assert_eq!(row.status, "measured_pass");
+        assert_eq!(row.p50_ttft_ns, Some(20.0));
+        assert_eq!(row.p95_ttft_ns, Some(40.0));
+        assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
+        assert_eq!(row.source, "specter_native_rfc9220_tunnel_adapter");
+    }
+
     #[tokio::test]
     async fn specter_native_local_fixture_reuses_streaming_connection_for_multiple_samples() {
         let fixture = super::LocalNativeH3Fixture::start("specter_native")
@@ -2175,6 +2337,24 @@ mod tests {
         }
 
         assert_eq!(client.connection_reuse_count(), 7);
+    }
+
+    #[tokio::test]
+    async fn specter_native_local_fixture_measures_rfc9220_tunnel_echo() {
+        let fixture = super::LocalNativeH3Fixture::start("specter_native_rfc9220_tunnel")
+            .await
+            .unwrap();
+
+        let row = super::measure_specter_native_rfc9220_tunnel(&fixture.tunnel_url(), 0, 1)
+            .await
+            .unwrap();
+
+        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel");
+        assert_eq!(row.status, "measured_pass");
+        assert_eq!(row.source, "specter_native_rfc9220_tunnel_adapter");
+        assert!(row.p50_ttft_ns.is_some());
+        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
     async fn specter_native_fixture_stream_bytes(
