@@ -36,6 +36,16 @@ fn run_handshake_to_completion(
         .provide_crypto(QuicEncryptionLevel::Initial, &client_initial)
         .expect("server processes ClientHello");
 
+    // If the client is offering 0-RTT, BoringSSL emits the early-data
+    // application CRYPTO before the server's Finished arrives. Forward it
+    // so the server can decide accept/reject.
+    let client_early = client.take_crypto(QuicEncryptionLevel::EarlyData);
+    if !client_early.is_empty() {
+        server
+            .provide_crypto(QuicEncryptionLevel::EarlyData, &client_early)
+            .expect("server processes client early data CRYPTO");
+    }
+
     // Server emits ServerHello (Initial) plus EE / Certificate / Finished
     // (Handshake). Hand them back to the client.
     let server_initial = server.take_crypto(QuicEncryptionLevel::Initial);
