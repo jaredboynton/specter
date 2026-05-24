@@ -14,9 +14,24 @@ use specter::fingerprint::{Http3Fingerprint, TlsFingerprint};
 use specter::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
 use specter::transport::h3::tls::{
     NativeH3HandshakeStatus, NativeQuicTlsSession, QuicEncryptionLevel,
+    NATIVE_H3_TICKET_KEY_LEN,
 };
 
 mod helpers;
+
+/// Fixed TLS session-ticket key used across both server instances inside a
+/// single in-process resumption fixture. Production native H3 servers
+/// derive this internally and rotate it; tests pin it so the "second"
+/// server can decrypt the ticket the "first" server issued and
+/// SSL_session_reused returns true on the resumed client.
+const TEST_RESUMPTION_TICKET_KEYS: [u8; NATIVE_H3_TICKET_KEY_LEN] = [
+    // 16-byte key name
+    0x73, 0x70, 0x65, 0x63, 0x74, 0x65, 0x72, 0x2d, 0x68, 0x33, 0x2d, 0x73, 0x74, 0x65, 0x6b, 0x21,
+    // 16-byte HMAC key
+    0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0,
+    // 16-byte AES key
+    0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0,
+];
 
 /// Drive the BoringSSL handshake state machines for a client/server pair until
 /// both sides have produced application keys. Returns the captured DER
@@ -99,8 +114,13 @@ fn capture_initial_session_ticket(
     )
     .expect("native H3 client TLS session");
     let (cert_pem, key_pem) = helpers::tls::cached_cert_and_key_pem();
-    let mut server = NativeQuicTlsSession::server(fingerprint, &cert_pem, &key_pem)
-        .expect("native H3 server TLS session");
+    let mut server = NativeQuicTlsSession::server_with_ticket_keys(
+        fingerprint,
+        &cert_pem,
+        &key_pem,
+        &TEST_RESUMPTION_TICKET_KEYS,
+    )
+    .expect("native H3 server TLS session");
 
     let ticket = run_handshake_to_completion(&mut client, &mut server)
         .expect("server must issue a NewSessionTicket on a fresh TLS 1.3 + QUIC handshake");
@@ -139,6 +159,12 @@ fn native_h3_tls_replayed_session_ticket_produces_resumed_status() {
         ticket.as_ref(),
     )
     .expect("native H3 client with replayed session");
+    assert!(
+        resumed_client
+            .take_crypto(QuicEncryptionLevel::EarlyData)
+            .is_empty(),
+        "ordinary session resumption must not emit 0-RTT CRYPTO unless request replay policy opted in"
+    );
     let (cert_pem, key_pem) = helpers::tls::cached_cert_and_key_pem();
     let mut resumed_server =
         NativeQuicTlsSession::server(&fingerprint, &cert_pem, &key_pem).expect("server session");
