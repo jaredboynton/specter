@@ -76,15 +76,14 @@ async fn test_h2_tls() {
                     // HEADERS
                     break sid;
                 }
-                0x04 => {
+                0x04
                     // SETTINGS
-                    if flags & 0x01 == 0 {
+                    if flags & 0x01 == 0 => {
                         conn.send_settings(&[(0x03, 100), (0x04, 65535)])
                             .await
                             .unwrap();
                         conn.send_settings_ack().await.unwrap();
                     }
-                }
                 _ => {}
             }
         };

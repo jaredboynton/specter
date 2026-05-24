@@ -40,9 +40,9 @@ async fn h2_handshake_and_serve(
         let (_len, frame_type, flags, stream_id, _payload) = frame;
 
         match frame_type {
-            0x04 => {
+            0x04
                 // SETTINGS
-                if flags & 0x01 == 0 && !settings_sent {
+                if flags & 0x01 == 0 && !settings_sent => {
                     // Client SETTINGS -- reply with our SETTINGS + ACK.
                     conn.send_settings(&[
                         (0x01, 4096),  // HEADER_TABLE_SIZE
@@ -55,7 +55,6 @@ async fn h2_handshake_and_serve(
                     settings_sent = true;
                 }
                 // else: ACK from client, ignore.
-            }
             0x01 => {
                 // HEADERS -- a new request on this stream.
                 let mut ids = observed_stream_ids.lock().await;
