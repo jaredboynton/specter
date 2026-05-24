@@ -626,6 +626,26 @@ fn native_quic_ack_tracker_uses_max_ack_delay_timer_below_packet_threshold() {
 }
 
 #[test]
+fn native_quic_ack_tracker_encodes_delayed_ack_delay_units() {
+    let mut tracker = QuicAckTracker::default();
+    let first_observed = Instant::now();
+    tracker.observe_at(7, first_observed);
+
+    let frame = tracker
+        .to_ack_frame_with_delay(first_observed + Duration::from_millis(25), 3)
+        .expect("ACK frame");
+
+    assert!(matches!(
+        frame,
+        QuicFrame::Ack {
+            largest_acknowledged: 7,
+            ack_delay: 3125,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn native_quic_loss_detector_marks_packets_lost_by_reordering_threshold() {
     let mut detector = QuicLossDetector::default();
     detector.on_packet_sent(1);

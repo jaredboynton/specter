@@ -877,6 +877,7 @@ impl LocalNativeH3Connection {
                 self.fingerprint.transport.ack_eliciting_threshold,
                 Duration::from_millis(self.fingerprint.transport.max_ack_delay_ms),
                 Instant::now(),
+                self.fingerprint.transport.ack_delay_exponent,
             )?
         {
             self.send_packet(packet.packet).await?;
@@ -907,7 +908,13 @@ impl LocalNativeH3Connection {
     }
 
     async fn send_delayed_application_ack(&mut self) -> anyhow::Result<()> {
-        if let Some(packet) = self.handshake.build_server_application_ack_packet()? {
+        if let Some(packet) = self
+            .handshake
+            .build_server_application_ack_packet_with_delay(
+                Instant::now(),
+                self.fingerprint.transport.ack_delay_exponent,
+            )?
+        {
             self.send_packet(packet.packet).await?;
         }
         Ok(())

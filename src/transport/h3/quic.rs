@@ -404,7 +404,11 @@ impl QuicAckTracker {
         })
     }
 
-    pub fn to_ack_frame_with_delay(&self, now: Instant, ack_delay_exponent: u64) -> Result<QuicFrame> {
+    pub fn to_ack_frame_with_delay(
+        &self,
+        now: Instant,
+        ack_delay_exponent: u64,
+    ) -> Result<QuicFrame> {
         let Some(&largest_acknowledged) = self.received.iter().next_back() else {
             return Err(Error::HttpProtocol(
                 "cannot build QUIC ACK frame without received packets".into(),
@@ -413,7 +417,12 @@ impl QuicAckTracker {
         let delay = self
             .received_at
             .get(&largest_acknowledged)
-            .map(|received_at| encode_ack_delay(now.saturating_duration_since(*received_at), ack_delay_exponent))
+            .map(|received_at| {
+                encode_ack_delay(
+                    now.saturating_duration_since(*received_at),
+                    ack_delay_exponent,
+                )
+            })
             .unwrap_or(0);
         self.to_ack_frame(delay)
     }

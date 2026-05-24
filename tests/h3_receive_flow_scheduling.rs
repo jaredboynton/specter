@@ -146,6 +146,10 @@ fn native_h3_driver_schedules_timer_driven_delayed_application_acks() {
         drive_loop.contains("send_delayed_application_ack().await?"),
         "native H3 driver must wake on the delayed ACK timer even when ack_eliciting_threshold is not reached"
     );
+    assert!(
+        driver.contains("ack_delay_exponent"),
+        "native H3 delayed ACKs must encode ACK Delay using the configured ack_delay_exponent"
+    );
 }
 
 #[test]

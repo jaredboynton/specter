@@ -875,7 +875,13 @@ impl NativeH3Driver {
     }
 
     async fn send_delayed_application_ack(&mut self) -> Result<()> {
-        if let Some(packet) = self.handshake.build_client_application_ack_packet()? {
+        if let Some(packet) = self
+            .handshake
+            .build_client_application_ack_packet_with_delay(
+                Instant::now(),
+                self.fingerprint.transport.ack_delay_exponent,
+            )?
+        {
             self.socket
                 .send_to(packet.packet.as_ref(), self.peer_addr)
                 .await
@@ -1406,6 +1412,7 @@ impl NativeH3Driver {
                 self.fingerprint.transport.ack_eliciting_threshold,
                 Duration::from_millis(self.fingerprint.transport.max_ack_delay_ms),
                 Instant::now(),
+                self.fingerprint.transport.ack_delay_exponent,
             )?
         {
             self.socket
