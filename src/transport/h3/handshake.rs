@@ -2966,8 +2966,10 @@ impl NativeQuicHandshake {
             &frame,
         )?;
 
+        let now = Instant::now();
+        let packet_size = packet.len();
         self.client_application_loss_detector
-            .on_packet_sent(packet_number);
+            .on_packet_sent_at(packet_number, now);
         self.client_application_sent_streams.insert(
             packet_number,
             SentApplicationStreamPacket {
@@ -2976,6 +2978,11 @@ impl NativeQuicHandshake {
                 fin,
                 data: data.clone(),
             },
+        );
+        self.recovery.on_packet_sent(
+            PacketNumberSpace::Application,
+            packet_number,
+            SentPacketInfo::new(now, packet_size, true, true),
         );
         self.next_client_application_packet_number += 1;
 
@@ -3242,8 +3249,15 @@ impl NativeQuicHandshake {
             self.write_key_phase,
             &frame,
         )?;
+        let now = Instant::now();
+        let packet_size = packet.len();
         self.client_application_loss_detector
-            .on_packet_sent(packet_number);
+            .on_packet_sent_at(packet_number, now);
+        self.recovery.on_packet_sent(
+            PacketNumberSpace::Application,
+            packet_number,
+            SentPacketInfo::new(now, packet_size, true, true),
+        );
         self.next_client_application_packet_number += 1;
 
         Ok(ClientApplicationControlPacket {
@@ -3293,6 +3307,14 @@ impl NativeQuicHandshake {
             for packet_number in self.client_application_loss_detector.on_ack_frame(frame)? {
                 self.client_application_sent_streams.remove(&packet_number);
                 self.application_key_update.note_packet_acked(packet_number);
+            }
+            if matches!(frame, QuicFrame::Ack { .. } | QuicFrame::AckEcn { .. }) {
+                self.recovery.on_ack_received(
+                    PacketNumberSpace::Application,
+                    frame,
+                    self.fingerprint.transport.ack_delay_exponent,
+                    now,
+                )?;
             }
             match frame {
                 QuicFrame::MaxData(max_data) => {

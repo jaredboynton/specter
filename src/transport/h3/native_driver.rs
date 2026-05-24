@@ -1013,7 +1013,7 @@ impl NativeH3Driver {
             self.flush_streaming_responses();
             let released_credit = H3ReleasedReceiveCredit::new(
                 self.apply_released_body_credits().await?,
-                self.apply_released_tunnel_credits(),
+                self.apply_released_tunnel_credits()?,
             );
             if released_credit.has_credit() && !self.receive_backpressured() {
                 self.send_receive_flow_control_updates().await?;
@@ -1088,7 +1088,7 @@ impl NativeH3Driver {
                     self.flush_streaming_responses();
                     let released_credit = H3ReleasedReceiveCredit::new(
                         self.apply_released_body_credits().await?,
-                        self.apply_released_tunnel_credits(),
+                        self.apply_released_tunnel_credits()?,
                     );
                     if released_credit.has_credit() && !self.receive_backpressured() {
                         self.send_receive_flow_control_updates().await?;
@@ -1942,7 +1942,7 @@ impl NativeH3Driver {
         self.flush_streaming_responses();
         let released_credit = H3ReleasedReceiveCredit::new(
             self.apply_released_body_credits().await?,
-            self.apply_released_tunnel_credits(),
+            self.apply_released_tunnel_credits()?,
         );
         let has_streaming_responses = !self.pending_streaming_responses.is_empty();
         let has_tunnels = !self.pending_tunnels.is_empty();
@@ -2154,21 +2154,22 @@ impl NativeH3Driver {
                 })
                 .unwrap_or((0, false));
 
+            if released > 0 {
+                self.handshake
+                    .record_client_stream_consumed(stream_id, released as u64)?;
+                released_body_credit = released_body_credit.saturating_add(released);
+            }
             if closed {
                 self.send_stream_cancel(stream_id).await?;
                 self.pending_streaming_responses.remove(&stream_id);
                 continue;
-            }
-
-            if released > 0 {
-                released_body_credit = released_body_credit.saturating_add(released);
             }
         }
 
         Ok(released_body_credit)
     }
 
-    fn apply_released_tunnel_credits(&mut self) -> usize {
+    fn apply_released_tunnel_credits(&mut self) -> Result<usize> {
         let stream_ids = self.pending_tunnels.keys().copied().collect::<Vec<_>>();
         let mut released_tunnel_credit = 0usize;
 
@@ -2184,17 +2185,18 @@ impl NativeH3Driver {
                 })
                 .unwrap_or((0, false));
 
+            if released > 0 {
+                self.handshake
+                    .record_client_stream_consumed(stream_id, released as u64)?;
+                released_tunnel_credit = released_tunnel_credit.saturating_add(released);
+            }
             if closed {
                 self.pending_tunnels.remove(&stream_id);
                 continue;
             }
-
-            if released > 0 {
-                released_tunnel_credit = released_tunnel_credit.saturating_add(released);
-            }
         }
 
-        released_tunnel_credit
+        Ok(released_tunnel_credit)
     }
 
     async fn send_stream_cancel(&mut self, stream_id: u64) -> Result<()> {
