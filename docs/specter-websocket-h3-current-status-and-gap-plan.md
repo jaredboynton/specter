@@ -12,7 +12,7 @@ Specter now has credible proof for the H1/H2, RFC6455, and local same-fixture na
 - **H1 RFC6455 WebSocket vs fast Rust clients:** local echo benchmark now includes `fastwebsockets 0.10.0` and `tokio-tungstenite 0.24`; persisted run `docs/benchmarks/websocket-vs-fastwebsockets/2026-05-24-final.json` passes both gates.
 - **Live Codex WSS vs tokio-tungstenite:** persisted n=50 artifact passes all samples and shows better Specter p95 tail, but median TTFT remains within/noisy against tungstenite.
 - **Native H3 HTTP comparator:** isolated comparator crate now has a release-grade n=30 proof at `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-n30.json` with real rows for `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest_h3`; optional transport-only `quinn_transport`/`s2n_quic_transport` rows are measured separately and fixture packet errors now carry stable `category`/`fatal` fields if they reappear.
-- **RFC9220 WebSocket-over-H3:** correctness/API exists as a raw byte tunnel. The same-fixture proof now includes Specter local rows for echo, client DATA+FIN/server FIN, and a slow-consumer tunnel plus concurrent H3 streaming workload. Third-party RFC9220 tunnel comparator rows are now explicit as pending (`quiche`, `tokio-quiche`) or unsupported/not comparable (`h3-quinn`, `reqwest`, `tokio-tungstenite`), so there is still no third-party RFC9220 throughput win claim.
+- **RFC9220 WebSocket-over-H3:** correctness/API exists as a raw byte tunnel. The same-fixture proof now includes Specter local rows for echo, client DATA+FIN/server FIN, a slow-consumer tunnel plus concurrent H3 streaming workload, and measured low-level `quiche`/`tokio-quiche` raw tunnel comparator rows. There is still no published RFC9220 tunnel superiority claim because p99-scale samples and a dedicated tunnel gate remain open.
 - **Native QUIC production readiness:** still not production-complete; PTO send-time tracking, client Handshake CRYPTO PTO retransmission, event-level peer-close draining, bounded client CONNECTION_CLOSE replay, ACK_ECN frame/counter validation, Retry/VN packet primitives, and client PATH_CHALLENGE/PATH_RESPONSE token lifecycle exist, but full packet-space recovery/backoff, Retry/VN handshake integration, RFC-grade close-drain timing, key update, ECN marking/congestion response, and per-address path migration remain gaps.
 
 ## Direct answers captured during audit
@@ -106,14 +106,14 @@ Specter status:
 ### Still caveated / comparator gaps
 
 - The n=30 native H3 proof was produced by per-client invocations merged through the import-precedence path; the same-process all-client run remains a useful hardening target for fixture-event capture under load.
-- RFC9220 third-party tunnel comparator rows are explicit but not measured: `quiche_direct_rfc9220_tunnel` and `tokio_quiche_rfc9220_tunnel` are `pending_adapter`; `h3_quinn_rfc9220_tunnel`, `reqwest_h3_rfc9220_tunnel`, `tokio_tungstenite_rfc9220`, and `reqwest_rfc9220` are `unsupported_by_client`/capability-audit rows rather than throughput comparators.
-- RFC9220/WebSocket-over-H3 p99 still needs n>=100 to be statistically meaningful, and any third-party tunnel superiority claim requires real low-level RFC9220 comparator adapters.
+- RFC9220 third-party tunnel comparator rows are measured for low-level `quiche_direct_rfc9220_tunnel` and `tokio_quiche_rfc9220_tunnel`; `h3_quinn_rfc9220_tunnel`, `reqwest_h3_rfc9220_tunnel`, `tokio_tungstenite_rfc9220`, and `reqwest_rfc9220` remain unsupported capability-audit rows rather than throughput comparators.
+- RFC9220/WebSocket-over-H3 p99 still needs n>=100 to be statistically meaningful, and any third-party tunnel superiority claim needs a dedicated RFC9220 gate rather than relying on the H3 HTTP gate.
 
 ### Closed / moved out of gaps
 
 - ACK decimation is no longer threshold-only: native client/server/fixture paths schedule delayed ACKs via `max_ack_delay_ms`; only browser-capture parity remains.
 - `quinn_transport` and `s2n_quic_transport` are no longer pending adapters; both have transport-only echo rows and are explicitly outside the H3 superiority gate.
-- Specter RFC9220 local tunnel throughput/latency rows are no longer pending for echo, close/FIN, or slow-consumer mixed workloads; only third-party tunnel comparators, larger p99-scale samples, and a tunnel superiority claim remain open.
+- Specter RFC9220 local tunnel throughput/latency rows and low-level `quiche`/`tokio-quiche` raw tunnel comparator rows are no longer pending; only larger p99-scale samples, unsupported higher-level client capability rows, and a dedicated tunnel superiority gate remain open.
 - TLS certificate compression and raw ordered QUIC transport-parameter encoding are no longer silent gaps; native H3 ClientHello coverage now proves `compress_certificate` and raw ordered parameter emission.
 - TLS resumption/0-RTT status is no longer implicit: native H3 now exposes capability helpers that report both unsupported until `SSL_SESSION` and early-data plumbing land.
 - ACK_ECN is no longer just parse/round-trip coverage: native loss detection validates counters and tracks CE growth; only outbound marking, congestion response, and probing policy remain open.
@@ -127,7 +127,7 @@ Specter status:
 
 1. **RFC9002 recovery/PTO completion:** send-time tracking and client Handshake CRYPTO PTO retransmission exist, but full RTT/PTO backoff, packet-space recovery timers, Initial/server CRYPTO PTO coverage, and production loss recovery remain open.
 2. **Retry/VN handshake integration:** Retry and Version Negotiation packet parsing/validation primitives exist, but the client handshake does not yet restart Initials from Retry tokens or negotiate/fallback versions.
-3. **RFC9220 comparator/statistical proof:** Specter local tunnel echo, close/FIN, and slow-consumer mixed rows are persisted at n=30; low-level `quiche`/`tokio-quiche` RFC9220 tunnel adapters and statistically meaningful p99 (n>=100) remain missing.
+3. **RFC9220 statistical proof:** Specter local tunnel echo, close/FIN, slow-consumer mixed rows, and low-level `quiche`/`tokio-quiche` raw tunnel comparator rows are persisted at n=30; statistically meaningful p99 (n>=100) and a dedicated tunnel superiority gate remain missing.
 4. **H3 production scheduling:** in-connection request-body/tunnel fairness and a pool-level origin fair-queue primitive exist, but H3Client dispatch is not yet wired to the primitive and RTT/BDP-aware adaptive send-window growth remains incomplete.
 
 ### P1
@@ -167,7 +167,7 @@ Specter status:
    - Raw byte tunnel: echo RTT, close/FIN latency, and slow-consumer mixed workload are now measured for Specter locally at n=30; next add a statistically meaningful p99 by raising samples to n>=100.
    - Framed mode: RFC6455 codec over RFC9220 if/when a high-level adapter is added.
    - Slow-consumer mixed workload: the n=30 Specter row proves the active H3 streaming response completes while a delayed-reader RFC9220 tunnel holds inbound bytes; next make this a regression gate and add byte-level pending/backpressure counters.
-   - Third-party RFC9220 comparators: build low-level `quiche` and `tokio-quiche` Extended CONNECT tunnel adapters if feasible; keep `reqwest` and `tokio-tungstenite` as unsupported capability rows unless their public APIs grow RFC9220/H3 tunnel support.
+   - Third-party RFC9220 comparators: low-level `quiche` and `tokio-quiche` Extended CONNECT tunnel adapters are now measured; keep `reqwest`, `h3-quinn`, and `tokio-tungstenite` as unsupported capability rows unless their public APIs grow RFC9220/H3 tunnel support.
 
 6. **Close native QUIC production gaps**
    - Continue from landed PTO send-time tracking and client Handshake CRYPTO PTO retransmission toward full packet-space recovery/PTO and CRYPTO retransmission.
