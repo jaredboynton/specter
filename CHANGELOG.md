@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-05-24
+
+### Fixed
+- **Release workflows**: Switched CI and binding release jobs to install verified prebuilt BoringSSL archives, avoiding slow source builds and Windows NASM failures.
+- **Node.js binding release test**: Increased the local WebSocket integration test timeout so release CI does not fail after a successful but slightly slow handshake/message exchange.
+
 ## [4.0.0] - 2026-05-24
 
 ### Added
