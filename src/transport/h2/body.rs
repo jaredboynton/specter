@@ -26,9 +26,17 @@ pub(crate) enum H2BodyPush {
     Closed,
 }
 
-#[derive(Default)]
+/// Bounded in-flight DATA item capacity per H2 stream body.
+///
+/// H2 stream-level flow control still bounds total in-flight bytes; this cap
+/// is a safety bound on the number of distinct chunks queued between the
+/// driver and the consumer, which removes the per-chunk lock-step round-trip
+/// the original single-slot design imposed.
+const H2_BODY_SLOT_CAPACITY: usize = 32;
+
 struct H2BodyState {
-    slot: Option<std::result::Result<Bytes, Error>>,
+    slots: VecDeque<std::result::Result<Bytes, Error>>,
+    cap: usize,
     terminal_error: Option<Error>,
     ended: bool,
     closed: bool,
@@ -36,7 +44,25 @@ struct H2BodyState {
     transitions: VecDeque<&'static str>,
 }
 
-/// Shared DATA slot between the H2 driver and the public `Body` poller.
+impl Default for H2BodyState {
+    fn default() -> Self {
+        Self {
+            slots: VecDeque::with_capacity(H2_BODY_SLOT_CAPACITY),
+            cap: H2_BODY_SLOT_CAPACITY,
+            terminal_error: None,
+            ended: false,
+            closed: false,
+            consumer_waker: None,
+            transitions: VecDeque::new(),
+        }
+    }
+}
+
+/// Shared DATA slots between the H2 driver and the public `Body` poller.
+///
+/// Driver-owned wakeable state with a bounded `VecDeque` of in-flight chunks
+/// plus a consumer `Waker` and a `Notify` to wake the driver when the
+/// consumer drains a chunk and the slot becomes refillable.
 pub struct H2BodyShared {
     state: Mutex<H2BodyState>,
     released_recv_bytes: AtomicUsize,
@@ -57,11 +83,11 @@ impl H2BodyShared {
         if state.closed {
             return H2BodyPush::Closed;
         }
-        if state.slot.is_some() {
+        if state.slots.len() >= state.cap {
             return H2BodyPush::Full(item);
         }
         state.transitions.push_back("driver_slot_fill");
-        state.slot = Some(item);
+        state.slots.push_back(item);
         if let Some(waker) = state.consumer_waker.take() {
             waker.wake();
         }
@@ -82,10 +108,10 @@ impl H2BodyShared {
         if state.closed {
             return H2BodyPush::Closed;
         }
-        if state.slot.is_some() {
+        if state.slots.len() >= state.cap {
             return H2BodyPush::Full(Err(error));
         }
-        state.slot = Some(Err(error));
+        state.slots.push_back(Err(error));
         state.transitions.push_back("driver_error");
         if let Some(waker) = state.consumer_waker.take() {
             waker.wake();
@@ -99,7 +125,7 @@ impl H2BodyShared {
 
     pub(crate) fn is_slot_available(&self) -> bool {
         let state = self.state.lock().expect("h2 body state poisoned");
-        !state.closed && state.slot.is_none()
+        !state.closed && state.slots.len() < state.cap
     }
 
     pub(crate) fn take_released_recv_bytes(&self) -> usize {
@@ -194,7 +220,7 @@ impl HttpBody for H2Body {
 
         let state_poll = {
             let mut state = self.shared.state.lock().expect("h2 body state poisoned");
-            if let Some(item) = state.slot.take() {
+            if let Some(item) = state.slots.pop_front() {
                 state.transitions.push_back("consumer_slot_take");
                 StatePoll::Item(item)
             } else if let Some(error) = state.terminal_error.take() {

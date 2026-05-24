@@ -3,10 +3,11 @@
 //! Uses httparse for response parsing and raw I/O for maximum control
 //! over request formatting and header order.
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{Method, Uri};
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use std::future::Future;
+use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -37,10 +38,13 @@ const MAX_HEADERS_SIZE: usize = 64 * 1024;
 /// Maximum number of headers to parse.
 const MAX_HEADERS_COUNT: usize = 100;
 
-/// Per-read buffer used by the streaming body readers. Sized at 16 KiB to
-/// match the typical streaming chunk size and to avoid splitting common
-/// chunks across multiple `read` syscalls.
-const STREAM_READ_BUF_SIZE: usize = 16 * 1024;
+/// Per-read buffer used by the streaming body readers. Sized at 64 KiB so the
+/// kernel can hand back multiple already-arrived 16 KiB application chunks in
+/// a single `recv` syscall, mirroring hyper's auto-tuned read sizing on warm
+/// connections. The buffer is held as `BytesMut` capacity that we slice into
+/// zero-copy `Bytes` per yield, so larger sizing does not increase per-chunk
+/// memcpy costs.
+const STREAM_READ_BUF_SIZE: usize = 64 * 1024;
 
 /// HTTP/1.1 connection for sending requests.
 pub struct H1Connection {
@@ -74,7 +78,14 @@ pub struct H1Body {
     mode: H1BodyMode,
     should_close: bool,
     on_reusable: Option<H1ReuseHook>,
-    read_buf: Box<[u8; STREAM_READ_BUF_SIZE]>,
+    /// Reusable read buffer. Holds spare capacity that the socket reads into via
+    /// `ReadBuf::uninit`, then yields filled bytes as zero-copy `Bytes` via
+    /// `split_to(n).freeze()`. Capacity is reclaimed on each chunk yield because
+    /// the consumer's `Bytes` carries the underlying allocation; the empty
+    /// `BytesMut` shell allocates a fresh chunk worth of capacity on the next
+    /// read. This matches the hyper read path and avoids the per-chunk memcpy
+    /// that `Bytes::copy_from_slice(&[u8; N])` incurs.
+    read_buf: BytesMut,
     terminal: bool,
     read_idle_timeout: Option<Duration>,
     read_idle_sleep: Option<Pin<Box<Sleep>>>,
@@ -96,7 +107,7 @@ impl H1Body {
             mode,
             should_close,
             on_reusable: Some(on_reusable),
-            read_buf: Box::new([0; STREAM_READ_BUF_SIZE]),
+            read_buf: BytesMut::with_capacity(STREAM_READ_BUF_SIZE),
             terminal: false,
             read_idle_timeout,
             read_idle_sleep: None,
@@ -165,6 +176,9 @@ impl H1Body {
         None
     }
 
+    /// Read from the socket directly into the spare capacity of `self.read_buf`,
+    /// returning the number of bytes appended. Reuses the existing capacity when
+    /// available so consecutive reads on a fresh chunk avoid reallocation.
     fn poll_read_into_internal_buffer(&mut self, cx: &mut Context<'_>) -> Poll<Result<usize>> {
         self.poll_read_into_internal_buffer_limited(cx, STREAM_READ_BUF_SIZE)
     }
@@ -180,36 +194,51 @@ impl H1Body {
             )));
         };
 
-        let limit = limit.min(STREAM_READ_BUF_SIZE);
-        let mut read = ReadBuf::new(&mut self.read_buf[..limit]);
-        match Pin::new(stream).poll_read(cx, &mut read) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(())) => {
-                let n = read.filled().len();
-                self.reset_read_idle();
-                Poll::Ready(Ok(n))
-            }
-            Poll::Ready(Err(err)) => Poll::Ready(Err(Error::HttpProtocol(format!(
-                "Failed to read H1 response body: {}",
-                err
-            )))),
+        let limit = limit.clamp(1, STREAM_READ_BUF_SIZE);
+
+        // Ensure spare capacity for this read without growing the live data.
+        if self.read_buf.capacity() - self.read_buf.len() < limit {
+            self.read_buf.reserve(limit);
         }
+
+        // SAFETY: `chunk_mut()` hands out the contiguous spare capacity as
+        // `MaybeUninit<u8>`. We construct a `ReadBuf::uninit` over it; tokio's
+        // `AsyncRead::poll_read` only writes initialized bytes and tracks the
+        // filled length. After the read returns, we call `advance_mut` for the
+        // exact filled length.
+        let n = {
+            let dst = self.read_buf.chunk_mut();
+            let dst_slice: &mut [MaybeUninit<u8>] =
+                unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast(), dst.len()) };
+            let take = dst_slice.len().min(limit);
+            let mut read = ReadBuf::uninit(&mut dst_slice[..take]);
+            match Pin::new(stream).poll_read(cx, &mut read) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(err)) => {
+                    return Poll::Ready(Err(Error::HttpProtocol(format!(
+                        "Failed to read H1 response body: {}",
+                        err
+                    ))));
+                }
+                Poll::Ready(Ok(())) => read.filled().len(),
+            }
+        };
+
+        // SAFETY: `n` bytes were initialized by the successful `poll_read` above.
+        unsafe {
+            self.read_buf.advance_mut(n);
+        }
+
+        if n > 0 {
+            self.reset_read_idle();
+        }
+        Poll::Ready(Ok(n))
     }
 
-    fn poll_read_more(
-        &mut self,
-        cx: &mut Context<'_>,
-        target: &mut BytesMut,
-    ) -> Poll<Result<usize>> {
-        match self.poll_read_into_internal_buffer(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(0)) => Poll::Ready(Ok(0)),
-            Poll::Ready(Ok(n)) => {
-                target.extend_from_slice(&self.read_buf[..n]);
-                Poll::Ready(Ok(n))
-            }
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-        }
+    /// Read more bytes into the internal `read_buf`. Returns the number of bytes
+    /// newly appended; zero indicates EOF.
+    fn poll_read_more(&mut self, cx: &mut Context<'_>) -> Poll<Result<usize>> {
+        self.poll_read_into_internal_buffer(cx)
     }
 
     fn poll_fixed_body(
@@ -223,9 +252,22 @@ impl H1Body {
             return self.poll_return_to_pool(cx);
         }
 
+        // Yield any bytes that were already parked in `buffer` (e.g. carry-over
+        // from header parsing). This path is hit at most once per response.
         if !buffer.is_empty() {
             let n = remaining.min(buffer.len());
             let chunk = buffer.split_to(n).freeze();
+            remaining -= n;
+            self.mode = H1BodyMode::Fixed { remaining, buffer };
+            return Poll::Ready(Some(Ok(Frame::data(chunk))));
+        }
+
+        // Drain any bytes already present in `read_buf` before issuing another
+        // syscall. Common when the kernel delivered more than we yielded last
+        // poll_frame.
+        if !self.read_buf.is_empty() {
+            let n = remaining.min(self.read_buf.len());
+            let chunk = self.read_buf.split_to(n).freeze();
             remaining -= n;
             self.mode = H1BodyMode::Fixed { remaining, buffer };
             return Poll::Ready(Some(Ok(Frame::data(chunk))));
@@ -242,7 +284,11 @@ impl H1Body {
             ))),
             Poll::Ready(Ok(n)) => {
                 let take = remaining.min(n);
-                let chunk = Bytes::copy_from_slice(&self.read_buf[..take]);
+                // Zero-copy slice: hand out a `Bytes` that shares the
+                // underlying allocation with `read_buf`. The remaining capacity
+                // (after `split_to`) becomes the new `read_buf` for the next
+                // read.
+                let chunk = self.read_buf.split_to(take).freeze();
                 remaining -= take;
                 self.mode = H1BodyMode::Fixed { remaining, buffer };
                 Poll::Ready(Some(Ok(Frame::data(chunk))))
@@ -262,6 +308,13 @@ impl H1Body {
             return Poll::Ready(Some(Ok(Frame::data(chunk))));
         }
 
+        if !self.read_buf.is_empty() {
+            let take = self.read_buf.len();
+            let chunk = self.read_buf.split_to(take).freeze();
+            self.mode = H1BodyMode::CloseDelimited { buffer };
+            return Poll::Ready(Some(Ok(Frame::data(chunk))));
+        }
+
         match self.poll_read_into_internal_buffer(cx) {
             Poll::Pending => {
                 self.mode = H1BodyMode::CloseDelimited { buffer };
@@ -273,11 +326,22 @@ impl H1Body {
                 self.poll_return_to_pool(cx)
             }
             Poll::Ready(Ok(n)) => {
-                let chunk = Bytes::copy_from_slice(&self.read_buf[..n]);
+                // Zero-copy slice (see `poll_fixed_body`).
+                let chunk = self.read_buf.split_to(n).freeze();
                 self.mode = H1BodyMode::CloseDelimited { buffer };
                 Poll::Ready(Some(Ok(Frame::data(chunk))))
             }
             Poll::Ready(Err(err)) => self.fail(err),
+        }
+    }
+
+    /// Drain bytes from `self.read_buf` into the chunked-mode `buffer`. Cheap
+    /// when both buffers share no allocation; this is the only place where a
+    /// memcpy is unavoidable because chunked framing needs contiguous bytes
+    /// across multiple reads.
+    fn drain_read_buf_into(&mut self, buffer: &mut BytesMut) {
+        if !self.read_buf.is_empty() {
+            buffer.unsplit(self.read_buf.split());
         }
     }
 
@@ -296,11 +360,10 @@ impl H1Body {
                 continue;
             }
 
-            let mut scratch = BytesMut::new();
-            match self.poll_read_more(cx, &mut scratch) {
+            match self.poll_read_more(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Ok(0)) => return Poll::Ready(Ok(())),
-                Poll::Ready(Ok(_)) => buffer.extend_from_slice(&scratch),
+                Poll::Ready(Ok(_)) => self.drain_read_buf_into(buffer),
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             }
         }
@@ -311,12 +374,15 @@ impl H1Body {
         cx: &mut Context<'_>,
         mut buffer: BytesMut,
     ) -> Poll<Option<Result<Frame<Bytes>>>> {
+        // Pull anything left in the per-poll read buffer into the chunked
+        // accumulator before parsing.
+        self.drain_read_buf_into(&mut buffer);
+
         let (chunk_size, line_end) = loop {
             if let Some((size, end)) = find_chunk_size(&buffer) {
                 break (size, end);
             }
-            let mut scratch = BytesMut::new();
-            match self.poll_read_more(cx, &mut scratch) {
+            match self.poll_read_more(cx) {
                 Poll::Pending => {
                     self.mode = H1BodyMode::Chunked { buffer };
                     return Poll::Pending;
@@ -326,7 +392,7 @@ impl H1Body {
                         "Connection closed while reading chunk size".into(),
                     ));
                 }
-                Poll::Ready(Ok(_)) => buffer.extend_from_slice(&scratch),
+                Poll::Ready(Ok(_)) => self.drain_read_buf_into(&mut buffer),
                 Poll::Ready(Err(err)) => return self.fail(err),
             }
         };
@@ -349,8 +415,7 @@ impl H1Body {
 
         let chunk_end = chunk_size + 2;
         while buffer.len() < chunk_end {
-            let mut scratch = BytesMut::new();
-            match self.poll_read_more(cx, &mut scratch) {
+            match self.poll_read_more(cx) {
                 Poll::Pending => {
                     self.mode = H1BodyMode::Chunked { buffer };
                     return Poll::Pending;
@@ -360,7 +425,7 @@ impl H1Body {
                         "Connection closed while reading chunk data".into(),
                     ));
                 }
-                Poll::Ready(Ok(_)) => buffer.extend_from_slice(&scratch),
+                Poll::Ready(Ok(_)) => self.drain_read_buf_into(&mut buffer),
                 Poll::Ready(Err(err)) => return self.fail(err),
             }
         }

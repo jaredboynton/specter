@@ -27,9 +27,12 @@ pub(crate) enum H3BodyPush {
     Closed,
 }
 
-#[derive(Default)]
+/// Bounded in-flight DATA item capacity per H3 stream body.
+const H3_BODY_SLOT_CAPACITY: usize = 8;
+
 struct H3BodyState {
-    slot: Option<std::result::Result<Bytes, Error>>,
+    slots: VecDeque<std::result::Result<Bytes, Error>>,
+    cap: usize,
     terminal_error: Option<Error>,
     ended: bool,
     closed: bool,
@@ -37,7 +40,25 @@ struct H3BodyState {
     transitions: VecDeque<&'static str>,
 }
 
-/// Shared DATA slot between the H3 driver and the public `Body` poller.
+impl Default for H3BodyState {
+    fn default() -> Self {
+        Self {
+            slots: VecDeque::with_capacity(H3_BODY_SLOT_CAPACITY),
+            cap: H3_BODY_SLOT_CAPACITY,
+            terminal_error: None,
+            ended: false,
+            closed: false,
+            consumer_waker: None,
+            transitions: VecDeque::new(),
+        }
+    }
+}
+
+/// Shared DATA slots between the H3 driver and the public `Body` poller.
+///
+/// Bounded `VecDeque` plus consumer `Waker` and driver `Notify`. The cap is a
+/// safety bound on in-flight chunks; QUIC stream-level flow control still
+/// bounds total in-flight bytes.
 pub struct H3BodyShared {
     state: Mutex<H3BodyState>,
     driver_notify: Arc<Notify>,
@@ -47,7 +68,8 @@ impl fmt::Debug for H3BodyShared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.lock().expect("h3 body state poisoned");
         f.debug_struct("H3BodyShared")
-            .field("slot_occupied", &state.slot.is_some())
+            .field("slot_count", &state.slots.len())
+            .field("cap", &state.cap)
             .field("ended", &state.ended)
             .field("closed", &state.closed)
             .finish()
@@ -67,11 +89,11 @@ impl H3BodyShared {
         if state.closed {
             return H3BodyPush::Closed;
         }
-        if state.slot.is_some() {
+        if state.slots.len() >= state.cap {
             return H3BodyPush::Full;
         }
         state.transitions.push_back("driver_slot_fill");
-        state.slot = Some(item);
+        state.slots.push_back(item);
         if let Some(waker) = state.consumer_waker.take() {
             waker.wake();
         }
@@ -92,7 +114,7 @@ impl H3BodyShared {
         if state.closed {
             return H3BodyPush::Closed;
         }
-        if state.slot.is_some() {
+        if state.slots.len() >= state.cap {
             if state.terminal_error.is_none() {
                 state.terminal_error = Some(error);
                 state.transitions.push_back("driver_terminal_error");
@@ -102,7 +124,7 @@ impl H3BodyShared {
             }
             return H3BodyPush::Accepted;
         }
-        state.slot = Some(Err(error));
+        state.slots.push_back(Err(error));
         state.transitions.push_back("driver_error");
         if let Some(waker) = state.consumer_waker.take() {
             waker.wake();
@@ -116,7 +138,7 @@ impl H3BodyShared {
 
     pub(crate) fn is_slot_available(&self) -> bool {
         let state = self.state.lock().expect("h3 body state poisoned");
-        !state.closed && state.slot.is_none()
+        !state.closed && state.slots.len() < state.cap
     }
 
     fn close(&self) {
@@ -203,7 +225,7 @@ impl HttpBody for H3Body {
 
         let state_poll = {
             let mut state = self.shared.state.lock().expect("h3 body state poisoned");
-            if let Some(item) = state.slot.take() {
+            if let Some(item) = state.slots.pop_front() {
                 state.transitions.push_back("consumer_slot_take");
                 StatePoll::Item(item)
             } else if let Some(error) = state.terminal_error.take() {

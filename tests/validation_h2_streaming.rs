@@ -1008,11 +1008,29 @@ fn h2_body_uses_wakeable_slot_not_mpsc() {
         response_rs.contains("BodyInner::H2"),
         "public Body must have a dedicated H2 poll-body variant"
     );
+    // Behavioral invariant: H2 body delivery is driver-owned wakeable state,
+    // NOT an mpsc channel. We pin the wakeable-state shape (Waker + Arc<...>)
+    // and explicitly forbid mpsc Sender/Receiver of body bytes — the specific
+    // in-flight container (single Option, bounded VecDeque, etc.) is an
+    // implementation detail.
     assert!(
-        h2_body_rs.contains("struct H2BodyShared")
-            && h2_body_rs.contains("slot: Option")
-            && h2_body_rs.contains("consumer_waker"),
-        "H2 body delivery should be a wakeable shared slot"
+        h2_body_rs.contains("struct H2BodyShared"),
+        "H2 body delivery must expose H2BodyShared driver-owned state"
+    );
+    assert!(
+        h2_body_rs.contains("consumer_waker") && h2_body_rs.contains("Waker"),
+        "H2 body shared state must hold a consumer Waker for poll-based delivery"
+    );
+    assert!(
+        h2_body_rs.contains("Arc<Self>") || h2_body_rs.contains("Arc::new(Self"),
+        "H2BodyShared must be reference-counted (driver-owned plus consumer-held)"
+    );
+    assert!(
+        !h2_body_rs.contains("tokio::sync::mpsc::Sender")
+            && !h2_body_rs.contains("tokio::sync::mpsc::Receiver")
+            && !h2_body_rs.contains("mpsc::Sender<Result<Bytes>>")
+            && !h2_body_rs.contains("mpsc::Receiver<Result<Bytes>>"),
+        "H2 body shared state must NOT use a tokio::sync::mpsc channel for DATA delivery"
     );
     assert!(
         h2_driver_rs.contains("Arc<H2BodyShared>"),
@@ -1031,7 +1049,7 @@ fn h2_body_uses_wakeable_slot_not_mpsc() {
 
     let evidence = json!({
         "response_body_variant": "BodyInner::H2",
-        "delivery_state": "H2BodyShared { Mutex slot, consumer_waker, driver Notify }",
+        "delivery_state": "H2BodyShared { Mutex<bounded VecDeque slots>, consumer_waker, driver Notify }",
         "driver_delivery_has_mpsc_body_sender": false,
         "pooled_h2_api_returns_body_receiver": false,
         "flow_control_credit_release": "Body poll releases stream WINDOW_UPDATE credit after data is consumed"
