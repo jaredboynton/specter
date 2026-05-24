@@ -9,10 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::time::Instant;
 
 const SHORT_HEADER_CID_LEN: usize = 16;
 const MOCK_IDLE_TIMEOUT: Duration = Duration::from_millis(150);
@@ -255,6 +254,10 @@ impl NativeMockH3Connection {
             let idle_remaining = MOCK_IDLE_TIMEOUT
                 .checked_sub(self.last_activity.elapsed())
                 .unwrap_or(Duration::ZERO);
+            let server_application_ack_deadline = self.server_application_ack_deadline();
+            let server_application_ack_delay = server_application_ack_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
             tokio::select! {
                 biased;
                 _ = tokio::time::sleep(idle_remaining) => {
@@ -268,6 +271,11 @@ impl NativeMockH3Connection {
                             .await;
                     }
                     break;
+                }
+                _ = tokio::time::sleep(server_application_ack_delay), if server_application_ack_deadline.is_some() => {
+                    if let Err(err) = self.send_delayed_application_ack().await {
+                        tracing::debug!("native mock H3 delayed ACK error: {}", err);
+                    }
                 }
                 packet = self.rx.recv() => {
                     let Some(packet) = packet else { break };
@@ -335,7 +343,14 @@ impl NativeMockH3Connection {
             self.closed = true;
             return Ok(false);
         }
-        if let Some(packet) = self.handshake.build_server_application_ack_packet()? {
+        if let Some(packet) = self
+            .handshake
+            .build_server_application_ack_packet_after_or_delay(
+                self.fingerprint.transport.ack_eliciting_threshold,
+                Duration::from_millis(self.fingerprint.transport.max_ack_delay_ms),
+                Instant::now(),
+            )?
+        {
             self.send_packet(packet.packet).await?;
         }
         for packet in self
@@ -357,6 +372,20 @@ impl NativeMockH3Connection {
             }
         }
         Ok(active)
+    }
+
+    fn server_application_ack_deadline(&self) -> Option<Instant> {
+        self.handshake
+            .server_application_ack_deadline(Duration::from_millis(
+                self.fingerprint.transport.max_ack_delay_ms,
+            ))
+    }
+
+    async fn send_delayed_application_ack(&mut self) -> specter::Result<()> {
+        if let Some(packet) = self.handshake.build_server_application_ack_packet()? {
+            self.send_packet(packet.packet).await?;
+        }
+        Ok(())
     }
 
     async fn send_settings_if_ready(&mut self) -> specter::Result<()> {

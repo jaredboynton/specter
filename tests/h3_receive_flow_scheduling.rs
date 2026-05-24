@@ -158,7 +158,7 @@ fn native_mock_h3_server_schedules_timer_driven_delayed_application_acks() {
         "native mock H3 server must derive a delayed ACK deadline from max_ack_delay_ms"
     );
     assert!(
-        mock_server.contains("send_delayed_application_ack().await?"),
+        mock_server.contains("send_delayed_application_ack().await"),
         "native mock H3 server must wake on the delayed ACK timer below ack_eliciting_threshold"
     );
     assert!(
@@ -177,7 +177,7 @@ fn native_h3_same_fixture_schedules_timer_driven_delayed_application_acks() {
         "native H3 same-fixture server must derive a delayed ACK deadline from max_ack_delay_ms"
     );
     assert!(
-        fixture.contains("send_delayed_application_ack().await?"),
+        fixture.contains("send_delayed_application_ack().await"),
         "native H3 same-fixture server must wake on the delayed ACK timer below ack_eliciting_threshold"
     );
     assert!(
