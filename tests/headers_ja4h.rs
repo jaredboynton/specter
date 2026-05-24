@@ -2,7 +2,9 @@
 //!
 //! Validates OrderedHeaders preserves order and JA4H fingerprint calculation.
 
-use specter::headers::{chrome_142_headers, firefox_133_headers, firefox_151_headers, OrderedHeaders};
+use specter::headers::{
+    chrome_142_headers, firefox_133_headers, firefox_151_headers, OrderedHeaders,
+};
 
 #[test]
 fn test_ordered_headers_preserves_order() {
@@ -37,8 +39,16 @@ fn test_ja4h_fingerprint_deterministic() {
 
 #[test]
 fn test_firefox_user_agent_value_changes_do_not_change_current_ja4h() {
-    let firefox_133 = OrderedHeaders::new(firefox_133_headers());
-    let firefox_151 = OrderedHeaders::new(firefox_151_headers());
+    let to_ordered = |headers: Vec<(&'static str, &'static str)>| {
+        OrderedHeaders::new(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+        )
+    };
+    let firefox_133 = to_ordered(firefox_133_headers());
+    let firefox_151 = to_ordered(firefox_151_headers());
 
     assert_ne!(
         firefox_133
