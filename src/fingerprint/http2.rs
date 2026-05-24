@@ -8,7 +8,7 @@ use std::time::Duration;
 /// Format: (stream_id, depends_on_stream_id, weight, exclusive)
 /// - exclusive: true means this stream replaces all dependencies of the parent
 /// - weight: 1-256, higher means more bandwidth allocation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriorityTree {
     /// Priority frames to send: (stream_id, depends_on, weight, exclusive)
     pub priorities: Vec<(u32, u32, u8, bool)>,
@@ -64,7 +64,7 @@ impl PriorityTree {
 }
 
 /// HTTP/2 SETTINGS for fingerprinting.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Http2Settings {
     pub header_table_size: u32,
     pub enable_push: bool,
@@ -112,7 +112,7 @@ impl Default for Http2Settings {
 }
 
 impl Http2Settings {
-    /// Create Firefox 133 HTTP/2 settings.
+    /// Create shared Firefox desktop HTTP/2 settings.
     ///
     /// Firefox differs from Chrome:
     /// - HEADER_TABLE_SIZE: 65536 (same)

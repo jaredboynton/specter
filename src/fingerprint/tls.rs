@@ -6,7 +6,7 @@
 //! signature algorithm, and curve ordering - but extension ordering may not
 //! match real browsers.
 //!
-//! Current implementation: Chrome 142-148, Firefox 133
+//! Current implementation: Chrome 142-148, Firefox 133-151, Firefox ESR 115/128/140
 //!
 //! ## Post-Quantum Cryptography (Kyber)
 //!
@@ -72,9 +72,9 @@ pub const CHROME_EXTENSION_IDS: &[u16] =
 /// Backwards-compatible alias for Chrome 142 extension IDs.
 pub const CHROME_142_EXTENSION_IDS: &[u16] = CHROME_EXTENSION_IDS;
 
-/// Firefox 133 cipher suites in exact order.
+/// Shared Firefox desktop cipher suites in exact order.
 /// Firefox prefers AES-GCM over ChaCha20 (unlike some mobile-optimized builds).
-pub const FIREFOX_133_CIPHER_SUITES: &[&str] = &[
+pub const FIREFOX_CIPHER_SUITES: &[&str] = &[
     // TLS 1.3 cipher suites
     "TLS_AES_128_GCM_SHA256",
     "TLS_AES_256_GCM_SHA384",
@@ -95,9 +95,12 @@ pub const FIREFOX_133_CIPHER_SUITES: &[&str] = &[
     "TLS_RSA_WITH_AES_256_CBC_SHA",
 ];
 
-/// Firefox 133 signature algorithms.
+/// Backwards-compatible alias for Firefox 133 cipher suites.
+pub const FIREFOX_133_CIPHER_SUITES: &[&str] = FIREFOX_CIPHER_SUITES;
+
+/// Shared Firefox desktop signature algorithms.
 /// Similar to Chrome but may have slight ordering differences.
-pub const FIREFOX_133_SIGNATURE_ALGORITHMS: &[&str] = &[
+pub const FIREFOX_SIGNATURE_ALGORITHMS: &[&str] = &[
     "ecdsa_secp256r1_sha256",
     "rsa_pss_rsae_sha256",
     "rsa_pkcs1_sha256",
@@ -108,17 +111,26 @@ pub const FIREFOX_133_SIGNATURE_ALGORITHMS: &[&str] = &[
     "rsa_pkcs1_sha512",
 ];
 
-/// Firefox 133 supported curves.
+/// Backwards-compatible alias for Firefox 133 signature algorithms.
+pub const FIREFOX_133_SIGNATURE_ALGORITHMS: &[&str] = FIREFOX_SIGNATURE_ALGORITHMS;
+
+/// Shared Firefox desktop supported curves.
 /// Firefox supports more curves than Chrome, including P-521.
 /// BoringSSL uses curve names "P-256", "P-384", "P-521" rather than
 /// the standard "secp256r1", "secp384r1", "secp521r1" identifiers.
-pub const FIREFOX_133_CURVES: &[&str] = &["x25519", "P-256", "P-384", "P-521"];
+pub const FIREFOX_CURVES: &[&str] = &["x25519", "P-256", "P-384", "P-521"];
 
-/// Firefox 133 extension IDs.
-/// Firefox 133 also randomizes extension order (similar to Chrome 110+),
+/// Backwards-compatible alias for Firefox 133 curves.
+pub const FIREFOX_133_CURVES: &[&str] = FIREFOX_CURVES;
+
+/// Shared Firefox desktop extension IDs.
+/// Firefox randomizes extension order (similar to Chrome 110+),
 /// so JA3 fingerprints will vary. JA4 sorts extensions for stable fingerprinting.
-pub const FIREFOX_133_EXTENSION_IDS: &[u16] =
+pub const FIREFOX_EXTENSION_IDS: &[u16] =
     &[0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43, 27, 21];
+
+/// Backwards-compatible alias for Firefox 133 extension IDs.
+pub const FIREFOX_133_EXTENSION_IDS: &[u16] = FIREFOX_EXTENSION_IDS;
 
 /// Certificate compression algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +144,7 @@ pub enum CertCompression {
 }
 
 /// TLS fingerprint configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsFingerprint {
     /// Cipher suites in order.
     pub cipher_list: Vec<&'static str>,
@@ -221,7 +233,7 @@ impl TlsFingerprint {
         Self::chrome()
     }
 
-    /// Create a TLS fingerprint for Firefox 133.
+    /// Create a shared TLS fingerprint for Firefox desktop profiles.
     ///
     /// Firefox differs from Chrome in:
     /// - Cipher suite order (AES-GCM preferred, ChaCha20 third)
@@ -230,17 +242,22 @@ impl TlsFingerprint {
     /// - Extension order randomization (like Chrome 110+)
     /// - No certificate compression (Firefox does not use compress_certificate)
     /// - Post-quantum Kyber disabled by default (requires manual flag)
-    pub fn firefox_133() -> Self {
+    pub fn firefox() -> Self {
         Self {
-            cipher_list: FIREFOX_133_CIPHER_SUITES.to_vec(),
-            sigalgs: FIREFOX_133_SIGNATURE_ALGORITHMS.to_vec(),
-            curves: FIREFOX_133_CURVES.to_vec(),
-            extensions: FIREFOX_133_EXTENSION_IDS.to_vec(),
-            extension_order: FIREFOX_133_EXTENSION_IDS.to_vec(),
+            cipher_list: FIREFOX_CIPHER_SUITES.to_vec(),
+            sigalgs: FIREFOX_SIGNATURE_ALGORITHMS.to_vec(),
+            curves: FIREFOX_CURVES.to_vec(),
+            extensions: FIREFOX_EXTENSION_IDS.to_vec(),
+            extension_order: FIREFOX_EXTENSION_IDS.to_vec(),
             grease: false,                           // Firefox does NOT use GREASE
             cert_compression: CertCompression::None, // Firefox does not use certificate compression
             enable_kyber: false,                     // Firefox requires manual flag for Kyber
         }
+    }
+
+    /// Create a TLS fingerprint for Firefox 133.
+    pub fn firefox_133() -> Self {
+        Self::firefox()
     }
 
     /// Stable, explicit-field key suitable for use as a connection-pool discriminator.
