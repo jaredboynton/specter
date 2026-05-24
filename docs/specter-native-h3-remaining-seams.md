@@ -113,7 +113,7 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - Made the full local fixture matrix isolate each client with a fresh fixture instance.
 - Deferred native H3 receive-window MAX_DATA/MAX_STREAM_DATA flushing until after inbound DATA is applied to bounded streaming body queues, and retry deferred credit on public body progress.
 - Added byte-level H3 response-body and RFC9220 tunnel release accounting so the native driver only flushes queued receive-window credit for active streams after public body/tunnel consumption releases bytes into the matching QUIC stream.
-- Queued RFC9220/WebSocket-over-H3 tunnel inbound DATA/FIN/GOAWAY when the public inbound channel is full, and wired tunnel reads to release receive credit and wake the native driver.
+- Made RFC9220/WebSocket-over-H3 tunnel inbound DATA byte-budgeted instead of item-slot bounded, while preserving ordered FIN/GOAWAY delivery; tunnel reads release receive credit, release inbound byte permits, and wake the native driver.
 - Routed opened RFC9220 tunnel stream resets through the same queued inbound path so reset delivery is not dropped when the public tunnel channel is full.
 - Changed native H3 tunnel receive pausing to wait until all open RFC9220 tunnel inbound queues are backpressured, so one slow tunnel no longer pauses socket reads while a sibling tunnel still has capacity.
 - Changed native H3 receive pausing to consider active streaming-response and RFC9220 tunnel receive classes together, so a blocked response class no longer pauses tunnel reads, or vice versa, while another active class still has capacity.
@@ -140,7 +140,7 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - Added client/server CONNECTION_CLOSE drain replay: local idle/client-shutdown closes and fixture/mock server closes retain the protected close packet, replay it to peer packets during a bounded drain window, and suppress non-close sends after peer close drains.
 - Added a pool-level `OriginFairQueue` rotation primitive for per-origin fairness and wired H3Client slow-path fresh-connect admission through it.
 - Added adaptive native H3 DATA send-window growth/decay driven by RTT samples, loss, and a bounded BDP proxy.
-- Added byte-bounded RFC9220 tunnel outbound backpressure: public sends acquire per-tunnel byte permits and the native driver releases permits per emitted DATA chunk or drains remaining credit on completion.
+- Added byte-bounded RFC9220 tunnel backpressure in both directions: public sends acquire per-tunnel outbound byte permits and the native driver releases them per emitted DATA chunk, while inbound driver-to-handle DATA reserves receive byte permits and releases them when public reads consume the DATA.
 - Added native QUIC 1-RTT key-update handling: client/server key phases rotate through derived next traffic secrets, retain previous keys for reordered old-phase packets, and enforce the RFC9001 local-update ACK gate.
 
 ## Closed gaps now tracked as regression guards
@@ -155,7 +155,7 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - TLS certificate compression, deterministic-vs-browser-permuted extension behavior, raw ordered QUIC transport parameters with dynamic connection-ID placeholders, session-ticket helpers, `NativeH3SessionCache`, H3Client cache wiring, connection-level session replay, driver-side ticket drain, and 0-RTT early-data context setup are wired for native H3; remaining fingerprint work is explicit extension-list ordering, 0-RTT replay-policy integration, and capture presets.
 - TLS resumption is now plumbed from H3Client through `SSL_SESSION` replay and ticket storage; ordinary session replay now strips early-data capability unless request policy opts in, and TLS-level 0-RTT accept/reject status plus reason codes are observable. The remaining 0-RTT gap is anti-replay request policy, transport send integration, and connection/H3Client-level propagation of acceptance/rejection, not ambiguity or missing cache wiring.
 - H3 scheduling now has in-connection fair send turns for streaming request bodies and RFC9220 tunnel DATA, sibling-tunnel and mixed tunnel/response receive-class fairness, RTT/loss/BDP-aware adaptive send budgets, and H3Client origin-fair slow-path dispatch.
-- Outbound RFC9220 tunnel backpressure is byte-bounded at the send API and driver queue boundary; public sends block on byte permits and permit release tracks emitted DATA chunks. Slow-consumer mixed RFC9220 coverage remains green after this outbound backpressure change.
+- RFC9220 tunnel backpressure is byte-bounded at both the send API/driver queue boundary and the driver-to-public-reader boundary. Public sends block on outbound byte permits, inbound DATA delivery reserves receive byte permits before queuing, and permit release tracks emitted or publicly consumed DATA. Slow-consumer mixed RFC9220 coverage remains green after the outbound change, and focused inbound tests cover tiny chunks versus oversized chunks.
 - RFC9220 tunnel inbound backpressure is byte-bounded at the driver-to-public-reader boundary: native H3 reserves per-tunnel receive byte credit before DATA delivery, queues further DATA when the budget is exhausted, preserves control delivery order, and releases credit when public tunnel reads consume DATA.
 - Native H3 receive-window updates are now user-consumption-gated for streaming responses and RFC9220 tunnels: public body/tunnel byte release includes encoded H3 DATA frame type/length overhead and feeds `record_client_stream_consumed` per stream before flushing absolute MAX_DATA/MAX_STREAM_DATA.
 - Native QUIC 1-RTT key update has a traffic-secret/key-phase state machine with previous-key retention and local-update ACK gating; keep it as regression coverage rather than an active “not implemented” gap.
@@ -219,9 +219,9 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - `CARGO_TARGET_DIR=/tmp/specter-h3-continue cargo test --test h3_native_recovery -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-ecn cargo test --test h3_native_recovery -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-ecn cargo test --test h3_receive_flow_scheduling native_h3_driver_decays_send_window_on_ack_ecn_congestion -- --nocapture`
-- `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --lib reset_on_full_tunnel_inbound_is_queued_until_public_reader_frees_capacity -- --nocapture`
-- `CARGO_TARGET_DIR=/tmp/specter-h3-tunnel-validate cargo test --lib native_driver::tests::tunnel_inbound -- --nocapture`
-- `CARGO_TARGET_DIR=/tmp/specter-h3-tunnel-validate cargo test --lib tunnel::tests -- --nocapture`
+- `CARGO_TARGET_DIR=/tmp/specter-h3-inbound-audit cargo test --lib tunnel_inbound -- --nocapture`
+- `CARGO_TARGET_DIR=/tmp/specter-h3-inbound-audit cargo test --lib tunnel -- --nocapture`
+- `CARGO_TARGET_DIR=/tmp/specter-h3-inbound-audit cargo test --test h3_receive_flow_scheduling tunnel -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --test h3_native_quic native_quic_ack_tracker_uses_max_ack_delay_timer_below_packet_threshold -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --test h3_quic_packet_parsing -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --test h3_native_quic version_negotiation -- --nocapture`
