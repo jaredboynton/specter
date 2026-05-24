@@ -2024,8 +2024,8 @@ impl NativeQuicHandshake {
     }
 
     // Cross-agent compatibility shim for the sibling P1 session-resumption
-    // worker. Until `SSL_SESSION` install lands, this delegates to the
-    // non-resuming constructor; the session DER is accepted but unused.
+    // worker. When a cached DER session exists, install it before emitting the
+    // ClientHello; otherwise use the ordinary first-handshake constructor.
     #[allow(clippy::too_many_arguments)]
     pub fn client_with_tls_fingerprint_and_session(
         server_name: &str,
@@ -2036,18 +2036,31 @@ impl NativeQuicHandshake {
         verify_peer: bool,
         root_certs: &[Vec<u8>],
         use_platform_roots: bool,
-        _session_der: Option<&[u8]>,
+        session_der: Option<&[u8]>,
     ) -> Result<Self> {
-        Self::client_with_tls_fingerprint(
-            server_name,
-            fingerprint,
-            tls_fingerprint,
-            destination_cid,
-            source_cid,
-            verify_peer,
-            root_certs,
-            use_platform_roots,
-        )
+        match session_der {
+            Some(session_der) => Self::client_with_replayed_session_ticket(
+                server_name,
+                fingerprint,
+                tls_fingerprint,
+                destination_cid,
+                source_cid,
+                verify_peer,
+                root_certs,
+                use_platform_roots,
+                session_der,
+            ),
+            None => Self::client_with_tls_fingerprint(
+                server_name,
+                fingerprint,
+                tls_fingerprint,
+                destination_cid,
+                source_cid,
+                verify_peer,
+                root_certs,
+                use_platform_roots,
+            ),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
