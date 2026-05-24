@@ -9,12 +9,13 @@ use crate::error::{Error, Result};
 use crate::fingerprint::{Http3Fingerprint, QuicTransportParams, TlsFingerprint};
 use crate::transport::h3::native;
 use crate::transport::h3::quic::{
-    build_initial_crypto_packet, decode_frames, decode_version_negotiation_packet,
-    derive_initial_key_material, encode_frame, encode_long_header, open_long_header_packet,
-    open_short_header_packet, protect_long_header_packet, protect_short_header_packet,
-    split_long_header_datagram, validate_retry_integrity_tag_v1, ConnectionId, LongHeaderPacket,
-    LongHeaderType, QuicAckTracker, QuicCryptoAssembler, QuicFrame, QuicLossDetector,
-    QuicPacketKeyMaterial, QuicPathValidator,
+    build_initial_crypto_packet, decode_frames, decode_transport_parameters,
+    decode_version_negotiation_packet, derive_initial_key_material, encode_frame,
+    encode_long_header, open_long_header_packet, open_short_header_packet,
+    protect_long_header_packet, protect_short_header_packet, split_long_header_datagram,
+    validate_retry_integrity_tag_v1, ConnectionId, LongHeaderPacket, LongHeaderType,
+    QuicAckTracker, QuicCryptoAssembler, QuicFrame, QuicLossDetector, QuicPacketKeyMaterial,
+    QuicPathValidator, TransportParameter,
 };
 use crate::transport::h3::tls::{
     build_client_initial_packet_from_capture_with_size, ClientInitialPacket, NativeQuicTlsSession,
@@ -514,6 +515,7 @@ pub struct NativeQuicHandshake {
     client_handshake_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     client_application_sent_streams: BTreeMap<u64, SentApplicationStreamPacket>,
     client_path_validator: QuicPathValidator,
+    server_transport_parameters_validated: bool,
     next_client_initial_packet_number: u64,
     next_server_initial_packet_number: u64,
     next_server_handshake_packet_number: u64,
@@ -583,6 +585,66 @@ impl NativeQuicServerHandshake {
                 key_pem,
                 &client_destination_cid,
                 &server_source_cid,
+            )?,
+            client_source_cid,
+            server_source_cid,
+            client_initial_keys: initial_keys.client,
+            server_initial_keys: initial_keys.server,
+            client_handshake_keys: None,
+            server_handshake_keys: None,
+            client_initial_crypto: QuicCryptoAssembler::default(),
+            client_handshake_crypto: QuicCryptoAssembler::default(),
+            client_initial_ack_tracker: QuicAckTracker::default(),
+            client_handshake_ack_tracker: QuicAckTracker::default(),
+            client_application_ack_tracker: QuicAckTracker::default(),
+            server_application_loss_detector: QuicLossDetector::default(),
+            server_application_flow_control: QuicApplicationFlowControl::server(
+                &fingerprint.transport,
+            ),
+            server_application_receive_flow_control: QuicReceiveFlowControl::server(
+                &fingerprint.transport,
+            ),
+            server_application_sent_streams: BTreeMap::new(),
+            next_client_initial_packet_number: 0,
+            next_client_handshake_packet_number: 0,
+            next_client_application_packet_number: 0,
+            next_server_initial_packet_number: 0,
+            next_server_handshake_packet_number: 0,
+            next_server_application_packet_number: 0,
+            next_server_unidirectional_stream_id: 3,
+            client_application_keys: None,
+            server_application_keys: None,
+            server_initial_crypto_offset: 0,
+            server_handshake_crypto_offset: 0,
+            server_stream_offsets: BTreeMap::new(),
+            server_control_stream_id: None,
+            client_h3_stream_buffers: BTreeMap::new(),
+            client_h3_stream_buffer_offsets: BTreeMap::new(),
+            client_h3_stream_types: BTreeMap::new(),
+            close_draining: false,
+        })
+    }
+
+    pub fn new_with_transport_parameter_connection_ids(
+        fingerprint: &Http3Fingerprint,
+        cert_pem: &[u8],
+        key_pem: &[u8],
+        client_destination_cid: ConnectionId,
+        client_source_cid: ConnectionId,
+        server_source_cid: ConnectionId,
+        transport_original_destination_cid: ConnectionId,
+        transport_initial_source_cid: ConnectionId,
+        transport_retry_source_cid: Option<ConnectionId>,
+    ) -> Result<Self> {
+        let initial_keys = derive_initial_key_material(client_destination_cid.as_bytes())?;
+        Ok(Self {
+            tls: NativeQuicTlsSession::server_with_transport_parameter_connection_ids(
+                fingerprint,
+                cert_pem,
+                key_pem,
+                &transport_original_destination_cid,
+                &transport_initial_source_cid,
+                transport_retry_source_cid.as_ref(),
             )?,
             client_source_cid,
             server_source_cid,
@@ -1456,6 +1518,7 @@ impl NativeQuicHandshake {
             client_handshake_sent_crypto: BTreeMap::new(),
             client_application_sent_streams: BTreeMap::new(),
             client_path_validator: QuicPathValidator::default(),
+            server_transport_parameters_validated: false,
             next_client_initial_packet_number: 1,
             next_server_initial_packet_number: 0,
             next_server_handshake_packet_number: 0,
@@ -2305,6 +2368,7 @@ impl NativeQuicHandshake {
                         .provide_crypto(QuicEncryptionLevel::Initial, &crypto_data)?;
                     let secrets = self.tls.secrets();
                     self.install_tls_secrets(&secrets)?;
+                    self.validate_server_transport_parameters_if_available()?;
                     processed.push(ProcessedServerInitial {
                         packet_number: opened.packet_number,
                         crypto_data,
@@ -2346,6 +2410,7 @@ impl NativeQuicHandshake {
                             .provide_crypto(QuicEncryptionLevel::Handshake, &crypto_data)?;
                         let secrets = self.tls.secrets();
                         self.install_tls_secrets(&secrets)?;
+                        self.validate_server_transport_parameters_if_available()?;
                         let handshake_crypto_out =
                             self.tls.take_crypto(QuicEncryptionLevel::Handshake);
                         if !handshake_crypto_out.is_empty() {
@@ -2420,6 +2485,72 @@ impl NativeQuicHandshake {
         self.pending_client_initial = Some(retry_initial);
         self.next_client_initial_packet_number = packet_number + 1;
         Ok(())
+    }
+
+    fn validate_server_transport_parameters_if_available(&mut self) -> Result<()> {
+        if self.server_transport_parameters_validated {
+            return Ok(());
+        }
+        let peer_transport_parameters = self.tls.peer_transport_parameters();
+        if peer_transport_parameters.is_empty() {
+            return Ok(());
+        }
+        self.validate_server_transport_parameters(peer_transport_parameters.as_ref())?;
+        self.server_transport_parameters_validated = true;
+        Ok(())
+    }
+
+    fn validate_server_transport_parameters(&self, encoded: &[u8]) -> Result<()> {
+        let mut original_destination_cid = None;
+        let mut initial_source_cid = None;
+        let mut retry_source_cid = None;
+
+        for parameter in decode_transport_parameters(encoded)? {
+            match parameter {
+                TransportParameter::OriginalDestinationConnectionId(value) => {
+                    original_destination_cid = Some(value);
+                }
+                TransportParameter::InitialSourceConnectionId(value) => {
+                    initial_source_cid = Some(value);
+                }
+                TransportParameter::RetrySourceConnectionId(value) => {
+                    retry_source_cid = Some(value);
+                }
+                _ => {}
+            }
+        }
+
+        let original_destination_cid = original_destination_cid.ok_or_else(|| {
+            Error::Quic("native H3 server omitted original_destination_connection_id".into())
+        })?;
+        if original_destination_cid.as_ref() != self.original_destination_cid.as_bytes() {
+            return Err(Error::Quic(
+                "native H3 server original_destination_connection_id mismatch".into(),
+            ));
+        }
+
+        let initial_source_cid = initial_source_cid.ok_or_else(|| {
+            Error::Quic("native H3 server omitted initial_source_connection_id".into())
+        })?;
+        if initial_source_cid.as_ref() != self.destination_cid.as_bytes() {
+            return Err(Error::Quic(
+                "native H3 server initial_source_connection_id mismatch".into(),
+            ));
+        }
+
+        match (&self.retry_source_cid, retry_source_cid) {
+            (Some(expected), Some(actual)) if actual.as_ref() == expected.as_bytes() => Ok(()),
+            (Some(_), Some(_)) => Err(Error::Quic(
+                "native H3 server retry_source_connection_id mismatch".into(),
+            )),
+            (Some(_), None) => Err(Error::Quic(
+                "native H3 server omitted retry_source_connection_id".into(),
+            )),
+            (None, Some(_)) => Err(Error::Quic(
+                "native H3 server sent unexpected retry_source_connection_id".into(),
+            )),
+            (None, None) => Ok(()),
+        }
     }
 }
 
