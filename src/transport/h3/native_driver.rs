@@ -811,6 +811,7 @@ impl NativeH3Driver {
             || !self.pending_streaming_responses.is_empty()
             || !self.pending_tunnels.is_empty()
             || !self.pending_commands.is_empty()
+            || self.client_application_ack_deadline().is_some()
     }
 
     fn streaming_response_body_backpressured(&self) -> bool {
@@ -828,7 +829,16 @@ impl NativeH3Driver {
     }
 
     fn receive_backpressured(&self) -> bool {
-        self.streaming_response_body_backpressured() || self.tunnel_inbound_backpressured()
+        let has_streaming_responses = !self.pending_streaming_responses.is_empty();
+        let has_tunnels = !self.pending_tunnels.is_empty();
+        if !has_streaming_responses && !has_tunnels {
+            return false;
+        }
+
+        let streaming_responses_backpressured =
+            !has_streaming_responses || self.streaming_response_body_backpressured();
+        let tunnels_backpressured = !has_tunnels || self.tunnel_inbound_backpressured();
+        streaming_responses_backpressured && tunnels_backpressured
     }
 
     fn client_application_ack_deadline(&self) -> Option<Instant> {
@@ -1896,6 +1906,91 @@ fn is_enable_connect_protocol(setting: &H3Setting) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_scheduler_rotates_classes_when_both_have_work() {
+        let mut scheduler = H3SendScheduler::default();
+
+        assert_eq!(
+            scheduler.next_classes(true, true),
+            [H3SendClass::RequestBody, H3SendClass::TunnelData]
+        );
+
+        scheduler.record_stream_progress(H3SendClass::RequestBody, 0);
+        assert_eq!(
+            scheduler.next_classes(true, true),
+            [H3SendClass::TunnelData, H3SendClass::RequestBody],
+            "tunnel DATA must get the next class turn after request body progress"
+        );
+
+        scheduler.record_stream_progress(H3SendClass::TunnelData, 4);
+        assert_eq!(
+            scheduler.next_classes(true, true),
+            [H3SendClass::RequestBody, H3SendClass::TunnelData],
+            "request bodies must regain the next class turn after tunnel progress"
+        );
+    }
+
+    #[test]
+    fn send_scheduler_rotates_streams_within_each_class() {
+        let mut scheduler = H3SendScheduler::default();
+        let stream_ids = vec![0, 4, 8];
+
+        assert_eq!(
+            scheduler.ordered_streams(H3SendClass::RequestBody, stream_ids.clone()),
+            vec![0, 4, 8]
+        );
+
+        scheduler.record_stream_progress(H3SendClass::RequestBody, 0);
+        assert_eq!(
+            scheduler.ordered_streams(H3SendClass::RequestBody, stream_ids.clone()),
+            vec![4, 8, 0],
+            "request-body scheduling must not repeatedly service the lowest stream id first"
+        );
+
+        scheduler.record_stream_progress(H3SendClass::RequestBody, 8);
+        assert_eq!(
+            scheduler.ordered_streams(H3SendClass::RequestBody, stream_ids.clone()),
+            vec![0, 4, 8]
+        );
+
+        scheduler.record_stream_progress(H3SendClass::TunnelData, 4);
+        assert_eq!(
+            scheduler.ordered_streams(H3SendClass::TunnelData, stream_ids),
+            vec![8, 0, 4],
+            "tunnel DATA rotation must be independent from request-body rotation"
+        );
+    }
+
+    #[test]
+    fn send_scheduler_grows_data_budget_after_full_budget_writes() {
+        let mut scheduler = H3SendScheduler::default();
+        let initial = scheduler.data_budget(usize::MAX);
+
+        scheduler.record_data_sent(initial);
+        let grown = scheduler.data_budget(usize::MAX);
+
+        assert!(
+            grown > initial,
+            "H3 outbound DATA budget must grow after filling the previous budget"
+        );
+        assert_eq!(
+            scheduler.data_budget(5),
+            5,
+            "scheduler must not inflate small DATA chunks beyond available bytes"
+        );
+    }
+
+    #[test]
+    fn released_receive_credit_preserves_body_and_tunnel_byte_counts() {
+        let credit = H3ReleasedReceiveCredit::new(17, 29);
+
+        assert_eq!(credit.body_bytes, 17);
+        assert_eq!(credit.tunnel_bytes, 29);
+        assert_eq!(credit.total_bytes(), 46);
+        assert!(credit.has_credit());
+        assert!(!H3ReleasedReceiveCredit::new(0, 0).has_credit());
+    }
 
     #[test]
     fn streaming_response_body_reports_backpressure_when_shared_and_pending_slots_are_full() {

@@ -179,6 +179,13 @@ struct SentApplicationStreamPacket {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SentCryptoPacket {
+    packet_type: LongHeaderType,
+    crypto_offset: u64,
+    crypto_data: Bytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct QuicApplicationFlowControl {
     local_initiator: u64,
     max_data: u64,
@@ -492,9 +499,11 @@ pub struct NativeQuicHandshake {
     initial_ack_tracker: QuicAckTracker,
     handshake_ack_tracker: QuicAckTracker,
     application_ack_tracker: QuicAckTracker,
+    client_handshake_loss_detector: QuicLossDetector,
     client_application_loss_detector: QuicLossDetector,
     client_application_flow_control: QuicApplicationFlowControl,
     client_application_receive_flow_control: QuicReceiveFlowControl,
+    client_handshake_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     client_application_sent_streams: BTreeMap<u64, SentApplicationStreamPacket>,
     next_client_initial_packet_number: u64,
     next_server_initial_packet_number: u64,
@@ -509,6 +518,7 @@ pub struct NativeQuicHandshake {
     server_h3_stream_buffers: BTreeMap<u64, BytesMut>,
     server_h3_stream_buffer_offsets: BTreeMap<u64, u64>,
     server_h3_stream_types: BTreeMap<u64, native::H3StreamType>,
+    close_draining: bool,
 }
 
 pub struct NativeQuicServerHandshake {
@@ -544,6 +554,7 @@ pub struct NativeQuicServerHandshake {
     client_h3_stream_buffers: BTreeMap<u64, BytesMut>,
     client_h3_stream_buffer_offsets: BTreeMap<u64, u64>,
     client_h3_stream_types: BTreeMap<u64, native::H3StreamType>,
+    close_draining: bool,
 }
 
 impl NativeQuicServerHandshake {
@@ -599,6 +610,7 @@ impl NativeQuicServerHandshake {
             client_h3_stream_buffers: BTreeMap::new(),
             client_h3_stream_buffer_offsets: BTreeMap::new(),
             client_h3_stream_types: BTreeMap::new(),
+            close_draining: false,
         })
     }
 
@@ -1408,6 +1420,7 @@ impl NativeQuicHandshake {
             initial_ack_tracker: QuicAckTracker::default(),
             handshake_ack_tracker: QuicAckTracker::default(),
             application_ack_tracker: QuicAckTracker::default(),
+            client_handshake_loss_detector: QuicLossDetector::default(),
             client_application_loss_detector: QuicLossDetector::default(),
             client_application_flow_control: QuicApplicationFlowControl::client(
                 &fingerprint.transport,
@@ -1415,6 +1428,7 @@ impl NativeQuicHandshake {
             client_application_receive_flow_control: QuicReceiveFlowControl::client(
                 &fingerprint.transport,
             ),
+            client_handshake_sent_crypto: BTreeMap::new(),
             client_application_sent_streams: BTreeMap::new(),
             next_client_initial_packet_number: 1,
             next_server_initial_packet_number: 0,
@@ -1429,6 +1443,7 @@ impl NativeQuicHandshake {
             server_h3_stream_buffers: BTreeMap::new(),
             server_h3_stream_buffer_offsets: BTreeMap::new(),
             server_h3_stream_types: BTreeMap::new(),
+            close_draining: false,
         })
     }
 

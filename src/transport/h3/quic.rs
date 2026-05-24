@@ -498,6 +498,7 @@ struct AckRange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuicLossDetector {
     sent: BTreeSet<u64>,
+    sent_at: BTreeMap<u64, Instant>,
     acked: BTreeSet<u64>,
     packet_threshold: u64,
 }
@@ -506,6 +507,7 @@ impl Default for QuicLossDetector {
     fn default() -> Self {
         Self {
             sent: BTreeSet::new(),
+            sent_at: BTreeMap::new(),
             acked: BTreeSet::new(),
             packet_threshold: 3,
         }
@@ -519,14 +521,20 @@ impl QuicLossDetector {
     }
 
     pub fn on_packet_sent(&mut self, packet_number: u64) {
+        self.on_packet_sent_at(packet_number, Instant::now());
+    }
+
+    pub fn on_packet_sent_at(&mut self, packet_number: u64, sent_at: Instant) {
         if packet_number <= MAX_PACKET_NUMBER {
             self.sent.insert(packet_number);
+            self.sent_at.insert(packet_number, sent_at);
         }
     }
 
     pub fn on_ack_received(&mut self, packet_number: u64) {
         if self.sent.contains(&packet_number) {
             self.acked.insert(packet_number);
+            self.sent_at.remove(&packet_number);
         }
     }
 
@@ -567,6 +575,7 @@ impl QuicLossDetector {
 
     pub fn retire_packet(&mut self, packet_number: u64) {
         self.sent.remove(&packet_number);
+        self.sent_at.remove(&packet_number);
     }
 
     pub fn lost_packets(&self) -> Vec<u64> {
@@ -582,6 +591,19 @@ impl QuicLossDetector {
             .copied()
             .filter(|packet_number| {
                 *packet_number <= loss_cutoff && !self.acked.contains(packet_number)
+            })
+            .collect()
+    }
+
+    pub fn pto_expired_packets(&self, now: Instant, pto: Duration) -> Vec<u64> {
+        self.sent
+            .iter()
+            .copied()
+            .filter(|packet_number| !self.acked.contains(packet_number))
+            .filter(|packet_number| {
+                self.sent_at
+                    .get(packet_number)
+                    .is_some_and(|sent_at| now.saturating_duration_since(*sent_at) >= pto)
             })
             .collect()
     }
@@ -1093,6 +1115,12 @@ pub fn recover_packet_number(
 
 pub fn encode_transport_parameters(params: &QuicTransportParams) -> Bytes {
     let mut out = BytesMut::new();
+    if let Some(raw_ordered_parameters) = &params.raw_ordered_transport_parameters {
+        for parameter in raw_ordered_parameters {
+            put_transport_parameter_bytes(&mut out, parameter.id, &parameter.value);
+        }
+        return out.freeze();
+    }
     put_transport_parameter(
         &mut out,
         TP_MAX_IDLE_TIMEOUT,
