@@ -11,7 +11,7 @@ Specter now has credible proof for the H1/H2, RFC6455, and local same-fixture na
 - **H1/H2 vs reqwest:** release-grade localhost proof is documented in `README.md` and `docs/benchmarks/2026-05-24-streaming/`.
 - **H1 RFC6455 WebSocket vs fast Rust clients:** local echo benchmark now includes `fastwebsockets 0.10.0` and `tokio-tungstenite 0.24`; persisted run `docs/benchmarks/websocket-vs-fastwebsockets/2026-05-24-final.json` passes both gates.
 - **Live Codex WSS vs tokio-tungstenite:** persisted n=50 artifact passes all samples and shows better Specter p95 tail, but median TTFT remains within/noisy against tungstenite.
-- **Native H3 HTTP comparator:** isolated comparator crate now has persisted same-fixture artifacts under `docs/benchmarks/native-h3-vs-rust-clients/`; `2026-05-24-full-local-with-s2n-smoke.json` passes `--require-superiority` with real rows for `quiche`, `tokio-quiche`, `h3-quinn`, `reqwest_h3`, `quinn_transport`, and `s2n_quic_transport`, and emits no fixture packet-error events.
+- **Native H3 HTTP comparator:** isolated comparator crate now has persisted same-fixture artifacts under `docs/benchmarks/native-h3-vs-rust-clients/`; `2026-05-24-full-local-with-s2n-smoke.json` passes `--require-superiority` with real rows for `quiche`, `tokio-quiche`, `h3-quinn`, `reqwest_h3`, `quinn_transport`, and `s2n_quic_transport`, emits no fixture packet-error events, and now records stable `category`/`fatal` fields if packet-open noise reappears.
 - **RFC9220 WebSocket-over-H3:** correctness/API exists as a raw byte tunnel, and the full same-fixture proof includes a Specter local echo latency/throughput row; third-party tunnel comparator rows, close/FIN timing, and slow-consumer rows remain pending.
 - **Native QUIC production readiness:** still not production-complete; PTO/timer recovery, CRYPTO retransmission, Retry, version negotiation, close drain, key update, ECN socket plumbing beyond ACK_ECN frame parsing, and full path validation remain gaps.
 
@@ -104,7 +104,7 @@ Specter status:
 
 - Native H3 release artifact with samples >=30 remains pending; current persisted smoke artifacts prove the real same-fixture rows and gate behavior with samples=2.
 - RFC9220/WebSocket-over-H3 comparator rows, p95/p99, close/FIN timing, and slow-consumer rows.
-- H3 fixture cleanup/error classification is artifacted now; latest full same-fixture proofs emit no packet-error events.
+- H3 fixture cleanup/error classification is artifacted now: fixture events serialize stable `category` and `fatal` fields, including `non_fatal_packet_open_after_application_ready` for app-ready packet-open noise and `fatal_packet_open_before_application_ready` for handshake-phase packet-open failures; latest full same-fixture proofs emit no packet-error events.
 - Import/merge precedence for split H3 artifacts now prefers measured rows over pending placeholders.
 
 ## Native QUIC/H3 protocol gaps
@@ -154,7 +154,7 @@ Specter status:
 
 4. **Make H3 comparator release-grade**
    - Current same-fixture artifacts under `docs/benchmarks/native-h3-vs-rust-clients/` pass with samples=2 and real measured rows.
-   - Next step is a larger samples >=30 release run plus stderr capture if packet-error noise reappears.
+   - Next step is a larger samples >=30 release run; preserve stderr plus `fixture_events`, and treat any `fatal_*` packet-open category as release-blocking.
 
 5. **Expand RFC9220 benchmark rows**
    - Raw byte tunnel: open latency, first DATA latency, sustained throughput, echo RTT, close/FIN latency.
