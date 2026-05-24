@@ -306,9 +306,9 @@ Run with `cargo bench --bench codex_ws_streaming`.
 - All headers properly lowercased per RFC 7540/9113
 - True multiplexing (concurrent requests on single connection, respecting `MAX_CONCURRENT_STREAMS`)
 
-**HTTP/3** - QUIC transport via quiche with TLS 1.3 fingerprinting.
+**HTTP/3** - Native QUIC/H3 implementation under `src/transport/h3`, with request streaming, browser-shaped H3/QUIC fingerprint controls, and RFC 9220 WebSocket-over-H3 tunnels. The H3 benchmark matrix uses `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest_h3` as comparator baselines; production-grade native QUIC recovery/fallback hardening is still active work.
 
-**WebSockets** - RFC 6455 client over HTTP/1.1 Upgrade, plus RFC 8441 Extended CONNECT tunnels over HTTP/2. Compression extensions are intentionally not negotiated.
+**WebSockets** - RFC 6455 client over HTTP/1.1 Upgrade, RFC 8441 Extended CONNECT tunnels over HTTP/2, and RFC 9220 Extended CONNECT tunnels over native HTTP/3. Compression extensions are intentionally not negotiated.
 
 **TLS** - BoringSSL configured with Chrome cipher suites, curves, and signature algorithms. The TLS configuration is identical across Chrome 142-148. BoringSSL does its own extension randomization (which matches Chrome's behavior for TLS 1.3).
 
