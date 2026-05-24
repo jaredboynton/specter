@@ -80,6 +80,8 @@ hex = "0.4"
 rcgen = "0.14.5"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }
 fastwebsockets = "0.10.0"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = "0.3"
 
 [[bench]]
 name = "streaming_vs_reqwest"
@@ -87,6 +89,14 @@ harness = false
 
 [[bench]]
 name = "websocket_vs_fastwebsockets"
+harness = false
+
+[[bench]]
+name = "codex_real_streaming"
+harness = false
+
+[[bench]]
+name = "codex_ws_streaming"
 harness = false
 
 # Inner-loop iteration tuning. These profile sections only affect builds rooted

@@ -584,6 +584,28 @@ fn native_quic_ack_tracker_clears_pending_ack_without_forgetting_ranges() {
 }
 
 #[test]
+fn native_quic_ack_tracker_defers_until_configured_packet_threshold() {
+    let mut tracker = QuicAckTracker::default();
+
+    assert!(!tracker.should_ack_after(4));
+    tracker.observe(1);
+    tracker.observe(2);
+    tracker.observe(3);
+    assert!(!tracker.should_ack_after(4));
+
+    tracker.observe(4);
+    assert!(tracker.should_ack_after(4));
+
+    tracker.mark_ack_sent();
+    assert!(!tracker.should_ack_after(4));
+
+    tracker.observe(4);
+    assert!(!tracker.should_ack_after(1));
+    tracker.observe(5);
+    assert!(tracker.should_ack_after(1));
+}
+
+#[test]
 fn native_quic_loss_detector_marks_packets_lost_by_reordering_threshold() {
     let mut detector = QuicLossDetector::default();
     detector.on_packet_sent(1);

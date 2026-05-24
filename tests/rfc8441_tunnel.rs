@@ -102,6 +102,13 @@ fn spawn_driver() -> (H2Handle, DuplexStream, tokio::task::JoinHandle<()>) {
 fn spawn_driver_with_settings(
     settings: Http2Settings,
 ) -> (H2Handle, DuplexStream, tokio::task::JoinHandle<()>) {
+    spawn_driver_with_settings_and_config(settings, H2TransportConfig::default())
+}
+
+fn spawn_driver_with_settings_and_config(
+    settings: Http2Settings,
+    config: H2TransportConfig,
+) -> (H2Handle, DuplexStream, tokio::task::JoinHandle<()>) {
     let (client, server) = duplex(8192);
     let (command_tx, command_rx) = mpsc::channel(8);
     let goaway_received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -111,13 +118,7 @@ fn spawn_driver_with_settings(
         let conn = RawH2Connection::connect(client, settings, PseudoHeaderOrder::Chrome)
             .await
             .unwrap();
-        let driver = H2Driver::new(
-            conn,
-            driver_command_tx,
-            command_rx,
-            goaway_received,
-            H2TransportConfig::default(),
-        );
+        let driver = H2Driver::new(conn, driver_command_tx, command_rx, goaway_received, config);
         let _ = driver.drive().await;
     });
     (handle, server, driver_task)
@@ -458,6 +459,51 @@ async fn rfc8441_tunnel_open_counts_against_max_concurrent_streams() {
     assert!(
         !second_open.is_finished(),
         "second tunnel open must remain pending or fail asynchronously until a stream slot is free"
+    );
+
+    drop(first_tunnel);
+    second_open.abort();
+    driver_task.abort();
+}
+
+#[tokio::test]
+async fn rfc8441_tunnel_open_counts_against_local_h2_stream_cap() {
+    let mut config = H2TransportConfig::default();
+    config.max_concurrent_streams_per_connection = Some(1);
+    let (handle, mut server, driver_task) =
+        spawn_driver_with_settings_and_config(Http2Settings::default(), config);
+    let first_uri: Uri = "wss://example.com/one".parse().unwrap();
+    let second_uri: Uri = "wss://example.com/two".parse().unwrap();
+
+    read_client_preface_and_settings(&mut server).await;
+    write_settings(&mut server, &[(0x8, 1), (0x3, 100)]).await;
+
+    let first_handle = handle.clone();
+    let first_open =
+        tokio::spawn(async move { first_handle.open_websocket_tunnel(first_uri, vec![]).await });
+    let (first_headers, _) = read_headers_frame(&mut server).await;
+    write_headers(&mut server, first_headers.stream_id, &[0x88], false).await;
+    let first_tunnel = timeout(Duration::from_secs(1), first_open)
+        .await
+        .expect("first tunnel open must not hang")
+        .unwrap()
+        .expect("first tunnel should open");
+
+    let second_open =
+        tokio::spawn(async move { handle.open_websocket_tunnel(second_uri, vec![]).await });
+
+    let second_headers = timeout(
+        Duration::from_millis(200),
+        maybe_read_headers_frame(&mut server),
+    )
+    .await;
+    assert!(
+        second_headers.is_err(),
+        "local H2 stream cap must queue CONNECT even when peer MAX_CONCURRENT_STREAMS allows more"
+    );
+    assert!(
+        !second_open.is_finished(),
+        "second tunnel open must wait for the local H2 stream cap to free capacity"
     );
 
     drop(first_tunnel);

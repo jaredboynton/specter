@@ -10,6 +10,7 @@ fn chrome_http3_fingerprint_exposes_quic_h3_and_grease_knobs() {
     assert_eq!(fingerprint.transport.initial_max_streams_bidi, 100);
     assert_eq!(fingerprint.transport.ack_delay_exponent, 3);
     assert_eq!(fingerprint.transport.max_ack_delay_ms, 25);
+    assert_eq!(fingerprint.transport.ack_eliciting_threshold, 16);
     assert_eq!(fingerprint.transport.active_connection_id_limit, 2);
     assert!(fingerprint.transport.disable_active_migration);
     assert!(fingerprint.transport.grease);
@@ -53,6 +54,37 @@ fn custom_http3_fingerprint_flows_through_h3_client_and_unified_builder() {
         .build()
         .unwrap();
     assert_eq!(client.h3_client().http3_fingerprint(), &fingerprint);
+}
+
+#[test]
+fn client_builder_h3_capacity_knobs_flow_into_native_fingerprint() {
+    let client = Client::builder()
+        .h3_initial_max_data(32 * 1024 * 1024)
+        .h3_initial_max_stream_data_bidi_local(8 * 1024 * 1024)
+        .h3_initial_max_stream_data_bidi_remote(9 * 1024 * 1024)
+        .h3_initial_max_stream_data_uni(10 * 1024 * 1024)
+        .h3_initial_max_streams_bidi(256)
+        .h3_initial_max_streams_uni(64)
+        .h3_max_connection_window(64 * 1024 * 1024)
+        .h3_max_stream_window(16 * 1024 * 1024)
+        .build()
+        .unwrap();
+
+    let transport = &client.h3_client().http3_fingerprint().transport;
+    assert_eq!(transport.initial_max_data, 32 * 1024 * 1024);
+    assert_eq!(
+        transport.initial_max_stream_data_bidi_local,
+        8 * 1024 * 1024
+    );
+    assert_eq!(
+        transport.initial_max_stream_data_bidi_remote,
+        9 * 1024 * 1024
+    );
+    assert_eq!(transport.initial_max_stream_data_uni, 10 * 1024 * 1024);
+    assert_eq!(transport.initial_max_streams_bidi, 256);
+    assert_eq!(transport.initial_max_streams_uni, 64);
+    assert_eq!(transport.max_connection_window, 64 * 1024 * 1024);
+    assert_eq!(transport.max_stream_window, 16 * 1024 * 1024);
 }
 
 #[test]

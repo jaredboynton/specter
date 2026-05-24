@@ -1,6 +1,6 @@
 # Specter
 
-HTTP client that accurately replicates Chrome's TLS and HTTP/2 behavior, letting you automate browser workflows programmatically.
+Rust HTTP client with Chrome-accurate fingerprints across TLS, HTTP/1.1, HTTP/2, HTTP/3, and WebSockets - automation that looks like a real browser on the wire.
 
 ## What This Is
 
@@ -214,6 +214,23 @@ Node and Python bindings expose RFC 8441 separately as `client.websocketH2(...)`
 
 The RFC 8441 API is a byte tunnel. Use it when you need H2 Extended CONNECT semantics directly; use `client.websocket(...)` for the full RFC 6455 frame/message client.
 
+## Performance
+
+Specter ships deterministic localhost streaming benchmarks against `reqwest 0.12`. Across H1 and H2 request- and response-body streaming, Specter beats reqwest on both TTFT and throughput with Wilcoxon p-values well below 0.01. From the persisted 2026-05-24 proof artifacts:
+
+| Workload | Protocol | TTFT Improvement | Throughput Improvement | Throughput p-value | Artifact |
+| --- | --- | ---: | ---: | ---: | --- |
+| Response-body streaming | H1 | +65.59% | +19.97% | 4.44e-16 | [`final2-h1-response-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h1-response-s100.json) |
+| Response-body streaming | H2 | +26.12% | +7.88% | 4.05e-8 | [`final2-h2-response-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h2-response-s100.json) |
+| Request-body streaming | H1 | +10.34% | +11.53% | 8.77e-13 | [`final2-h1-request-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h1-request-s100.json) |
+| Request-body streaming | H2 | +17.27% | +20.87% | 0 | [`final2-h2-request-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h2-request-s100.json) |
+
+CI gates require at least 5% median TTFT and throughput improvement, p<0.01, p95 throughput regression at most 5%, and RFC 8441/WebSocket coexistence preserved; the measured numbers above clear those gates by wide margins. Published request artifacts have zero denominator-floor clamps, zero client-write denominator-floor clamps, and zero upload-complete fallbacks. H2 response streaming was repeated three additional times after the final hot-path fix; the weakest repeat still shows +5.71% throughput with p=1.48e-6.
+
+The request-body benchmark uses a fixed `5 x 1024B` body schedule, `2ms` inter-chunk pacing, and an 8-request workload, measured against the fixture upload-complete timestamp rather than response completion.
+
+See [`docs/benchmarks/2026-05-24-streaming/`](docs/benchmarks/2026-05-24-streaming/) for the summary, raw JSON artifacts, exact commands, and RFC 8441 coexistence proof. These are deterministic local benchmark results, not a claim that every network or workload is faster.
+
 ## Implementation
 
 **HTTP/1.1** - Direct socket implementation, no hyper dependency.
@@ -248,21 +265,6 @@ Local/CI checks:
 - `cargo run --example fingerprint_validation` hits ScrapFly, BrowserLeaks, tls.peet.ws, and Cloudflare to confirm TLS/HTTP/2/HTTP/3 fingerprints.
 - `cargo run --example protocol_test -- --verbose` walks through HTTP/1.1 preference, HTTP/2 pooling, HTTP/3 only, and connection header filtering. Pass `--target example.com` to test a custom origin.
 - `cargo clippy -p specter -- -D warnings` stays clean to make CI fail-fast on regressions.
-
-### Streaming benchmarks vs reqwest
-
-Specter includes deterministic localhost streaming benchmarks against `reqwest 0.12`. The persisted 2026-05-24 proof artifacts show Specter meeting the configured H1/H2 request-body and response-body gates: at least 5% median TTFT improvement, at least 5% median throughput improvement, Wilcoxon p-value below 0.01, p95 throughput regression at most 5%, and RFC 8441/WebSocket coexistence preserved.
-
-| Workload | Protocol | TTFT Improvement | Throughput Improvement | Throughput p-value | Artifact |
-| --- | --- | ---: | ---: | ---: | --- |
-| Response-body streaming | H1 | +65.59% | +19.97% | 4.44e-16 | [`final2-h1-response-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h1-response-s100.json) |
-| Response-body streaming | H2 | +26.12% | +7.88% | 4.05e-8 | [`final2-h2-response-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h2-response-s100.json) |
-| Request-body streaming | H1 | +10.34% | +11.53% | 8.77e-13 | [`final2-h1-request-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h1-request-s100.json) |
-| Request-body streaming | H2 | +17.27% | +20.87% | 0 | [`final2-h2-request-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h2-request-s100.json) |
-
-The request-body gate keeps the fixed `5 x 1024B` body schedule, `2ms` inter-chunk pacing, and 8-request workload, but measures against the fixture upload-complete timestamp rather than response completion. The published request artifacts have zero denominator-floor clamps, zero client-write denominator-floor clamps, and zero upload-complete fallbacks. H2 response streaming was repeated three additional times after the final hot-path fix; the weakest repeat still shows +5.71% throughput with p=1.48e-6.
-
-See [`docs/benchmarks/2026-05-24-streaming/`](docs/benchmarks/2026-05-24-streaming/) for the summary, raw JSON artifacts, exact commands, and RFC 8441 coexistence proof. These are deterministic local benchmark results, not a claim that every network or workload is faster.
 
 ## Development
 

@@ -74,6 +74,7 @@ pub struct H2TransportConfig {
     pub keep_alive_interval: Option<Duration>,
     pub keep_alive_timeout: Duration,
     pub keep_alive_while_idle: bool,
+    pub max_concurrent_streams_per_connection: Option<u32>,
 }
 
 impl Default for H2TransportConfig {
@@ -82,6 +83,16 @@ impl Default for H2TransportConfig {
             keep_alive_interval: None,
             keep_alive_timeout: Duration::from_secs(20),
             keep_alive_while_idle: false,
+            max_concurrent_streams_per_connection: None,
+        }
+    }
+}
+
+impl H2TransportConfig {
+    pub(crate) fn effective_max_concurrent_streams(&self, peer_max_streams: u32) -> usize {
+        match self.max_concurrent_streams_per_connection {
+            Some(local_max) if local_max > 0 => peer_max_streams.min(local_max) as usize,
+            _ => peer_max_streams as usize,
         }
     }
 }

@@ -230,6 +230,85 @@ async fn pool_idle_timeout_long_allows_h1_reuse() {
 }
 
 #[tokio::test]
+async fn h1_max_connections_per_origin_limits_active_parallelism() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let active_for_task = active.clone();
+    let max_active_for_task = max_active.clone();
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let active = active_for_task.clone();
+            let max_active = max_active_for_task.clone();
+            tokio::spawn(async move {
+                let mut buffer = Vec::new();
+                let mut read_buf = [0u8; 1024];
+                while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = match stream.read(&mut read_buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => n,
+                    };
+                    buffer.extend_from_slice(&read_buf[..n]);
+                }
+
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await;
+                let _ = stream.flush().await;
+                active.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+
+    let client = Client::builder()
+        .prefer_http2(false)
+        .pool_max_idle_per_host(0)
+        .h1_max_connections_per_origin(1)
+        .build()
+        .unwrap();
+    let url = format!("http://127.0.0.1:{}/slow", addr.port());
+
+    let request = |client: Client, url: String| async move {
+        let response = client.get(url.as_str()).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.text().unwrap(), "ok");
+    };
+
+    tokio::join!(
+        request(client.clone(), url.clone()),
+        request(client.clone(), url.clone()),
+        request(client, url),
+    );
+
+    assert_eq!(
+        max_active.load(Ordering::SeqCst),
+        1,
+        "h1_max_connections_per_origin(1) must queue active H1 requests instead of opening parallel sockets"
+    );
+}
+
+#[test]
+fn client_builder_exposes_h2_stream_capacity_knob() {
+    let client = Client::builder()
+        .h2_max_concurrent_streams_per_connection(17)
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        client.h2_max_concurrent_streams_per_connection(),
+        Some(17),
+        "ClientBuilder must expose the local H2 stream cap used by the scheduler"
+    );
+}
+
+#[tokio::test]
 async fn client_builder_h3_max_idle_timeout_forces_reconnect() {
     let server = MockH3Server::new().await.unwrap();
     let connection_count = server.connection_count();

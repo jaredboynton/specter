@@ -834,7 +834,9 @@ where
     }
 
     fn has_available_stream_slot(&self) -> bool {
-        let max_streams = self.connection.peer_settings().max_concurrent_streams as usize;
+        let max_streams = self.config.effective_max_concurrent_streams(
+            self.connection.peer_settings().max_concurrent_streams,
+        );
         self.active_stream_count() < max_streams
     }
 

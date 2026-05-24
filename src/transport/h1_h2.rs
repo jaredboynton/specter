@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::time::timeout as tokio_timeout;
 use url::Url;
 
@@ -81,6 +81,9 @@ pub struct Client {
     h2_direct_pool: H2DirectPool,
     /// HTTP/1.1 connection pool for reuse
     h1_pool: Arc<ConnectionPool>,
+    /// Active HTTP/1.1 connection slots per origin.
+    h1_connection_slots: Arc<RwLock<HashMap<PoolKey, Arc<Semaphore>>>>,
+    h1_max_connections_per_origin: usize,
     http2_settings: Http2Settings,
     pseudo_order: PseudoHeaderOrder,
     default_version: HttpVersion,
@@ -150,6 +153,7 @@ pub struct ClientBuilder {
     dns_config: DnsConfig,
     pool_idle_timeout: Duration,
     pool_max_idle_per_host: usize,
+    h1_max_connections_per_origin: usize,
     h3_max_idle_timeout: Option<u64>,
     h3_fingerprint: Option<Http3Fingerprint>,
     h3_backend: H3Backend,
@@ -284,6 +288,47 @@ impl Client {
     /// Get default headers applied to new requests and tunnel builders.
     pub fn default_headers(&self) -> &Headers {
         &self.default_headers
+    }
+
+    /// Maximum active HTTP/1.1 connections allowed per origin.
+    pub fn h1_max_connections_per_origin(&self) -> usize {
+        self.h1_max_connections_per_origin
+    }
+
+    /// Local maximum concurrent HTTP/2 streams allowed per pooled connection.
+    pub fn h2_max_concurrent_streams_per_connection(&self) -> Option<u32> {
+        self.h2_transport_config
+            .max_concurrent_streams_per_connection
+    }
+
+    async fn acquire_h1_connection_slot(
+        &self,
+        key: &PoolKey,
+        timeouts: &Timeouts,
+    ) -> Result<Option<OwnedSemaphorePermit>> {
+        if self.h1_max_connections_per_origin == 0 {
+            return Ok(None);
+        }
+
+        let semaphore = {
+            let mut slots = self.h1_connection_slots.write().await;
+            slots
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Semaphore::new(self.h1_max_connections_per_origin)))
+                .clone()
+        };
+
+        let acquire = semaphore.acquire_owned();
+        let permit = if let Some(pool_acquire_timeout) = timeouts.pool_acquire {
+            tokio_timeout(pool_acquire_timeout, acquire)
+                .await
+                .map_err(|_| Error::PoolAcquireTimeout(pool_acquire_timeout))?
+        } else {
+            acquire.await
+        }
+        .map_err(|_| Error::Connection("HTTP/1.1 connection scheduler closed".into()))?;
+
+        Ok(Some(permit))
     }
 
     /// Check if a host is localhost (localhost, 127.0.0.1, ::1)
@@ -880,6 +925,9 @@ impl<'a> RequestBuilder<'a> {
         let pool_key = client.make_pool_key(&uri);
 
         let response = if !prefer_http2 {
+            let h1_slot = client
+                .acquire_h1_connection_slot(&pool_key, &timeouts)
+                .await?;
             let pooled_h1_stream = client.h1_pool.get_h1(&pool_key).await;
             if pooled_h1_stream.is_some() {
                 client.pool_reuse_counter.fetch_add(1, Ordering::Relaxed);
@@ -899,6 +947,7 @@ impl<'a> RequestBuilder<'a> {
             let h1_pool = client.h1_pool.clone();
             let pool_key_for_reuse = pool_key.clone();
             let on_reusable: crate::transport::h1::H1ReuseHook = Box::new(move |stream| {
+                let _h1_slot = h1_slot;
                 let _ = h1_pool.try_put_h1(pool_key_for_reuse, stream);
             });
             let conn = H1Connection::new(stream);
@@ -1475,6 +1524,7 @@ impl Client {
 
         // HTTP/1.1 path (with connection pooling)
         let pool_key = self.make_pool_key(&uri);
+        let h1_slot = self.acquire_h1_connection_slot(&pool_key, timeouts).await?;
 
         // Try to get a pooled connection first
         let mut stream_opt = self.h1_pool.get_h1(&pool_key).await;
@@ -1510,6 +1560,7 @@ impl Client {
         };
 
         let response = if server_wants_h2 {
+            drop(h1_slot);
             // Server negotiated HTTP/2 - we must speak HTTP/2 or they'll close connection
             tracing::debug!("Server selected h2 via ALPN, upgrading to HTTP/2");
 
@@ -1541,6 +1592,7 @@ impl Client {
                 fut.await
             }?
         } else {
+            let _h1_slot = h1_slot;
             // HTTP/1.1 - use the stream we already connected (or got from pool)
 
             // Send request - retry with new connection if pooled connection fails
@@ -1913,6 +1965,7 @@ impl ClientBuilder {
             dns_config: DnsConfig::new(),
             pool_idle_timeout: Duration::from_secs(30),
             pool_max_idle_per_host: 6,
+            h1_max_connections_per_origin: 6,
             h3_max_idle_timeout: None,
             h3_fingerprint: None,
             h3_backend: H3Backend::Native,
@@ -2038,6 +2091,21 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the maximum number of active HTTP/1.1 connections per origin.
+    ///
+    /// HTTP/1.1 has no true protocol multiplexing, so concurrent H1 work is
+    /// bounded by connection slots instead of stream slots. Set to `0` to
+    /// disable this queue and allow unbounded active H1 dials.
+    pub fn h1_max_connections_per_origin(mut self, max: usize) -> Self {
+        self.h1_max_connections_per_origin = max;
+        self
+    }
+
+    /// Alias for [`ClientBuilder::h1_max_connections_per_origin`].
+    pub fn h1_max_connections_per_host(self, max: usize) -> Self {
+        self.h1_max_connections_per_origin(max)
+    }
+
     /// Enable Specter's built-in cached async DNS resolver.
     ///
     /// This is a reqwest-compatible API name. Specter implements this without
@@ -2145,6 +2213,22 @@ impl ClientBuilder {
     pub fn http2_keep_alive_while_idle(mut self, enabled: bool) -> Self {
         self.h2_transport_config.keep_alive_while_idle = enabled;
         self
+    }
+
+    /// Set a local cap for concurrent streams opened on each pooled HTTP/2 connection.
+    ///
+    /// The effective scheduler limit is `min(peer MAX_CONCURRENT_STREAMS, max)`.
+    /// Passing `0` removes the local cap and leaves the peer-advertised limit
+    /// as the only stream-slot bound.
+    pub fn h2_max_concurrent_streams_per_connection(mut self, max: u32) -> Self {
+        self.h2_transport_config
+            .max_concurrent_streams_per_connection = (max > 0).then_some(max);
+        self
+    }
+
+    /// Alias for [`ClientBuilder::h2_max_concurrent_streams_per_connection`].
+    pub fn h2_max_streams_per_origin(self, max: u32) -> Self {
+        self.h2_max_concurrent_streams_per_connection(max)
     }
 
     /// Enable or disable the exclusive direct-read HTTP/2 streaming-response
@@ -2371,6 +2455,8 @@ impl ClientBuilder {
             h2_pool: Arc::new(RwLock::new(HashMap::new())),
             h2_direct_pool: Arc::new(StdMutex::new(HashMap::new())),
             h1_pool,
+            h1_connection_slots: Arc::new(RwLock::new(HashMap::new())),
+            h1_max_connections_per_origin: self.h1_max_connections_per_origin,
             http2_settings,
             pseudo_order,
             default_version,

@@ -24,6 +24,17 @@ const LOCAL_FIXTURE_CHUNK_COUNT: usize = 5;
 const LOCAL_FIXTURE_CHUNK_DELAY_MS: u64 = 1;
 const LOCAL_FIXTURE_H3_STREAM_SEGMENT_SIZE: usize = 1_200;
 
+fn trace_local_fixture_latency(label: &str, stream_id: Option<u64>) {
+    if std::env::var_os("SPECTER_H3_LATENCY_TRACE").is_none() {
+        return;
+    }
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    eprintln!("trace local_fixture {micros} {label} stream={stream_id:?}");
+}
+
 #[derive(Debug, Serialize)]
 struct Artifact {
     benchmark: &'static str,
@@ -915,6 +926,7 @@ impl LocalNativeH3Connection {
         stream_id: u64,
         headers: Vec<specter::transport::h3::native::H3Header>,
     ) -> anyhow::Result<()> {
+        trace_local_fixture_latency("request_headers_received", Some(stream_id));
         let path = headers
             .iter()
             .find(|header| header.name() == ":path")
@@ -932,6 +944,7 @@ impl LocalNativeH3Connection {
         } else if path.starts_with("/stream") {
             self.send_response_packet(stream_id, "application/octet-stream", None, false)
                 .await?;
+            trace_local_fixture_latency("response_headers_sent", Some(stream_id));
             let response_tx = self.response_tx.clone();
             tokio::spawn(async move {
                 for index in 0..LOCAL_FIXTURE_CHUNK_COUNT {
