@@ -519,3 +519,41 @@ fn native_mock_h3_server_schedules_lost_application_stream_retransmits() {
         "native mock H3 server must automatically send lost application STREAM retransmits after ACK/loss updates"
     );
 }
+
+#[test]
+fn native_mock_h3_server_schedules_application_loss_detection_timer() {
+    let mock_server = std::fs::read_to_string("tests/helpers/mock_h3_server.rs")
+        .expect("native mock H3 server source");
+
+    assert!(
+        mock_server.contains("server_loss_detection_deadline"),
+        "native mock H3 server must derive an application loss-detection deadline"
+    );
+    assert!(
+        mock_server.contains("handle_loss_detection_timeout().await"),
+        "native mock H3 server must wake on the application loss-detection timer"
+    );
+    assert!(
+        mock_server.contains("retransmit_pto_server_application_stream_packets"),
+        "native mock H3 server must retransmit application STREAM data on server application PTO"
+    );
+}
+
+#[test]
+fn native_h3_same_fixture_schedules_application_loss_detection_timer() {
+    let fixture = std::fs::read_to_string("benches/native_h3_vs_rust_clients/src/main.rs")
+        .expect("native H3 same-fixture benchmark source");
+
+    assert!(
+        fixture.contains("server_loss_detection_deadline"),
+        "native H3 same-fixture server must derive an application loss-detection deadline"
+    );
+    assert!(
+        fixture.contains("handle_loss_detection_timeout().await"),
+        "native H3 same-fixture server must wake on the application loss-detection timer"
+    );
+    assert!(
+        fixture.contains("retransmit_pto_server_application_stream_packets"),
+        "native H3 same-fixture server must retransmit application STREAM data on server application PTO"
+    );
+}
