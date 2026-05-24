@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use boring::ex_data::Index;
 use boring::pkey::PKey;
 use boring::ssl::{
-    AlpnError, Ssl, SslContext, SslContextBuilder, SslMethod, SslVerifyMode, SslVersion,
+    AlpnError, Ssl, SslContext, SslContextBuilder, SslMethod, SslSession, SslSessionCacheMode,
+    SslVerifyMode, SslVersion,
 };
 use boring::x509::X509;
 use boring_sys as ffi;
@@ -17,7 +18,8 @@ use foreign_types_shared::ForeignType;
 
 use crate::error::{Error, Result};
 use crate::fingerprint::{
-    tls::NativeH3TlsCapabilities, CertCompression, Http3Fingerprint, TlsFingerprint,
+    tls::{NativeH3TlsCapabilities, TlsExtensionOrderBehavior},
+    CertCompression, Http3Fingerprint, TlsFingerprint,
 };
 use crate::transport::h3::quic::{
     build_initial_crypto_packet, derive_initial_key_material,
@@ -33,6 +35,11 @@ unsafe extern "C" {
         out_params: *mut *const u8,
         out_params_len: *mut usize,
     );
+    fn SSL_set_quic_early_data_context(
+        ssl: *mut ffi::SSL,
+        context: *const u8,
+        context_len: usize,
+    ) -> c_int;
 }
 
 const QUIC_VERSION_1: u32 = 1;
@@ -52,6 +59,7 @@ pub struct NativeQuicTlsSession {
     ssl: Ssl,
     state: SharedCaptureState,
     transport_parameters: Bytes,
+    zero_rtt_offer: Option<NativeH3ZeroRttOffer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +70,18 @@ pub struct ClientInitialPacket {
     pub crypto_data: Bytes,
     pub transport_parameters: Bytes,
     pub secrets: Vec<QuicTlsSecret>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeH3SessionTicket {
+    pub der: Bytes,
+    pub timeout_secs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeH3ZeroRttOffer {
+    pub early_data_len: usize,
+    pub context: Bytes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -98,6 +118,7 @@ struct CaptureState {
     handshake_crypto: Vec<u8>,
     application_crypto: Vec<u8>,
     secrets: Vec<QuicTlsSecret>,
+    session_tickets: Vec<NativeH3SessionTicket>,
 }
 
 type SharedCaptureState = Arc<Mutex<CaptureState>>;
@@ -116,7 +137,8 @@ pub fn native_h3_tls_capabilities(fingerprint: &TlsFingerprint) -> NativeH3TlsCa
 
 impl NativeQuicTlsSession {
     pub fn client(server_name: &str, fingerprint: &Http3Fingerprint) -> Result<Self> {
-        let mut session = Self::new_client(server_name, fingerprint, None, None, true, &[], false)?;
+        let mut session =
+            Self::new_client(server_name, fingerprint, None, None, true, &[], false, None, None)?;
         session.drive_handshake("QUIC ClientHello capture handshake")?;
         if session.crypto_len(QuicEncryptionLevel::Initial) == 0 {
             return Err(Error::Tls(
@@ -185,6 +207,68 @@ impl NativeQuicTlsSession {
             verify_peer,
             &[],
             false,
+            None,
+            None,
+        )?;
+        session.drive_handshake("QUIC ClientHello capture handshake")?;
+        if session.crypto_len(QuicEncryptionLevel::Initial) == 0 {
+            return Err(Error::Tls(
+                "QUIC ClientHello capture produced no CRYPTO data".into(),
+            ));
+        }
+        Ok(session)
+    }
+
+    pub fn client_with_replayed_session(
+        server_name: &str,
+        fingerprint: &Http3Fingerprint,
+        tls_fingerprint: Option<&TlsFingerprint>,
+        verify_peer: bool,
+        session_ticket_der: &[u8],
+    ) -> Result<Self> {
+        let mut session = Self::new_client(
+            server_name,
+            fingerprint,
+            None,
+            tls_fingerprint,
+            verify_peer,
+            &[],
+            false,
+            Some(session_ticket_der),
+            None,
+        )?;
+        session.drive_handshake("QUIC ClientHello capture handshake")?;
+        if session.crypto_len(QuicEncryptionLevel::Initial) == 0 {
+            return Err(Error::Tls(
+                "QUIC ClientHello capture produced no CRYPTO data".into(),
+            ));
+        }
+        Ok(session)
+    }
+
+    pub fn client_with_zero_rtt_offer(
+        server_name: &str,
+        fingerprint: &Http3Fingerprint,
+        tls_fingerprint: Option<&TlsFingerprint>,
+        verify_peer: bool,
+        session_ticket_der: Option<&[u8]>,
+        early_data: &[u8],
+    ) -> Result<Self> {
+        if session_ticket_der.is_none() && !early_data.is_empty() {
+            return Err(Error::Tls(
+                "native H3 0-RTT requires a replayable TLS session ticket".into(),
+            ));
+        }
+        let mut session = Self::new_client(
+            server_name,
+            fingerprint,
+            None,
+            tls_fingerprint,
+            verify_peer,
+            &[],
+            false,
+            session_ticket_der,
+            Some(early_data),
         )?;
         session.drive_handshake("QUIC ClientHello capture handshake")?;
         if session.crypto_len(QuicEncryptionLevel::Initial) == 0 {
@@ -228,6 +312,8 @@ impl NativeQuicTlsSession {
             verify_peer,
             root_certs,
             use_platform_roots,
+            None,
+            None,
         )?;
         session.drive_handshake("QUIC ClientHello capture handshake")?;
         if session.crypto_len(QuicEncryptionLevel::Initial) == 0 {
@@ -279,6 +365,24 @@ impl NativeQuicTlsSession {
             .clone()
     }
 
+    pub fn take_session_tickets(&mut self) -> Vec<NativeH3SessionTicket> {
+        std::mem::take(
+            &mut self
+                .state
+                .lock()
+                .expect("QUIC TLS capture state poisoned")
+                .session_tickets,
+        )
+    }
+
+    pub fn zero_rtt_offer(&self) -> Option<&NativeH3ZeroRttOffer> {
+        self.zero_rtt_offer.as_ref()
+    }
+
+    pub fn session_reused(&self) -> bool {
+        self.ssl.session_reused()
+    }
+
     pub fn transport_parameters(&self) -> &Bytes {
         &self.transport_parameters
     }
@@ -308,9 +412,12 @@ impl NativeQuicTlsSession {
         verify_peer: bool,
         root_certs: &[Vec<u8>],
         use_platform_roots: bool,
+        replayed_session_ticket: Option<&[u8]>,
+        zero_rtt_early_data: Option<&[u8]>,
     ) -> Result<Self> {
         let mut builder = SslContext::builder(SslMethod::tls_client())
             .map_err(|err| Error::Tls(format!("failed to create QUIC TLS context: {err}")))?;
+        let state = Arc::new(Mutex::new(CaptureState::default()));
         builder
             .set_min_proto_version(Some(SslVersion::TLS1_3))
             .map_err(|err| Error::Tls(format!("failed to set QUIC TLS minimum version: {err}")))?;
@@ -322,7 +429,25 @@ impl NativeQuicTlsSession {
                 .map(|fingerprint| fingerprint.grease)
                 .unwrap_or(fingerprint.transport.grease),
         );
-        builder.set_permute_extensions(true);
+        let extension_order_behavior = tls_fingerprint
+            .map(TlsFingerprint::native_h3_extension_order_behavior)
+            .unwrap_or(TlsExtensionOrderBehavior::BrowserPermuted);
+        builder.set_permute_extensions(matches!(
+            extension_order_behavior,
+            TlsExtensionOrderBehavior::BrowserPermuted
+        ));
+        builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
+        let ticket_state = state.clone();
+        builder.set_new_session_callback(move |_ssl, session| {
+            if let Ok(der) = session.to_der() {
+                if let Ok(mut state) = ticket_state.lock() {
+                    state.session_tickets.push(NativeH3SessionTicket {
+                        der: Bytes::from(der),
+                        timeout_secs: session.timeout(),
+                    });
+                }
+            }
+        });
         if let Some(tls_fingerprint) = tls_fingerprint {
             apply_tls_fingerprint(&mut builder, tls_fingerprint)?;
         }
@@ -342,8 +467,6 @@ impl NativeQuicTlsSession {
             .map_err(|err| Error::Tls(format!("failed to create QUIC TLS session: {err}")))?;
         ssl.set_hostname(server_name)
             .map_err(|err| Error::Tls(format!("failed to set QUIC SNI: {err}")))?;
-
-        let state = Arc::new(Mutex::new(CaptureState::default()));
         ssl.replace_ex_data(capture_index(), state.clone());
 
         let transport_parameters =
@@ -355,6 +478,46 @@ impl NativeQuicTlsSession {
             } else {
                 encode_transport_parameters(&fingerprint.transport)
             };
+        if let Some(session_ticket_der) = replayed_session_ticket {
+            let session = SslSession::from_der(session_ticket_der).map_err(|err| {
+                Error::Tls(format!(
+                    "failed to parse native H3 replayed session ticket: {err}"
+                ))
+            })?;
+            unsafe {
+                ssl.set_session(&session).map_err(|err| {
+                    Error::Tls(format!(
+                        "failed to install native H3 replayed session ticket: {err}"
+                    ))
+                })?;
+            }
+        }
+        let zero_rtt_offer = if let Some(early_data) = zero_rtt_early_data {
+            if replayed_session_ticket.is_none() && !early_data.is_empty() {
+                return Err(Error::Tls(
+                    "native H3 0-RTT requires a replayable TLS session ticket".into(),
+                ));
+            }
+            let context = native_h3_early_data_context(fingerprint, &transport_parameters);
+            unsafe {
+                if SSL_set_quic_early_data_context(
+                    ssl.as_ptr(),
+                    context.as_ptr(),
+                    context.len(),
+                ) != 1
+                {
+                    return Err(Error::Tls(
+                        "failed to configure native H3 0-RTT early-data context".into(),
+                    ));
+                }
+            }
+            Some(NativeH3ZeroRttOffer {
+                early_data_len: early_data.len(),
+                context,
+            })
+        } else {
+            None
+        };
         unsafe {
             if ffi::SSL_set_quic_method(ssl.as_ptr(), quic_method()) != 1 {
                 return Err(Error::Tls("failed to install QUIC TLS method".into()));
@@ -374,6 +537,7 @@ impl NativeQuicTlsSession {
             ssl,
             state,
             transport_parameters,
+            zero_rtt_offer,
         })
     }
 
@@ -468,6 +632,7 @@ impl NativeQuicTlsSession {
             ssl,
             state,
             transport_parameters,
+            zero_rtt_offer: None,
         })
     }
 
