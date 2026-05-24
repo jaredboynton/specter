@@ -188,7 +188,8 @@ fn native_h3_driver_retains_connection_close_for_draining_replay() {
         "native H3 driver must retain the protected CONNECTION_CLOSE packet for drain replays"
     );
     assert!(
-        send_connection_close.contains("self.closing_connection_close_packet = Some(close_packet.clone())"),
+        send_connection_close
+            .contains("self.closing_connection_close_packet = Some(close_packet.clone())"),
         "send_connection_close must remember the protected close packet before entering drain"
     );
     assert!(

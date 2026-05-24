@@ -1720,6 +1720,46 @@ fn native_h3_handshake_validates_retry_and_queues_new_initial() {
 }
 
 #[test]
+fn native_h3_handshake_rejects_server_original_dcid_transport_parameter_mismatch() {
+    let fingerprint = Http3Fingerprint::chrome();
+    let client_destination_cid = ConnectionId::from_static(b"server-dcid");
+    let client_source_cid = ConnectionId::from_static(b"client-scid");
+    let server_source_cid = ConnectionId::from_static(b"server-scid");
+    let mut client = NativeQuicHandshake::client_with_verify_peer(
+        "localhost",
+        &fingerprint,
+        client_destination_cid.clone(),
+        client_source_cid.clone(),
+        false,
+    )
+    .unwrap();
+    let (cert_pem, key_pem) = helpers::tls::cached_cert_and_key_pem();
+    let mut server = NativeQuicServerHandshake::new_with_transport_parameter_connection_ids(
+        &fingerprint,
+        &cert_pem,
+        &key_pem,
+        client_destination_cid.clone(),
+        client_source_cid,
+        server_source_cid.clone(),
+        ConnectionId::from_static(b"wrong-dcid"),
+        server_source_cid,
+        None,
+    )
+    .unwrap();
+    let server_flight = server
+        .process_client_initial(client.client_initial().packet.as_ref())
+        .unwrap();
+
+    let err = client
+        .process_server_datagram(&server_flight.datagram)
+        .expect_err("client must reject mismatched server original_destination_connection_id");
+
+    assert!(err
+        .to_string()
+        .contains("original_destination_connection_id"));
+}
+
+#[test]
 fn native_h3_handshake_exposes_single_client_initial_packet() {
     let handshake = NativeQuicHandshake::client(
         "example.com",
