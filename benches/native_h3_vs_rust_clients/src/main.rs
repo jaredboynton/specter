@@ -1579,6 +1579,9 @@ impl LocalNativeH3Connection {
         }
 
         let events = self.handshake.open_client_h3_event_packet(packet)?;
+        if self.handshake.close_state().is_draining() {
+            return Ok(());
+        }
         if let Some(packet) = self
             .handshake
             .build_server_application_ack_packet_after_or_delay(
