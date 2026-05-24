@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::task::{Poll, Wake, Waker};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
@@ -23,17 +23,6 @@ use crate::transport::h3::native::{
 use crate::transport::h3::{H3TransportConfig, H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 
 struct NotifyWake(Arc<Notify>);
-
-fn trace_native_h3_latency(label: &str, stream_id: Option<u64>) {
-    if std::env::var_os("SPECTER_H3_LATENCY_TRACE").is_none() {
-        return;
-    }
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    eprintln!("trace native_driver {micros} {label} stream={stream_id:?}");
-}
 
 impl Wake for NotifyWake {
     fn wake(self: Arc<Self>) {
@@ -909,7 +898,6 @@ impl NativeH3Driver {
                         Err(error) => return Err(error),
                     }
                 };
-                trace_native_h3_latency("send_streaming_request_packet", Some(packet.stream_id));
                 self.state.track_streaming_response_stream(packet.stream_id);
                 self.pending_streaming_responses.insert(
                     packet.stream_id,
@@ -1497,7 +1485,6 @@ impl NativeH3Driver {
         };
         match event {
             NativeH3StreamingResponseEvent::Headers { status, headers } => {
-                trace_native_h3_latency("streaming_headers_ready", Some(stream_id));
                 if let Some(headers_tx) = stream.headers_tx.take() {
                     let _ = headers_tx.send(Ok((status, headers)));
                 }

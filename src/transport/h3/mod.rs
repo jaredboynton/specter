@@ -152,6 +152,7 @@ impl H3Client {
     }
 
     pub fn with_http3_fingerprint(mut self, fingerprint: Http3Fingerprint) -> Self {
+        self.clear_hot_handle();
         self.http3_fingerprint = fingerprint;
         self
     }
@@ -161,6 +162,7 @@ impl H3Client {
     }
 
     pub fn with_h3_backend(mut self, backend: H3Backend) -> Self {
+        self.clear_hot_handle();
         self.backend = backend;
         self
     }
@@ -171,12 +173,14 @@ impl H3Client {
 
     /// Set runtime HTTP/3 transport tuning.
     pub fn with_transport_config(mut self, config: H3TransportConfig) -> Self {
+        self.clear_hot_handle();
         self.transport_config = config.normalized();
         self
     }
 
     /// Set bounded in-flight response DATA slots per streaming H3 body.
     pub fn with_streaming_body_buffer_slots(mut self, slots: usize) -> Self {
+        self.clear_hot_handle();
         self.transport_config.streaming_body_buffer_slots = slots.max(1);
         self
     }
@@ -188,36 +192,42 @@ impl H3Client {
 
     /// Set a custom idle timeout (in milliseconds)
     pub fn with_max_idle_timeout(mut self, timeout_ms: u64) -> Self {
+        self.clear_hot_handle();
         self.max_idle_timeout = Some(timeout_ms);
         self
     }
 
     /// Set DNS resolution configuration.
     pub fn with_dns_config(mut self, dns_config: DnsConfig) -> Self {
+        self.clear_hot_handle();
         self.dns_config = dns_config;
         self
     }
 
     /// Disable server certificate verification (for testing)
     pub fn danger_accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.clear_hot_handle();
         self.verify_peer = !accept;
         self
     }
 
     /// Add a custom root certificate (DER or PEM) to the H3 trust store.
     pub fn add_root_certificate(mut self, cert: Vec<u8>) -> Self {
+        self.clear_hot_handle();
         self.root_certs.push(cert);
         self
     }
 
     /// Replace custom root certificates (DER or PEM) used by the H3 trust store.
     pub fn with_root_certificates(mut self, certs: Vec<Vec<u8>>) -> Self {
+        self.clear_hot_handle();
         self.root_certs = certs;
         self
     }
 
     /// Load platform root certificates into the H3 trust store.
     pub fn with_platform_roots(mut self, enabled: bool) -> Self {
+        self.clear_hot_handle();
         self.use_platform_roots = enabled;
         self
     }
@@ -376,6 +386,12 @@ impl H3Client {
         }
     }
 
+    fn clear_hot_handle(&self) {
+        if let Ok(mut hot) = self.hot_handle.write() {
+            *hot = None;
+        }
+    }
+
     fn clear_hot_handle_for_key(&self, key: &H3PoolKey) {
         if let Ok(mut hot) = self.hot_handle.write() {
             if hot.as_ref().is_some_and(|cached| &cached.key == key) {
@@ -454,8 +470,9 @@ impl H3Client {
             self.transport_config,
         )
         .await?;
+        let hot_key = key.clone();
         pool.insert(key, handle.clone());
-        self.store_hot_handle(url, &self.pool_key(url)?, &handle);
+        self.store_hot_handle(url, &hot_key, &handle);
         Ok(handle)
     }
 

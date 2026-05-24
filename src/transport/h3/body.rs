@@ -28,7 +28,7 @@ pub(crate) enum H3BodyPush {
 }
 
 /// Default bounded in-flight DATA item capacity per H3 stream body.
-pub(crate) const DEFAULT_H3_BODY_SLOT_CAPACITY: usize = 8;
+pub(crate) const DEFAULT_H3_BODY_SLOT_CAPACITY: usize = 64;
 
 struct H3BodyState {
     slots: VecDeque<std::result::Result<Bytes, Error>>,

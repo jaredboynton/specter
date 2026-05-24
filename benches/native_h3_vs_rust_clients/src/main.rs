@@ -24,17 +24,6 @@ const LOCAL_FIXTURE_CHUNK_COUNT: usize = 5;
 const LOCAL_FIXTURE_CHUNK_DELAY_MS: u64 = 1;
 const LOCAL_FIXTURE_H3_STREAM_SEGMENT_SIZE: usize = 1_200;
 
-fn trace_local_fixture_latency(label: &str, stream_id: Option<u64>) {
-    if std::env::var_os("SPECTER_H3_LATENCY_TRACE").is_none() {
-        return;
-    }
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    eprintln!("trace local_fixture {micros} {label} stream={stream_id:?}");
-}
-
 #[derive(Debug, Serialize)]
 struct Artifact {
     benchmark: &'static str,
@@ -926,7 +915,6 @@ impl LocalNativeH3Connection {
         stream_id: u64,
         headers: Vec<specter::transport::h3::native::H3Header>,
     ) -> anyhow::Result<()> {
-        trace_local_fixture_latency("request_headers_received", Some(stream_id));
         let path = headers
             .iter()
             .find(|header| header.name() == ":path")
@@ -944,7 +932,6 @@ impl LocalNativeH3Connection {
         } else if path.starts_with("/stream") {
             self.send_response_packet(stream_id, "application/octet-stream", None, false)
                 .await?;
-            trace_local_fixture_latency("response_headers_sent", Some(stream_id));
             let response_tx = self.response_tx.clone();
             tokio::spawn(async move {
                 for index in 0..LOCAL_FIXTURE_CHUNK_COUNT {
@@ -1076,17 +1063,22 @@ async fn measure_specter_native(
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
+    let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
+    fingerprint.transport.ack_eliciting_threshold = 64;
     let client = specter::H3Client::new()
         .danger_accept_invalid_certs(true)
+        .with_http3_fingerprint(fingerprint)
         .with_max_idle_timeout(ADAPTER_TIMEOUT.as_millis() as u64);
+    let handle = client.handle(url).await?;
+    let uri: http::Uri = url.parse()?;
 
     for _ in 0..warmups {
-        let _ = measure_specter_native_once(&client, url).await?;
+        let _ = measure_specter_native_once(&handle, &uri).await?;
     }
 
     let mut measured = Vec::with_capacity(samples);
     for _ in 0..samples {
-        measured.push(measure_specter_native_once(&client, url).await?);
+        measured.push(measure_specter_native_once(&handle, &uri).await?);
     }
 
     Ok(adapter_row_from_samples(
@@ -1097,12 +1089,17 @@ async fn measure_specter_native(
 }
 
 async fn measure_specter_native_once(
-    client: &specter::H3Client,
-    url: &str,
+    handle: &specter::transport::h3::H3Handle,
+    uri: &http::Uri,
 ) -> anyhow::Result<AdapterSample> {
     let start = Instant::now();
-    let mut response = client
-        .send_streaming(url, "GET", Vec::new(), specter::RequestBody::empty())
+    let mut response = handle
+        .send_streaming(
+            http::Method::GET,
+            uri,
+            Vec::new(),
+            specter::RequestBody::empty(),
+        )
         .await?;
     if !(200..300).contains(&response.status_code()) {
         anyhow::bail!(
@@ -1290,23 +1287,6 @@ async fn measure_h3_quinn(
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    for _ in 0..warmups {
-        let _ = measure_h3_quinn_once(url).await?;
-    }
-
-    let mut measured = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        measured.push(measure_h3_quinn_once(url).await?);
-    }
-
-    Ok(adapter_row_from_samples(
-        "h3_quinn",
-        "h3_quinn_adapter",
-        &measured,
-    ))
-}
-
-async fn measure_h3_quinn_once(url: &str) -> anyhow::Result<AdapterSample> {
     let url = url::Url::parse(url)?;
     let peer_addr = url
         .socket_addrs(|| Some(443))?
@@ -1327,10 +1307,36 @@ async fn measure_h3_quinn_once(url: &str) -> anyhow::Result<AdapterSample> {
     let (mut driver, mut send_request) =
         h3::client::new(h3_quinn::Connection::new(connection)).await?;
     let driver = tokio::spawn(async move { poll_fn(|cx| driver.poll_close(cx)).await });
+    let request_url = url.as_str().to_owned();
 
+    for _ in 0..warmups {
+        let _ = measure_h3_quinn_once(&mut send_request, &request_url).await?;
+    }
+
+    let mut measured = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        measured.push(measure_h3_quinn_once(&mut send_request, &request_url).await?);
+    }
+
+    drop(send_request);
+    close_connection.close(0u32.into(), b"benchmark complete");
+    driver.abort();
+    let _ = tokio::time::timeout(Duration::from_secs(1), endpoint.wait_idle()).await;
+
+    Ok(adapter_row_from_samples(
+        "h3_quinn",
+        "h3_quinn_adapter",
+        &measured,
+    ))
+}
+
+async fn measure_h3_quinn_once(
+    send_request: &mut h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    url: &str,
+) -> anyhow::Result<AdapterSample> {
     let start = Instant::now();
     let mut request_stream = send_request
-        .send_request(http::Request::get(url.as_str()).body(())?)
+        .send_request(http::Request::get(url).body(())?)
         .await?;
     request_stream.finish().await?;
     let _response = request_stream.recv_response().await?;
@@ -1340,11 +1346,6 @@ async fn measure_h3_quinn_once(url: &str) -> anyhow::Result<AdapterSample> {
         first_byte_ns.get_or_insert_with(|| start.elapsed().as_nanos() as f64);
         bytes = bytes.saturating_add(chunk.remaining() as u64);
     }
-    drop(send_request);
-    close_connection.close(0u32.into(), b"benchmark complete");
-    driver.abort();
-    let _ = tokio::time::timeout(Duration::from_secs(1), endpoint.wait_idle()).await;
-
     Ok(AdapterSample::new(
         first_byte_ns.unwrap_or_else(|| start.elapsed().as_nanos() as f64),
         start.elapsed().as_nanos() as f64,
