@@ -3570,7 +3570,9 @@ fn native_h3_client_enters_closing_phase_on_local_connection_close() {
 
     let now = std::time::Instant::now();
     assert!(!client.client_is_close_window_expired(now));
-    let remaining = client.client_close_time_until_expiry(now).expect("draining window pending");
+    let remaining = client
+        .client_close_time_until_expiry(now)
+        .expect("draining window pending");
     assert!(remaining <= close_window);
     let far_future = now + close_window + Duration::from_millis(50);
     assert!(client.client_is_close_window_expired(far_future));
@@ -3592,9 +3594,15 @@ fn native_h3_client_replays_connection_close_rate_limited() {
     close_state.set_replay_packet_threshold(1);
 
     let t0 = std::time::Instant::now();
-    assert!(!client.client_should_replay_connection_close(t0), "no peer packets yet");
+    assert!(
+        !client.client_should_replay_connection_close(t0),
+        "no peer packets yet"
+    );
     client.client_observe_inbound_packet_for_close();
-    assert!(!client.client_should_replay_connection_close(t0), "interval not elapsed");
+    assert!(
+        !client.client_should_replay_connection_close(t0),
+        "interval not elapsed"
+    );
     assert!(
         client.client_should_replay_connection_close(t0 + Duration::from_millis(60)),
         "after one packet plus min-interval the replay fires"

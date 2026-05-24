@@ -247,7 +247,10 @@ impl NativeMockH3Connection {
             if self.handshake.close_state().is_closing()
                 || self.handshake.close_state().is_draining()
             {
-                if self.handshake.server_is_close_window_expired(Instant::now()) {
+                if self
+                    .handshake
+                    .server_is_close_window_expired(Instant::now())
+                {
                     self.closed = true;
                     break;
                 }
@@ -434,7 +437,8 @@ impl NativeMockH3Connection {
     }
 
     fn server_close_time_until_expiry(&self) -> Option<Duration> {
-        self.handshake.server_close_time_until_expiry(Instant::now())
+        self.handshake
+            .server_close_time_until_expiry(Instant::now())
     }
 
     async fn run_server_close_window(&mut self) -> specter::Result<()> {

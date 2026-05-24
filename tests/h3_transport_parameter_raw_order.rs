@@ -2,7 +2,8 @@ use bytes::Bytes;
 use specter::fingerprint::{QuicTransportParams, RawQuicTransportParameter};
 use specter::transport::h3::quic::{
     decode_transport_parameters, encode_server_transport_parameters, encode_transport_parameters,
-    encode_transport_parameters_with_initial_source_connection_id, ConnectionId, TransportParameter,
+    encode_transport_parameters_with_initial_source_connection_id, ConnectionId,
+    TransportParameter,
 };
 
 #[test]
@@ -133,9 +134,9 @@ fn native_quic_raw_ordered_transport_parameters_can_place_dynamic_server_cids() 
         vec![
             TransportParameter::InitialSourceConnectionId(Bytes::from_static(b"server-scid")),
             TransportParameter::MaxIdleTimeout(25),
-            TransportParameter::OriginalDestinationConnectionId(Bytes::from_static(
-                b"client-dcid",
-            )),
+            TransportParameter::OriginalDestinationConnectionId(
+                Bytes::from_static(b"client-dcid",)
+            ),
             TransportParameter::RetrySourceConnectionId(Bytes::from_static(b"retry-scid")),
         ]
     );
