@@ -55,7 +55,9 @@ pub use handle::H2Handle;
 pub use hpack::{HpackDecoder, HpackEncoder, PseudoHeaderOrder};
 pub use tunnel::{H2Tunnel, H2TunnelEvent, H2TunnelOutbound};
 
-pub(crate) use body::{H2Body, H2BodyTimeouts, H2DirectBody, H2DirectReuseHook};
+pub(crate) use body::{
+    H2Body, H2BodyTimeouts, H2DirectBody, H2DirectReuseHook, DEFAULT_H2_BODY_SLOT_CAPACITY,
+};
 use handle::H2InlineState;
 
 // Re-export wrapper types for convenience
@@ -75,6 +77,7 @@ pub struct H2TransportConfig {
     pub keep_alive_timeout: Duration,
     pub keep_alive_while_idle: bool,
     pub max_concurrent_streams_per_connection: Option<u32>,
+    pub streaming_body_buffer_slots: usize,
 }
 
 impl Default for H2TransportConfig {
@@ -84,11 +87,17 @@ impl Default for H2TransportConfig {
             keep_alive_timeout: Duration::from_secs(20),
             keep_alive_while_idle: false,
             max_concurrent_streams_per_connection: None,
+            streaming_body_buffer_slots: DEFAULT_H2_BODY_SLOT_CAPACITY,
         }
     }
 }
 
 impl H2TransportConfig {
+    pub(crate) fn normalized(mut self) -> Self {
+        self.streaming_body_buffer_slots = self.streaming_body_buffer_slots.max(1);
+        self
+    }
+
     pub(crate) fn effective_max_concurrent_streams(&self, peer_max_streams: u32) -> usize {
         match self.max_concurrent_streams_per_connection {
             Some(local_max) if local_max > 0 => peer_max_streams.min(local_max) as usize,
@@ -191,6 +200,7 @@ impl H2PooledConnection {
 
     /// Create a new pooled connection with runtime transport config.
     pub fn new_with_config(conn: H2Connection, config: H2TransportConfig) -> Self {
+        let config = config.normalized();
         const CHANNEL_BUFFER: usize = 32;
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER);
         let goaway_received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -212,6 +222,7 @@ impl H2PooledConnection {
             inline_active: inline_active.clone(),
             inline_eligible: inline_eligible.clone(),
             body_progress_notify: body_progress_notify.clone(),
+            streaming_body_buffer_slots: config.streaming_body_buffer_slots,
         });
 
         let driver = H2Driver::new_with_inline(
@@ -219,7 +230,7 @@ impl H2PooledConnection {
             command_tx.clone(),
             command_rx,
             goaway_received.clone(),
-            config,
+            config.clone(),
             inline_register_rx,
             inline_active,
             inline_eligible,
@@ -233,7 +244,7 @@ impl H2PooledConnection {
             }
         });
 
-        let handle = H2Handle::with_inline(command_tx, goaway_received, inline_state);
+        let handle = H2Handle::with_inline(command_tx, goaway_received, inline_state, config);
         Self { handle }
     }
 

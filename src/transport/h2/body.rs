@@ -38,13 +38,13 @@ pub(crate) enum H2BodyDataPush {
     Closed,
 }
 
-/// Bounded in-flight DATA item capacity per H2 stream body.
+/// Default bounded in-flight DATA item capacity per H2 stream body.
 ///
 /// H2 stream-level flow control still bounds total in-flight bytes; this cap
 /// is a safety bound on the number of distinct chunks queued between the
 /// driver and the consumer, which removes the per-chunk lock-step round-trip
 /// the original single-slot design imposed.
-const H2_BODY_SLOT_CAPACITY: usize = 5;
+pub(crate) const DEFAULT_H2_BODY_SLOT_CAPACITY: usize = 5;
 const H2_BODY_CHUNK_COALESCE_LIMIT: usize = 16 * 1024;
 const H2_DIRECT_DEFER_FLOW_BYTES: usize = 1024 * 1024;
 const MIN_RELEASE_NOTIFY_BYTES: usize = 8 * 1024;
@@ -58,7 +58,7 @@ type H2BodyItem = std::result::Result<Bytes, Error>;
 /// a consumer `Waker` and a `Notify` to wake the driver when the
 /// consumer drains a chunk and the slot becomes refillable.
 pub struct H2BodyShared {
-    slots: [UnsafeCell<Option<H2BodyItem>>; H2_BODY_SLOT_CAPACITY],
+    slots: Vec<UnsafeCell<Option<H2BodyItem>>>,
     head: AtomicUsize,
     tail: AtomicUsize,
     ended: AtomicBool,
@@ -75,11 +75,16 @@ pub struct H2BodyShared {
 unsafe impl Sync for H2BodyShared {}
 
 impl H2BodyShared {
-    pub(crate) fn new(driver_notify: Arc<Notify>, initial_window_size: u32) -> Arc<Self> {
+    pub(crate) fn new_with_capacity(
+        driver_notify: Arc<Notify>,
+        initial_window_size: u32,
+        capacity: usize,
+    ) -> Arc<Self> {
+        let capacity = capacity.max(1);
         let release_notify_bytes = ((initial_window_size as usize) / 4)
             .clamp(MIN_RELEASE_NOTIFY_BYTES, MAX_RELEASE_NOTIFY_BYTES);
         Arc::new(Self {
-            slots: std::array::from_fn(|_| UnsafeCell::new(None)),
+            slots: (0..capacity).map(|_| UnsafeCell::new(None)).collect(),
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
             ended: AtomicBool::new(false),
@@ -101,6 +106,11 @@ impl H2BodyShared {
     }
 
     #[inline(always)]
+    fn slot_capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    #[inline(always)]
     fn try_push_item(&self, item: H2BodyItem, end_stream: bool) -> H2BodyPush {
         if self.closed.load(Ordering::Acquire) {
             return H2BodyPush::Closed;
@@ -109,12 +119,13 @@ impl H2BodyShared {
         let tail = self.tail.load(Ordering::Relaxed);
         let head = self.head.load(Ordering::Acquire);
         let queued_len = self.queued_len_from(head, tail);
-        if queued_len >= H2_BODY_SLOT_CAPACITY {
+        let capacity = self.slot_capacity();
+        if queued_len >= capacity {
             return H2BodyPush::Full(item);
         }
 
         let wake_consumer = queued_len == 0 || end_stream;
-        let slot = tail % H2_BODY_SLOT_CAPACITY;
+        let slot = tail % capacity;
         // SAFETY: the producer is single-threaded, and queued_len < capacity
         // means the consumer has released this slot before advancing head.
         unsafe {
@@ -139,12 +150,13 @@ impl H2BodyShared {
             return None;
         }
 
-        let slot = head % H2_BODY_SLOT_CAPACITY;
+        let capacity = self.slot_capacity();
+        let slot = head % capacity;
         // SAFETY: the consumer is single-threaded, and tail > head means the
         // producer initialized this slot before publishing tail.
         let item = unsafe { (*self.slots[slot].get()).take() };
         self.head.store(head + 1, Ordering::Release);
-        item.map(|item| (item, queued_len >= H2_BODY_SLOT_CAPACITY))
+        item.map(|item| (item, queued_len >= capacity))
     }
 
     #[inline(always)]
@@ -155,7 +167,7 @@ impl H2BodyShared {
             return None;
         }
 
-        let slot = head % H2_BODY_SLOT_CAPACITY;
+        let slot = head % self.slot_capacity();
         // SAFETY: the consumer is the only reader of the front slot, and
         // tail > head means the producer has fully initialized it.
         unsafe {
@@ -185,12 +197,13 @@ impl H2BodyShared {
         if self.closed.load(Ordering::Acquire) {
             return H2BodyDataPush::Closed;
         }
-        if queued_len >= H2_BODY_SLOT_CAPACITY {
+        let capacity = self.slot_capacity();
+        if queued_len >= capacity {
             return H2BodyDataPush::Full(data);
         }
 
         let wake_consumer = queued_len == 0 || end_stream;
-        let slot = tail % H2_BODY_SLOT_CAPACITY;
+        let slot = tail % capacity;
         // SAFETY: the producer is single-threaded, and queued_len < capacity
         // means this slot is not currently visible to the consumer.
         unsafe {
@@ -234,7 +247,7 @@ impl H2BodyShared {
         let head = self.head.load(Ordering::Acquire);
         let tail = self.tail.load(Ordering::Acquire);
         !self.closed.load(Ordering::Acquire)
-            && self.queued_len_from(head, tail) < H2_BODY_SLOT_CAPACITY
+            && self.queued_len_from(head, tail) < self.slot_capacity()
     }
 
     pub(crate) fn take_released_recv_bytes(&self) -> usize {
@@ -416,7 +429,7 @@ impl H2Body {
                                 total_len += bytes.len();
                                 extra
                                     .get_or_insert_with(|| {
-                                        Vec::with_capacity(H2_BODY_SLOT_CAPACITY)
+                                        Vec::with_capacity(DEFAULT_H2_BODY_SLOT_CAPACITY)
                                     })
                                     .push(bytes);
                             }
@@ -518,6 +531,29 @@ impl HttpBody for H2Body {
 
     fn size_hint(&self) -> SizeHint {
         SizeHint::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h2_body_shared_uses_configured_slot_capacity() {
+        let shared = H2BodyShared::new_with_capacity(Arc::new(Notify::new()), 65_535, 2);
+
+        assert!(matches!(
+            shared.push_data(Bytes::from_static(b"one"), false),
+            H2BodyDataPush::Accepted { queued_len: 1 }
+        ));
+        assert!(matches!(
+            shared.push_data(Bytes::from_static(b"two"), false),
+            H2BodyDataPush::Accepted { queued_len: 2 }
+        ));
+        assert!(matches!(
+            shared.push_data(Bytes::from_static(b"three"), false),
+            H2BodyDataPush::Full(_)
+        ));
     }
 }
 

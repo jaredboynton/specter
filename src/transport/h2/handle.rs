@@ -19,6 +19,7 @@ use crate::transport::h2::body::{H2Body, H2BodyShared, H2BodyTimeouts};
 use crate::transport::h2::driver::{DriverCommand, InlineRegistration, StreamingHeadersResult};
 use crate::transport::h2::tunnel::H2Tunnel;
 use crate::transport::h2::write_half::H2WriteHalf;
+use crate::transport::h2::H2TransportConfig;
 
 /// Shared write/registration primer used by the inline streaming fast path.
 ///
@@ -39,6 +40,7 @@ pub(crate) struct H2InlineState {
     /// driver toggles this flag.
     pub(crate) inline_eligible: Arc<AtomicBool>,
     pub(crate) body_progress_notify: Arc<tokio::sync::Notify>,
+    pub(crate) streaming_body_buffer_slots: usize,
 }
 
 /// HTTP/2 connection handle for sending requests
@@ -51,15 +53,25 @@ pub struct H2Handle {
     /// Optional inline streaming primer; absent in raw test contexts where
     /// no shared write half exists.
     inline: Option<Arc<H2InlineState>>,
+    transport_config: H2TransportConfig,
 }
 
 impl H2Handle {
     /// Create a new handle with a command channel to the driver
     pub fn new(command_tx: mpsc::Sender<DriverCommand>, goaway_received: Arc<AtomicBool>) -> Self {
+        Self::new_with_config(command_tx, goaway_received, H2TransportConfig::default())
+    }
+
+    pub(crate) fn new_with_config(
+        command_tx: mpsc::Sender<DriverCommand>,
+        goaway_received: Arc<AtomicBool>,
+        transport_config: H2TransportConfig,
+    ) -> Self {
         Self {
             command_tx,
             goaway_received,
             inline: None,
+            transport_config: transport_config.normalized(),
         }
     }
 
@@ -67,17 +79,24 @@ impl H2Handle {
         command_tx: mpsc::Sender<DriverCommand>,
         goaway_received: Arc<AtomicBool>,
         inline: Arc<H2InlineState>,
+        transport_config: H2TransportConfig,
     ) -> Self {
         Self {
             command_tx,
             goaway_received,
             inline: Some(inline),
+            transport_config: transport_config.normalized(),
         }
     }
 
     /// Check if the driver is still running and hasn't received GOAWAY
     pub fn is_alive(&self) -> bool {
         !self.command_tx.is_closed() && !self.goaway_received.load(Ordering::Relaxed)
+    }
+
+    /// Bounded in-flight response DATA slots per streaming H2 body.
+    pub fn streaming_body_buffer_slots(&self) -> usize {
+        self.transport_config.streaming_body_buffer_slots
     }
 
     /// Send an HTTP/2 request and receive the response.
@@ -153,7 +172,11 @@ impl H2Handle {
             .as_ref()
             .map(|inline| inline.initial_window_size)
             .unwrap_or(65_535);
-        let body_shared = H2BodyShared::new(self.body_progress_notify(), initial_window_size);
+        let body_shared = H2BodyShared::new_with_capacity(
+            self.body_progress_notify(),
+            initial_window_size,
+            self.transport_config.streaming_body_buffer_slots,
+        );
 
         let command = DriverCommand::SendStreamingRequest {
             method,
@@ -213,9 +236,10 @@ impl H2Handle {
         }
 
         let (headers_tx, headers_rx) = oneshot::channel::<StreamingHeadersResult>();
-        let body_shared = H2BodyShared::new(
+        let body_shared = H2BodyShared::new_with_capacity(
             inline.body_progress_notify.clone(),
             inline.initial_window_size,
+            inline.streaming_body_buffer_slots,
         );
 
         let max_frame_size = inline.peer_max_frame_size.load(Ordering::Relaxed) as usize;
