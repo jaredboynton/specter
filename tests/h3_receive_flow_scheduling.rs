@@ -520,6 +520,75 @@ fn native_h3_driver_propagates_tls_handshake_status_to_handle() {
 }
 
 #[test]
+fn native_h3_client_has_safe_zero_rtt_request_policy() {
+    let h3_client = std::fs::read_to_string("src/transport/h3/mod.rs").expect("H3 client source");
+    let send_request = h3_client
+        .split("pub async fn send_request")
+        .nth(1)
+        .expect("H3Client must expose send_request")
+        .split("pub async fn send_streaming")
+        .next()
+        .expect("send_request section");
+
+    assert!(
+        h3_client.contains("is_zero_rtt_safe_request"),
+        "native H3 must centralize the anti-replay policy for 0-RTT request eligibility"
+    );
+    assert!(
+        send_request.contains("try_send_request_with_zero_rtt"),
+        "H3Client::send_request must attempt 0-RTT only for safe fresh-connection requests"
+    );
+    assert!(
+        h3_client.contains("matches!(method, \"GET\" | \"HEAD\" | \"OPTIONS\")"),
+        "0-RTT policy must be stricter than pooled-retry idempotency and exclude unsafe PUT/DELETE replays"
+    );
+}
+
+#[test]
+fn native_h3_connection_replays_rejected_zero_rtt_once() {
+    let connection =
+        std::fs::read_to_string("src/transport/h3/connection.rs").expect("connection source");
+    let handshake =
+        std::fs::read_to_string("src/transport/h3/handshake.rs").expect("handshake source");
+
+    assert!(
+        connection.contains("connect_with_zero_rtt_request"),
+        "connection establishment must accept a first request for end-to-end 0-RTT"
+    );
+    assert!(
+        handshake.contains("build_client_h3_zero_rtt_request_packet"),
+        "native QUIC must be able to packetize the first H3 request as QUIC 0-RTT"
+    );
+    assert!(
+        connection.contains("early_data_rejected()")
+            && connection.contains("build_client_h3_replay_request_packet"),
+        "rejected 0-RTT must replay exactly through the 1-RTT request packet path"
+    );
+}
+
+#[test]
+fn native_h3_zero_rtt_acceptance_propagates_with_pending_response() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let spawn_driver = driver
+        .split("pub fn spawn_native_h3_driver")
+        .nth(1)
+        .expect("driver must have spawn_native_h3_driver")
+        .split("struct NativeH3Driver")
+        .next()
+        .expect("spawn_native_h3_driver section");
+
+    assert!(
+        spawn_driver.contains("pending_zero_rtt_response"),
+        "driver spawn must inherit the response waiter for a request sent during the handshake"
+    );
+    assert!(
+        spawn_driver.contains("native_handshake_report"),
+        "driver spawn must preserve the EarlyAccepted/EarlyRejected status for H3Handle and H3Client"
+    );
+}
+
+#[test]
 fn native_mock_h3_server_schedules_timer_driven_delayed_application_acks() {
     let mock_server = std::fs::read_to_string("tests/helpers/mock_h3_server.rs")
         .expect("native mock H3 server source");
