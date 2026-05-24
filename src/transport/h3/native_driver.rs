@@ -25,7 +25,22 @@ use crate::transport::h3::{
 };
 
 const H3_INITIAL_SEND_DATA_BUDGET: usize = 16 * 1024;
-const H3_MAX_SEND_DATA_BUDGET: usize = 256 * 1024;
+const H3_MAX_SEND_DATA_BUDGET: usize = 4 * 1024 * 1024;
+const H3_SEND_WINDOW_FLOOR: usize = 16 * 1024;
+/// RTT inflation ratio (numerator/denominator). When `smoothed_rtt`
+/// exceeds `min_rtt * NUM / DEN` we treat the path as queueing and decay
+/// the in-flight send window even without an explicit loss signal.
+const H3_RTT_INFLATION_NUM: u32 = 3;
+const H3_RTT_INFLATION_DEN: u32 = 2;
+const H3_SEND_WINDOW_LOSS_DECAY_NUM: usize = 1;
+const H3_SEND_WINDOW_LOSS_DECAY_DEN: usize = 2;
+const H3_SEND_WINDOW_RTT_INFLATION_DECAY_NUM: usize = 4;
+const H3_SEND_WINDOW_RTT_INFLATION_DECAY_DEN: usize = 5;
+/// Multiplier applied to the observed BDP proxy when computing the new
+/// growth target. Two-RTT headroom lets the scheduler keep the pipe full
+/// while ACKs are still in flight without overshooting too aggressively.
+const H3_SEND_WINDOW_BDP_GAIN_NUM: u64 = 2;
+const H3_SEND_WINDOW_BDP_GAIN_DEN: u64 = 1;
 
 struct NotifyWake(Arc<Notify>);
 
@@ -59,7 +74,7 @@ struct H3SendScheduler {
     next_class: H3SendClass,
     next_request_after: Option<u64>,
     next_tunnel_after: Option<u64>,
-    data_budget: usize,
+    send_window: AdaptiveSendWindow,
 }
 
 impl Default for H3SendScheduler {
@@ -68,7 +83,7 @@ impl Default for H3SendScheduler {
             next_class: H3SendClass::RequestBody,
             next_request_after: None,
             next_tunnel_after: None,
-            data_budget: H3_INITIAL_SEND_DATA_BUDGET,
+            send_window: AdaptiveSendWindow::new(),
         }
     }
 }
@@ -105,18 +120,19 @@ impl H3SendScheduler {
     }
 
     fn data_budget(&self, available: usize) -> usize {
-        available
-            .min(self.data_budget)
-            .max((available > 0) as usize)
+        self.send_window.budget(available)
     }
 
     fn record_data_sent(&mut self, sent: usize) {
-        if sent >= self.data_budget && self.data_budget < H3_MAX_SEND_DATA_BUDGET {
-            self.data_budget = self
-                .data_budget
-                .saturating_add(self.data_budget / 2)
-                .min(H3_MAX_SEND_DATA_BUDGET);
-        }
+        self.send_window.record_data_sent(sent);
+    }
+
+    fn observe_rtt_sample(&mut self, smoothed_rtt: Duration, min_rtt: Duration) {
+        self.send_window.observe_rtt_sample(smoothed_rtt, min_rtt);
+    }
+
+    fn observe_loss(&mut self) {
+        self.send_window.observe_loss();
     }
 
     fn next_after(&self, class: H3SendClass) -> Option<u64> {
@@ -124,6 +140,93 @@ impl H3SendScheduler {
             H3SendClass::RequestBody => self.next_request_after,
             H3SendClass::TunnelData => self.next_tunnel_after,
         }
+    }
+}
+
+/// RTT- and loss-aware send-window estimator.
+///
+/// Grows toward a bounded multiple of the observed BDP proxy (bytes sent
+/// during the most recent RTT window) and decays on RFC9002 loss epochs or
+/// queueing-style RTT inflation. Sample-only rules keep the window inside
+/// `[floor, ceiling]` so a pathological signal cannot regress the H3 data
+/// budget below the pre-existing threshold-only behavior.
+#[derive(Debug, Clone)]
+struct AdaptiveSendWindow {
+    floor: usize,
+    ceiling: usize,
+    current: usize,
+    bytes_sent_since_sample: u64,
+}
+
+impl AdaptiveSendWindow {
+    fn new() -> Self {
+        Self {
+            floor: H3_SEND_WINDOW_FLOOR,
+            ceiling: H3_MAX_SEND_DATA_BUDGET,
+            current: H3_INITIAL_SEND_DATA_BUDGET,
+            bytes_sent_since_sample: 0,
+        }
+    }
+
+    fn budget(&self, available: usize) -> usize {
+        available.min(self.current).max((available > 0) as usize)
+    }
+
+    fn record_data_sent(&mut self, sent: usize) {
+        self.bytes_sent_since_sample = self.bytes_sent_since_sample.saturating_add(sent as u64);
+        if sent >= self.current && self.current < self.ceiling {
+            self.current = self
+                .current
+                .saturating_add(self.current / 2)
+                .min(self.ceiling);
+        }
+    }
+
+    fn observe_rtt_sample(&mut self, smoothed_rtt: Duration, min_rtt: Duration) {
+        let bdp_proxy = self.bytes_sent_since_sample;
+        self.bytes_sent_since_sample = 0;
+
+        let inflated = min_rtt
+            .checked_mul(H3_RTT_INFLATION_NUM)
+            .map(|threshold| smoothed_rtt > threshold / H3_RTT_INFLATION_DEN)
+            .unwrap_or(false);
+        if inflated {
+            self.decay_for_rtt_inflation();
+            return;
+        }
+
+        if bdp_proxy == 0 {
+            return;
+        }
+        let target =
+            bdp_proxy.saturating_mul(H3_SEND_WINDOW_BDP_GAIN_NUM) / H3_SEND_WINDOW_BDP_GAIN_DEN;
+        let target = target.min(self.ceiling as u64) as usize;
+        if target > self.current {
+            let delta = (target - self.current) / 2;
+            self.current = self
+                .current
+                .saturating_add(delta)
+                .min(self.ceiling)
+                .max(self.floor);
+        }
+    }
+
+    fn observe_loss(&mut self) {
+        self.current = self
+            .current
+            .saturating_mul(H3_SEND_WINDOW_LOSS_DECAY_NUM)
+            .checked_div(H3_SEND_WINDOW_LOSS_DECAY_DEN)
+            .unwrap_or(self.floor)
+            .max(self.floor);
+    }
+
+    fn decay_for_rtt_inflation(&mut self) {
+        self.current = self
+            .current
+            .saturating_mul(H3_SEND_WINDOW_RTT_INFLATION_DECAY_NUM)
+            .checked_div(H3_SEND_WINDOW_RTT_INFLATION_DECAY_DEN)
+            .unwrap_or(self.floor)
+            .max(self.floor);
     }
 }
 
@@ -682,9 +785,9 @@ impl NativeDriverStreamingRequestBody {
 
 struct NativeDriverTunnelState {
     response_tx: Option<oneshot::Sender<Result<H3Tunnel>>>,
-    outbound_tx: Option<mpsc::Sender<H3TunnelOutbound>>,
-    outbound_rx: Option<mpsc::Receiver<H3TunnelOutbound>>,
-    pending_outbound: VecDeque<H3TunnelOutbound>,
+    outbound_tx: Option<mpsc::UnboundedSender<H3TunnelOutbound>>,
+    outbound_rx: Option<mpsc::UnboundedReceiver<H3TunnelOutbound>>,
+    pending_outbound: VecDeque<DriverPendingTunnelOutbound>,
     inbound_tx: mpsc::Sender<Result<H3TunnelEvent>>,
     inbound_rx: Option<mpsc::Receiver<Result<H3TunnelEvent>>>,
     pending_inbound: VecDeque<Result<H3TunnelEvent>>,
@@ -695,16 +798,21 @@ struct NativeDriverTunnelState {
 impl NativeDriverTunnelState {
     #[cfg(test)]
     fn new(response_tx: oneshot::Sender<Result<H3Tunnel>>) -> Self {
-        Self::new_with_notify(response_tx, Arc::new(Notify::new()))
+        Self::new_with_notify(
+            response_tx,
+            Arc::new(Notify::new()),
+            H3TransportConfig::default().tunnel_outbound_byte_budget,
+        )
     }
 
     fn new_with_notify(
         response_tx: oneshot::Sender<Result<H3Tunnel>>,
         driver_notify: Arc<Notify>,
+        send_budget: usize,
     ) -> Self {
-        let (outbound_tx, outbound_rx) = mpsc::channel(32);
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (inbound_tx, inbound_rx) = mpsc::channel(32);
-        let credit = H3TunnelCredit::new(driver_notify);
+        let credit = H3TunnelCredit::new(driver_notify, send_budget);
         Self {
             response_tx: Some(response_tx),
             outbound_tx: Some(outbound_tx),
@@ -781,6 +889,45 @@ enum TunnelInboundStatus {
     Blocked,
     Closed,
     Remove,
+}
+
+#[derive(Debug, Clone)]
+struct DriverPendingTunnelOutbound {
+    bytes: Bytes,
+    fin: bool,
+    /// Permits already added back to the semaphore for this outbound. Capped
+    /// at `acquired_credit` so a slow-draining chunk never over-releases.
+    credit_released: u32,
+    /// Permits originally acquired on the credit semaphore for this outbound.
+    acquired_credit: u32,
+}
+
+impl DriverPendingTunnelOutbound {
+    fn from_outbound(outbound: H3TunnelOutbound, send_budget: usize) -> Self {
+        let acquired_credit = outbound.bytes.len().min(send_budget).min(u32::MAX as usize) as u32;
+        Self {
+            bytes: outbound.bytes,
+            fin: outbound.fin,
+            credit_released: 0,
+            acquired_credit,
+        }
+    }
+
+    fn record_chunk_sent(&mut self, chunk_len: usize) -> usize {
+        if chunk_len == 0 || self.credit_released >= self.acquired_credit {
+            return 0;
+        }
+        let remaining_credit = self.acquired_credit - self.credit_released;
+        let to_release = (chunk_len as u64).min(remaining_credit as u64) as u32;
+        self.credit_released = self.credit_released.saturating_add(to_release);
+        to_release as usize
+    }
+
+    fn drain_remaining_credit(&mut self) -> usize {
+        let remaining = self.acquired_credit.saturating_sub(self.credit_released);
+        self.credit_released = self.acquired_credit;
+        remaining as usize
+    }
 }
 
 fn fail_pending_command_with_quic_message(command: DriverCommand, message: String) {
@@ -871,7 +1018,19 @@ impl NativeH3Driver {
             if self.last_activity.elapsed() > self.max_idle_timeout && !has_pending_work {
                 self.send_connection_close(0x00, Bytes::from_static(b"Idle timeout"))
                     .await?;
-                self.drain_connection_close(&mut buf).await?;
+                self.run_close_window(&mut buf).await?;
+                return Ok(());
+            }
+            // RFC9000 § 10.2: if a peer CONNECTION_CLOSE has put us into the
+            // draining phase, stay alive only until the close window expires.
+            if self.handshake.close_state().is_draining() {
+                if self
+                    .handshake
+                    .client_is_close_window_expired(Instant::now())
+                {
+                    return Ok(());
+                }
+                self.run_close_window(&mut buf).await?;
                 return Ok(());
             }
             let client_application_ack_deadline = self.client_application_ack_deadline();
@@ -894,7 +1053,7 @@ impl NativeH3Driver {
                         None => {
                             self.send_connection_close(0x00, Bytes::from_static(b"Client shutdown"))
                                 .await?;
-                            self.drain_connection_close(&mut buf).await?;
+                            self.run_close_window(&mut buf).await?;
                             return Ok(());
                         }
                     }
@@ -909,7 +1068,7 @@ impl NativeH3Driver {
                 _ = tokio::time::sleep(remaining_idle), if !has_pending_work => {
                     self.send_connection_close(0x00, Bytes::from_static(b"Idle timeout"))
                         .await?;
-                    self.drain_connection_close(&mut buf).await?;
+                    self.run_close_window(&mut buf).await?;
                     return Ok(());
                 }
                 _ = tokio::time::sleep(client_application_ack_delay), if client_application_ack_deadline.is_some() => {
@@ -1003,6 +1162,9 @@ impl NativeH3Driver {
         Ok(())
     }
 
+    /// RFC9000 § 10.2 closing: emit a CONNECTION_CLOSE frame, retain the
+    /// protected packet bytes so we can replay them per RFC9000 § 10.2.1
+    /// without consuming additional packet numbers, and seed the close timer.
     async fn send_connection_close(&mut self, error_code: u64, reason: Bytes) -> Result<()> {
         let packet = self
             .handshake
@@ -1011,6 +1173,13 @@ impl NativeH3Driver {
         self.closing_connection_close_packet = Some(close_packet.clone());
         self.is_draining
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Configure the close-state replay rate-limit per RFC9000 § 10.2.1:
+        // wait at least one PTO between replays and require at least one
+        // peer packet to have arrived since the last replay.
+        let pto = self.handshake.client_application_pto();
+        let close_state = self.handshake.close_state_mut();
+        close_state.set_replay_min_interval(pto);
+        close_state.set_replay_packet_threshold(1);
         self.socket
             .send_to(close_packet.as_ref(), self.peer_addr)
             .await
@@ -1018,28 +1187,54 @@ impl NativeH3Driver {
         Ok(())
     }
 
+    /// RFC9000 § 10.2.1 replay: retransmit the saved CONNECTION_CLOSE packet
+    /// bytes verbatim. The QUIC spec explicitly permits reusing the same
+    /// packet number for closing-phase replays so we avoid consuming a fresh
+    /// packet number for each retransmission.
     async fn replay_connection_close(&mut self) -> Result<()> {
         if let Some(close_packet) = &self.closing_connection_close_packet {
             self.socket
                 .send_to(close_packet.as_ref(), self.peer_addr)
                 .await
                 .map_err(Error::Io)?;
+            self.handshake
+                .client_mark_connection_close_replayed(Instant::now());
         }
         Ok(())
     }
 
-    async fn drain_connection_close(&mut self, buf: &mut [u8]) -> Result<()> {
-        if self.closing_connection_close_packet.is_none() {
+    /// RFC9000 § 10.2 close-window loop. Walks the close timer (closing or
+    /// draining), absorbs peer packets, and rate-limits CONNECTION_CLOSE
+    /// replays during the closing phase. Returns once the timer expires.
+    async fn run_close_window(&mut self, buf: &mut [u8]) -> Result<()> {
+        if self.closing_connection_close_packet.is_none()
+            && !self.handshake.close_state().is_draining()
+        {
             return Ok(());
         }
 
-        let drain_for = Duration::from_millis(self.fingerprint.transport.max_ack_delay_ms.max(1))
-            .min(self.max_idle_timeout);
-        let drain_deadline = Instant::now() + drain_for;
-        while let Some(remaining) = drain_deadline.checked_duration_since(Instant::now()) {
+        loop {
+            let now = Instant::now();
+            let Some(remaining) = self.handshake.client_close_time_until_expiry(now) else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+
             match tokio::time::timeout(remaining, self.socket.recv_from(buf)).await {
-                Ok(Ok((_, from))) if from == self.peer_addr => {
-                    self.replay_connection_close().await?;
+                Ok(Ok((_len, from))) if from == self.peer_addr => {
+                    self.handshake.client_observe_inbound_packet_for_close();
+                    // RFC9000 § 10.2: draining peers stop sending; only
+                    // closing peers replay CONNECTION_CLOSE in response to
+                    // peer packets, subject to the rate limit.
+                    if self.handshake.close_state().is_closing()
+                        && self
+                            .handshake
+                            .client_should_replay_connection_close(Instant::now())
+                    {
+                        self.replay_connection_close().await?;
+                    }
                 }
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => return Err(Error::Io(error)),
@@ -1078,6 +1273,10 @@ impl NativeH3Driver {
         Ok(())
     }
 
+    // Stub placeholder for the sibling P0.1 RFC9002 recovery worker so the
+    // tree compiles while their full PTO/RTT signal aggregation lands here.
+    fn observe_recovery_signals(&mut self) {}
+
     async fn send_lost_application_stream_retransmits(&mut self) -> Result<()> {
         for packet in self
             .handshake
@@ -1089,6 +1288,19 @@ impl NativeH3Driver {
                 .map_err(Error::Io)?;
         }
         Ok(())
+    }
+
+    fn observe_recovery_signals(&mut self) {
+        if !self.handshake.client_application_lost_packets().is_empty() {
+            self.send_scheduler.observe_loss();
+        }
+        if let (Some(smoothed_rtt), Some(min_rtt)) = (
+            self.handshake.client_application_smoothed_rtt(),
+            self.handshake.client_application_min_rtt(),
+        ) {
+            self.send_scheduler
+                .observe_rtt_sample(smoothed_rtt, min_rtt);
+        }
     }
 
     async fn handle_command(&mut self, command: DriverCommand) -> Result<()> {
@@ -1277,6 +1489,7 @@ impl NativeH3Driver {
                     NativeDriverTunnelState::new_with_notify(
                         response_tx,
                         self.body_progress_notify.clone(),
+                        self.transport_config.tunnel_outbound_byte_budget,
                     ),
                 );
                 self.socket
@@ -1324,7 +1537,12 @@ impl NativeH3Driver {
         let Some(tunnel) = self.pending_tunnels.get_mut(&stream_id) else {
             return Ok(());
         };
-        tunnel.pending_outbound.push_back(outbound);
+        tunnel
+            .pending_outbound
+            .push_back(DriverPendingTunnelOutbound::from_outbound(
+                outbound,
+                self.transport_config.tunnel_outbound_byte_budget,
+            ));
         self.flush_scheduled_send_work().await?;
         Ok(())
     }
@@ -1367,25 +1585,23 @@ impl NativeH3Driver {
     }
 
     async fn flush_tunnel_data_once(&mut self, stream_id: u64) -> Result<bool> {
-        let Some(outbound) = self
+        let Some(mut outbound) = self
             .pending_tunnels
-            .get(&stream_id)
-            .and_then(|tunnel| tunnel.pending_outbound.front().cloned())
+            .get_mut(&stream_id)
+            .and_then(|tunnel| tunnel.pending_outbound.pop_front())
         else {
             return Ok(false);
         };
 
-        let (bytes, fin, remaining) = if outbound.bytes.is_empty() {
+        let original_len = outbound.bytes.len();
+        let (bytes, fin, remaining_start) = if outbound.bytes.is_empty() {
             (Bytes::new(), outbound.fin, None)
         } else {
             let send_len = self.send_scheduler.data_budget(outbound.bytes.len());
             let bytes = outbound.bytes.slice(..send_len);
-            let remaining = (send_len < outbound.bytes.len()).then(|| H3TunnelOutbound {
-                bytes: outbound.bytes.slice(send_len..),
-                fin: outbound.fin,
-            });
-            let fin = outbound.fin && remaining.is_none();
-            (bytes, fin, remaining)
+            let remaining_start = (send_len < outbound.bytes.len()).then_some(send_len);
+            let fin = outbound.fin && remaining_start.is_none();
+            (bytes, fin, remaining_start)
         };
 
         let packet = match self
@@ -1394,6 +1610,9 @@ impl NativeH3Driver {
         {
             Ok(packet) => packet,
             Err(error) if is_flow_control_blocked_error(&error) => {
+                if let Some(tunnel) = self.pending_tunnels.get_mut(&stream_id) {
+                    tunnel.pending_outbound.push_front(outbound);
+                }
                 self.send_flow_control_blocked_packet().await?;
                 return Ok(false);
             }
@@ -1412,9 +1631,17 @@ impl NativeH3Driver {
         }
 
         if let Some(tunnel) = self.pending_tunnels.get_mut(&stream_id) {
-            tunnel.pending_outbound.pop_front();
-            if let Some(remaining) = remaining {
-                tunnel.pending_outbound.push_front(remaining);
+            let released = outbound.record_chunk_sent(bytes.len());
+            if let Some(remaining_start) = remaining_start {
+                outbound.bytes = outbound.bytes.slice(remaining_start..original_len);
+                tunnel.pending_outbound.push_front(outbound);
+                if released > 0 {
+                    tunnel.credit.release_send_bytes(released);
+                }
+            } else {
+                tunnel
+                    .credit
+                    .release_send_bytes(released.saturating_add(outbound.drain_remaining_credit()));
             }
         }
 
@@ -1618,9 +1845,32 @@ impl NativeH3Driver {
     }
 
     async fn process_datagram(&mut self, datagram: &[u8]) -> Result<()> {
+        // RFC9000 § 10.2: once we have entered the closing phase we no
+        // longer process inbound packets through the H3 event pipeline. We
+        // still count peer packets so the rate-limited CONNECTION_CLOSE
+        // replay can fire (RFC9000 § 10.2.1) and we ignore packets entirely
+        // once we transition to draining.
+        if self.handshake.close_state().is_closing()
+            && self.closing_connection_close_packet.is_some()
+        {
+            self.handshake.client_observe_inbound_packet_for_close();
+            if self
+                .handshake
+                .client_should_replay_connection_close(Instant::now())
+            {
+                self.replay_connection_close().await?;
+            }
+            return Ok(());
+        }
+        if self.handshake.close_state().is_draining() {
+            return Ok(());
+        }
         if self.is_draining.load(std::sync::atomic::Ordering::SeqCst)
             && self.closing_connection_close_packet.is_some()
         {
+            // Backstop for the pre-RFC9000 close path: keep replaying while
+            // the AtomicBool is set but the close-state machine has not yet
+            // been transitioned (e.g. external draining signal).
             self.replay_connection_close().await?;
             return Ok(());
         }
@@ -1668,6 +1918,7 @@ impl NativeH3Driver {
                 .await
                 .map_err(Error::Io)?;
         }
+        self.observe_recovery_signals();
         self.send_lost_application_stream_retransmits().await?;
         for event in events {
             match event {
@@ -1726,6 +1977,11 @@ impl NativeH3Driver {
                 let frame_type = frame_type
                     .map(|frame_type| format!(" frame={frame_type:#x}"))
                     .unwrap_or_default();
+                // RFC9000 § 10.2: peer CONNECTION_CLOSE moves the client
+                // into the draining phase. We still need to fail in-flight
+                // request/tunnel state, but we also seed the close timer so
+                // the driver winds down within the close window.
+                self.handshake.client_enter_draining(Instant::now());
                 self.fail_all_with_quic_message(format!(
                     "Connection close error={error_code:#x}{frame_type} reason={reason}"
                 ));
