@@ -904,7 +904,7 @@ mod tests {
             now,
         );
         assert_eq!(rtt.min_rtt(), Some(Duration::from_millis(50)));
-        assert_eq!(rtt.smoothed_rtt(), Duration::from_millis(51));
+        assert_eq!(rtt.smoothed_rtt(), Duration::from_micros(50_625));
     }
 
     #[test]
