@@ -1243,15 +1243,28 @@ impl NativeH3Driver {
             }
 
             match tokio::time::timeout(remaining, self.socket.recv_from(buf)).await {
-                Ok(Ok((_len, from))) if from == self.peer_addr => {
+                Ok(Ok((len, from))) if from == self.peer_addr => {
                     self.handshake.client_observe_inbound_packet_for_close();
-                    // RFC9000 § 10.2: draining peers stop sending; only
-                    // closing peers replay CONNECTION_CLOSE in response to
-                    // peer packets, subject to the rate limit.
+                    // RFC9000 § 10.2 MAY-optimisation: detect a peer
+                    // CONNECTION_CLOSE so we can transition closing -> draining
+                    // and stop replaying. Short-header (application) packets
+                    // are the only ones that can carry CONNECTION_CLOSE here.
                     if self.handshake.close_state().is_closing()
-                        && self
-                            .handshake
-                            .client_should_replay_connection_close(Instant::now())
+                        && buf.get(0).copied().is_some_and(|first| first & 0x80 == 0)
+                    {
+                        let _ = self.handshake.open_server_h3_event_packet(&buf[..len]);
+                    }
+                    if self.handshake.close_state().is_draining() {
+                        // Spec says we MUST stop sending in draining; keep
+                        // looping so the rest of the window can run down.
+                        continue;
+                    }
+                    // RFC9000 § 10.2.1: replay CONNECTION_CLOSE only when
+                    // the inbound packet count threshold AND minimum
+                    // interval have both been met.
+                    if self
+                        .handshake
+                        .client_should_replay_connection_close(Instant::now())
                     {
                         self.replay_connection_close().await?;
                     }
@@ -1356,7 +1369,9 @@ impl NativeH3Driver {
     }
 
     fn observe_recovery_signals(&mut self) {
-        if !self.handshake.client_application_lost_packets().is_empty() {
+        if !self.handshake.client_application_lost_packets().is_empty()
+            || self.handshake.take_client_application_ecn_congestion()
+        {
             self.send_scheduler.observe_loss();
         }
         if let (Some(smoothed_rtt), Some(min_rtt)) = (
@@ -1910,15 +1925,26 @@ impl NativeH3Driver {
     }
 
     async fn process_datagram(&mut self, datagram: &[u8]) -> Result<()> {
-        // RFC9000 § 10.2: once we have entered the closing phase we no
-        // longer process inbound packets through the H3 event pipeline. We
-        // still count peer packets so the rate-limited CONNECTION_CLOSE
-        // replay can fire (RFC9000 § 10.2.1) and we ignore packets entirely
-        // once we transition to draining.
+        // RFC9000 § 10.2: once we are draining we MUST drop all incoming
+        // packets without further processing.
+        if self.handshake.close_state().is_draining() {
+            return Ok(());
+        }
+        // RFC9000 § 10.2 + § 10.2.1: while we are in the closing phase, we
+        // count inbound packets so the rate-limited CONNECTION_CLOSE replay
+        // can fire, and we attempt to parse a peer CONNECTION_CLOSE so the
+        // MAY-optimisation closing -> draining can apply. We do not feed
+        // any other frames into the H3 event pipeline because the driver's
+        // user-visible state has already been failed out.
         if self.handshake.close_state().is_closing()
             && self.closing_connection_close_packet.is_some()
         {
             self.handshake.client_observe_inbound_packet_for_close();
+            if datagram.first().is_some_and(|first| first & 0x80 == 0) {
+                // Short-header application packet: parse to detect a peer
+                // CONNECTION_CLOSE that would transition us to draining.
+                let _ = self.handshake.open_server_h3_event_packet(datagram);
+            }
             if self
                 .handshake
                 .client_should_replay_connection_close(Instant::now())
@@ -1927,15 +1953,12 @@ impl NativeH3Driver {
             }
             return Ok(());
         }
-        if self.handshake.close_state().is_draining() {
-            return Ok(());
-        }
         if self.is_draining.load(std::sync::atomic::Ordering::SeqCst)
             && self.closing_connection_close_packet.is_some()
         {
-            // Backstop for the pre-RFC9000 close path: keep replaying while
-            // the AtomicBool is set but the close-state machine has not yet
-            // been transitioned (e.g. external draining signal).
+            // Backstop for paths that flipped is_draining without driving
+            // the close-state machine (e.g. GOAWAY-only draining): keep
+            // replaying CONNECTION_CLOSE for inbound packets.
             self.replay_connection_close().await?;
             return Ok(());
         }
