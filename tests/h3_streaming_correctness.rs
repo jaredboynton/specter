@@ -60,7 +60,7 @@ async fn h3_response_body_is_poll_based() {
 
     let h3_mod = std::fs::read_to_string("src/transport/h3/mod.rs").unwrap();
     let h3_handle = std::fs::read_to_string("src/transport/h3/handle.rs").unwrap();
-    let h3_driver = std::fs::read_to_string("src/transport/h3/driver.rs").unwrap();
+    let h3_driver = std::fs::read_to_string("src/transport/h3/native_driver.rs").unwrap();
     assert!(
         !h3_mod.contains("mpsc::Receiver<Result<Bytes>>")
             && !h3_handle.contains("mpsc::Receiver<Result<Bytes>>")
@@ -485,8 +485,7 @@ async fn h3_streaming_does_not_duplicate_partial_non_idempotent_requests() {
             }
         };
 
-        // We close the connection (or drop it) to simulate a failure after request progressed
-        // (we won't respond to the stream, simulating a failure)
+        conn.close_connection(true, 0, b"request progressed").await;
     });
 
     let client = H3Client::new().danger_accept_invalid_certs(true);

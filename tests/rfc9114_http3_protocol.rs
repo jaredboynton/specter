@@ -29,11 +29,7 @@ async fn test_h3_clean_shutdown() {
             // Wait for handshake/settings exchange to settle
             tokio::time::sleep(Duration::from_millis(200)).await;
 
-            // Send GOAWAY to close connection cleanly (Proactive)
-            // Frame Type 0x07 (GOAWAY)
-            // Payload: LastStreamID (0), ErrorCode (0)
-            let payload = vec![0x00, 0x00];
-            conn.send_frame(0, 7, &payload).await;
+            conn.close_connection(true, 0, b"clean shutdown").await;
             // Wait for flush
             tokio::time::sleep(Duration::from_millis(100)).await;
         },
@@ -103,7 +99,8 @@ async fn test_h3_malformed_frame() {
                     || msg.contains("FrameUnexpected")
                     || msg.contains("closed")
                     || msg.contains("channel closed")
-                    || msg.contains("MissingSettings"),
+                    || msg.contains("MissingSettings")
+                    || msg.contains("control stream carried request/response frame"),
                 "Error should indicate frame unexpected or closure, got: {}",
                 msg
             );

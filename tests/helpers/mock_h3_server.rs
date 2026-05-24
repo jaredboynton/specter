@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use specter::fingerprint::Http3Fingerprint;
 use specter::transport::h3::handshake::{ClientH3Event, NativeQuicServerHandshake};
-use specter::transport::h3::native::{decode_header_block, H3Frame, H3Header};
+use specter::transport::h3::native::{decode_header_block, encode_frame, H3Frame, H3Header};
 use specter::transport::h3::quic::{split_long_header_datagram, ConnectionId, LongHeaderType};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -33,11 +33,14 @@ impl MockH3Server {
         let port = socket.local_addr()?.port();
         let socket = Arc::new(socket);
 
+        let mut fingerprint = Http3Fingerprint::chrome();
+        fingerprint.settings.enable_extended_connect = false;
+
         Ok(Self {
             socket,
             port,
             enable_extended_connect: false,
-            fingerprint: Http3Fingerprint::chrome(),
+            fingerprint,
             connection_count: Arc::new(AtomicUsize::new(0)),
         })
     }
@@ -165,7 +168,7 @@ fn spawn_native_connection<F, Fut>(
     if enable_extended_connect {
         fingerprint.settings.enable_extended_connect = true;
     }
-    let server_source_cid = ConnectionId::from_static(b"mock-h3-server");
+    let server_source_cid = client_destination_cid.clone();
     let server = match NativeQuicServerHandshake::new(
         &fingerprint,
         &cert_pem,
@@ -478,20 +481,12 @@ impl NativeMockH3Connection {
                 bytes,
                 fin,
             } => {
-                let packet = if bytes.is_empty() {
-                    self.handshake.build_server_h3_raw_stream_packet(
-                        stream_id,
-                        Bytes::new(),
-                        fin,
-                    )?
+                let payload = if bytes.is_empty() {
+                    Bytes::new()
                 } else {
-                    self.handshake.build_server_h3_response_data_packet(
-                        stream_id,
-                        Bytes::from(bytes),
-                        fin,
-                    )?
+                    encode_frame(&H3Frame::Data(Bytes::from(bytes)))
                 };
-                self.send_packet(packet.packet).await?;
+                self.send_stream_payload(stream_id, payload, fin).await?;
             }
             MockCommand::SendGoAway { id } => {
                 let packet = self.handshake.build_server_h3_goaway_packet(id)?;
@@ -530,6 +525,37 @@ impl NativeMockH3Connection {
             MockCommand::GetStats { response_tx } => {
                 let _ = response_tx.send(self.stats);
             }
+        }
+        Ok(())
+    }
+
+    async fn send_stream_payload(
+        &mut self,
+        stream_id: u64,
+        payload: Bytes,
+        fin: bool,
+    ) -> specter::Result<()> {
+        const MAX_MOCK_STREAM_PAYLOAD: usize = 1000;
+
+        if payload.is_empty() {
+            let packet =
+                self.handshake
+                    .build_server_h3_raw_stream_packet(stream_id, Bytes::new(), fin)?;
+            self.send_packet(packet.packet).await?;
+            return Ok(());
+        }
+
+        let mut offset = 0;
+        while offset < payload.len() {
+            let end = (offset + MAX_MOCK_STREAM_PAYLOAD).min(payload.len());
+            let is_last = end == payload.len();
+            let packet = self.handshake.build_server_h3_raw_stream_packet(
+                stream_id,
+                payload.slice(offset..end),
+                fin && is_last,
+            )?;
+            self.send_packet(packet.packet).await?;
+            offset = end;
         }
         Ok(())
     }

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::error::{Error, Result};
 use crate::fingerprint::Http3Fingerprint;
@@ -18,7 +18,7 @@ use crate::transport::h3::command::{DriverCommand, StreamResponse, StreamingHead
 use crate::transport::h3::handle::H3Handle;
 use crate::transport::h3::handshake::{NativeQuicHandshake, ServerH3Event, ServerH3StreamEvent};
 use crate::transport::h3::native::{
-    H3Frame, H3Header, H3Setting, H3StreamType, decode_header_block,
+    decode_header_block, H3Frame, H3Header, H3Setting, H3StreamType,
 };
 use crate::transport::h3::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 
