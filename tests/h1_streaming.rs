@@ -1,10 +1,13 @@
 use bytes::Bytes;
 use specter::{Client, HttpVersion};
 use std::fs;
+use std::io::{Read as StdRead, Write as StdWrite};
+use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    mpsc as std_mpsc, Arc,
 };
+use std::thread::{self, JoinHandle as StdJoinHandle};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -219,6 +222,126 @@ async fn next_data(body: &mut specter::Body) -> Bytes {
     frame.into_data().unwrap()
 }
 
+struct ChunkedFixture {
+    url: String,
+    first_chunk_sent_rx: Option<std_mpsc::Receiver<()>>,
+    continue_after_first_tx: Option<std_mpsc::Sender<()>>,
+    final_chunk_sent: Arc<AtomicBool>,
+    server_thread: Option<StdJoinHandle<()>>,
+}
+
+impl ChunkedFixture {
+    fn start() -> Self {
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (first_chunk_sent_tx, first_chunk_sent_rx) = std_mpsc::channel();
+        let (continue_after_first_tx, continue_after_first_rx) = std_mpsc::channel();
+        let final_chunk_sent = Arc::new(AtomicBool::new(false));
+        let final_chunk_sent_for_thread = final_chunk_sent.clone();
+
+        let server_thread = thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+
+            while let Some(path) = read_request_path_blocking(&mut stream) {
+                match path.as_str() {
+                    "/chunked" => {
+                        stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n")
+                            .unwrap();
+                        stream.write_all(b"6\r\nalpha-\r\n").unwrap();
+                        stream.flush().unwrap();
+                        let _ = first_chunk_sent_tx.send(());
+                        let _ = continue_after_first_rx.recv_timeout(Duration::from_secs(5));
+                        stream
+                            .write_all(b"5\r\nbeta-\r\n5\r\ngamma\r\n0\r\n\r\n")
+                            .unwrap();
+                        stream.flush().unwrap();
+                        final_chunk_sent_for_thread.store(true, Ordering::SeqCst);
+                    }
+                    "/fixed" => {
+                        stream
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: keep-alive\r\n\r\none-two-three",
+                            )
+                            .unwrap();
+                        stream.flush().unwrap();
+                    }
+                    _ => {
+                        stream
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .unwrap();
+                        stream.flush().unwrap();
+                        return;
+                    }
+                }
+            }
+        });
+
+        Self {
+            url,
+            first_chunk_sent_rx: Some(first_chunk_sent_rx),
+            continue_after_first_tx: Some(continue_after_first_tx),
+            final_chunk_sent,
+            server_thread: Some(server_thread),
+        }
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}{}", self.url, path)
+    }
+
+    fn wait_for_first_chunk(&mut self) {
+        self.first_chunk_sent_rx
+            .take()
+            .expect("first chunk receiver should be present")
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fixture should flush the first chunk before the incremental read assertion");
+    }
+
+    fn allow_completion(&mut self) {
+        if let Some(tx) = self.continue_after_first_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    fn final_chunk_sent(&self) -> bool {
+        self.final_chunk_sent.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for ChunkedFixture {
+    fn drop(&mut self) {
+        self.allow_completion();
+        let _ = StdTcpStream::connect(self.url.trim_start_matches("http://"));
+        if let Some(server_thread) = self.server_thread.take() {
+            let _ = server_thread.join();
+        }
+    }
+}
+
+fn read_request_path_blocking(stream: &mut StdTcpStream) -> Option<String> {
+    let mut buffer = Vec::new();
+    let mut read_buf = [0u8; 1024];
+    while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = stream.read(&mut read_buf).ok()?;
+        if n == 0 {
+            return None;
+        }
+        buffer.extend_from_slice(&read_buf[..n]);
+    }
+
+    let request = String::from_utf8_lossy(&buffer);
+    request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .map(str::to_string)
+}
+
 #[tokio::test]
 async fn h1_high_level_send_streaming_dispatches_to_h1() {
     let fixture = H1Fixture::start().await;
@@ -265,9 +388,9 @@ async fn h1_streams_fixed_content_length_incrementally() {
     assert_eq!(body, b"one-two-three");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn h1_streams_chunked_transfer_incrementally() {
-    let fixture = H1Fixture::start().await;
+    let mut fixture = ChunkedFixture::start();
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let mut response = client
         .get(fixture.endpoint("/chunked"))
@@ -276,7 +399,9 @@ async fn h1_streams_chunked_transfer_incrementally() {
         .await
         .unwrap();
 
-    let first = timeout(Duration::from_millis(80), response.body_mut().frame())
+    fixture.wait_for_first_chunk();
+
+    let first = timeout(Duration::from_secs(2), response.body_mut().frame())
         .await
         .unwrap()
         .unwrap()
@@ -284,12 +409,22 @@ async fn h1_streams_chunked_transfer_incrementally() {
         .into_data()
         .unwrap();
     assert_eq!(first, Bytes::from_static(b"alpha-"));
+    assert!(
+        !fixture.final_chunk_sent(),
+        "first decoded chunk must be visible before the fixture sends the terminal chunk"
+    );
+    fixture.allow_completion();
+
     let mut body = first.to_vec();
     while let Some(frame) = response.body_mut().frame().await {
         let chunk = frame.unwrap().into_data().unwrap();
         body.extend_from_slice(&chunk);
     }
     assert_eq!(body, b"alpha-beta-gamma");
+    assert!(
+        fixture.final_chunk_sent(),
+        "fixture should send the terminal chunk after the incremental assertion releases it"
+    );
 
     let response = client
         .get(fixture.endpoint("/fixed"))
