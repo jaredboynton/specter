@@ -255,7 +255,7 @@ impl TlsFingerprint {
         }
     }
 
-    /// Create a TLS fingerprint for Firefox 133.
+    /// Compatibility alias for the shared Firefox desktop TLS fingerprint.
     pub fn firefox_133() -> Self {
         Self::firefox()
     }

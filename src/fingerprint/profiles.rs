@@ -27,9 +27,8 @@ pub enum FingerprintProfile {
     Chrome147,
     /// Chrome 148 on macOS
     Chrome148,
-    /// Firefox 133 on macOS - basic fingerprint (cipher suites, curves, sigalgs)
-    /// TLS extension order is randomized by Firefox, so this fingerprint
-    /// will not match real Firefox exactly. Firefox does NOT use GREASE.
+    /// Firefox 133 on macOS using the shared Firefox desktop transport fingerprint.
+    /// TLS extension order is randomized by Firefox. Firefox does NOT use GREASE.
     Firefox133,
     /// No fingerprinting - use default TLS settings
     None,
