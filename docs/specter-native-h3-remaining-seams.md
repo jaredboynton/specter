@@ -154,7 +154,7 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - TLS resumption is now plumbed from H3Client through `SSL_SESSION` replay and ticket storage; the remaining 0-RTT gap is anti-replay request policy, transport send integration, and acceptance/rejection observability, not ambiguity or missing cache wiring.
 - H3 scheduling now has in-connection fair send turns for streaming request bodies and RFC9220 tunnel DATA, sibling-tunnel and mixed tunnel/response receive-class fairness, RTT/loss/BDP-aware adaptive send budgets, and H3Client origin-fair slow-path dispatch.
 - Outbound RFC9220 tunnel backpressure is byte-bounded at the send API and driver queue boundary; public sends block on byte permits and permit release tracks emitted DATA chunks.
-- Native H3 receive-window updates are now user-consumption-gated for streaming responses and RFC9220 tunnels: public body/tunnel byte release feeds `record_client_stream_consumed` per stream before flushing absolute MAX_DATA/MAX_STREAM_DATA.
+- Native H3 receive-window updates are now user-consumption-gated for streaming responses and RFC9220 tunnels: public body/tunnel byte release includes encoded H3 DATA frame type/length overhead and feeds `record_client_stream_consumed` per stream before flushing absolute MAX_DATA/MAX_STREAM_DATA.
 - Native QUIC 1-RTT key update has a traffic-secret/key-phase state machine with previous-key retention and local-update ACK gating; keep it as regression coverage rather than an active “not implemented” gap.
 - Client CONNECTION_CLOSE is retained and replayed during bounded local close drain windows; remaining close-drain work is RFC-grade timer/PTO behavior and broader server/migration close handling.
 
@@ -164,7 +164,6 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - Browser-capture ACK parity remains open for per-browser/version ACK behavior and the tuned `ack_eliciting_threshold = 128` benchmark profile.
 - RFC9220/WebSocket-over-H3 still lacks p99-scale samples, third-party close/FIN and slow-consumer comparator rows, and a dedicated tunnel superiority gate/claim, even though low-level `quiche` and `tokio-quiche` raw tunnel echo comparator adapters now have n=30 rows.
 - TLS/H3 fingerprint gaps remain: explicit extension-list ordering beyond BoringSSL permutation policy, 0-RTT request send/replay policy, 0-RTT acceptance/rejection observability, capture-derived raw transport-parameter presets, and dynamic connection-ID placeholder handling inside raw ordered transport-parameter lists.
-- H3 flow-control precision still needs byte-precise encoded H3 DATA-frame credit; current user-consumed credit accounts payload bytes, not encoded frame overhead.
 
 ## Validation run
 
