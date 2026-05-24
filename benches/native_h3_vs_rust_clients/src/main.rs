@@ -1490,15 +1490,18 @@ impl LocalNativeH3Connection {
                     if let Err(error) = self.process_datagram(&packet).await {
                         let datagram = describe_local_native_h3_datagram(&packet);
                         let app_ready = self.handshake.is_application_ready();
-                        let classification =
-                            classify_local_native_h3_packet_error(&error, app_ready);
-                        eprintln!(
-                            "local native H3 fixture packet error: {error}; {}; app_ready={}; category={}; fatal={}",
-                            datagram,
-                            app_ready,
-                            classification.category,
-                            classification.fatal
+                        let classification = classify_local_native_h3_packet_error_with_datagram(
+                            &error, app_ready, &datagram,
                         );
+                        if should_log_local_native_h3_fixture_event(&classification) {
+                            eprintln!(
+                                "local native H3 fixture packet error: {error}; {}; app_ready={}; category={}; fatal={}",
+                                datagram,
+                                app_ready,
+                                classification.category,
+                                classification.fatal
+                            );
+                        }
                         self.record_event(FixtureEvent {
                             client: self.client.clone(),
                             level: classification.level,
@@ -1891,6 +1894,33 @@ fn classify_local_native_h3_packet_error(
             fatal: true,
         }
     }
+}
+
+fn classify_local_native_h3_packet_error_with_datagram(
+    error: &anyhow::Error,
+    app_ready: bool,
+    datagram: &str,
+) -> FixtureErrorClassification {
+    let message = error.to_string();
+    if message.contains("QUIC packet open failed")
+        && app_ready
+        && datagram.contains("short_prefix=")
+    {
+        return FixtureErrorClassification {
+            level: "debug",
+            kind: "packet_noise",
+            classification: "post_application_short_header_packet_open_noise",
+            category: "ignored_short_header_packet_open_after_application_ready",
+            fatal: false,
+        };
+    }
+    classify_local_native_h3_packet_error(error, app_ready)
+}
+
+fn should_log_local_native_h3_fixture_event(
+    classification: &FixtureErrorClassification,
+) -> bool {
+    classification.level != "debug"
 }
 
 async fn measure_specter_native(
