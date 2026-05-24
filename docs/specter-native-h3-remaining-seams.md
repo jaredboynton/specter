@@ -122,7 +122,7 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - Treat pending delayed application ACKs as native driver work and disable idle-timeout sleeping while that work is pending, so short custom idle windows do not spin or close before the delayed ACK timer fires.
 - Wired the native mock H3 server and same-fixture benchmark H3 server to use the same threshold-or-`max_ack_delay_ms` ACK timer path instead of immediate application ACKs.
 - Added ACK_ECN frame encode/decode support, counter validation, CE growth tracking, and ACK_ECN range handling in the native QUIC loss detector.
-- Added native QUIC Version Negotiation and Retry packet parsing primitives, RFC9001 QUIC v1 Retry integrity tag calculation/validation, client Retry/VN handshake handling, and client PATH_CHALLENGE packetization with matching PATH_RESPONSE validation; full path migration integration remains pending.
+- Added native QUIC Version Negotiation and Retry packet parsing primitives, RFC9001 QUIC v1 Retry integrity tag calculation/validation, full client Retry/VN handshake integration in `NativeQuicHandshake::process_server_datagram` (Retry DCID swap, Initial keys re-derivation from Retry SCID, token attachment, zero-offset CRYPTO replay, VN-driven Initial restart with regenerated source connection ID and chosen supported version via `set_supported_versions`, RFC9000 § 17.2.5.1/.2 loop guards for late and duplicate Retry, RFC9000 § 6.1–6.3 single VN response and `version_negotiation_failed` error when no overlap exists), and client PATH_CHALLENGE packetization with matching PATH_RESPONSE validation; full path migration integration remains pending.
 - Added QUIC send-time tracking, client Handshake CRYPTO PTO retransmission, and server Initial/Handshake CRYPTO PTO retransmission while preserving CRYPTO offsets and fresh packet numbers; full packet-space recovery remains pending.
 - Wired ACK-frame processing to sample RTT from newly ACKed largest sent packets, update latest/min/smoothed RTT and RTT variance, and feed the current PTO estimate.
 - Added event-level peer `CONNECTION_CLOSE` draining so inbound close frames stop further H3 event processing; close timers/retransmit remain pending.
@@ -143,7 +143,7 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 ## Closed gaps now tracked as regression guards
 
 - Native QUIC ACK_ECN frame encode/decode, counter validation, CE growth tracking, and loss-detector ACK range handling are implemented; remaining ECN work is outbound marking, CE-driven congestion response, and PMTU/path probing policy.
-- Version Negotiation and Retry packet parsing, QUIC v1 Retry integrity validation, client Retry/VN handshake handling, and client PATH_CHALLENGE/PATH_RESPONSE token lifecycle handling are implemented; remaining work is full per-address path migration state.
+- Version Negotiation and Retry packet parsing, QUIC v1 Retry integrity validation, full client Retry/VN handshake integration (Retry-driven Initial restart with new DCID-derived keys and token attachment, VN-driven restart with regenerated SCID and chosen version, RFC9000 § 17.2.5.1/.2 and § 6.1–6.3 loop guards, `version_negotiation_failed` error on no overlap), and client PATH_CHALLENGE/PATH_RESPONSE token lifecycle handling are implemented; remaining work is full per-address path migration state.
 - QUIC send-time tracking, ACK-driven RTT/PTO estimator updates, client Handshake CRYPTO PTO retransmission, server Initial/Handshake CRYPTO PTO retransmission, and event-level peer close draining are implemented; remaining recovery work is full RFC9002 timers/backoff, client Initial PTO replay, and close-drain timer/retransmit behavior.
 - Client/server same-fixture ACK decimation now has a `max_ack_delay_ms` timer path; remaining ACK work is browser-capture parity for tuned thresholds.
 - The latest full same-fixture proof emits no fixture packet-error events, and fixture events now serialize stable `category`/`fatal` fields; keep this as a regression guard, not an active cleanup gap.
@@ -194,6 +194,9 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --test h3_quic_packet_parsing -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --test h3_native_quic version_negotiation -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --test h3_native_quic retry -- --nocapture`
+- `CARGO_TARGET_DIR=/tmp/specter-p0-2-target cargo test --no-default-features --test h3_native_handshake retry -- --nocapture`
+- `CARGO_TARGET_DIR=/tmp/specter-p0-2-target cargo test --no-default-features --test h3_native_handshake version_negotiation -- --nocapture`
+- `CARGO_TARGET_DIR=/tmp/specter-p0-2-target cargo test --no-default-features --test h3_quic_packet_parsing -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --test h3_native_quic path_validator -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --test h3_transport_parameter_raw_order -- --nocapture`
 - `CARGO_TARGET_DIR=/tmp/specter-h3-test-target cargo test --test h3_receive_flow_scheduling native_h3_driver_schedules_timer_driven_delayed_application_acks -- --nocapture`
