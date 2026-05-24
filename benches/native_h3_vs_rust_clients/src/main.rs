@@ -2312,6 +2312,24 @@ mod tests {
         assert_eq!(row.source, "specter_native_rfc9220_tunnel_adapter");
     }
 
+    #[test]
+    fn quinn_transport_adapter_row_uses_measured_samples() {
+        let samples = vec![
+            super::AdapterSample::new(40.0, 400.0, 4_000),
+            super::AdapterSample::new(10.0, 100.0, 1_000),
+            super::AdapterSample::new(20.0, 200.0, 2_000),
+        ];
+
+        let row = super::quinn_transport_row_from_samples(&samples);
+
+        assert_eq!(row.competitor_id, "quinn_transport");
+        assert_eq!(row.status, "measured_pass");
+        assert_eq!(row.p50_ttft_ns, Some(20.0));
+        assert_eq!(row.p95_ttft_ns, Some(40.0));
+        assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
+        assert_eq!(row.source, "quinn_transport_adapter");
+    }
+
     #[tokio::test]
     async fn specter_native_local_fixture_reuses_streaming_connection_for_multiple_samples() {
         let fixture = super::LocalNativeH3Fixture::start("specter_native")
@@ -2352,6 +2370,22 @@ mod tests {
         assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "specter_native_rfc9220_tunnel_adapter");
+        assert!(row.p50_ttft_ns.is_some());
+        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
+    }
+
+    #[tokio::test]
+    async fn quinn_transport_fixture_measures_bidirectional_echo() {
+        let fixture = super::LocalQuinnTransportFixture::start().await.unwrap();
+
+        let row = super::measure_quinn_transport(fixture.url(), 0, 1)
+            .await
+            .unwrap();
+
+        assert_eq!(row.competitor_id, "quinn_transport");
+        assert_eq!(row.status, "measured_pass");
+        assert_eq!(row.source, "quinn_transport_adapter");
         assert!(row.p50_ttft_ns.is_some());
         assert!(row.p95_ttft_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
