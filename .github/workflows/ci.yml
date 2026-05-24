@@ -40,10 +40,7 @@ jobs:
 
       - run: cargo fmt -- --check
 
-      - name: Install BoringSSL build tools
-        run: brew install cmake ninja
-
-      - name: Build prebuilt BoringSSL
+      - name: Install prebuilt BoringSSL
         run: |
           set -euo pipefail
           if [[ "$(uname -m)" == "arm64" ]]; then
@@ -51,13 +48,8 @@ jobs:
           else
             TARGET=x86_64-apple-darwin
           fi
-          cargo fetch --manifest-path Cargo.toml
-          chmod +x scripts/build-boringssl.sh
-          ./scripts/build-boringssl.sh --manifest-path Cargo.toml "$TARGET"
-          test -s "lib/boringssl/include/openssl/x509v3.h"
-          test -s "lib/boringssl/$TARGET/build/libssl.a"
-          echo "BORING_BSSL_PATH=${{ github.workspace }}/lib/boringssl/$TARGET/build" >> "$GITHUB_ENV"
-          echo "BORING_BSSL_INCLUDE_PATH=${{ github.workspace }}/lib/boringssl/include" >> "$GITHUB_ENV"
+          chmod +x scripts/install-boringssl-prebuilt.sh
+          ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml "$TARGET"
 
       - run: cargo nextest run --all-features --profile ci
 
@@ -101,6 +93,11 @@ jobs:
       - name: Install zig
         run: brew install zig
 
+      - name: Install prebuilt BoringSSL
+        run: |
+          chmod +x scripts/install-boringssl-prebuilt.sh
+          ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml ${{ matrix.target }}
+
       - name: Build
         run: |
           chmod +x scripts/zig-cc-* scripts/zig-cxx-*
@@ -122,8 +119,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install LLVM and BoringSSL build tools
-        run: brew install llvm cmake ninja
+      - name: Install LLVM
+        run: brew install llvm
 
       - name: Add LLVM to PATH
         run: echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
@@ -132,8 +129,10 @@ jobs:
         with:
           tool: cargo-xwin
 
-      - name: Build
+      - name: Install prebuilt BoringSSL
         run: |
-          set -euo pipefail
-          . "$GITHUB_WORKSPACE/scripts/lib-bssl-env.sh" "${{ matrix.target }}"
-          cargo xwin build --release --target ${{ matrix.target }} --lib
+          chmod +x scripts/install-boringssl-prebuilt.sh
+          ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml ${{ matrix.target }}
+
+      - name: Build
+        run: cargo xwin build --release --target ${{ matrix.target }} --lib

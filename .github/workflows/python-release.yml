@@ -23,17 +23,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install BoringSSL build tools
-        run: brew install cmake ninja
-      - name: Build prebuilt BoringSSL for ${{ matrix.target }}
+      - name: Install prebuilt BoringSSL for ${{ matrix.target }}
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
-          cargo fetch --manifest-path bindings/python/Cargo.toml
-          chmod +x scripts/build-boringssl.sh
-          ./scripts/build-boringssl.sh --manifest-path bindings/python/Cargo.toml "${{ matrix.target }}"
-          test -s lib/boringssl/include/openssl/x509v3.h
-          test -s "lib/boringssl/${{ matrix.target }}/build/libssl.a"
+          chmod +x scripts/install-boringssl-prebuilt.sh
+          ./scripts/install-boringssl-prebuilt.sh --manifest-path bindings/python/Cargo.toml "${{ matrix.target }}"
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -70,19 +65,12 @@ jobs:
         with:
           python-version: '3.11'
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install system dependencies
-        run: |
-          brew update
-          brew install cmake ninja
-      - name: Build prebuilt BoringSSL for aarch64-apple-darwin
+      - name: Install prebuilt BoringSSL for aarch64-apple-darwin
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
-          cargo fetch --manifest-path bindings/python/Cargo.toml
-          chmod +x scripts/build-boringssl.sh
-          ./scripts/build-boringssl.sh --manifest-path bindings/python/Cargo.toml aarch64-apple-darwin
-          test -s lib/boringssl/include/openssl/x509v3.h
-          test -s lib/boringssl/aarch64-apple-darwin/build/libssl.a
+          chmod +x scripts/install-boringssl-prebuilt.sh
+          ./scripts/install-boringssl-prebuilt.sh --manifest-path bindings/python/Cargo.toml aarch64-apple-darwin
       # maturin develop requires a virtualenv - create one explicitly
       - name: Create virtualenv and install deps
         run: |

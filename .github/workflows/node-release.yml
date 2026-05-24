@@ -53,18 +53,12 @@ jobs:
         if: contains(matrix.settings.target, 'unknown-linux')
         run: brew install zig
 
-      - name: Install BoringSSL build tools
-        run: brew install cmake ninja
-
-      - name: Build prebuilt BoringSSL for ${{ matrix.settings.target }}
+      - name: Install prebuilt BoringSSL for ${{ matrix.settings.target }}
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
-          cargo fetch --manifest-path bindings/node/Cargo.toml
-          chmod +x scripts/build-boringssl.sh
-          ./scripts/build-boringssl.sh --manifest-path bindings/node/Cargo.toml "${{ matrix.settings.target }}"
-          test -s lib/boringssl/include/openssl/x509v3.h
-          test -s "lib/boringssl/${{ matrix.settings.target }}/build/libssl.a"
+          chmod +x scripts/install-boringssl-prebuilt.sh
+          ./scripts/install-boringssl-prebuilt.sh --manifest-path bindings/node/Cargo.toml "${{ matrix.settings.target }}"
           find "lib/boringssl/${{ matrix.settings.target }}/build" -maxdepth 1 -type f | head -10
           find lib/boringssl/include/openssl -maxdepth 1 -type f | head -10
 
@@ -131,18 +125,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install BoringSSL build tools
-        run: brew install cmake ninja
-
-      - name: Build prebuilt BoringSSL for aarch64-apple-darwin
+      - name: Install prebuilt BoringSSL for aarch64-apple-darwin
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
-          cargo fetch --manifest-path bindings/node/Cargo.toml
-          chmod +x scripts/build-boringssl.sh
-          ./scripts/build-boringssl.sh --manifest-path bindings/node/Cargo.toml aarch64-apple-darwin
-          test -s lib/boringssl/include/openssl/x509v3.h
-          test -s lib/boringssl/aarch64-apple-darwin/build/libssl.a
+          chmod +x scripts/install-boringssl-prebuilt.sh
+          ./scripts/install-boringssl-prebuilt.sh --manifest-path bindings/node/Cargo.toml aarch64-apple-darwin
 
       - name: Install dependencies
         run: |
