@@ -15,7 +15,24 @@ use crate::request::RequestBody;
 use crate::response::{Body, Response};
 use crate::transport::h3::body::{H3Body, H3BodyShared, H3BodyTimeouts};
 use crate::transport::h3::command::DriverCommand;
+use crate::transport::h3::tls::NativeH3HandshakeStatus;
 use crate::transport::h3::{H3TransportConfig, H3Tunnel};
+
+/// Native H3 TLS session resumption / QUIC 0-RTT outcome for a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NativeH3HandshakeReport {
+    pub status: NativeH3HandshakeStatus,
+    pub early_data_reason: u32,
+}
+
+impl Default for NativeH3HandshakeReport {
+    fn default() -> Self {
+        Self {
+            status: NativeH3HandshakeStatus::None,
+            early_data_reason: 0,
+        }
+    }
+}
 
 /// HTTP/3 connection handle for sending requests
 #[derive(Debug, Clone)]
@@ -25,6 +42,7 @@ pub struct H3Handle {
     is_draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
     body_progress_notify: Arc<Notify>,
     transport_config: H3TransportConfig,
+    native_handshake_report: NativeH3HandshakeReport,
 }
 
 impl H3Handle {
@@ -48,11 +66,28 @@ impl H3Handle {
         body_progress_notify: Arc<Notify>,
         transport_config: H3TransportConfig,
     ) -> Self {
+        Self::new_with_transport_config_and_native_handshake_report(
+            command_tx,
+            is_draining,
+            body_progress_notify,
+            transport_config,
+            NativeH3HandshakeReport::default(),
+        )
+    }
+
+    pub(crate) fn new_with_transport_config_and_native_handshake_report(
+        command_tx: mpsc::Sender<DriverCommand>,
+        is_draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        body_progress_notify: Arc<Notify>,
+        transport_config: H3TransportConfig,
+        native_handshake_report: NativeH3HandshakeReport,
+    ) -> Self {
         Self {
             command_tx,
             is_draining,
             body_progress_notify,
             transport_config: transport_config.normalized(),
+            native_handshake_report,
         }
     }
 
@@ -69,6 +104,21 @@ impl H3Handle {
     /// Bounded in-flight response DATA slots per streaming H3 body.
     pub fn streaming_body_buffer_slots(&self) -> usize {
         self.transport_config.streaming_body_buffer_slots
+    }
+
+    /// Native H3 TLS session resumption / QUIC 0-RTT outcome for this connection.
+    pub fn native_handshake_report(&self) -> NativeH3HandshakeReport {
+        self.native_handshake_report
+    }
+
+    /// Native H3 TLS session resumption / QUIC 0-RTT status for this connection.
+    pub fn native_handshake_status(&self) -> NativeH3HandshakeStatus {
+        self.native_handshake_report.status
+    }
+
+    /// BoringSSL early-data reason code for this connection.
+    pub fn native_early_data_reason(&self) -> u32 {
+        self.native_handshake_report.early_data_reason
     }
 
     /// Send an HTTP/3 request and receive the response.

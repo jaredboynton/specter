@@ -18,7 +18,7 @@ pub(crate) use body::{H3Body, H3BodyTimeouts, DEFAULT_H3_BODY_SLOT_CAPACITY};
 pub use command::DriverCommand;
 pub use connection::H3Connection;
 pub(crate) use dispatcher::H3Dispatcher;
-pub use handle::H3Handle;
+pub use handle::{H3Handle, NativeH3HandshakeReport};
 pub(crate) use tunnel::H3TunnelCredit;
 pub use tunnel::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 
@@ -138,6 +138,7 @@ pub struct H3Client {
     backend: H3Backend,
     transport_config: H3TransportConfig,
     session_cache: NativeH3SessionCache,
+    last_native_handshake_report: Arc<StdRwLock<NativeH3HandshakeReport>>,
     max_idle_timeout: Option<u64>,
     dns_config: DnsConfig,
     pool: Arc<RwLock<HashMap<H3PoolKey, H3Handle>>>,
@@ -169,6 +170,9 @@ impl H3Client {
             backend: H3Backend::Native,
             transport_config: H3TransportConfig::default(),
             session_cache: NativeH3SessionCache::new(),
+            last_native_handshake_report: Arc::new(StdRwLock::new(
+                NativeH3HandshakeReport::default(),
+            )),
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
@@ -188,6 +192,9 @@ impl H3Client {
             backend: H3Backend::Native,
             transport_config: H3TransportConfig::default(),
             session_cache: NativeH3SessionCache::new(),
+            last_native_handshake_report: Arc::new(StdRwLock::new(
+                NativeH3HandshakeReport::default(),
+            )),
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
@@ -287,6 +294,26 @@ impl H3Client {
     /// Shared native H3 TLS session cache used for session resumption.
     pub fn native_session_cache(&self) -> NativeH3SessionCache {
         self.session_cache.clone()
+    }
+
+    /// Last native H3 TLS resumption / 0-RTT outcome observed by this client.
+    pub fn last_native_handshake_report(&self) -> NativeH3HandshakeReport {
+        self.last_native_handshake_report
+            .read()
+            .map(|report| *report)
+            .unwrap_or_default()
+    }
+
+    /// Last native H3 TLS resumption / 0-RTT status observed by this client.
+    pub fn last_native_handshake_status(
+        &self,
+    ) -> crate::transport::h3::tls::NativeH3HandshakeStatus {
+        self.last_native_handshake_report().status
+    }
+
+    /// Last BoringSSL early-data reason code observed by this client.
+    pub fn last_native_early_data_reason(&self) -> u32 {
+        self.last_native_handshake_report().early_data_reason
     }
 
     /// Set a custom idle timeout (in milliseconds)
@@ -499,6 +526,12 @@ impl H3Client {
         }
     }
 
+    fn record_native_handshake_report(&self, handle: &H3Handle) {
+        if let Ok(mut report) = self.last_native_handshake_report.write() {
+            *report = handle.native_handshake_report();
+        }
+    }
+
     /// Resolve an H3Handle for the given URL: reuse a healthy pooled handle if
     /// one exists, otherwise establish a fresh connection. Returns the handle
     /// together with a flag indicating whether the returned handle came from
@@ -529,11 +562,13 @@ impl H3Client {
     async fn resolve_handle_for_request(&self, url: &str) -> Result<(H3Handle, bool, H3PoolKey)> {
         if let Some((key, handle)) = self.cached_hot_handle(url) {
             self.pool_reuse_counter.fetch_add(1, Ordering::Relaxed);
+            self.record_native_handshake_report(&handle);
             return Ok((handle, true, key));
         }
 
         let key = self.pool_key(url)?;
         let (handle, tried_pooled) = self.resolve_handle(url, &key).await?;
+        self.record_native_handshake_report(&handle);
         self.store_hot_handle(url, &key, &handle);
         Ok((handle, tried_pooled, key))
     }
@@ -543,6 +578,7 @@ impl H3Client {
 
         if let Some(handle) = self.pool.read().await.get(&key).cloned() {
             if !handle.is_closed() && !handle.is_draining() {
+                self.record_native_handshake_report(&handle);
                 self.store_hot_handle(url, &key, &handle);
                 return Ok(handle);
             }
@@ -576,6 +612,7 @@ impl H3Client {
         .await?;
         let hot_key = key.clone();
         pool.insert(key, handle.clone());
+        self.record_native_handshake_report(&handle);
         self.store_hot_handle(url, &hot_key, &handle);
         Ok(handle)
     }

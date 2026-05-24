@@ -15,7 +15,7 @@ use crate::fingerprint::Http3Fingerprint;
 use crate::request::{RequestBody, RequestBodyStream};
 use crate::transport::h3::body::{H3BodyPush, H3BodyShared};
 use crate::transport::h3::command::{DriverCommand, StreamResponse, StreamingHeadersResult};
-use crate::transport::h3::handle::H3Handle;
+use crate::transport::h3::handle::{H3Handle, NativeH3HandshakeReport};
 use crate::transport::h3::handshake::{NativeQuicHandshake, ServerH3Event, ServerH3StreamEvent};
 use crate::transport::h3::native::{
     decode_header_block, H3Frame, H3Header, H3Setting, H3StreamType,
@@ -676,6 +676,10 @@ pub fn spawn_native_h3_driver(
     let (command_tx, command_rx) = mpsc::channel(32);
     let is_draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let body_progress_notify = Arc::new(Notify::new());
+    let native_handshake_report = NativeH3HandshakeReport {
+        status: handshake.handshake_status(),
+        early_data_reason: handshake.early_data_reason(),
+    };
     let driver = NativeH3Driver {
         command_tx: command_tx.clone(),
         command_rx,
@@ -706,12 +710,15 @@ pub fn spawn_native_h3_driver(
         }
     });
 
-    Ok(H3Handle::new_with_transport_config(
-        command_tx,
-        is_draining,
-        body_progress_notify,
-        transport_config,
-    ))
+    Ok(
+        H3Handle::new_with_transport_config_and_native_handshake_report(
+            command_tx,
+            is_draining,
+            body_progress_notify,
+            transport_config,
+            native_handshake_report,
+        ),
+    )
 }
 
 struct NativeH3Driver {
