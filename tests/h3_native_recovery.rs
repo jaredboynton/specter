@@ -91,6 +91,140 @@ fn rfc9002_recovery_state_tracks_bytes_in_flight_round_trip() {
 }
 
 #[test]
+fn rfc9002_recovery_ack_ecn_ce_growth_reduces_congestion_window() {
+    let mut recovery = RecoveryState::default();
+    let base = Instant::now();
+    recovery.on_packet_sent(
+        PacketNumberSpace::Application,
+        1,
+        SentPacketInfo::new(base, 1200, true, true),
+    );
+    let initial_cwnd = recovery.congestion().cwnd();
+
+    let ack = QuicFrame::AckEcn {
+        largest_acknowledged: 1,
+        ack_delay: 0,
+        first_ack_range: 0,
+        ranges: Vec::new(),
+        ect0_count: 0,
+        ect1_count: 0,
+        ce_count: 1,
+    };
+    let outcome = recovery
+        .on_ack_received(
+            PacketNumberSpace::Application,
+            &ack,
+            3,
+            base + Duration::from_millis(25),
+        )
+        .expect("ack ecn");
+
+    assert!(outcome.ecn_congestion);
+    assert!(recovery.congestion().cwnd() < initial_cwnd);
+}
+
+#[test]
+fn rfc9002_recovery_ack_ecn_ce_growth_without_new_ack_still_reduces_congestion_window() {
+    let mut recovery = RecoveryState::default();
+    let base = Instant::now();
+    recovery.on_packet_sent(
+        PacketNumberSpace::Application,
+        1,
+        SentPacketInfo::new(base, 1200, true, true),
+    );
+    let first = QuicFrame::AckEcn {
+        largest_acknowledged: 1,
+        ack_delay: 0,
+        first_ack_range: 0,
+        ranges: Vec::new(),
+        ect0_count: 0,
+        ect1_count: 0,
+        ce_count: 1,
+    };
+    let _ = recovery
+        .on_ack_received(
+            PacketNumberSpace::Application,
+            &first,
+            3,
+            base + Duration::from_millis(25),
+        )
+        .expect("first ack ecn");
+    let cwnd_after_first_ce = recovery.congestion().cwnd();
+
+    let duplicate_with_new_ce = QuicFrame::AckEcn {
+        largest_acknowledged: 1,
+        ack_delay: 0,
+        first_ack_range: 0,
+        ranges: Vec::new(),
+        ect0_count: 0,
+        ect1_count: 0,
+        ce_count: 2,
+    };
+    let outcome = recovery
+        .on_ack_received(
+            PacketNumberSpace::Application,
+            &duplicate_with_new_ce,
+            3,
+            base + Duration::from_millis(100),
+        )
+        .expect("duplicate ack ecn");
+
+    assert!(outcome.ecn_congestion);
+    assert!(recovery.congestion().cwnd() < cwnd_after_first_ce);
+}
+
+#[test]
+fn rfc9002_recovery_ack_ecn_counter_decrease_disables_ecn_without_error() {
+    let mut recovery = RecoveryState::default();
+    let base = Instant::now();
+    recovery.on_packet_sent(
+        PacketNumberSpace::Application,
+        1,
+        SentPacketInfo::new(base, 1200, true, true),
+    );
+    let first = QuicFrame::AckEcn {
+        largest_acknowledged: 1,
+        ack_delay: 0,
+        first_ack_range: 0,
+        ranges: Vec::new(),
+        ect0_count: 1,
+        ect1_count: 0,
+        ce_count: 0,
+    };
+    let _ = recovery
+        .on_ack_received(
+            PacketNumberSpace::Application,
+            &first,
+            3,
+            base + Duration::from_millis(25),
+        )
+        .expect("first ack ecn");
+
+    let decrease = QuicFrame::AckEcn {
+        largest_acknowledged: 1,
+        ack_delay: 0,
+        first_ack_range: 0,
+        ranges: Vec::new(),
+        ect0_count: 0,
+        ect1_count: 0,
+        ce_count: 0,
+    };
+    let outcome = recovery
+        .on_ack_received(
+            PacketNumberSpace::Application,
+            &decrease,
+            3,
+            base + Duration::from_millis(50),
+        )
+        .expect("counter decrease should disable ecn, not close");
+
+    assert!(outcome.ecn_validation_failed);
+    assert!(recovery
+        .space(PacketNumberSpace::Application)
+        .ecn_validation_failed());
+}
+
+#[test]
 fn rfc9002_recovery_pto_doubles_on_each_timeout_until_ack_resets_it() {
     let mut recovery = RecoveryState::default();
     let now = Instant::now();
