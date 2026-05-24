@@ -48,7 +48,8 @@ unsafe extern "C" {
     fn SSL_get_early_data_reason(ssl: *const ffi::SSL) -> u32;
     fn SSL_process_quic_post_handshake(ssl: *mut ffi::SSL) -> c_int;
     fn SSL_SESSION_early_data_capable(session: *const ffi::SSL_SESSION) -> c_int;
-    fn SSL_SESSION_copy_without_early_data(session: *mut ffi::SSL_SESSION) -> *mut ffi::SSL_SESSION;
+    fn SSL_SESSION_copy_without_early_data(session: *mut ffi::SSL_SESSION)
+        -> *mut ffi::SSL_SESSION;
     fn SSL_CTX_set_tlsext_ticket_keys(
         ctx: *mut ffi::SSL_CTX,
         keys: *const c_void,

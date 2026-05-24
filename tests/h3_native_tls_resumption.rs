@@ -13,8 +13,7 @@ use specter::fingerprint::tls::TlsExtensionOrderBehavior;
 use specter::fingerprint::{Http3Fingerprint, TlsFingerprint};
 use specter::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
 use specter::transport::h3::tls::{
-    NativeH3HandshakeStatus, NativeQuicTlsSession, QuicEncryptionLevel,
-    NATIVE_H3_TICKET_KEY_LEN,
+    NativeH3HandshakeStatus, NativeQuicTlsSession, QuicEncryptionLevel, NATIVE_H3_TICKET_KEY_LEN,
 };
 
 mod helpers;
@@ -166,8 +165,13 @@ fn native_h3_tls_replayed_session_ticket_produces_resumed_status() {
         "ordinary session resumption must not emit 0-RTT CRYPTO unless request replay policy opted in"
     );
     let (cert_pem, key_pem) = helpers::tls::cached_cert_and_key_pem();
-    let mut resumed_server =
-        NativeQuicTlsSession::server(&fingerprint, &cert_pem, &key_pem).expect("server session");
+    let mut resumed_server = NativeQuicTlsSession::server_with_ticket_keys(
+        &fingerprint,
+        &cert_pem,
+        &key_pem,
+        &TEST_RESUMPTION_TICKET_KEYS,
+    )
+    .expect("server session");
 
     let _second_ticket = run_handshake_to_completion(&mut resumed_client, &mut resumed_server);
 
@@ -206,8 +210,13 @@ fn native_h3_tls_zero_rtt_offer_reports_early_accept_or_clean_reject() {
     );
 
     let (cert_pem, key_pem) = helpers::tls::cached_cert_and_key_pem();
-    let mut zero_rtt_server =
-        NativeQuicTlsSession::server(&fingerprint, &cert_pem, &key_pem).expect("server session");
+    let mut zero_rtt_server = NativeQuicTlsSession::server_with_ticket_keys(
+        &fingerprint,
+        &cert_pem,
+        &key_pem,
+        &TEST_RESUMPTION_TICKET_KEYS,
+    )
+    .expect("server session");
 
     let _post_ticket = run_handshake_to_completion(&mut zero_rtt_client, &mut zero_rtt_server);
 
@@ -279,8 +288,13 @@ fn native_h3_session_cache_does_not_reuse_session_across_fingerprints() {
     )
     .expect("native H3 client with mismatched-fingerprint session");
     let (cert_pem, key_pem) = helpers::tls::cached_cert_and_key_pem();
-    let mut firefox_server =
-        NativeQuicTlsSession::server(&fingerprint, &cert_pem, &key_pem).expect("server session");
+    let mut firefox_server = NativeQuicTlsSession::server_with_ticket_keys(
+        &fingerprint,
+        &cert_pem,
+        &key_pem,
+        &TEST_RESUMPTION_TICKET_KEYS,
+    )
+    .expect("server session");
     let _ = run_handshake_to_completion(&mut firefox_client, &mut firefox_server);
 
     let status = firefox_client.handshake_status();
