@@ -25,7 +25,7 @@ jobs:
           components: rustfmt
 
       - uses: mozilla-actions/sccache-action@v0.0.9
-      - run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+      - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - uses: actions/cache@v4
         with:
@@ -38,16 +38,27 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: Configure prebuilt BoringSSL
-        run: |
-          if [[ "$(uname -m)" == "arm64" ]]; then
-            echo "BORING_BSSL_PATH=${{ github.workspace }}/lib/boringssl/aarch64-apple-darwin/build" >> $GITHUB_ENV
-          else
-            echo "BORING_BSSL_PATH=${{ github.workspace }}/lib/boringssl/x86_64-apple-darwin/build" >> $GITHUB_ENV
-          fi
-          echo "BORING_BSSL_INCLUDE_PATH=${{ github.workspace }}/lib/boringssl/include" >> $GITHUB_ENV
-
       - run: cargo fmt -- --check
+
+      - name: Install BoringSSL build tools
+        run: brew install cmake ninja
+
+      - name: Build prebuilt BoringSSL
+        run: |
+          set -euo pipefail
+          if [[ "$(uname -m)" == "arm64" ]]; then
+            TARGET=aarch64-apple-darwin
+          else
+            TARGET=x86_64-apple-darwin
+          fi
+          cargo fetch --manifest-path Cargo.toml
+          chmod +x scripts/build-boringssl.sh
+          ./scripts/build-boringssl.sh --manifest-path Cargo.toml "$TARGET"
+          test -s "lib/boringssl/include/openssl/x509v3.h"
+          test -s "lib/boringssl/$TARGET/build/libssl.a"
+          echo "BORING_BSSL_PATH=${{ github.workspace }}/lib/boringssl/$TARGET/build" >> "$GITHUB_ENV"
+          echo "BORING_BSSL_INCLUDE_PATH=${{ github.workspace }}/lib/boringssl/include" >> "$GITHUB_ENV"
+
       - run: cargo nextest run --all-features --profile ci
 
       - uses: actions/upload-artifact@v4
@@ -111,8 +122,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install LLVM
-        run: brew install llvm
+      - name: Install LLVM and BoringSSL build tools
+        run: brew install llvm cmake ninja
 
       - name: Add LLVM to PATH
         run: echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
@@ -122,7 +133,7 @@ jobs:
           tool: cargo-xwin
 
       - name: Build
-        run: cargo xwin build --release --target ${{ matrix.target }} --lib
-        env:
-          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.target }}/build
-          BORING_BSSL_INCLUDE_PATH: ${{ github.workspace }}/lib/boringssl/include
+        run: |
+          set -euo pipefail
+          . "$GITHUB_WORKSPACE/scripts/lib-bssl-env.sh" "${{ matrix.target }}"
+          cargo xwin build --release --target ${{ matrix.target }} --lib
