@@ -1917,9 +1917,7 @@ fn classify_local_native_h3_packet_error_with_datagram(
     classify_local_native_h3_packet_error(error, app_ready)
 }
 
-fn should_log_local_native_h3_fixture_event(
-    classification: &FixtureErrorClassification,
-) -> bool {
+fn should_log_local_native_h3_fixture_event(classification: &FixtureErrorClassification) -> bool {
     classification.level != "debug"
 }
 
