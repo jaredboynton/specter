@@ -5,7 +5,7 @@
 //! - HTTP/2: Connection reuse with stream multiplexing
 //! - HTTP/3: QUIC connection reuse with stream multiplexing
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -43,6 +43,70 @@ impl PoolKey {
             fingerprint,
             pseudo_order,
         }
+    }
+
+    pub fn origin_key(&self) -> OriginKey {
+        OriginKey {
+            host: self.host.clone(),
+            port: self.port,
+            is_https: self.is_https,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct OriginKey {
+    pub host: String,
+    pub port: u16,
+    pub is_https: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OriginFairQueue {
+    order: VecDeque<OriginKey>,
+    queues: HashMap<OriginKey, VecDeque<PoolKey>>,
+    len: usize,
+}
+
+impl OriginFairQueue {
+    pub fn push(&mut self, key: PoolKey) {
+        let origin = key.origin_key();
+        let queue = self.queues.entry(origin.clone()).or_default();
+        if queue.is_empty() {
+            self.order.push_back(origin);
+        }
+        queue.push_back(key);
+        self.len += 1;
+    }
+
+    pub fn pop_next(&mut self) -> Option<PoolKey> {
+        while let Some(origin) = self.order.pop_front() {
+            let Some((key, has_more)) = self.pop_origin_front(&origin) else {
+                continue;
+            };
+            if has_more {
+                self.order.push_back(origin);
+            } else {
+                self.queues.remove(&origin);
+            }
+            self.len = self.len.saturating_sub(1);
+            return Some(key);
+        }
+        None
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn pop_origin_front(&mut self, origin: &OriginKey) -> Option<(PoolKey, bool)> {
+        let queue = self.queues.get_mut(origin)?;
+        let key = queue.pop_front()?;
+        Some((key, !queue.is_empty()))
     }
 }
 

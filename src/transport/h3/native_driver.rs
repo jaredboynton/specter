@@ -583,6 +583,7 @@ pub fn spawn_native_h3_driver(
         pending_commands: VecDeque::new(),
         send_scheduler: H3SendScheduler::default(),
         is_draining: is_draining.clone(),
+        closing_connection_close_packet: None,
         body_progress_notify: body_progress_notify.clone(),
         transport_config: transport_config.normalized(),
         max_idle_timeout: Duration::from_millis(max_idle_timeout_ms.max(1)),
@@ -618,6 +619,7 @@ struct NativeH3Driver {
     pending_commands: VecDeque<DriverCommand>,
     send_scheduler: H3SendScheduler,
     is_draining: Arc<std::sync::atomic::AtomicBool>,
+    closing_connection_close_packet: Option<Bytes>,
     body_progress_notify: Arc<Notify>,
     transport_config: H3TransportConfig,
     max_idle_timeout: Duration,
@@ -1002,10 +1004,24 @@ impl NativeH3Driver {
         let packet = self
             .handshake
             .build_client_connection_close_packet(error_code, reason)?;
+        let close_packet = packet.packet.clone();
+        self.closing_connection_close_packet = Some(close_packet.clone());
+        self.is_draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.socket
-            .send_to(packet.packet.as_ref(), self.peer_addr)
+            .send_to(close_packet.as_ref(), self.peer_addr)
             .await
             .map_err(Error::Io)?;
+        Ok(())
+    }
+
+    async fn replay_connection_close(&mut self) -> Result<()> {
+        if let Some(close_packet) = &self.closing_connection_close_packet {
+            self.socket
+                .send_to(close_packet.as_ref(), self.peer_addr)
+                .await
+                .map_err(Error::Io)?;
+        }
         Ok(())
     }
 
@@ -1578,6 +1594,13 @@ impl NativeH3Driver {
     }
 
     async fn process_datagram(&mut self, datagram: &[u8]) -> Result<()> {
+        if self.is_draining.load(std::sync::atomic::Ordering::SeqCst)
+            && self.closing_connection_close_packet.is_some()
+        {
+            self.replay_connection_close().await?;
+            return Ok(());
+        }
+
         if datagram.first().is_some_and(|first| first & 0x80 != 0) {
             let processed_packets = self.handshake.process_server_datagram(datagram)?;
             if let Some(packet) = self.handshake.build_client_initial_ack_packet()? {
@@ -2321,6 +2344,7 @@ mod tests {
             pending_tunnels: HashMap::from([(stream_id, tunnel)]),
             pending_commands: VecDeque::new(),
             is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            closing_connection_close_packet: None,
             body_progress_notify: Arc::new(Notify::new()),
             send_scheduler: H3SendScheduler::default(),
             transport_config: H3TransportConfig::default(),

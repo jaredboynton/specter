@@ -143,6 +143,52 @@ pub enum CertCompression {
     None,
 }
 
+pub const NATIVE_H3_SESSION_RESUMPTION_UNSUPPORTED_REASON: &str =
+    "native H3 does not yet wire BoringSSL session tickets into the QUIC handshake";
+pub const NATIVE_H3_ZERO_RTT_UNSUPPORTED_REASON: &str =
+    "native H3 cannot send 0-RTT until session resumption and early-data transport replay are implemented";
+
+/// Native HTTP/3 TLS feature support status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeH3TlsFeatureStatus {
+    Supported,
+    Unsupported { reason: &'static str },
+}
+
+impl NativeH3TlsFeatureStatus {
+    pub fn is_supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+}
+
+/// Native HTTP/3 TLS capabilities derived from the current fingerprint/config surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeH3TlsCapabilities {
+    pub session_resumption: NativeH3TlsFeatureStatus,
+    pub zero_rtt: NativeH3TlsFeatureStatus,
+}
+
+impl NativeH3TlsCapabilities {
+    pub fn current() -> Self {
+        Self {
+            session_resumption: NativeH3TlsFeatureStatus::Unsupported {
+                reason: NATIVE_H3_SESSION_RESUMPTION_UNSUPPORTED_REASON,
+            },
+            zero_rtt: NativeH3TlsFeatureStatus::Unsupported {
+                reason: NATIVE_H3_ZERO_RTT_UNSUPPORTED_REASON,
+            },
+        }
+    }
+
+    pub fn supports_session_resumption(self) -> bool {
+        self.session_resumption.is_supported()
+    }
+
+    pub fn supports_zero_rtt(self) -> bool {
+        self.zero_rtt.is_supported()
+    }
+}
+
 /// TLS fingerprint configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsFingerprint {
@@ -258,6 +304,11 @@ impl TlsFingerprint {
     /// Compatibility alias for the shared Firefox desktop TLS fingerprint.
     pub fn firefox_133() -> Self {
         Self::firefox()
+    }
+
+    /// Native HTTP/3 TLS capability status for this fingerprint/config surface.
+    pub fn native_h3_capabilities(&self) -> NativeH3TlsCapabilities {
+        NativeH3TlsCapabilities::current()
     }
 
     /// Stable, explicit-field key suitable for use as a connection-pool discriminator.

@@ -553,6 +553,9 @@ pub struct QuicLossDetector {
     sent_at: BTreeMap<u64, Instant>,
     acked: BTreeSet<u64>,
     packet_threshold: u64,
+    ecn_counts: Option<EcnCounters>,
+    ecn_validation_failed: bool,
+    ecn_ce_marked_packets: u64,
 }
 
 impl Default for QuicLossDetector {
@@ -562,7 +565,26 @@ impl Default for QuicLossDetector {
             sent_at: BTreeMap::new(),
             acked: BTreeSet::new(),
             packet_threshold: 3,
+            ecn_counts: None,
+            ecn_validation_failed: false,
+            ecn_ce_marked_packets: 0,
         }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct EcnCounters {
+    ect0: u64,
+    ect1: u64,
+    ce: u64,
+}
+
+impl EcnCounters {
+    fn total(self) -> Result<u64> {
+        self.ect0
+            .checked_add(self.ect1)
+            .and_then(|total| total.checked_add(self.ce))
+            .ok_or_else(|| Error::HttpProtocol("QUIC ACK_ECN counter overflow".into()))
     }
 }
 
@@ -591,25 +613,42 @@ impl QuicLossDetector {
     }
 
     pub fn on_ack_frame(&mut self, frame: &QuicFrame) -> Result<Vec<u64>> {
-        let (largest_acknowledged, first_ack_range, ranges) = match frame {
+        let (largest_acknowledged, first_ack_range, ranges, ecn_counts) = match frame {
             QuicFrame::Ack {
                 largest_acknowledged,
                 first_ack_range,
                 ranges,
                 ..
-            }
-            | QuicFrame::AckEcn {
+            } => (*largest_acknowledged, *first_ack_range, ranges, None),
+            QuicFrame::AckEcn {
                 largest_acknowledged,
                 first_ack_range,
                 ranges,
+                ect0_count,
+                ect1_count,
+                ce_count,
                 ..
-            } => (*largest_acknowledged, *first_ack_range, ranges),
+            } => (
+                *largest_acknowledged,
+                *first_ack_range,
+                ranges,
+                Some(EcnCounters {
+                    ect0: *ect0_count,
+                    ect1: *ect1_count,
+                    ce: *ce_count,
+                }),
+            ),
             _ => return Ok(Vec::new()),
         };
 
+        let mut decoded_ranges = Vec::new();
         let mut acked_packets = Vec::new();
-        let mut smallest_acked =
-            self.on_ack_range(largest_acknowledged, first_ack_range, &mut acked_packets)?;
+        let mut smallest_acked = self.collect_ack_range(
+            largest_acknowledged,
+            first_ack_range,
+            &mut acked_packets,
+            &mut decoded_ranges,
+        )?;
         for range in ranges {
             let gap = range
                 .gap
@@ -618,8 +657,24 @@ impl QuicLossDetector {
             let largest_in_range = smallest_acked.checked_sub(gap).ok_or_else(|| {
                 Error::HttpProtocol("QUIC ACK range underflowed packet number space".into())
             })?;
-            smallest_acked =
-                self.on_ack_range(largest_in_range, range.ack_range_length, &mut acked_packets)?;
+            smallest_acked = self.collect_ack_range(
+                largest_in_range,
+                range.ack_range_length,
+                &mut acked_packets,
+                &mut decoded_ranges,
+            )?;
+        }
+
+        if let Some(ecn_counts) = ecn_counts {
+            let newly_acked = acked_packets
+                .iter()
+                .filter(|packet_number| !self.acked.contains(packet_number))
+                .count() as u64;
+            self.validate_ack_ecn_counts(ecn_counts, newly_acked)?;
+        }
+
+        for (largest_acknowledged, ack_range_length) in decoded_ranges {
+            self.on_ack_range(largest_acknowledged, ack_range_length)?;
         }
 
         Ok(acked_packets)
@@ -660,11 +715,20 @@ impl QuicLossDetector {
             .collect()
     }
 
-    fn on_ack_range(
-        &mut self,
+    pub fn ecn_validation_failed(&self) -> bool {
+        self.ecn_validation_failed
+    }
+
+    pub fn ecn_ce_marked_packets(&self) -> u64 {
+        self.ecn_ce_marked_packets
+    }
+
+    fn collect_ack_range(
+        &self,
         largest_acknowledged: u64,
         ack_range_length: u64,
         acked_packets: &mut Vec<u64>,
+        decoded_ranges: &mut Vec<(u64, u64)>,
     ) -> Result<u64> {
         let smallest_acknowledged = largest_acknowledged
             .checked_sub(ack_range_length)
@@ -675,9 +739,50 @@ impl QuicLossDetector {
             if self.sent.contains(&packet_number) {
                 acked_packets.push(packet_number);
             }
+        }
+        decoded_ranges.push((largest_acknowledged, ack_range_length));
+        Ok(smallest_acknowledged)
+    }
+
+    fn on_ack_range(&mut self, largest_acknowledged: u64, ack_range_length: u64) -> Result<()> {
+        let smallest_acknowledged = largest_acknowledged
+            .checked_sub(ack_range_length)
+            .ok_or_else(|| {
+                Error::HttpProtocol("QUIC ACK range exceeded largest packet number".into())
+            })?;
+        for packet_number in smallest_acknowledged..=largest_acknowledged {
             self.on_ack_received(packet_number);
         }
-        Ok(smallest_acknowledged)
+        Ok(())
+    }
+
+    fn validate_ack_ecn_counts(
+        &mut self,
+        counters: EcnCounters,
+        newly_acked_packets: u64,
+    ) -> Result<()> {
+        let previous = self.ecn_counts.unwrap_or_default();
+        if counters.ect0 < previous.ect0
+            || counters.ect1 < previous.ect1
+            || counters.ce < previous.ce
+        {
+            self.ecn_validation_failed = true;
+            return Err(Error::Quic("QUIC ACK_ECN counters decreased".into()));
+        }
+
+        let count_increase = counters.total()?.checked_sub(previous.total()?).ok_or_else(|| {
+            Error::HttpProtocol("QUIC ACK_ECN counter total underflow".into())
+        })?;
+        if count_increase > newly_acked_packets {
+            self.ecn_validation_failed = true;
+            return Err(Error::Quic(format!(
+                "QUIC ACK_ECN count increase {count_increase} exceeds newly acknowledged packet count {newly_acked_packets}"
+            )));
+        }
+
+        self.ecn_counts = Some(counters);
+        self.ecn_ce_marked_packets = counters.ce;
+        Ok(())
     }
 }
 

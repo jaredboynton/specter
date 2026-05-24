@@ -15,7 +15,9 @@ use bytes::Bytes;
 use foreign_types_shared::ForeignType;
 
 use crate::error::{Error, Result};
-use crate::fingerprint::{CertCompression, Http3Fingerprint, TlsFingerprint};
+use crate::fingerprint::{
+    tls::NativeH3TlsCapabilities, CertCompression, Http3Fingerprint, TlsFingerprint,
+};
 use crate::transport::h3::quic::{
     build_initial_crypto_packet, derive_initial_key_material,
     derive_packet_key_material_from_secret, encode_initial_header,
@@ -97,6 +99,10 @@ pub fn capture_client_initial_crypto(
 ) -> Result<CapturedClientInitial> {
     let mut session = NativeQuicTlsSession::client(server_name, fingerprint)?;
     Ok(session.take_client_initial())
+}
+
+pub fn native_h3_tls_capabilities(fingerprint: &TlsFingerprint) -> NativeH3TlsCapabilities {
+    fingerprint.native_h3_capabilities()
 }
 
 impl NativeQuicTlsSession {

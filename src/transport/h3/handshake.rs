@@ -13,7 +13,7 @@ use crate::transport::h3::quic::{
     open_long_header_packet, open_short_header_packet, protect_long_header_packet,
     protect_short_header_packet, split_long_header_datagram, ConnectionId, LongHeaderPacket,
     LongHeaderType, QuicAckTracker, QuicCryptoAssembler, QuicFrame, QuicLossDetector,
-    QuicPacketKeyMaterial,
+    QuicPacketKeyMaterial, QuicPathValidator,
 };
 use crate::transport::h3::tls::{
     build_client_initial_packet_from_capture_with_size, ClientInitialPacket, NativeQuicTlsSession,
@@ -505,6 +505,7 @@ pub struct NativeQuicHandshake {
     client_application_receive_flow_control: QuicReceiveFlowControl,
     client_handshake_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     client_application_sent_streams: BTreeMap<u64, SentApplicationStreamPacket>,
+    client_path_validator: QuicPathValidator,
     next_client_initial_packet_number: u64,
     next_server_initial_packet_number: u64,
     next_server_handshake_packet_number: u64,
@@ -1443,6 +1444,7 @@ impl NativeQuicHandshake {
             ),
             client_handshake_sent_crypto: BTreeMap::new(),
             client_application_sent_streams: BTreeMap::new(),
+            client_path_validator: QuicPathValidator::default(),
             next_client_initial_packet_number: 1,
             next_server_initial_packet_number: 0,
             next_server_handshake_packet_number: 0,
@@ -1497,6 +1499,14 @@ impl NativeQuicHandshake {
 
     pub fn is_close_draining(&self) -> bool {
         self.close_draining
+    }
+
+    pub fn client_path_validation_pending_count(&self) -> usize {
+        self.client_path_validator.pending_count()
+    }
+
+    pub fn is_client_path_validated(&self, data: &[u8; 8]) -> bool {
+        self.client_path_validator.is_validated(data)
     }
 
     pub fn client_application_lost_packets(&self) -> Vec<u64> {
@@ -1979,6 +1989,14 @@ impl NativeQuicHandshake {
         self.build_client_application_control_packet(QuicFrame::PathResponse(data))
     }
 
+    pub fn build_client_path_challenge_packet(
+        &mut self,
+        data: [u8; 8],
+    ) -> Result<ClientApplicationControlPacket> {
+        let frame = self.client_path_validator.path_challenge(data);
+        self.build_client_application_control_packet(frame)
+    }
+
     pub fn build_client_connection_close_packet(
         &mut self,
         error_code: u64,
@@ -2119,6 +2137,9 @@ impl NativeQuicHandshake {
                 } => self
                     .client_application_flow_control
                     .apply_max_streams(*bidirectional, *max_streams),
+                QuicFrame::PathResponse(data) => {
+                    self.client_path_validator.on_path_response(*data);
+                }
                 _ => {}
             }
         }
