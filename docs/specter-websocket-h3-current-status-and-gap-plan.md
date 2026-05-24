@@ -12,7 +12,7 @@ Specter now has credible proof for the H1/H2, RFC6455, and local same-fixture na
 - **H1 RFC6455 WebSocket vs fast Rust clients:** local echo benchmark now includes `fastwebsockets 0.10.0` and `tokio-tungstenite 0.24`; persisted run `docs/benchmarks/websocket-vs-fastwebsockets/2026-05-24-final.json` passes both gates.
 - **Live Codex WSS vs tokio-tungstenite:** persisted n=50 artifact passes all samples and shows better Specter p95 tail, but median TTFT remains within/noisy against tungstenite.
 - **Native H3 HTTP comparator:** isolated comparator crate now has persisted same-fixture artifacts under `docs/benchmarks/native-h3-vs-rust-clients/`; `2026-05-24-full-local-with-s2n-smoke.json` passes `--require-superiority` with real rows for `quiche`, `tokio-quiche`, `h3-quinn`, `reqwest_h3`, `quinn_transport`, and `s2n_quic_transport`, emits no fixture packet-error events, and now records stable `category`/`fatal` fields if packet-open noise reappears.
-- **RFC9220 WebSocket-over-H3:** correctness/API exists as a raw byte tunnel, and the full same-fixture proof includes a Specter local echo latency/throughput row; third-party tunnel comparator rows, close/FIN timing, and slow-consumer rows remain pending.
+- **RFC9220 WebSocket-over-H3:** correctness/API exists as a raw byte tunnel. The same-fixture proof now includes Specter local rows for echo, client DATA+FIN/server FIN, and a slow-consumer tunnel plus concurrent H3 streaming workload. Third-party RFC9220 tunnel comparator rows are now explicit as pending (`quiche`, `tokio-quiche`) or unsupported/not comparable (`h3-quinn`, `reqwest`, `tokio-tungstenite`), so there is still no third-party RFC9220 throughput win claim.
 - **Native QUIC production readiness:** still not production-complete; PTO/timer recovery, CRYPTO retransmission, Retry, version negotiation, close drain, key update, ECN socket plumbing beyond ACK_ECN frame parsing, and full path validation remain gaps.
 
 ## Direct answers captured during audit
@@ -100,10 +100,11 @@ Specter status:
 - **H3 HTTP:** current comparator crate already targets `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest_h3`.
 - **QUIC transport-only:** `quinn_transport` and `s2n_quic_transport` now have local bidirectional echo adapters and measured rows in `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-quic-transport-local.json`; these are lower-layer baselines, not direct HTTP/3 superiority rows.
 
-### Still not release-grade
+### Partial / not release-grade
 
 - Native H3 release artifact with samples >=30 remains pending; current persisted smoke artifacts prove the real same-fixture rows and gate behavior with samples=2.
-- RFC9220/WebSocket-over-H3 comparator rows, p95/p99, close/FIN timing, and slow-consumer rows.
+- RFC9220/WebSocket-over-H3 now has Specter-local p50/p95 echo, close/FIN, and slow-consumer mixed rows in `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-rfc9220-websocket-h3-agent3.json`; p99 and samples >=30 are still missing.
+- RFC9220 third-party tunnel comparator rows are explicit but not measured: `quiche_direct_rfc9220_tunnel` and `tokio_quiche_rfc9220_tunnel` are `pending_adapter`; `h3_quinn_rfc9220_tunnel`, `reqwest_h3_rfc9220_tunnel`, `tokio_tungstenite_rfc9220`, and `reqwest_rfc9220` are `unsupported_by_client`/capability-audit rows rather than throughput comparators.
 - H3 fixture cleanup/error classification is artifacted now: fixture events serialize stable `category` and `fatal` fields, including `non_fatal_packet_open_after_application_ready` for app-ready packet-open noise and `fatal_packet_open_before_application_ready` for handshake-phase packet-open failures; latest full same-fixture proofs emit no packet-error events.
 - Import/merge precedence for split H3 artifacts now prefers measured rows over pending placeholders.
 
@@ -115,7 +116,7 @@ Specter status:
 2. **CRYPTO retransmission:** Initial/Handshake CRYPTO is not fully stored/retransmitted by timer/PTO.
 3. **ACK delay browser parity:** threshold+timer support and ACK Delay encoding now have focused test coverage; browser/version capture parity for the tuned threshold remains open.
 4. **H3 flow-control release semantics:** receive-window credit for active streaming responses is gated by public body-consumed bytes, while absolute MAX_DATA/MAX_STREAM_DATA values still come from the existing receive-threshold logic.
-5. **RFC9220 performance proof:** Specter local tunnel echo rows exist in the full same-fixture proof; non-Specter comparator rows, close/FIN timing, and mixed slow-consumer proof are still missing.
+5. **RFC9220 performance proof:** Specter local tunnel echo, close/FIN, and slow-consumer mixed rows exist with samples=5; non-Specter RFC9220 comparator adapters, p99, and samples >=30 remain missing.
 
 ### P1
 
@@ -157,9 +158,10 @@ Specter status:
    - Next step is a larger samples >=30 release run; preserve stderr plus `fixture_events`, and treat any `fatal_*` packet-open category as release-blocking.
 
 5. **Expand RFC9220 benchmark rows**
-   - Raw byte tunnel: open latency, first DATA latency, sustained throughput, echo RTT, close/FIN latency.
+   - Raw byte tunnel: echo RTT and close/FIN latency are now measured for Specter locally; next add p99 and samples >=30.
    - Framed mode: RFC6455 codec over RFC9220 if/when a high-level adapter is added.
-   - Slow-consumer mixed workload: one slow H3 tunnel plus active H3 response/tunnel must not stall globally.
+   - Slow-consumer mixed workload: local Specter row now proves completion with one delayed-reader H3 tunnel plus active H3 response; next make this a larger regression gate and add byte-level pending/backpressure counters.
+   - Third-party RFC9220 comparators: build low-level `quiche` and `tokio-quiche` Extended CONNECT tunnel adapters if feasible; keep `reqwest` and `tokio-tungstenite` as unsupported capability rows unless their public APIs grow RFC9220/H3 tunnel support.
 
 6. **Close native QUIC production gaps**
    - Implement packet-space recovery/PTO and CRYPTO retransmission first.
@@ -173,6 +175,8 @@ Specter status:
 - Live Codex SSE: `docs/benchmarks/codex-real-streaming/n10-final.json`
 - Live Codex WSS: `docs/benchmarks/codex-ws-streaming/n50-postfix.json`
 - Local RFC9220 H3 tunnel echo: `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-rfc9220-tunnel-local.json`
+- Local RFC9220 H3 agent3 aggregate: `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-rfc9220-websocket-h3-agent3.json`
+- Local RFC9220 H3 agent3 rows: `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-rfc9220-tunnel-echo-agent3.json`, `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-rfc9220-tunnel-close-agent3.json`, `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-rfc9220-tunnel-mixed-agent3.json`
 - Full native H3 same-fixture smoke: `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-with-s2n-smoke.json`
 - Local QUIC transport baselines: `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-quic-transport-local.json`
 - Supporting agent reports: `/tmp/specter-*-agent*.md`
