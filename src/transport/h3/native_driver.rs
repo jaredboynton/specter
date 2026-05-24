@@ -1912,7 +1912,10 @@ mod tests {
         );
         assert_eq!(tunnel.pending_inbound.len(), 1);
 
-        inbound_rx.try_recv().expect("free one inbound slot").unwrap();
+        inbound_rx
+            .try_recv()
+            .expect("free one inbound slot")
+            .unwrap();
         assert_eq!(tunnel.flush_inbound(), TunnelInboundStatus::Open);
         assert!(tunnel.pending_inbound.is_empty());
 
@@ -1920,7 +1923,10 @@ mod tests {
             inbound_rx.try_recv().expect("drain original item").unwrap();
         }
         assert_eq!(
-            inbound_rx.try_recv().expect("queued item delivered").unwrap(),
+            inbound_rx
+                .try_recv()
+                .expect("queued item delivered")
+                .unwrap(),
             H3TunnelEvent::Data(Bytes::from_static(b"queued"))
         );
     }
