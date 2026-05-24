@@ -1153,7 +1153,7 @@ impl NativeQuicServerHandshake {
         &mut self,
     ) -> Result<Vec<ServerApplicationPacket>> {
         let mut lost_packets = self.server_application_loss_detector.lost_packets();
-        lost_packets.extend(self.server_application_recovery_lost_packets.drain(..));
+        lost_packets.append(&mut self.server_application_recovery_lost_packets);
         self.retransmit_server_application_stream_packets(lost_packets)
     }
 
