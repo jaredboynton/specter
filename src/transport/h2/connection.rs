@@ -718,6 +718,11 @@ where
         Ok(conn_send_window.min(stream_send_window))
     }
 
+    /// Maximum outbound DATA payload size accepted by the peer.
+    pub(crate) fn max_data_frame_size(&self) -> usize {
+        self.peer_settings.max_frame_size as usize
+    }
+
     /// Read the next frame from the connection.
     /// Returns (FrameHeader, Payload).
     pub async fn read_next_frame(&mut self) -> Result<(FrameHeader, Bytes)> {

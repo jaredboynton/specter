@@ -5,7 +5,7 @@ use http_body::{Body as HttpBody, Frame, SizeHint};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -33,6 +33,8 @@ pub(crate) enum H2BodyPush {
 /// driver and the consumer, which removes the per-chunk lock-step round-trip
 /// the original single-slot design imposed.
 const H2_BODY_SLOT_CAPACITY: usize = 32;
+const MIN_RELEASE_NOTIFY_BYTES: usize = 8 * 1024;
+const MAX_RELEASE_NOTIFY_BYTES: usize = 512 * 1024;
 
 struct H2BodyState {
     slots: VecDeque<std::result::Result<Bytes, Error>>,
@@ -41,7 +43,6 @@ struct H2BodyState {
     ended: bool,
     closed: bool,
     consumer_waker: Option<Waker>,
-    transitions: VecDeque<&'static str>,
 }
 
 impl Default for H2BodyState {
@@ -53,7 +54,6 @@ impl Default for H2BodyState {
             ended: false,
             closed: false,
             consumer_waker: None,
-            transitions: VecDeque::new(),
         }
     }
 }
@@ -65,20 +65,29 @@ impl Default for H2BodyState {
 /// consumer drains a chunk and the slot becomes refillable.
 pub struct H2BodyShared {
     state: Mutex<H2BodyState>,
+    closed: AtomicBool,
     released_recv_bytes: AtomicUsize,
+    release_notify_bytes: usize,
     driver_notify: Arc<Notify>,
 }
 
 impl H2BodyShared {
-    pub(crate) fn new(driver_notify: Arc<Notify>) -> Arc<Self> {
+    pub(crate) fn new(driver_notify: Arc<Notify>, initial_window_size: u32) -> Arc<Self> {
+        let release_notify_bytes = ((initial_window_size as usize) / 4)
+            .clamp(MIN_RELEASE_NOTIFY_BYTES, MAX_RELEASE_NOTIFY_BYTES);
         Arc::new(Self {
             state: Mutex::new(H2BodyState::default()),
+            closed: AtomicBool::new(false),
             released_recv_bytes: AtomicUsize::new(0),
+            release_notify_bytes,
             driver_notify,
         })
     }
 
     pub(crate) fn push(&self, item: std::result::Result<Bytes, Error>) -> H2BodyPush {
+        if self.closed.load(Ordering::Acquire) {
+            return H2BodyPush::Closed;
+        }
         let mut state = self.state.lock().expect("h2 body state poisoned");
         if state.closed {
             return H2BodyPush::Closed;
@@ -86,10 +95,12 @@ impl H2BodyShared {
         if state.slots.len() >= state.cap {
             return H2BodyPush::Full(item);
         }
-        state.transitions.push_back("driver_slot_fill");
+        let should_wake = state.slots.is_empty();
         state.slots.push_back(item);
-        if let Some(waker) = state.consumer_waker.take() {
-            waker.wake();
+        if should_wake {
+            if let Some(waker) = state.consumer_waker.as_ref() {
+                waker.wake_by_ref();
+            }
         }
         H2BodyPush::Accepted
     }
@@ -97,13 +108,17 @@ impl H2BodyShared {
     pub(crate) fn finish(&self) {
         let mut state = self.state.lock().expect("h2 body state poisoned");
         state.ended = true;
-        state.transitions.push_back("driver_finish");
-        if let Some(waker) = state.consumer_waker.take() {
-            waker.wake();
+        if state.slots.is_empty() {
+            if let Some(waker) = state.consumer_waker.as_ref() {
+                waker.wake_by_ref();
+            }
         }
     }
 
     pub(crate) fn fail(&self, error: Error) -> H2BodyPush {
+        if self.closed.load(Ordering::Acquire) {
+            return H2BodyPush::Closed;
+        }
         let mut state = self.state.lock().expect("h2 body state poisoned");
         if state.closed {
             return H2BodyPush::Closed;
@@ -111,16 +126,18 @@ impl H2BodyShared {
         if state.slots.len() >= state.cap {
             return H2BodyPush::Full(Err(error));
         }
+        let should_wake = state.slots.is_empty();
         state.slots.push_back(Err(error));
-        state.transitions.push_back("driver_error");
-        if let Some(waker) = state.consumer_waker.take() {
-            waker.wake();
+        if should_wake {
+            if let Some(waker) = state.consumer_waker.as_ref() {
+                waker.wake_by_ref();
+            }
         }
         H2BodyPush::Accepted
     }
 
     pub(crate) fn is_closed(&self) -> bool {
-        self.state.lock().expect("h2 body state poisoned").closed
+        self.closed.load(Ordering::Acquire)
     }
 
     pub(crate) fn is_slot_available(&self) -> bool {
@@ -140,7 +157,7 @@ impl H2BodyShared {
         let mut state = self.state.lock().expect("h2 body state poisoned");
         if !state.closed {
             state.closed = true;
-            state.transitions.push_back("consumer_closed");
+            self.closed.store(true, Ordering::Release);
             if let Some(waker) = state.consumer_waker.take() {
                 waker.wake();
             }
@@ -212,7 +229,10 @@ impl HttpBody for H2Body {
         }
 
         enum StatePoll {
-            Item(std::result::Result<Bytes, Error>),
+            Item {
+                item: std::result::Result<Bytes, Error>,
+                notify_slot_available: bool,
+            },
             Error(Error),
             End,
             Pending,
@@ -221,8 +241,10 @@ impl HttpBody for H2Body {
         let state_poll = {
             let mut state = self.shared.state.lock().expect("h2 body state poisoned");
             if let Some(item) = state.slots.pop_front() {
-                state.transitions.push_back("consumer_slot_take");
-                StatePoll::Item(item)
+                StatePoll::Item {
+                    item,
+                    notify_slot_available: state.slots.len() + 1 >= state.cap,
+                }
             } else if let Some(error) = state.terminal_error.take() {
                 state.closed = true;
                 StatePoll::Error(error)
@@ -230,8 +252,13 @@ impl HttpBody for H2Body {
                 state.closed = true;
                 StatePoll::End
             } else {
-                state.consumer_waker = Some(cx.waker().clone());
-                self.shared.driver_notify.notify_one();
+                let replace_waker = state
+                    .consumer_waker
+                    .as_ref()
+                    .is_none_or(|waker| !waker.will_wake(cx.waker()));
+                if replace_waker {
+                    state.consumer_waker = Some(cx.waker().clone());
+                }
                 StatePoll::Pending
             }
         };
@@ -246,12 +273,21 @@ impl HttpBody for H2Body {
                 return Poll::Ready(None);
             }
             StatePoll::Pending => {}
-            StatePoll::Item(item) => match item {
+            StatePoll::Item {
+                item,
+                notify_slot_available,
+            } => match item {
                 Ok(bytes) => {
-                    self.shared
+                    let released = bytes.len();
+                    let previous_released = self
+                        .shared
                         .released_recv_bytes
-                        .fetch_add(bytes.len(), Ordering::AcqRel);
-                    self.shared.driver_notify.notify_one();
+                        .fetch_add(released, Ordering::AcqRel);
+                    if notify_slot_available
+                        || previous_released + released >= self.shared.release_notify_bytes
+                    {
+                        self.shared.driver_notify.notify_one();
+                    }
                     self.reset_read_idle();
                     if bytes.is_empty() {
                         return self.poll_frame(cx);

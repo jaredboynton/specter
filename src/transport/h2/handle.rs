@@ -148,7 +148,12 @@ impl H2Handle {
         body_timeouts: H2BodyTimeouts,
     ) -> Result<Response> {
         let (headers_tx, headers_rx) = oneshot::channel();
-        let body_shared = H2BodyShared::new(self.body_progress_notify());
+        let initial_window_size = self
+            .inline
+            .as_ref()
+            .map(|inline| inline.initial_window_size)
+            .unwrap_or(65_535);
+        let body_shared = H2BodyShared::new(self.body_progress_notify(), initial_window_size);
 
         let command = DriverCommand::SendStreamingRequest {
             method,
@@ -208,7 +213,10 @@ impl H2Handle {
         }
 
         let (headers_tx, headers_rx) = oneshot::channel::<StreamingHeadersResult>();
-        let body_shared = H2BodyShared::new(inline.body_progress_notify.clone());
+        let body_shared = H2BodyShared::new(
+            inline.body_progress_notify.clone(),
+            inline.initial_window_size,
+        );
 
         let max_frame_size = inline.peer_max_frame_size.load(Ordering::Relaxed) as usize;
         let stream_id = match inline

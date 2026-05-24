@@ -24,6 +24,7 @@ use crate::request::RequestBody;
 use crate::response::Response;
 use crate::transport::dns::DnsConfig;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -42,6 +43,10 @@ pub struct H3Client {
     max_idle_timeout: Option<u64>,
     dns_config: DnsConfig,
     pool: Arc<RwLock<HashMap<H3PoolKey, H3Handle>>>,
+    /// Counter incremented every time a request resolves to an existing
+    /// healthy pooled H3Handle. Shared with the parent `Client` so the
+    /// public reuse-count surface aggregates H1/H2/H3 hits.
+    pool_reuse_counter: Arc<AtomicUsize>,
 }
 
 impl Default for H3Client {
@@ -58,6 +63,7 @@ impl H3Client {
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
+            pool_reuse_counter: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -68,7 +74,21 @@ impl H3Client {
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
+            pool_reuse_counter: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Replace the pool-reuse counter so the parent `Client` can aggregate
+    /// H1/H2/H3 hits behind a single `Arc<AtomicUsize>`.
+    pub(crate) fn with_pool_reuse_counter(mut self, counter: Arc<AtomicUsize>) -> Self {
+        self.pool_reuse_counter = counter;
+        self
+    }
+
+    /// Snapshot of the pooled-handle reuse counter. Increments every time a
+    /// request resolves to an existing healthy pooled H3Handle.
+    pub fn pool_reuse_count(&self) -> usize {
+        self.pool_reuse_counter.load(Ordering::Relaxed)
     }
 
     /// Set a custom idle timeout (in milliseconds)
@@ -227,6 +247,7 @@ impl H3Client {
             let pool = self.pool.read().await;
             if let Some(handle) = pool.get(key).cloned() {
                 if !handle.is_closed() && !handle.is_draining() {
+                    self.pool_reuse_counter.fetch_add(1, Ordering::Relaxed);
                     return Ok((handle, true));
                 }
             }

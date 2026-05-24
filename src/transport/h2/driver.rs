@@ -29,6 +29,8 @@ use crate::transport::h2::frame::{flags, ErrorCode, FrameHeader, FrameType};
 use crate::transport::h2::tunnel::{H2Tunnel, H2TunnelEvent, H2TunnelOutbound};
 use crate::transport::h2::H2TransportConfig;
 
+const STREAM_WINDOW_UPDATE_MIN_INCREMENT: usize = 32 * 1024;
+
 /// Command sent from handle to driver
 pub enum DriverCommand {
     /// Send a request and get response via oneshot
@@ -184,6 +186,10 @@ struct DriverStreamState {
     /// the connection's `Stream::recv_window` would have tracked, so the DATA
     /// hot path only touches `self.streams` for inbound flow accounting.
     recv_window: i32,
+    /// Stream-level receive credit released by the public body consumer but
+    /// not yet advertised with WINDOW_UPDATE. Batching this avoids one
+    /// WINDOW_UPDATE per DATA chunk while preserving backpressure.
+    pending_recv_window_update: usize,
     /// Marks streams registered via the inline shared-writer fast path so
     /// the driver knows to decrement the inline-active counter on stream
     /// teardown.
@@ -209,6 +215,7 @@ impl DriverStreamState {
             pending_streaming_body: VecDeque::new(),
             pending_streaming_end: false,
             recv_window,
+            pending_recv_window_update: 0,
             inline: false,
         }
     }
@@ -233,6 +240,7 @@ impl DriverStreamState {
             pending_streaming_body: VecDeque::new(),
             pending_streaming_end: false,
             recv_window,
+            pending_recv_window_update: 0,
             inline: false,
         }
     }
@@ -287,7 +295,7 @@ pub struct H2Driver<S> {
     /// Woken when public H2 bodies consume a slot/drop or request-body
     /// producers become ready after returning Pending.
     body_progress_notify: Arc<Notify>,
-    request_body_waker: Arc<NotifyWake>,
+    request_body_waker: Waker,
 }
 
 impl<S> H2Driver<S>
@@ -332,7 +340,7 @@ where
         inline_eligible: Arc<AtomicBool>,
         body_progress_notify: Arc<Notify>,
     ) -> Self {
-        let request_body_waker = Arc::new(NotifyWake(body_progress_notify.clone()));
+        let request_body_waker = Waker::from(Arc::new(NotifyWake(body_progress_notify.clone())));
         Self {
             command_rx,
             command_tx,
@@ -497,6 +505,12 @@ where
         }
     }
 
+    fn store_stream_recv_window(&mut self, stream_id: u32, recv_window: i32) {
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.recv_window = recv_window;
+        }
+    }
+
     /// Returns the stream ID eligible for the single-stream streaming fast
     /// path, or `None` when the regular multiplexed driver loop must run.
     ///
@@ -539,9 +553,9 @@ where
     async fn run_single_stream_streaming_fast_path(&mut self, stream_id: u32) -> Result<bool> {
         // Hoist the shared body slot once so per-frame DATA delivery does
         // not re-enter the streams HashMap in the unbackpressured case.
-        let body_shared = match self.streams.get(&stream_id) {
+        let (body_shared, mut recv_window) = match self.streams.get(&stream_id) {
             Some(stream) => match stream.streaming_body.as_ref() {
-                Some(shared) => shared.clone(),
+                Some(shared) => (shared.clone(), stream.recv_window),
                 None => return Ok(false),
             },
             None => return Ok(false),
@@ -552,16 +566,19 @@ where
         loop {
             match self.command_rx.try_recv() {
                 Ok(cmd) => {
+                    self.store_stream_recv_window(stream_id, recv_window);
                     self.pending_requests.push_back(cmd);
                     return Ok(true);
                 }
                 Err(mpsc::error::TryRecvError::Empty) => {}
                 Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.store_stream_recv_window(stream_id, recv_window);
                     return Ok(processed_any);
                 }
             }
 
             if let Ok(reg) = self.inline_register_rx.try_recv() {
+                self.store_stream_recv_window(stream_id, recv_window);
                 self.register_inline_stream(reg);
                 return Ok(true);
             }
@@ -591,9 +608,7 @@ where
                     .await?;
 
                 if data_len > 0 {
-                    if let Some(stream) = self.streams.get_mut(&stream_id) {
-                        stream.recv_window -= data_len as i32;
-                    }
+                    recv_window -= data_len as i32;
                 }
 
                 if !data.is_empty() {
@@ -601,6 +616,7 @@ where
                         H2BodyPush::Accepted => {}
                         H2BodyPush::Full(item) => {
                             if let Some(stream) = self.streams.get_mut(&stream_id) {
+                                stream.recv_window = recv_window;
                                 stream.pending_streaming_body.push_back(item);
                                 if end_stream {
                                     stream.pending_streaming_end = true;
@@ -616,15 +632,12 @@ where
                 }
 
                 if end_stream {
-                    if body_shared.is_slot_available() {
-                        body_shared.finish();
-                        self.complete_stream(stream_id);
-                    } else if let Some(stream) = self.streams.get_mut(&stream_id) {
-                        stream.pending_streaming_end = true;
-                    }
+                    body_shared.finish();
+                    self.complete_stream(stream_id);
                     return Ok(true);
                 }
             } else {
+                self.store_stream_recv_window(stream_id, recv_window);
                 if let Err(e) = self.handle_frame(header, payload).await {
                     tracing::error!("H2Driver frame error (fast path): {:?}", e);
                     return Err(e);
@@ -1005,26 +1018,57 @@ where
 
     async fn flush_streaming_request_body(&mut self, stream_id: u32) -> Result<()> {
         loop {
-            let has_stream = self
+            if self
                 .streams
                 .get(&stream_id)
                 .and_then(|stream| stream.request_stream.as_ref())
-                .is_some();
-            if !has_stream {
+                .is_none()
+            {
                 return Ok(());
             }
 
-            let has_current = self
-                .streams
-                .get(&stream_id)
-                .and_then(|stream| stream.request_stream.as_ref())
-                .and_then(|body| body.current_chunk.as_ref())
-                .is_some();
+            let available = self.connection.available_send_window(stream_id).await?;
+            if available <= 0 {
+                return Ok(());
+            }
 
-            if !has_current {
-                let can_send = self.connection.available_send_window(stream_id).await? > 0;
-                if !can_send {
-                    return Ok(());
+            let batch_limit = (available as usize).min(self.connection.max_data_frame_size());
+            if batch_limit == 0 {
+                return Ok(());
+            }
+
+            let mut batch = BytesMut::with_capacity(batch_limit);
+            let mut end_stream = false;
+            let mut remove_request_stream_after_send = false;
+
+            while batch.len() < batch_limit {
+                let current = self
+                    .streams
+                    .get(&stream_id)
+                    .and_then(|stream| stream.request_stream.as_ref())
+                    .and_then(|body| {
+                        body.current_chunk
+                            .as_ref()
+                            .map(|chunk| (chunk.clone(), body.current_offset))
+                    });
+
+                if let Some((chunk, offset)) = current {
+                    let remaining = &chunk[offset..];
+                    let take = remaining.len().min(batch_limit - batch.len());
+                    batch.extend_from_slice(&remaining[..take]);
+
+                    let stream = self.streams.get_mut(&stream_id).expect("stream exists");
+                    let body = stream
+                        .request_stream
+                        .as_mut()
+                        .expect("request stream exists");
+                    body.current_offset += take;
+                    body.sent += take as u64;
+                    if body.current_offset >= chunk.len() {
+                        body.current_chunk = None;
+                        body.current_offset = 0;
+                    }
+                    continue;
                 }
 
                 let poll_result = {
@@ -1036,14 +1080,13 @@ where
                     if body.finished {
                         Poll::Ready(None)
                     } else {
-                        let waker = Waker::from(self.request_body_waker.clone());
-                        let mut cx = std::task::Context::from_waker(&waker);
+                        let mut cx = std::task::Context::from_waker(&self.request_body_waker);
                         body.stream.as_mut().poll_next(&mut cx)
                     }
                 };
 
                 match poll_result {
-                    Poll::Pending => return Ok(()),
+                    Poll::Pending => break,
                     Poll::Ready(Some(Ok(chunk))) => {
                         if chunk.is_empty() {
                             continue;
@@ -1096,51 +1139,49 @@ where
                         if already_sent_end {
                             return Ok(());
                         }
-                        let sent = self.connection.send_data(stream_id, &[], true).await?;
-                        debug_assert_eq!(sent, 0);
-                        if let Some(stream) = self.streams.get_mut(&stream_id) {
-                            if let Some(body) = stream.request_stream.as_mut() {
-                                body.end_stream_sent = true;
-                            }
-                            stream.request_stream = None;
-                        }
-                        return Ok(());
+                        end_stream = true;
+                        remove_request_stream_after_send = true;
+                        break;
                     }
                 }
             }
 
-            let (chunk, offset) = {
-                let stream = self.streams.get(&stream_id).expect("stream exists");
-                let body = stream
-                    .request_stream
-                    .as_ref()
-                    .expect("request stream exists");
-                (
-                    body.current_chunk.as_ref().expect("current chunk").clone(),
-                    body.current_offset,
-                )
-            };
-            let remaining = &chunk[offset..];
+            if batch.is_empty() {
+                if end_stream {
+                    let sent = self.connection.send_data(stream_id, &[], true).await?;
+                    debug_assert_eq!(sent, 0);
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        if let Some(body) = stream.request_stream.as_mut() {
+                            body.end_stream_sent = true;
+                        }
+                        stream.request_stream = None;
+                    }
+                }
+                return Ok(());
+            }
+
             let sent = self
                 .connection
-                .send_data(stream_id, remaining, false)
+                .send_data(stream_id, &batch, end_stream)
                 .await?;
             if sent == 0 {
                 return Ok(());
             }
-
-            let stream = self.streams.get_mut(&stream_id).expect("stream exists");
-            let body = stream
-                .request_stream
-                .as_mut()
-                .expect("request stream exists");
-            body.current_offset += sent;
-            body.sent += sent as u64;
-            if body.current_offset >= chunk.len() {
-                body.current_chunk = None;
-                body.current_offset = 0;
+            if sent != batch.len() {
+                return Err(Error::HttpProtocol(
+                    "short DATA write after preflighted flow-control window".into(),
+                ));
             }
-            return Ok(());
+
+            if remove_request_stream_after_send {
+                if let Some(stream) = self.streams.get_mut(&stream_id) {
+                    if let Some(body) = stream.request_stream.as_mut() {
+                        body.end_stream_sent = true;
+                    }
+                    stream.request_stream = None;
+                }
+                return Ok(());
+            }
         }
     }
 
@@ -1211,10 +1252,26 @@ where
                 continue;
             }
 
-            if let Some(stream) = self.streams.get_mut(&stream_id) {
-                stream.recv_window = stream.recv_window.saturating_add(released as i32);
+            let refresh_threshold = self.connection.flow_control_refresh_threshold();
+            let increment = self.streams.get_mut(&stream_id).and_then(|stream| {
+                stream.pending_recv_window_update =
+                    stream.pending_recv_window_update.saturating_add(released);
+                let should_update = stream.pending_recv_window_update
+                    >= STREAM_WINDOW_UPDATE_MIN_INCREMENT
+                    || stream.recv_window < refresh_threshold;
+                if should_update {
+                    let increment = stream.pending_recv_window_update.min(u32::MAX as usize);
+                    stream.pending_recv_window_update -= increment;
+                    stream.recv_window = stream.recv_window.saturating_add(increment as i32);
+                    Some(increment as u32)
+                } else {
+                    None
+                }
+            });
+
+            if let Some(increment) = increment {
                 self.connection
-                    .send_stream_window_update(stream_id, released as u32)
+                    .send_stream_window_update(stream_id, increment)
                     .await?;
             }
         }

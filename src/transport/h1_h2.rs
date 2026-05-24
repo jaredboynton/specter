@@ -13,6 +13,7 @@ use http::{Method, Uri};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -81,6 +82,10 @@ pub struct Client {
     cookie_store: Option<Arc<RwLock<CookieJar>>>,
     /// Fingerprint profile
     fingerprint: FingerprintProfile,
+    /// Counter incremented every time an H1, H2, or H3 request resolves to
+    /// an existing healthy pooled connection (rather than dialing a new
+    /// one). Cloned `Client` instances share this counter via `Arc`.
+    pool_reuse_counter: Arc<AtomicUsize>,
 }
 
 /// Builder for HTTP requests.
@@ -152,6 +157,13 @@ impl Client {
     /// Create a new client builder.
     pub fn builder() -> ClientBuilder {
         ClientBuilder::new()
+    }
+
+    /// Snapshot of the shared pool-reuse counter. Increments whenever an
+    /// H1/H2/H3 request resolves to an existing healthy pooled connection.
+    /// Cloned `Client` instances aggregate into the same counter.
+    pub fn connection_reuse_count(&self) -> usize {
+        self.pool_reuse_counter.load(Ordering::Relaxed)
     }
 
     /// Create a GET request builder.
@@ -821,6 +833,9 @@ impl<'a> RequestBuilder<'a> {
 
         let response = if !prefer_http2 {
             let pooled_h1_stream = client.h1_pool.get_h1(&pool_key).await;
+            if pooled_h1_stream.is_some() {
+                client.pool_reuse_counter.fetch_add(1, Ordering::Relaxed);
+            }
             let connector = client.connector_for_uri(&uri);
             let connect_fut = connector.connect_h1_only(&uri);
             let stream = if let Some(stream) = pooled_h1_stream {
@@ -897,6 +912,7 @@ impl<'a> RequestBuilder<'a> {
             };
 
             if let Some(conn) = pooled {
+                client.pool_reuse_counter.fetch_add(1, Ordering::Relaxed);
                 let streaming_body = request.body.is_streaming();
                 let body = if streaming_body {
                     std::mem::take(&mut request.body)
@@ -1296,6 +1312,7 @@ impl Client {
             };
 
             if let Some(conn) = pooled {
+                self.pool_reuse_counter.fetch_add(1, Ordering::Relaxed);
                 // Try to use pooled connection
                 let result = conn
                     .send_request(
@@ -1395,6 +1412,9 @@ impl Client {
         // Try to get a pooled connection first
         let mut stream_opt = self.h1_pool.get_h1(&pool_key).await;
         let mut used_pooled = stream_opt.is_some();
+        if used_pooled {
+            self.pool_reuse_counter.fetch_add(1, Ordering::Relaxed);
+        }
 
         // If no pooled connection, create a new one
         let mut stream = if let Some(pooled_stream) = stream_opt.take() {
@@ -2051,6 +2071,12 @@ impl ClientBuilder {
             100,
         ));
 
+        // Shared pool-reuse counter. The H3 sub-client takes a clone so its
+        // `resolve_handle` increments aggregate into the same surface as
+        // H1/H2 reuse.
+        let pool_reuse_counter: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+        let h3_client = h3_client.with_pool_reuse_counter(pool_reuse_counter.clone());
+
         Ok(Client {
             connector,
             insecure_connector,
@@ -2071,6 +2097,7 @@ impl ClientBuilder {
             redirect_policy: self.redirect_policy,
             cookie_store: self.cookie_store,
             fingerprint: self.fingerprint,
+            pool_reuse_counter,
         })
     }
 }
