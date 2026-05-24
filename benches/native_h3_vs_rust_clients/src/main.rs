@@ -177,6 +177,60 @@ fn competitor_specs() -> Vec<CompetitorSpec> {
             invocation_notes: "Specter native RFC 9220 WebSocket-over-H3 tunnel echo workload.",
         },
         CompetitorSpec {
+            id: "specter_native_rfc9220_tunnel_close",
+            crate_name: "specters",
+            version: specter_package_version(),
+            role: "h3_tunnel_workload",
+            required_for_superiority: false,
+            invocation_notes:
+                "Specter native RFC 9220 tunnel echo with client FIN and server FIN timing.",
+        },
+        CompetitorSpec {
+            id: "specter_native_rfc9220_tunnel_mixed",
+            crate_name: "specters",
+            version: specter_package_version(),
+            role: "h3_tunnel_workload",
+            required_for_superiority: false,
+            invocation_notes:
+                "Specter native RFC 9220 slow-consumer tunnel plus concurrent H3 streaming workload.",
+        },
+        CompetitorSpec {
+            id: "quiche_direct_rfc9220_tunnel",
+            crate_name: "quiche",
+            version: "0.29.0",
+            role: "h3_tunnel_comparator",
+            required_for_superiority: false,
+            invocation_notes:
+                "Pending low-level quiche Extended CONNECT/WebSocket-over-H3 tunnel comparator adapter.",
+        },
+        CompetitorSpec {
+            id: "tokio_quiche_rfc9220_tunnel",
+            crate_name: "tokio-quiche",
+            version: "0.19.0",
+            role: "h3_tunnel_comparator",
+            required_for_superiority: false,
+            invocation_notes:
+                "Pending tokio-quiche Extended CONNECT/WebSocket-over-H3 tunnel comparator adapter.",
+        },
+        CompetitorSpec {
+            id: "h3_quinn_rfc9220_tunnel",
+            crate_name: "h3+h3-quinn",
+            version: "h3 0.0.8 / h3-quinn 0.0.10",
+            role: "h3_tunnel_comparator",
+            required_for_superiority: false,
+            invocation_notes:
+                "Pending hyperium h3 Extended CONNECT/WebSocket-over-H3 tunnel comparator adapter.",
+        },
+        CompetitorSpec {
+            id: "reqwest_h3_rfc9220_tunnel",
+            crate_name: "reqwest",
+            version: "0.13.3",
+            role: "h3_tunnel_comparator",
+            required_for_superiority: false,
+            invocation_notes:
+                "Pending reqwest H3 tunnel comparator if a public RFC9220/WebSocket API becomes available.",
+        },
+        CompetitorSpec {
             id: "quiche_direct",
             crate_name: "quiche",
             version: "0.29.0",
@@ -357,6 +411,22 @@ fn specter_native_rfc9220_tunnel_row_from_samples(samples: &[AdapterSample]) -> 
     )
 }
 
+fn specter_native_rfc9220_tunnel_close_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
+    adapter_row_from_samples(
+        "specter_native_rfc9220_tunnel_close",
+        "specter_native_rfc9220_tunnel_close_adapter",
+        samples,
+    )
+}
+
+fn specter_native_rfc9220_tunnel_mixed_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
+    adapter_row_from_samples(
+        "specter_native_rfc9220_tunnel_mixed",
+        "specter_native_rfc9220_tunnel_mixed_adapter",
+        samples,
+    )
+}
+
 fn quinn_transport_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
     adapter_row_from_samples("quinn_transport", "quinn_transport_adapter", samples)
 }
@@ -400,6 +470,30 @@ fn row_context(competitor_id: &str) -> Option<RowContext> {
             workload: "websocket_over_h3_raw_tunnel_echo",
             default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
             notes: Some("Measured Specter raw byte tunnel over RFC9220 Extended CONNECT; not RFC6455 frame parsing."),
+        }),
+        "specter_native_rfc9220_tunnel_close" => Some(RowContext {
+            protocol: "h3_rfc9220",
+            workload: "websocket_over_h3_raw_tunnel_close_fin",
+            default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
+            notes: Some("Measures client DATA+FIN through echoed DATA and server FIN delivery on an RFC9220 tunnel."),
+        }),
+        "specter_native_rfc9220_tunnel_mixed" => Some(RowContext {
+            protocol: "h3_rfc9220",
+            workload: "slow_consumer_tunnel_plus_http3_streaming",
+            default_payload_bytes: Some(
+                LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES
+                    + LOCAL_FIXTURE_CHUNK_SIZE * LOCAL_FIXTURE_CHUNK_COUNT,
+            ),
+            notes: Some("Measures a delayed-reader RFC9220 tunnel while a same-origin H3 streaming response completes."),
+        }),
+        "quiche_direct_rfc9220_tunnel"
+        | "tokio_quiche_rfc9220_tunnel"
+        | "h3_quinn_rfc9220_tunnel"
+        | "reqwest_h3_rfc9220_tunnel" => Some(RowContext {
+            protocol: "h3_rfc9220",
+            workload: "websocket_over_h3_raw_tunnel_echo",
+            default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
+            notes: Some("Explicit RFC9220 comparator slot; adapter is pending and excluded from the HTTP/3 superiority gate."),
         }),
         "tokio_tungstenite_rfc9220" => Some(RowContext {
             protocol: "h3_rfc9220",
@@ -452,6 +546,8 @@ fn local_native_fixture_measurement_plan() -> Vec<&'static str> {
         plan.push("s2n_quic_transport");
     }
     plan.push("specter_native_rfc9220_tunnel");
+    plan.push("specter_native_rfc9220_tunnel_close");
+    plan.push("specter_native_rfc9220_tunnel_mixed");
     plan
 }
 
