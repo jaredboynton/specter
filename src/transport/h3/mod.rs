@@ -29,11 +29,13 @@ pub use tunnel::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 /// backpressure on the caller. Replaces the legacy item-count bound that
 /// treated a 1 MiB chunk and a 64 B chunk as equally costly.
 pub const DEFAULT_H3_TUNNEL_OUTBOUND_BYTE_BUDGET: usize = 256 * 1024;
+pub const DEFAULT_H3_TUNNEL_INBOUND_BYTE_BUDGET: usize = 256 * 1024;
 
 /// Minimum accepted outbound byte budget. Values below this are clamped up by
 /// [`H3TransportConfig::normalized`] so that even pathological configs leave
 /// enough credit for control-plane sends.
 pub const MIN_H3_TUNNEL_OUTBOUND_BYTE_BUDGET: usize = 1024;
+pub const MIN_H3_TUNNEL_INBOUND_BYTE_BUDGET: usize = 1024;
 
 // Re-implement H3Client using the new H3Connection/Handle architecture
 // to maintain API compatibility but gain multiplexing.
@@ -69,6 +71,9 @@ pub struct H3TransportConfig {
     /// capped at this value per send so callers above the budget wait for the
     /// previous in-flight bytes to drain rather than splitting the chunk.
     pub tunnel_outbound_byte_budget: usize,
+    /// Maximum bytes that may be queued from the H3 driver into the public
+    /// `H3Tunnel` receive side before socket reads are paused for this tunnel.
+    pub tunnel_inbound_byte_budget: usize,
 }
 
 impl Default for H3TransportConfig {
@@ -76,6 +81,7 @@ impl Default for H3TransportConfig {
         Self {
             streaming_body_buffer_slots: DEFAULT_H3_BODY_SLOT_CAPACITY,
             tunnel_outbound_byte_budget: DEFAULT_H3_TUNNEL_OUTBOUND_BYTE_BUDGET,
+            tunnel_inbound_byte_budget: DEFAULT_H3_TUNNEL_INBOUND_BYTE_BUDGET,
         }
     }
 }
@@ -86,6 +92,9 @@ impl H3TransportConfig {
         self.tunnel_outbound_byte_budget = self
             .tunnel_outbound_byte_budget
             .max(MIN_H3_TUNNEL_OUTBOUND_BYTE_BUDGET);
+        self.tunnel_inbound_byte_budget = self
+            .tunnel_inbound_byte_budget
+            .max(MIN_H3_TUNNEL_INBOUND_BYTE_BUDGET);
         self
     }
 }
@@ -252,6 +261,20 @@ impl H3Client {
     /// Configured per-tunnel outbound byte budget.
     pub fn tunnel_outbound_byte_budget(&self) -> usize {
         self.transport_config.tunnel_outbound_byte_budget
+    }
+
+    /// Override the per-tunnel inbound byte budget used to backpressure
+    /// driver-to-`H3Tunnel` delivery against public reads.
+    pub fn with_tunnel_inbound_byte_budget(mut self, budget: usize) -> Self {
+        self.clear_hot_handle();
+        self.transport_config.tunnel_inbound_byte_budget =
+            budget.max(MIN_H3_TUNNEL_INBOUND_BYTE_BUDGET);
+        self
+    }
+
+    /// Configured per-tunnel inbound byte budget.
+    pub fn tunnel_inbound_byte_budget(&self) -> usize {
+        self.transport_config.tunnel_inbound_byte_budget
     }
 
     /// Replace the shared native H3 TLS session cache used for session resumption.
