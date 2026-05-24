@@ -528,6 +528,79 @@ fn native_h3_server_opens_client_packet_after_one_rtt_key_update() {
 }
 
 #[test]
+fn native_h3_server_decrypts_previous_phase_packet_after_key_update_within_window() {
+    let (_, mut client, mut server) = completed_native_server_handshake();
+
+    let old_phase_packet = client
+        .build_client_application_stream_packet(0, Bytes::from_static(b"old-phase"), false)
+        .unwrap()
+        .unwrap();
+
+    client.force_key_update().unwrap();
+    let new_phase_packet = client
+        .build_client_application_stream_packet(0, Bytes::from_static(b"new-phase"), false)
+        .unwrap()
+        .unwrap();
+    server
+        .open_client_application_packet(new_phase_packet.packet.as_ref())
+        .unwrap();
+    assert!(server.read_key_phase());
+
+    let frames = server
+        .open_client_application_packet(old_phase_packet.packet.as_ref())
+        .unwrap();
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        QuicFrame::Stream { stream_id: 0, data, .. } if data == b"old-phase".as_slice()
+    )));
+}
+
+#[test]
+fn native_h3_force_key_update_twice_without_ack_returns_error() {
+    let (_, mut client, _server) = completed_native_server_handshake();
+
+    client
+        .force_key_update()
+        .expect("first key update must succeed");
+    assert!(client.key_update_in_progress());
+    let err = client
+        .force_key_update()
+        .expect_err("second update must wait for ACK confirmation per RFC9001 § 6.5");
+    assert!(
+        err.to_string().contains("RFC9001"),
+        "expected RFC9001 § 6.5 error, got: {err}"
+    );
+}
+
+#[test]
+fn native_h3_key_update_confirms_after_ack_of_new_phase_packet() {
+    let (_, mut client, mut server) = completed_native_server_handshake();
+
+    client.force_key_update().unwrap();
+    assert!(client.key_update_in_progress());
+    let stream_packet = client
+        .build_client_application_stream_packet(0, Bytes::from_static(b"new-phase-1"), false)
+        .unwrap()
+        .unwrap();
+    server
+        .open_client_application_packet(stream_packet.packet.as_ref())
+        .unwrap();
+    let ack = server
+        .build_server_application_ack_packet()
+        .unwrap()
+        .expect("server must ACK the ack-eliciting new-phase client packet");
+    client
+        .open_server_application_packet(ack.packet.as_ref())
+        .unwrap();
+
+    assert!(client.read_key_phase());
+    assert!(!client.key_update_in_progress());
+    client
+        .force_key_update()
+        .expect("subsequent update should succeed after the first is confirmed by ACK");
+}
+
+#[test]
 fn native_h3_server_handshake_opens_client_request_stream_packet() {
     let fingerprint = Http3Fingerprint::chrome();
     let client_destination_cid = ConnectionId::from_static(b"server-dcid");
@@ -1137,6 +1210,51 @@ fn native_h3_client_application_ack_updates_packet_space_recovery() {
 }
 
 #[test]
+fn native_h3_server_application_ack_updates_packet_space_recovery() {
+    let (_, mut client, mut server) = completed_native_server_handshake();
+    let uri: http::Uri = "https://localhost/native".parse().unwrap();
+    let request = client
+        .build_client_h3_request_packet(&http::Method::GET, &uri, &[], None)
+        .unwrap();
+    let request_events = server
+        .open_client_h3_stream_packet(request.packet.as_ref())
+        .unwrap();
+    let stream_id = request_events[0].stream_id;
+    let response = server
+        .build_server_h3_response_packet(
+            stream_id,
+            vec![H3Header::new(":status", "200")],
+            Some(Bytes::from_static(b"hello")),
+            false,
+        )
+        .unwrap();
+
+    assert!(server.recovery().handshake_complete());
+    assert!(server
+        .recovery()
+        .space(PacketNumberSpace::Application)
+        .sent_packets()
+        .contains_key(&response.packet_number));
+
+    client
+        .open_server_application_packet(response.packet.as_ref())
+        .unwrap();
+    let ack = client
+        .build_client_application_ack_packet()
+        .unwrap()
+        .expect("client should ACK observed server application packet");
+    server
+        .open_client_application_packet(ack.packet.as_ref())
+        .unwrap();
+
+    assert!(server
+        .recovery()
+        .space(PacketNumberSpace::Application)
+        .sent_packets()
+        .is_empty());
+}
+
+#[test]
 fn native_h3_client_retransmits_application_stream_packet_on_pto() {
     let (_, mut client, mut server) = completed_native_server_handshake();
     let uri: http::Uri = "https://localhost/native".parse().unwrap();
@@ -1168,6 +1286,53 @@ fn native_h3_client_retransmits_application_stream_packet_on_pto() {
         .open_client_h3_stream_packet(retransmits[0].packet.as_ref())
         .unwrap();
     assert_eq!(events[0].stream_id, request.stream_id);
+    assert!(matches!(&events[0].frames[0], H3Frame::Headers(_)));
+}
+
+#[test]
+fn native_h3_server_retransmits_application_stream_packet_on_pto() {
+    let (_, mut client, mut server) = completed_native_server_handshake();
+    let uri: http::Uri = "https://localhost/native".parse().unwrap();
+    let request = client
+        .build_client_h3_request_packet(&http::Method::GET, &uri, &[], None)
+        .unwrap();
+    let request_events = server
+        .open_client_h3_stream_packet(request.packet.as_ref())
+        .unwrap();
+    let stream_id = request_events[0].stream_id;
+    let response = server
+        .build_server_h3_response_packet(
+            stream_id,
+            vec![H3Header::new(":status", "200")],
+            Some(Bytes::from_static(b"hello")),
+            false,
+        )
+        .unwrap();
+    let timer = server
+        .loss_detection_timer()
+        .expect("server application packet should arm loss detection timer");
+    let now = timer + Duration::from_millis(1);
+    let pto = server.application_pto();
+
+    let outcome = server.on_loss_detection_timeout(now);
+    assert_eq!(
+        outcome,
+        LossDetectionOutcome::Pto {
+            space: PacketNumberSpace::Application,
+        }
+    );
+
+    let retransmits = server
+        .retransmit_pto_server_application_stream_packets(now, pto)
+        .unwrap();
+
+    assert_eq!(retransmits.len(), 1);
+    assert_eq!(retransmits[0].packet_number, response.packet_number + 1);
+    assert_eq!(retransmits[0].stream_id, stream_id);
+    let events = client
+        .open_server_h3_stream_packet(retransmits[0].packet.as_ref())
+        .unwrap();
+    assert_eq!(events[0].stream_id, stream_id);
     assert!(matches!(&events[0].frames[0], H3Frame::Headers(_)));
 }
 

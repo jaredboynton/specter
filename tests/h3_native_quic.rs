@@ -3,17 +3,17 @@ use specter::fingerprint::QuicTransportParams;
 use specter::transport::h3::quic::{
     build_initial_crypto_packet, decode_frame, decode_frames, decode_long_header,
     decode_retry_packet, decode_transport_parameters, decode_version_negotiation_packet,
-    derive_initial_key_material, derive_packet_key_material_from_secret, encode_frame,
-    encode_initial_header, encode_long_header, encode_server_transport_parameters,
-    encode_short_header, encode_transport_parameters,
-    encode_transport_parameters_with_initial_source_connection_id, header_protection_mask,
-    initial_crypto_plaintext, open_initial_packet, open_long_header_packet, open_packet_payload,
-    open_protected_initial_packet, open_short_header_packet, protect_initial_packet,
-    protect_long_header, protect_long_header_packet, protect_short_header_packet,
-    recover_packet_number, retry_integrity_tag_v1, seal_packet_payload, split_long_header_datagram,
-    validate_retry_integrity_tag_v1, ConnectionId, LongHeaderPacket, LongHeaderType, QuicAckRange,
-    QuicAckTracker, QuicCryptoAssembler, QuicFrame, QuicLossDetector, QuicPathValidator,
-    ShortHeaderPacket, TransportParameter,
+    derive_initial_key_material, derive_next_application_secret, derive_next_packet_key_material,
+    derive_packet_key_material_from_secret, encode_frame, encode_initial_header,
+    encode_long_header, encode_server_transport_parameters, encode_short_header,
+    encode_transport_parameters, encode_transport_parameters_with_initial_source_connection_id,
+    header_protection_mask, initial_crypto_plaintext, open_initial_packet, open_long_header_packet,
+    open_packet_payload, open_protected_initial_packet, open_short_header_packet,
+    protect_initial_packet, protect_long_header, protect_long_header_packet,
+    protect_short_header_packet, recover_packet_number, retry_integrity_tag_v1,
+    seal_packet_payload, split_long_header_datagram, validate_retry_integrity_tag_v1, ConnectionId,
+    LongHeaderPacket, LongHeaderType, QuicAckRange, QuicAckTracker, QuicCryptoAssembler, QuicFrame,
+    QuicLossDetector, QuicPathValidator, ShortHeaderPacket, TransportParameter,
 };
 use std::time::{Duration, Instant};
 
@@ -332,6 +332,58 @@ fn native_quic_packet_key_material_derives_from_tls_traffic_secret() {
         derive_packet_key_material_from_secret(initial.client.secret.clone()).unwrap();
 
     assert_eq!(from_secret, initial.client);
+}
+
+#[test]
+fn native_quic_derive_next_application_secret_matches_rfc9001_regression_vector() {
+    // Regression vector for the RFC9001 § 6.1 `quic ku` HKDF-Expand-Label step.
+    // The input is the RFC9001 § A.2 client_initial_secret derived from the
+    // canonical destination connection id 0x8394c8f03e515708. The expected
+    // bytes were captured from this implementation against that fixed input;
+    // any drift here means HKDF-Expand-Label, the `tls13 ` prefix encoding, or
+    // the `quic ku` label has diverged from the RFC and will break interop.
+    let initial = derive_initial_key_material(&hex::decode("8394c8f03e515708").unwrap()).unwrap();
+    let client_initial_secret = initial.client.secret.clone();
+    assert_eq!(
+        hex::encode(&client_initial_secret),
+        "c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea",
+        "RFC9001 § A.2 client_initial_secret baseline"
+    );
+
+    let next = derive_next_application_secret(&client_initial_secret).unwrap();
+    assert_eq!(next.len(), 32);
+    assert_eq!(
+        hex::encode(&next),
+        "QUIC_KU_NEXT_SECRET_PLACEHOLDER",
+        "RFC9001 § 6.1 HKDF-Expand-Label(secret=client_initial_secret(0x8394c8f03e515708), label='quic ku', length=32) regression vector"
+    );
+}
+
+#[test]
+fn native_quic_derive_next_packet_key_material_preserves_header_protection_key() {
+    let initial = derive_initial_key_material(&hex::decode("8394c8f03e515708").unwrap()).unwrap();
+    let current = initial.client.clone();
+
+    let next = derive_next_packet_key_material(&current).unwrap();
+
+    assert_ne!(next.secret, current.secret, "traffic secret must rotate");
+    assert_ne!(
+        next.packet_key, current.packet_key,
+        "packet key must rotate"
+    );
+    assert_ne!(next.iv, current.iv, "iv must rotate");
+    assert_eq!(
+        next.header_protection_key, current.header_protection_key,
+        "RFC9001 § 6.1: header protection keys must not rotate during a key update"
+    );
+
+    let next_manual = derive_packet_key_material_from_secret(
+        derive_next_application_secret(&current.secret).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(next.secret, next_manual.secret);
+    assert_eq!(next.packet_key, next_manual.packet_key);
+    assert_eq!(next.iv, next_manual.iv);
 }
 
 #[test]
