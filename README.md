@@ -4,14 +4,16 @@ Rust HTTP client with Chrome-accurate fingerprints across TLS, HTTP/1.1, HTTP/2,
 
 ## What This Is
 
-Specter implements HTTP/1.1, HTTP/2, and HTTP/3 with the same protocol fingerprints as Chrome. It's written in Rust with a custom HTTP/2 implementation built from RFC 9113 (we don't use hyper or the h2 crate). TLS uses BoringSSL - Chrome's actual TLS library. When you make requests with Specter, fingerprinting systems see the same signatures they'd see from a real Chrome browser. Validated against ScrapFly, Browserleaks, and tls.peet.ws.
+Specter implements HTTP/1.1, HTTP/2, and HTTP/3 with browser-like protocol fingerprints. It's written in Rust with a custom HTTP/2 implementation built from RFC 9113 (we don't use hyper or the h2 crate). TLS uses BoringSSL - Chrome's actual TLS library. When you make requests with Specter, fingerprinting systems see browser-style signatures across TLS, HTTP/2, HTTP/3, and request headers. Validated against ScrapFly, Browserleaks, and tls.peet.ws.
 
-Implemented Chrome fingerprints: **142, 143, 144, 145, 146, 147, 148**. Firefox 133 also supported.
+Implemented Chrome fingerprints: **142, 143, 144, 145, 146, 147, 148**.
+Implemented Firefox stable fingerprints: **133 through 151**. Firefox ESR fingerprints: **115, 128, 140**.
 See [`docs/fingerprints/chrome-142-148.md`](docs/fingerprints/chrome-142-148.md) for the Chromium UA-CH algorithm and Chrome Releases version evidence used by these profiles.
+See [`docs/fingerprints/firefox-version-profiles.md`](docs/fingerprints/firefox-version-profiles.md) for Mozilla release evidence, ESR caveats, and shared Firefox transport modeling.
 
 ```toml
 [dependencies]
-specter = "3.2"
+specter = "4.0"
 ```
 
 ### Certified Chrome profiles
@@ -27,6 +29,17 @@ specter = "3.2"
 | `FingerprintProfile::Chrome148` | `Chrome/148.0.0.0` | `148.0.7778.179` |
 
 `Chrome148` is the latest implemented profile. All Chrome 142-148 profiles share the Chrome TLS, HTTP/2, and HTTP/3 transport fingerprints; the User-Agent and UA-CH headers vary by milestone.
+
+### Certified Firefox profiles
+
+| Profile range | User-Agent identity | Transport identity |
+| --- | --- | --- |
+| `FingerprintProfile::Firefox133` through `FingerprintProfile::Firefox151` | `rv:<major>.0` and `Firefox/<major>.0` desktop macOS UA | Shared Firefox desktop TLS, HTTP/2, HTTP/3 |
+| `FingerprintProfile::FirefoxEsr115` | `Mac OS X 10.14`, `rv:115.0`, `Firefox/115.0` | Shared Firefox desktop TLS, HTTP/2, HTTP/3 |
+| `FingerprintProfile::FirefoxEsr128` | `Mac OS X 10.15`, `rv:128.0`, `Firefox/128.0` | Shared Firefox desktop TLS, HTTP/2, HTTP/3 |
+| `FingerprintProfile::FirefoxEsr140` | `Mac OS X 10.15`, `rv:140.0`, `Firefox/140.0` | Shared Firefox desktop TLS, HTTP/2, HTTP/3 |
+
+`Firefox151` is the latest implemented stable profile as of 2026-05-24. Firefox profiles vary by User-Agent/header identity and intentionally share a canonical Firefox desktop transport fingerprint until capture-backed evidence proves per-version transport drift. `Firefox140` and `FirefoxEsr140` are distinct profiles even though their current UA and transport values match.
 
 ## Usage
 
@@ -82,7 +95,7 @@ let client = Client::builder()
     .build()?;
 ```
 
-- `fingerprint(FingerprintProfile::Chrome148)` selects the TLS, HTTP/2, HTTP/3, User-Agent, and UA-CH fingerprints for the implemented Chrome 148 milestone. Other versions available: `Chrome142` through `Chrome147`.
+- `fingerprint(FingerprintProfile::Chrome148)` selects profile-derived TLS, HTTP/2, and HTTP/3 behavior for the implemented Chrome 148 milestone. Other versions available: `Chrome142` through `Chrome147`, Firefox stable `Firefox133` through `Firefox151`, and Firefox ESR `FirefoxEsr115`, `FirefoxEsr128`, `FirefoxEsr140`. Use `.user_agent(...)`, `.default_headers(...)`, or `specter::headers::*` helpers when you need exact User-Agent or request header presets; `.fingerprint(...)` does not inject per-request headers by itself.
 - `prefer_http2(true)` keeps HTTP/1.1 available through ALPN but defaults to pooled HTTP/2.
 - `timeout(...)` adds a global request timeout enforced across all transports.
 - `http2_settings(...)` / `pseudo_order(...)` let you override SETTINGS frames and pseudo header ordering when you need to mimic a different browser or experiment with fingerprints.
@@ -305,7 +318,7 @@ pre-commit run --all-files
 
 ## Versioning & Stability
 
-- We follow SemVer. API breaking changes will require a major version bump while fingerprint profile additions remain additive.
+- We follow SemVer. API breaking changes require a major version bump. Adding Rust `FingerprintProfile` variants is treated as source-breaking for downstream exhaustive matches, so profile expansions that add enum variants ship on a major release line unless a separate compatibility strategy is adopted.
 
 ## Responsible Use
 

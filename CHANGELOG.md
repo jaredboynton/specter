@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-05-24
+
+### Added
+- **Firefox 134-151 stable fingerprint profiles**: Added dedicated Rust profiles and navigation/AJAX/form header presets for every Firefox stable major from 134 through 151, with version-specific desktop macOS User-Agent strings and shared canonical Firefox TLS/HTTP/2/HTTP/3 transport mappings.
+- **Firefox ESR fingerprint profiles**: Added `FirefoxEsr115`, `FirefoxEsr128`, and `FirefoxEsr140` profiles, including ESR-specific header helpers and the legacy macOS 10.14 UA identity for ESR 115.
+- **Node.js and Python bindings**: Exposed every new Firefox stable and ESR profile through the binding enums, TypeScript definitions, Python stubs, builder smoke tests, enum numeric-compatibility tests, and binding-to-Rust mapping tests.
+- **Firefox profile certification docs**: Documented Mozilla release evidence, ESR caveats, User-Agent modeling, shared transport rationale, and validation commands in `docs/fingerprints/firefox-version-profiles.md`.
+
+### Changed
+- **Latest Firefox defaults**: `OrderedHeaders::firefox_navigation()` now defaults to the Firefox 151 stable header preset.
+- **Shared Firefox transport constructor**: Added `TlsFingerprint::firefox()` as the canonical Firefox TLS constructor and kept `firefox_133()` as a compatibility alias.
+
+### Breaking
+- **Rust enum expansion**: `FingerprintProfile` gained new public variants. This is source-breaking for downstream crates that exhaustively match the enum, so the release is cut as a new major version.
+
 ## [3.2.0] - 2026-05-24
 
 ### Added
