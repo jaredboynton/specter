@@ -320,6 +320,7 @@ impl QuicCryptoAssembler {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct QuicAckTracker {
     received: BTreeSet<u64>,
+    received_at: BTreeMap<u64, Instant>,
     pending_ack: bool,
     pending_ack_count: usize,
     first_pending_ack_at: Option<Instant>,
@@ -332,6 +333,7 @@ impl QuicAckTracker {
 
     pub fn observe_at(&mut self, packet_number: u64, now: Instant) {
         if packet_number <= MAX_PACKET_NUMBER && self.received.insert(packet_number) {
+            self.received_at.insert(packet_number, now);
             if !self.pending_ack {
                 self.first_pending_ack_at = Some(now);
             }
@@ -402,6 +404,20 @@ impl QuicAckTracker {
         })
     }
 
+    pub fn to_ack_frame_with_delay(&self, now: Instant, ack_delay_exponent: u64) -> Result<QuicFrame> {
+        let Some(&largest_acknowledged) = self.received.iter().next_back() else {
+            return Err(Error::HttpProtocol(
+                "cannot build QUIC ACK frame without received packets".into(),
+            ));
+        };
+        let delay = self
+            .received_at
+            .get(&largest_acknowledged)
+            .map(|received_at| encode_ack_delay(now.saturating_duration_since(*received_at), ack_delay_exponent))
+            .unwrap_or(0);
+        self.to_ack_frame(delay)
+    }
+
     fn ack_ranges_descending(&self) -> Vec<AckRange> {
         let mut ranges = Vec::new();
         let mut current: Option<AckRange> = None;
@@ -442,6 +458,16 @@ impl QuicAckTracker {
             })
             .flatten()
     }
+}
+
+fn encode_ack_delay(delay: Duration, ack_delay_exponent: u64) -> u64 {
+    let micros = delay.as_micros();
+    let scaled = if ack_delay_exponent >= u128::BITS as u64 {
+        0
+    } else {
+        micros >> ack_delay_exponent
+    };
+    scaled.min(u64::MAX as u128) as u64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -836,6 +836,14 @@ impl NativeQuicServerHandshake {
     pub fn build_server_application_ack_packet(
         &mut self,
     ) -> Result<Option<ServerApplicationAckPacket>> {
+        self.build_server_application_ack_packet_with_delay(Instant::now(), 0)
+    }
+
+    pub fn build_server_application_ack_packet_with_delay(
+        &mut self,
+        now: Instant,
+        ack_delay_exponent: u64,
+    ) -> Result<Option<ServerApplicationAckPacket>> {
         if self.client_application_ack_tracker.is_empty() {
             return Ok(None);
         }
@@ -848,7 +856,11 @@ impl NativeQuicServerHandshake {
 
         let packet_number = self.next_server_application_packet_number;
         let packet_number_len = 2;
-        let frame = encode_frame(&self.client_application_ack_tracker.to_ack_frame(0)?);
+        let frame = encode_frame(
+            &self
+                .client_application_ack_tracker
+                .to_ack_frame_with_delay(now, ack_delay_exponent)?,
+        );
         let packet = protect_short_header_packet(
             server_application_keys,
             &self.client_source_cid,
@@ -885,6 +897,7 @@ impl NativeQuicServerHandshake {
         threshold: usize,
         max_ack_delay: Duration,
         now: Instant,
+        ack_delay_exponent: u64,
     ) -> Result<Option<ServerApplicationAckPacket>> {
         if !self
             .client_application_ack_tracker
@@ -892,7 +905,7 @@ impl NativeQuicServerHandshake {
         {
             return Ok(None);
         }
-        self.build_server_application_ack_packet()
+        self.build_server_application_ack_packet_with_delay(now, ack_delay_exponent)
     }
 
     pub fn server_application_ack_deadline(&self, max_ack_delay: Duration) -> Option<Instant> {
@@ -1519,6 +1532,14 @@ impl NativeQuicHandshake {
     pub fn build_client_application_ack_packet(
         &mut self,
     ) -> Result<Option<ClientApplicationAckPacket>> {
+        self.build_client_application_ack_packet_with_delay(Instant::now(), 0)
+    }
+
+    pub fn build_client_application_ack_packet_with_delay(
+        &mut self,
+        now: Instant,
+        ack_delay_exponent: u64,
+    ) -> Result<Option<ClientApplicationAckPacket>> {
         if self.application_ack_tracker.is_empty() {
             return Ok(None);
         }
@@ -1530,7 +1551,11 @@ impl NativeQuicHandshake {
 
         let packet_number = self.next_client_application_packet_number;
         let packet_number_len = 2;
-        let frame = encode_frame(&self.application_ack_tracker.to_ack_frame(0)?);
+        let frame = encode_frame(
+            &self
+                .application_ack_tracker
+                .to_ack_frame_with_delay(now, ack_delay_exponent)?,
+        );
         let packet = protect_short_header_packet(
             client_application_keys,
             &self.destination_cid,
@@ -1564,6 +1589,7 @@ impl NativeQuicHandshake {
         threshold: usize,
         max_ack_delay: Duration,
         now: Instant,
+        ack_delay_exponent: u64,
     ) -> Result<Option<ClientApplicationAckPacket>> {
         if !self
             .application_ack_tracker
@@ -1571,7 +1597,7 @@ impl NativeQuicHandshake {
         {
             return Ok(None);
         }
-        self.build_client_application_ack_packet()
+        self.build_client_application_ack_packet_with_delay(now, ack_delay_exponent)
     }
 
     pub fn client_application_ack_deadline(&self, max_ack_delay: Duration) -> Option<Instant> {
