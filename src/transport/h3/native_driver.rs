@@ -1541,18 +1541,18 @@ impl NativeH3Driver {
             let remaining = chunk.slice(offset..);
             let send_len = self.send_scheduler.data_budget(remaining.len());
             let data = remaining.slice(..send_len);
-            let packet = match self.handshake.build_client_h3_data_packet(
-                stream_id,
-                data.clone(),
-                false,
-            ) {
-                Ok(packet) => packet,
-                Err(error) if is_flow_control_blocked_error(&error) => {
-                    self.send_flow_control_blocked_packet().await?;
-                    return Ok(false);
-                }
-                Err(error) => return Err(error),
-            };
+            let packet =
+                match self
+                    .handshake
+                    .build_client_h3_data_packet(stream_id, data.clone(), false)
+                {
+                    Ok(packet) => packet,
+                    Err(error) if is_flow_control_blocked_error(&error) => {
+                        self.send_flow_control_blocked_packet().await?;
+                        return Ok(false);
+                    }
+                    Err(error) => return Err(error),
+                };
             if let Some(packet) = packet {
                 self.socket
                     .send_to(packet.packet.as_ref(), self.peer_addr)
@@ -1643,8 +1643,7 @@ impl NativeH3Driver {
         );
         let has_streaming_responses = !self.pending_streaming_responses.is_empty();
         let has_tunnels = !self.pending_tunnels.is_empty();
-        if ((!has_streaming_responses && !has_tunnels)
-            || released_credit.has_credit())
+        if ((!has_streaming_responses && !has_tunnels) || released_credit.has_credit())
             && !self.receive_backpressured()
         {
             self.send_receive_flow_control_updates().await?;
