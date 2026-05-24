@@ -846,7 +846,7 @@ fn native_quic_loss_detector_applies_ack_ecn_frame_ranges() {
                 gap: 1,
                 ack_range_length: 2,
             }],
-            ect0_count: 10,
+            ect0_count: 4,
             ect1_count: 0,
             ce_count: 1,
         })

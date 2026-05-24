@@ -155,7 +155,7 @@ fn native_h3_driver_retains_connection_close_for_draining_replay() {
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
     let driver_fields = driver
-        .split("struct NativeH3Driver")
+        .split("struct NativeH3Driver {")
         .nth(1)
         .expect("driver must have NativeH3Driver")
         .split("struct NativeDriverStreamingResponseState")

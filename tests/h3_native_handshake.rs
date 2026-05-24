@@ -14,11 +14,11 @@ use specter::transport::h3::native_driver::{
     NativeH3TunnelEvent,
 };
 use specter::transport::h3::quic::{
-    decode_frames, derive_initial_key_material, derive_packet_key_material_from_secret,
-    encode_frame, encode_initial_header, encode_long_header, initial_crypto_plaintext,
-    open_long_header_packet, open_short_header_packet, protect_long_header_packet,
-    protect_short_header_packet, split_long_header_datagram, ConnectionId, LongHeaderPacket,
-    LongHeaderType, QuicFrame,
+    decode_frames, decode_long_header, derive_initial_key_material,
+    derive_packet_key_material_from_secret, encode_frame, encode_initial_header,
+    encode_long_header, initial_crypto_plaintext, open_long_header_packet, open_short_header_packet,
+    protect_long_header_packet, protect_short_header_packet, retry_integrity_tag_v1,
+    split_long_header_datagram, ConnectionId, LongHeaderPacket, LongHeaderType, QuicFrame,
 };
 use specter::transport::h3::tls::{QuicEncryptionLevel, QuicSecretDirection, QuicTlsSecret};
 use specter::{DnsConfig, H3Backend, H3Client};
@@ -26,6 +26,43 @@ use std::time::{Duration, Instant};
 
 mod helpers;
 use helpers::mock_h3_server::{MockEvent, MockH3Server};
+
+fn version_negotiation_packet(
+    destination_cid: &ConnectionId,
+    source_cid: &ConnectionId,
+    supported_versions: &[u32],
+) -> Bytes {
+    let mut packet = Vec::new();
+    packet.push(0x80);
+    packet.extend_from_slice(&0u32.to_be_bytes());
+    packet.push(destination_cid.as_bytes().len() as u8);
+    packet.extend_from_slice(destination_cid.as_bytes());
+    packet.push(source_cid.as_bytes().len() as u8);
+    packet.extend_from_slice(source_cid.as_bytes());
+    for version in supported_versions {
+        packet.extend_from_slice(&version.to_be_bytes());
+    }
+    Bytes::from(packet)
+}
+
+fn retry_packet(
+    original_destination_cid: &ConnectionId,
+    destination_cid: &ConnectionId,
+    source_cid: &ConnectionId,
+    token: &[u8],
+) -> Bytes {
+    let mut packet = Vec::new();
+    packet.push(0xf0);
+    packet.extend_from_slice(&1u32.to_be_bytes());
+    packet.push(destination_cid.as_bytes().len() as u8);
+    packet.extend_from_slice(destination_cid.as_bytes());
+    packet.push(source_cid.as_bytes().len() as u8);
+    packet.extend_from_slice(source_cid.as_bytes());
+    packet.extend_from_slice(token);
+    let tag = retry_integrity_tag_v1(original_destination_cid, &packet).unwrap();
+    packet.extend_from_slice(&tag);
+    Bytes::from(packet)
+}
 
 fn completed_native_server_handshake() -> (
     Http3Fingerprint,
@@ -1583,6 +1620,102 @@ fn native_h3_handshake_opens_server_initial_and_feeds_tls_crypto() {
         .expect_err("invalid server Initial CRYPTO must fail through TLS");
 
     assert!(err.to_string().contains("server CRYPTO"));
+}
+
+#[test]
+fn native_h3_handshake_rejects_version_negotiation_without_quic_v1() {
+    let client_destination_cid = ConnectionId::from_static(b"server-dcid");
+    let client_source_cid = ConnectionId::from_static(b"client-scid");
+    let mut handshake = NativeQuicHandshake::client(
+        "example.com",
+        &Http3Fingerprint::chrome(),
+        client_destination_cid.clone(),
+        client_source_cid.clone(),
+    )
+    .unwrap();
+    let packet = version_negotiation_packet(
+        &client_source_cid,
+        &client_destination_cid,
+        &[0xff00_001d, 0x709a_50c4],
+    );
+
+    let err = handshake
+        .process_server_datagram(&packet)
+        .expect_err("VN without QUIC v1 must stop native H3 handshake");
+
+    assert!(err.to_string().contains("QUIC version 1"));
+}
+
+#[test]
+fn native_h3_handshake_ignores_version_negotiation_that_lists_quic_v1() {
+    let client_destination_cid = ConnectionId::from_static(b"server-dcid");
+    let client_source_cid = ConnectionId::from_static(b"client-scid");
+    let mut handshake = NativeQuicHandshake::client(
+        "example.com",
+        &Http3Fingerprint::chrome(),
+        client_destination_cid.clone(),
+        client_source_cid.clone(),
+    )
+    .unwrap();
+    let packet = version_negotiation_packet(&client_source_cid, &client_destination_cid, &[1]);
+
+    let processed = handshake
+        .process_server_datagram(&packet)
+        .expect("VN that lists the selected version must be ignored");
+
+    assert!(processed.is_empty());
+}
+
+#[test]
+fn native_h3_handshake_validates_retry_and_queues_new_initial() {
+    let client_destination_cid = ConnectionId::from_static(b"server-dcid");
+    let client_source_cid = ConnectionId::from_static(b"client-scid");
+    let retry_source_cid = ConnectionId::from_static(b"retry-scid");
+    let mut handshake = NativeQuicHandshake::client(
+        "example.com",
+        &Http3Fingerprint::chrome(),
+        client_destination_cid.clone(),
+        client_source_cid.clone(),
+    )
+    .unwrap();
+    let original_initial = handshake.client_initial().packet.clone();
+    let retry = retry_packet(
+        &client_destination_cid,
+        &client_source_cid,
+        &retry_source_cid,
+        b"retry-token",
+    );
+
+    let processed = handshake
+        .process_server_datagram(&retry)
+        .expect("valid Retry should be accepted by client handshake");
+    let pending = handshake
+        .take_pending_client_initial()
+        .expect("Retry should queue a token-bearing Initial");
+
+    assert!(processed.is_empty());
+    assert_ne!(pending.packet, original_initial);
+    let header = decode_long_header(&pending.packet).unwrap();
+    assert_eq!(header.destination_cid, retry_source_cid);
+    assert_eq!(header.source_cid, client_source_cid);
+    assert_eq!(header.token, Bytes::from_static(b"retry-token"));
+
+    let packets = split_long_header_datagram(pending.packet.as_ref()).unwrap();
+    let retry_keys = derive_initial_key_material(retry_source_cid.as_bytes()).unwrap();
+    let opened = open_long_header_packet(
+        &retry_keys.client,
+        pending.packet.as_ref(),
+        packets[0].packet_number_offset,
+        1,
+    )
+    .unwrap();
+    let frames = decode_frames(&opened.payload).unwrap();
+
+    assert_eq!(opened.packet_number, 1);
+    assert!(matches!(
+        &frames[0],
+        QuicFrame::Crypto { offset: 0, data } if data == &pending.crypto_data
+    ));
 }
 
 #[test]
