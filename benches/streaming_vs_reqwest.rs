@@ -123,7 +123,7 @@ fn final_fixture_chunk_delivery_overhead_ns(
     let mut final_overhead = None;
     for local_offset in 0..data.len() {
         let absolute_offset = body_offset + local_offset;
-        if absolute_offset % BENCH_CHUNK_SIZE != 0 {
+        if !absolute_offset.is_multiple_of(BENCH_CHUNK_SIZE) {
             continue;
         }
         let end = local_offset + FIXTURE_CHUNK_STAMP_LEN;
@@ -1099,17 +1099,16 @@ async fn handle_h2_connection<
                 };
 
                 match frame_type {
-                    0x04 => {
-                        if flags & 0x01 == 0 && !settings_sent {
-                            let settings_payload = vec![
-                                0x00, 0x08, 0x00, 0x00, 0x00, 0x01,
-                                0x00, 0x03, 0x00, 0x00, 0x00, 0x64,
-                            ];
-                            let _ = tx.send((0x04, 0x00, 0, settings_payload)).await;
-                            let _ = tx.send((0x04, 0x01, 0, vec![])).await;
-                            settings_sent = true;
-                        }
+                    0x04 if flags & 0x01 == 0 && !settings_sent => {
+                        let settings_payload = vec![
+                            0x00, 0x08, 0x00, 0x00, 0x00, 0x01,
+                            0x00, 0x03, 0x00, 0x00, 0x00, 0x64,
+                        ];
+                        let _ = tx.send((0x04, 0x00, 0, settings_payload)).await;
+                        let _ = tx.send((0x04, 0x01, 0, vec![])).await;
+                        settings_sent = true;
                     }
+                    0x04 => {}
                     0x01 => {
                         let decoded = decoder.decode(&payload);
                         let headers = decoded.unwrap_or_default();
@@ -3329,6 +3328,7 @@ struct ResponseSampleSet {
 }
 
 impl ResponseSampleSet {
+    #[allow(clippy::too_many_arguments)]
     fn record(
         &mut self,
         ttft: Duration,
@@ -3442,6 +3442,7 @@ struct RequestSampleSet {
 }
 
 impl RequestSampleSet {
+    #[allow(clippy::too_many_arguments)]
     fn record(
         &mut self,
         ttft: Duration,

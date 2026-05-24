@@ -1064,7 +1064,7 @@ async fn measure_specter_native(
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
     let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
-    fingerprint.transport.ack_eliciting_threshold = 64;
+    fingerprint.transport.ack_eliciting_threshold = 128;
     let client = specter::H3Client::new()
         .danger_accept_invalid_certs(true)
         .with_http3_fingerprint(fingerprint)
