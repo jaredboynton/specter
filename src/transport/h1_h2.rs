@@ -302,6 +302,11 @@ impl Client {
             .max_concurrent_streams_per_connection
     }
 
+    /// Bounded in-flight response DATA slots per streaming H2 body.
+    pub fn h2_streaming_body_buffer_slots(&self) -> usize {
+        self.h2_transport_config.streaming_body_buffer_slots
+    }
+
     /// Bounded in-flight response DATA slots per streaming H3 body.
     pub fn h3_streaming_body_buffer_slots(&self) -> usize {
         self.h3_client.streaming_body_buffer_slots()
@@ -2236,6 +2241,17 @@ impl ClientBuilder {
     /// Alias for [`ClientBuilder::h2_max_concurrent_streams_per_connection`].
     pub fn h2_max_streams_per_origin(self, max: u32) -> Self {
         self.h2_max_concurrent_streams_per_connection(max)
+    }
+
+    /// Set bounded in-flight response DATA slots per streaming H2 body.
+    pub fn h2_streaming_body_buffer_slots(mut self, slots: usize) -> Self {
+        self.h2_transport_config.streaming_body_buffer_slots = slots.max(1);
+        self
+    }
+
+    /// Alias for [`ClientBuilder::h2_streaming_body_buffer_slots`].
+    pub fn h2_body_buffer_slots(self, slots: usize) -> Self {
+        self.h2_streaming_body_buffer_slots(slots)
     }
 
     /// Enable or disable the exclusive direct-read HTTP/2 streaming-response
