@@ -3,7 +3,7 @@
 //! Uses:
 //! - h1.rs for HTTP/1.1 (minimal httparse-based implementation)
 //! - h2.rs for HTTP/2 (with full SETTINGS fingerprinting and connection pooling)
-//! - h3.rs for HTTP/3 (via quiche QUIC)
+//! - h3.rs for native HTTP/3
 //!
 //! Supports automatic HTTP/3 upgrade via Alt-Svc header caching.
 
@@ -14,7 +14,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::timeout as tokio_timeout;
@@ -22,7 +22,7 @@ use url::Url;
 
 use crate::cookie::CookieJar;
 use crate::error::{Error, Result};
-use crate::fingerprint::{http2::Http2Settings, FingerprintProfile};
+use crate::fingerprint::{http2::Http2Settings, FingerprintProfile, Http3Fingerprint};
 use crate::headers::Headers;
 use crate::pool::alt_svc::AltSvcCache;
 use crate::pool::multiplexer::{ConnectionPool, PoolKey};
@@ -33,12 +33,32 @@ use crate::transport::connector::{BoringConnector, MaybeHttpsStream};
 use crate::transport::dns::{DnsConfig, Resolve};
 use crate::transport::h1::{H1Connection, H1StreamingOptions};
 use crate::transport::h2::{
-    H2BodyTimeouts, H2Connection, H2PooledConnection, H2TransportConfig, H2Tunnel,
-    PseudoHeaderOrder,
+    H2BodyTimeouts, H2Connection, H2DirectBody, H2DirectReuseHook, H2PooledConnection,
+    H2TransportConfig, H2Tunnel, PseudoHeaderOrder, RawH2Connection,
 };
-use crate::transport::h3::{H3Client, H3Tunnel};
+use crate::transport::h3::{H3Backend, H3Client, H3Tunnel};
 use crate::version::HttpVersion;
 use crate::websocket::{WebSocketBuilder, WebSocketClientParts};
+
+type H2DirectPool = Arc<StdMutex<HashMap<PoolKey, Vec<RawH2Connection<MaybeHttpsStream>>>>>;
+
+struct H2DirectStart {
+    conn: RawH2Connection<MaybeHttpsStream>,
+    stream_id: u32,
+    status: u16,
+    headers: Vec<(String, String)>,
+    end_stream: bool,
+}
+
+struct H2DirectResponseRequest {
+    conn: RawH2Connection<MaybeHttpsStream>,
+    method: Method,
+    uri: Uri,
+    headers: Vec<(String, String)>,
+    body_timeouts: H2BodyTimeouts,
+    pool_key: PoolKey,
+    ttfb_timeout: Option<Duration>,
+}
 
 /// Unified HTTP client with HTTP/1.1, HTTP/2, and HTTP/3 support.
 ///
@@ -57,6 +77,8 @@ pub struct Client {
     alt_svc_cache: Arc<AltSvcCache>,
     /// HTTP/2 connection pool for multiplexing
     h2_pool: Arc<RwLock<HashMap<PoolKey, H2PooledConnection>>>,
+    /// Exclusive HTTP/2 direct-streaming pool for ordinary single-stream downloads.
+    h2_direct_pool: H2DirectPool,
     /// HTTP/1.1 connection pool for reuse
     h1_pool: Arc<ConnectionPool>,
     http2_settings: Http2Settings,
@@ -66,6 +88,9 @@ pub struct Client {
     timeouts: Timeouts,
     /// HTTP/2 runtime transport tuning.
     h2_transport_config: H2TransportConfig,
+    /// Use the exclusive direct-read HTTP/2 streaming-response path for
+    /// body-less requests. Disabled by default to preserve multiplexing.
+    h2_direct_streaming_responses: bool,
     /// Whether to opportunistically try HTTP/3 when Alt-Svc indicates support
     h3_upgrade_enabled: bool,
     /// Force HTTP/2 prior knowledge (H2C) for cleartext connections
@@ -120,13 +145,16 @@ pub struct WebSocketH3Builder<'a> {
 pub struct ClientBuilder {
     fingerprint: FingerprintProfile,
     http2_settings: Option<Http2Settings>,
-    pseudo_order: PseudoHeaderOrder,
+    pseudo_order: Option<PseudoHeaderOrder>,
     timeouts: Timeouts,
     dns_config: DnsConfig,
     pool_idle_timeout: Duration,
     pool_max_idle_per_host: usize,
     h3_max_idle_timeout: Option<u64>,
+    h3_fingerprint: Option<Http3Fingerprint>,
+    h3_backend: H3Backend,
     h2_transport_config: H2TransportConfig,
+    h2_direct_streaming_responses: bool,
     tcp_keepalive: Option<Duration>,
     tcp_keepalive_interval: Option<Duration>,
     tcp_keepalive_retries: Option<u32>,
@@ -236,6 +264,26 @@ impl Client {
     /// (e.g. when bypassing the Alt-Svc upgrade path).
     pub fn h3_client(&self) -> &H3Client {
         &self.h3_client
+    }
+
+    /// Get the configured fingerprint profile.
+    pub fn fingerprint_profile(&self) -> FingerprintProfile {
+        self.fingerprint
+    }
+
+    /// Get the HTTP/2 settings used for new H2 connections.
+    pub fn http2_settings(&self) -> &Http2Settings {
+        &self.http2_settings
+    }
+
+    /// Get the HTTP/2 pseudo-header order used for new H2 requests.
+    pub fn pseudo_order(&self) -> PseudoHeaderOrder {
+        self.pseudo_order
+    }
+
+    /// Get default headers applied to new requests and tunnel builders.
+    pub fn default_headers(&self) -> &Headers {
+        &self.default_headers
     }
 
     /// Check if a host is localhost (localhost, 127.0.0.1, ::1)
@@ -876,12 +924,12 @@ impl<'a> RequestBuilder<'a> {
                 send_fut.await?
             };
 
-            let response = response.with_url(request_url.clone());
             if let Some(jar) = &client.cookie_store {
                 jar.write()
                     .await
                     .store_from_headers(response.headers(), request_url.as_str());
             }
+            let response = response.with_url(request_url);
             reject_compressed_streaming(&response)?;
             return Ok(response);
         } else {
@@ -1021,6 +1069,25 @@ impl<'a> RequestBuilder<'a> {
                         response
                     }
                 }
+            } else if client.h2_direct_streaming_responses && request.body.is_empty() {
+                let response = client
+                    .send_h2_direct_streaming_response(
+                        request.method.clone(),
+                        &uri,
+                        request.headers.to_vec(),
+                        &pool_key,
+                        &timeouts,
+                        body_timeouts,
+                    )
+                    .await?;
+
+                let response = response.with_url(request_url.clone());
+                if let Some(jar) = &client.cookie_store {
+                    jar.write()
+                        .await
+                        .store_from_headers(response.headers(), request_url.as_str());
+                }
+                response
             } else {
                 let connector = client.connector_for_uri(&uri);
                 let connect_fut = connector.connect(&uri);
@@ -1618,6 +1685,181 @@ impl Client {
         PoolKey::new(host, port, is_https, self.fingerprint, self.pseudo_order)
     }
 
+    fn take_h2_direct_connection(
+        &self,
+        pool_key: &PoolKey,
+    ) -> Option<RawH2Connection<MaybeHttpsStream>> {
+        let mut pool = self
+            .h2_direct_pool
+            .lock()
+            .expect("H2 direct pool mutex poisoned");
+        let conn = pool.get_mut(pool_key).and_then(Vec::pop);
+        if pool.get(pool_key).is_some_and(Vec::is_empty) {
+            pool.remove(pool_key);
+        }
+        conn
+    }
+
+    fn h2_direct_reuse_hook(&self, pool_key: PoolKey) -> H2DirectReuseHook {
+        let pool = self.h2_direct_pool.clone();
+        Box::new(move |conn| {
+            if !conn.is_reusable() {
+                return;
+            }
+            let mut guard = pool.lock().expect("H2 direct pool mutex poisoned");
+            let entry = guard.entry(pool_key).or_default();
+            if entry.is_empty() {
+                entry.push(conn);
+            }
+        })
+    }
+
+    async fn connect_h2_direct_connection(
+        &self,
+        uri: &Uri,
+        timeouts: &Timeouts,
+    ) -> Result<RawH2Connection<MaybeHttpsStream>> {
+        let connector = self.connector_for_uri(uri);
+        let connect_fut = connector.connect(uri);
+        let stream = if let Some(connect_timeout) = timeouts.connect {
+            tokio_timeout(connect_timeout, connect_fut)
+                .await
+                .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+        } else {
+            connect_fut.await?
+        };
+
+        let use_http2 = if self.http2_prior_knowledge && !stream.alpn_protocol().is_h2() {
+            true
+        } else if let MaybeHttpsStream::Https(ref ssl_stream) = stream {
+            ssl_stream.ssl().selected_alpn_protocol() == Some(b"h2")
+        } else {
+            false
+        };
+
+        if !use_http2 {
+            return Err(Error::HttpProtocol(format!(
+                "Expected h2 ALPN, got {:?}",
+                stream.alpn_protocol()
+            )));
+        }
+
+        let h2_connect_fut =
+            RawH2Connection::connect(stream, self.http2_settings.clone(), self.pseudo_order);
+        if let Some(connect_timeout) = timeouts.connect {
+            tokio_timeout(connect_timeout, h2_connect_fut)
+                .await
+                .map_err(|_| Error::ConnectTimeout(connect_timeout))?
+        } else {
+            h2_connect_fut.await
+        }
+    }
+
+    async fn start_h2_direct_response(&self, request: H2DirectResponseRequest) -> Result<Response> {
+        let H2DirectResponseRequest {
+            conn,
+            method,
+            uri,
+            headers,
+            body_timeouts,
+            pool_key,
+            ttfb_timeout,
+        } = request;
+        let fut = async move {
+            let mut conn = conn;
+            let stream_id = conn.send_headers_raw(&method, &uri, &headers, true).await?;
+            let (status, headers, end_stream) = conn
+                .read_response_headers_with_end_stream(stream_id)
+                .await?;
+            Ok::<_, Error>(H2DirectStart {
+                conn,
+                stream_id,
+                status: status.as_u16(),
+                headers,
+                end_stream,
+            })
+        };
+
+        let mut started = if let Some(timeout) = ttfb_timeout {
+            tokio_timeout(timeout, fut)
+                .await
+                .map_err(|_| Error::TtfbTimeout(timeout))??
+        } else {
+            fut.await?
+        };
+
+        if started.end_stream {
+            started.conn.remove_stream(started.stream_id);
+            let on_reusable = self.h2_direct_reuse_hook(pool_key);
+            on_reusable(started.conn);
+            return Ok(Response::with_body(
+                started.status,
+                Headers::from(started.headers),
+                Body::empty(),
+                "HTTP/2".to_string(),
+            ));
+        }
+
+        let on_reusable = self.h2_direct_reuse_hook(pool_key);
+        Ok(Response::with_body(
+            started.status,
+            Headers::from(started.headers),
+            Body::from_h2_direct(H2DirectBody::new(
+                started.conn,
+                started.stream_id,
+                body_timeouts,
+                on_reusable,
+            )),
+            "HTTP/2".to_string(),
+        ))
+    }
+
+    async fn send_h2_direct_streaming_response(
+        &self,
+        method: Method,
+        uri: &Uri,
+        headers: Vec<(String, String)>,
+        pool_key: &PoolKey,
+        timeouts: &Timeouts,
+        body_timeouts: H2BodyTimeouts,
+    ) -> Result<Response> {
+        if let Some(conn) = self.take_h2_direct_connection(pool_key) {
+            self.pool_reuse_counter.fetch_add(1, Ordering::Relaxed);
+            match self
+                .start_h2_direct_response(H2DirectResponseRequest {
+                    conn,
+                    method: method.clone(),
+                    uri: uri.clone(),
+                    headers: headers.clone(),
+                    body_timeouts,
+                    pool_key: pool_key.clone(),
+                    ttfb_timeout: timeouts.ttfb,
+                })
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    tracing::debug!(
+                        "Pooled direct HTTP/2 streaming connection failed, reconnecting: {}",
+                        error
+                    );
+                }
+            }
+        }
+
+        let conn = self.connect_h2_direct_connection(uri, timeouts).await?;
+        self.start_h2_direct_response(H2DirectResponseRequest {
+            conn,
+            method,
+            uri: uri.clone(),
+            headers,
+            body_timeouts,
+            pool_key: pool_key.clone(),
+            ttfb_timeout: timeouts.ttfb,
+        })
+        .await
+    }
+
     async fn do_send_http1(
         stream: MaybeHttpsStream,
         method: Method,
@@ -1666,13 +1908,16 @@ impl ClientBuilder {
         Self {
             fingerprint: FingerprintProfile::default(),
             http2_settings: None,
-            pseudo_order: PseudoHeaderOrder::Chrome,
+            pseudo_order: None,
             timeouts: Timeouts::default(),
             dns_config: DnsConfig::new(),
             pool_idle_timeout: Duration::from_secs(30),
             pool_max_idle_per_host: 6,
             h3_max_idle_timeout: None,
+            h3_fingerprint: None,
+            h3_backend: H3Backend::Native,
             h2_transport_config: H2TransportConfig::default(),
+            h2_direct_streaming_responses: false,
             tcp_keepalive: None,
             tcp_keepalive_interval: None,
             tcp_keepalive_retries: None,
@@ -1703,7 +1948,7 @@ impl ClientBuilder {
 
     /// Set pseudo-header ordering for HTTP/2 fingerprinting.
     pub fn pseudo_order(mut self, order: PseudoHeaderOrder) -> Self {
-        self.pseudo_order = order;
+        self.pseudo_order = Some(order);
         self
     }
 
@@ -1857,7 +2102,9 @@ impl ClientBuilder {
     /// Set HTTP/2 initial stream window size.
     pub fn http2_initial_stream_window_size(mut self, size: Option<u32>) -> Self {
         if let Some(size) = size {
-            let mut settings = self.http2_settings.unwrap_or_default();
+            let mut settings = self
+                .http2_settings
+                .unwrap_or_else(|| self.fingerprint.http2_settings());
             settings.initial_window_size = size;
             self.http2_settings = Some(settings);
         }
@@ -1867,7 +2114,9 @@ impl ClientBuilder {
     /// Set HTTP/2 initial connection window size.
     pub fn http2_initial_connection_window_size(mut self, size: Option<u32>) -> Self {
         if let Some(size) = size {
-            let mut settings = self.http2_settings.unwrap_or_default();
+            let mut settings = self
+                .http2_settings
+                .unwrap_or_else(|| self.fingerprint.http2_settings());
             settings.initial_window_update = size.saturating_sub(65_535);
             self.http2_settings = Some(settings);
         }
@@ -1898,9 +2147,33 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable or disable the exclusive direct-read HTTP/2 streaming-response
+    /// path for body-less requests.
+    ///
+    /// This avoids the pooled driver/body handoff for single-stream downloads,
+    /// but it intentionally owns the H2 connection until response EOF. Leave it
+    /// disabled when ordinary H2 multiplexing or RFC 8441 reuse should remain
+    /// available on the same connection.
+    pub fn h2_direct_streaming_responses(mut self, enabled: bool) -> Self {
+        self.h2_direct_streaming_responses = enabled;
+        self
+    }
+
     /// Set HTTP/3 max idle timeout in milliseconds.
     pub fn h3_max_idle_timeout(mut self, timeout_ms: u64) -> Self {
         self.h3_max_idle_timeout = Some(timeout_ms);
+        self
+    }
+
+    /// Set HTTP/3 and QUIC fingerprinting parameters.
+    pub fn h3_fingerprint(mut self, fingerprint: Http3Fingerprint) -> Self {
+        self.h3_fingerprint = Some(fingerprint);
+        self
+    }
+
+    /// Select the HTTP/3 runtime backend.
+    pub fn h3_backend(mut self, backend: H3Backend) -> Self {
+        self.h3_backend = backend;
         self
     }
 
@@ -2019,6 +2292,7 @@ impl ClientBuilder {
     pub fn build(self) -> Result<Client> {
         // Create connector with TLS fingerprint
         let tls_fingerprint = self.fingerprint.tls_fingerprint();
+        let root_certs = self.root_certs.clone();
         let mut connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
             .with_root_certificates(self.root_certs.clone())
             .with_platform_roots(self.use_platform_roots)
@@ -2034,7 +2308,7 @@ impl ClientBuilder {
 
         // Create insecure connector for localhost (always skips TLS verification)
         let insecure_connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
-            .with_root_certificates(self.root_certs)
+            .with_root_certificates(self.root_certs.clone())
             .with_platform_roots(self.use_platform_roots)
             .with_dns_config(self.dns_config.clone())
             .tcp_keepalive(self.tcp_keepalive)
@@ -2043,8 +2317,15 @@ impl ClientBuilder {
             .danger_accept_invalid_certs(true);
 
         // Create H3 client with same TLS fingerprint
-        let mut h3_client =
-            H3Client::with_fingerprint(tls_fingerprint).with_dns_config(self.dns_config.clone());
+        let h3_fingerprint = self
+            .h3_fingerprint
+            .unwrap_or_else(|| self.fingerprint.http3_fingerprint());
+        let mut h3_client = H3Client::with_fingerprint(tls_fingerprint)
+            .with_http3_fingerprint(h3_fingerprint)
+            .with_h3_backend(self.h3_backend)
+            .with_root_certificates(root_certs)
+            .with_platform_roots(self.use_platform_roots)
+            .with_dns_config(self.dns_config.clone());
         if let Some(timeout_ms) = self.h3_max_idle_timeout {
             h3_client = h3_client.with_max_idle_timeout(timeout_ms);
         }
@@ -2053,7 +2334,12 @@ impl ClientBuilder {
         }
 
         // Use provided HTTP/2 settings or default from fingerprint
-        let http2_settings = self.http2_settings.unwrap_or_default();
+        let http2_settings = self
+            .http2_settings
+            .unwrap_or_else(|| self.fingerprint.http2_settings());
+        let pseudo_order = self
+            .pseudo_order
+            .unwrap_or_else(|| self.fingerprint.http2_pseudo_order());
 
         // Determine default version
         let default_version = if self.prefer_http2 {
@@ -2083,12 +2369,14 @@ impl ClientBuilder {
             h3_client,
             alt_svc_cache: Arc::new(AltSvcCache::new()),
             h2_pool: Arc::new(RwLock::new(HashMap::new())),
+            h2_direct_pool: Arc::new(StdMutex::new(HashMap::new())),
             h1_pool,
             http2_settings,
-            pseudo_order: self.pseudo_order,
+            pseudo_order,
             default_version,
             timeouts: self.timeouts,
             h2_transport_config: self.h2_transport_config.clone(),
+            h2_direct_streaming_responses: self.h2_direct_streaming_responses,
             h3_upgrade_enabled: self.h3_upgrade_enabled,
             http2_prior_knowledge: self.http2_prior_knowledge,
             danger_accept_invalid_certs: self.danger_accept_invalid_certs,

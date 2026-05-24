@@ -122,8 +122,12 @@ pub enum FingerprintProfile {
     Chrome144,
     /// Chrome 145 on macOS
     Chrome145,
-    /// Chrome 146 on macOS (current stable)
+    /// Chrome 146 on macOS
     Chrome146,
+    /// Chrome 147 on macOS
+    Chrome147,
+    /// Chrome 148 on macOS
+    Chrome148,
     /// Firefox 133 on macOS
     Firefox133,
     /// No fingerprinting - use default TLS settings
@@ -568,6 +572,8 @@ impl ClientBuilder {
                 FingerprintProfile::Chrome144 => RustFingerprintProfile::Chrome144,
                 FingerprintProfile::Chrome145 => RustFingerprintProfile::Chrome145,
                 FingerprintProfile::Chrome146 => RustFingerprintProfile::Chrome146,
+                FingerprintProfile::Chrome147 => RustFingerprintProfile::Chrome147,
+                FingerprintProfile::Chrome148 => RustFingerprintProfile::Chrome148,
                 FingerprintProfile::Firefox133 => RustFingerprintProfile::Firefox133,
                 FingerprintProfile::None => RustFingerprintProfile::None,
             };

@@ -4,6 +4,8 @@ export enum FingerprintProfile {
   Chrome144,
   Chrome145,
   Chrome146,
+  Chrome147,
+  Chrome148,
   Firefox133,
   None,
 }

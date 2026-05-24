@@ -35,6 +35,10 @@ pub struct H1StreamingOptions {
 /// Maximum response header size (64KB).
 const MAX_HEADERS_SIZE: usize = 64 * 1024;
 
+/// Initial response header buffer size. Most H1 responses fit in a few hundred
+/// bytes; keep the 64 KiB hard cap without paying that allocation per request.
+const INITIAL_HEADERS_CAPACITY: usize = 1024;
+
 /// Maximum number of headers to parse.
 const MAX_HEADERS_COUNT: usize = 100;
 
@@ -619,12 +623,8 @@ impl H1Connection {
             options.total_timeout,
         ));
 
-        Ok(Response::with_body(
-            response.status_code(),
-            response.headers().clone(),
-            body,
-            response.http_version().to_string(),
-        ))
+        let (status, headers, http_version) = response.into_status_headers_version();
+        Ok(Response::with_body(status, headers, body, http_version))
     }
 
     /// Build the HTTP/1.1 request as bytes.
@@ -773,13 +773,23 @@ impl H1Connection {
                         std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await
                     {
                         let chunk = chunk?;
-                        sent += chunk.len() as u64;
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        let next_sent = sent + chunk.len() as u64;
+                        if next_sent > expected_len {
+                            return Err(Error::HttpProtocol(format!(
+                                "sized streaming request body length mismatch: sent more than Content-Length {}",
+                                expected_len
+                            )));
+                        }
                         self.stream.write_all(&chunk).await.map_err(|e| {
                             Error::HttpProtocol(format!(
                                 "Failed to write sized streaming request body: {}",
                                 e
                             ))
                         })?;
+                        sent = next_sent;
                     }
                     if sent != expected_len {
                         return Err(Error::HttpProtocol(format!(
@@ -842,6 +852,16 @@ impl H1Connection {
         mut stream: RequestBodyStream,
         expected_len: u64,
     ) -> Result<()> {
+        if let MaybeHttpsStream::Http(tcp_stream) = &mut self.stream {
+            return write_sized_request_stream_with_head_http(
+                tcp_stream,
+                request_bytes,
+                stream,
+                expected_len,
+            )
+            .await;
+        }
+
         let mut sent = 0u64;
 
         loop {
@@ -854,23 +874,25 @@ impl H1Connection {
             match first_poll {
                 Poll::Ready(Some(chunk)) => {
                     let chunk = chunk?;
-                    sent += chunk.len() as u64;
                     if chunk.is_empty() {
                         continue;
                     }
+                    let next_sent = sent + chunk.len() as u64;
+                    if next_sent > expected_len {
+                        return Err(Error::HttpProtocol(format!(
+                            "sized streaming request body length mismatch: sent more than Content-Length {}",
+                            expected_len
+                        )));
+                    }
                     request_bytes.extend_from_slice(&chunk);
-                    self.stream.write_all(&request_bytes).await.map_err(|e| {
-                        Error::HttpProtocol(format!(
-                            "Failed to write sized streaming request head/body: {}",
-                            e
-                        ))
-                    })?;
+                    self.write_sized_stream_bytes(&request_bytes, "head/body")
+                        .await?;
+                    sent = next_sent;
                     break;
                 }
                 Poll::Ready(None) | Poll::Pending => {
-                    self.stream.write_all(&request_bytes).await.map_err(|e| {
-                        Error::HttpProtocol(format!("Failed to write request: {}", e))
-                    })?;
+                    self.write_sized_stream_bytes(&request_bytes, "request")
+                        .await?;
                     break;
                 }
             }
@@ -878,13 +900,18 @@ impl H1Connection {
 
         while let Some(chunk) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
             let chunk = chunk?;
-            sent += chunk.len() as u64;
-            self.stream.write_all(&chunk).await.map_err(|e| {
-                Error::HttpProtocol(format!(
-                    "Failed to write sized streaming request body: {}",
-                    e
-                ))
-            })?;
+            if chunk.is_empty() {
+                continue;
+            }
+            let next_sent = sent + chunk.len() as u64;
+            if next_sent > expected_len {
+                return Err(Error::HttpProtocol(format!(
+                    "sized streaming request body length mismatch: sent more than Content-Length {}",
+                    expected_len
+                )));
+            }
+            self.write_sized_stream_bytes(&chunk, "body").await?;
+            sent = next_sent;
         }
 
         if sent != expected_len {
@@ -895,6 +922,37 @@ impl H1Connection {
         }
 
         Ok(())
+    }
+
+    async fn write_sized_stream_bytes(&mut self, bytes: &[u8], label: &str) -> Result<()> {
+        if let MaybeHttpsStream::Http(stream) = &mut self.stream {
+            match stream.try_write(bytes) {
+                Ok(n) if n == bytes.len() => return Ok(()),
+                Ok(n) => {
+                    stream.write_all(&bytes[n..]).await.map_err(|e| {
+                        Error::HttpProtocol(format!(
+                            "Failed to write sized streaming request {}: {}",
+                            label, e
+                        ))
+                    })?;
+                    return Ok(());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => {
+                    return Err(Error::HttpProtocol(format!(
+                        "Failed to write sized streaming request {}: {}",
+                        label, e
+                    )));
+                }
+            }
+        }
+
+        self.stream.write_all(bytes).await.map_err(|e| {
+            Error::HttpProtocol(format!(
+                "Failed to write sized streaming request {}: {}",
+                label, e
+            ))
+        })
     }
 
     async fn write_sized_request_bytes(
@@ -927,7 +985,7 @@ impl H1Connection {
     async fn read_response(&mut self, method: &Method) -> Result<Response> {
         // Persistent buffer to handle 1xx responses followed by final response
         // in the same read. We preserve bytes after each 1xx for the next parse.
-        let mut buffer = Vec::with_capacity(MAX_HEADERS_SIZE);
+        let mut buffer = Vec::with_capacity(INITIAL_HEADERS_CAPACITY);
 
         loop {
             // Read until we find the end of headers (\r\n\r\n)
@@ -982,7 +1040,34 @@ impl H1Connection {
         &mut self,
         method: &Method,
     ) -> Result<(Response, H1BodyMode)> {
-        let mut buffer = Vec::with_capacity(MAX_HEADERS_SIZE);
+        let mut first_read_buf = [0u8; 8192];
+        let first_read_len = self
+            .stream
+            .read(&mut first_read_buf)
+            .await
+            .map_err(|e| Error::HttpProtocol(format!("Failed to read response: {}", e)))?;
+
+        if first_read_len == 0 {
+            return Err(Error::HttpProtocol(
+                "Connection closed before response complete".into(),
+            ));
+        }
+
+        let first_read = &first_read_buf[..first_read_len];
+        let mut buffer = Vec::new();
+
+        if let Some(header_end) = find_header_end(first_read) {
+            let (response, mode) = self.parse_streaming_response(first_read, method)?;
+            if response.status < 100 || response.status >= 200 {
+                return Ok((response, mode));
+            }
+
+            buffer.reserve(INITIAL_HEADERS_CAPACITY.max(first_read.len() - header_end));
+            buffer.extend_from_slice(&first_read[header_end..]);
+        } else {
+            buffer.reserve(INITIAL_HEADERS_CAPACITY.max(first_read.len()));
+            buffer.extend_from_slice(first_read);
+        }
 
         loop {
             let _header_end = loop {
@@ -994,7 +1079,7 @@ impl H1Connection {
                     break header_end;
                 }
 
-                let mut read_buf = vec![0u8; 8192];
+                let mut read_buf = [0u8; 8192];
                 let n =
                     self.stream.read(&mut read_buf).await.map_err(|e| {
                         Error::HttpProtocol(format!("Failed to read response: {}", e))
@@ -1017,13 +1102,13 @@ impl H1Connection {
                 let headers_len = match informational.parse(&buffer) {
                     Ok(httparse::Status::Complete(len)) => len,
                     Ok(httparse::Status::Partial) => {
-                        return Err(Error::HttpProtocol("Incomplete response headers".into()))
+                        return Err(Error::HttpProtocol("Incomplete response headers".into()));
                     }
                     Err(e) => {
                         return Err(Error::HttpProtocol(format!(
                             "Failed to parse response: {}",
                             e
-                        )))
+                        )));
                     }
                 };
                 buffer = buffer[headers_len..].to_vec();
@@ -1056,60 +1141,64 @@ impl H1Connection {
         let status = response
             .code
             .ok_or_else(|| Error::HttpProtocol("Missing status code".into()))?;
-        let version = format!("HTTP/1.{}", response.version.unwrap_or(1));
-        let response_headers: Vec<(String, String)> = response
-            .headers
-            .iter()
-            .filter(|h| !h.name.is_empty())
-            .map(|h| {
-                (
-                    h.name.to_string(),
-                    String::from_utf8_lossy(h.value).to_string(),
-                )
-            })
-            .collect();
-        let response_headers = Headers::from(response_headers);
+        let version = http_1_version_string(response.version);
+        let mut response_headers_vec = Vec::new();
+        let mut transfer_encoding_present = false;
+        let mut is_chunked = false;
+        let mut content_length_index = None;
 
-        if let Some(conn) = find_header_value(&response_headers, "connection") {
-            if conn.to_ascii_lowercase().contains("close") {
+        for header in response.headers.iter().filter(|h| !h.name.is_empty()) {
+            let index = response_headers_vec.len();
+            let value = String::from_utf8_lossy(header.value).into_owned();
+
+            if header.name.eq_ignore_ascii_case("connection")
+                && header_value_contains_token(&value, "close")
+            {
                 self.should_close = true;
+            } else if header.name.eq_ignore_ascii_case("transfer-encoding") {
+                transfer_encoding_present = true;
+                is_chunked = transfer_encoding_final_is_chunked(&value);
+            } else if header.name.eq_ignore_ascii_case("content-length")
+                && content_length_index.is_none()
+            {
+                content_length_index = Some(index);
             }
+
+            response_headers_vec.push((header.name.to_string(), value));
         }
+
+        let content_length = if transfer_encoding_present {
+            None
+        } else if let Some(index) = content_length_index {
+            Some(parse_content_length(&response_headers_vec[index].1)?)
+        } else {
+            None
+        };
+        let response_headers = Headers::from(response_headers_vec);
 
         let has_body = !matches!(status, 100..=199 | 204 | 304) && *request_method != Method::HEAD;
-        let response = Response::new(status, response_headers.clone(), Bytes::new(), version);
         let initial = BytesMut::from(&buffer[headers_len..]);
 
-        if !has_body {
-            return Ok((response, H1BodyMode::Empty));
-        }
-
-        let transfer_encoding = find_header_value(&response_headers, "transfer-encoding");
-        let content_length_str = find_header_value(&response_headers, "content-length");
-        let is_chunked = transfer_encoding
-            .map(|v| {
-                v.split(',')
-                    .next_back()
-                    .map(|s| s.trim().eq_ignore_ascii_case("chunked"))
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-
-        let mode = if is_chunked {
-            H1BodyMode::Chunked { buffer: initial }
-        } else if transfer_encoding.is_some() {
-            self.should_close = true;
-            H1BodyMode::CloseDelimited { buffer: initial }
-        } else if let Some(cl_str) = content_length_str {
-            H1BodyMode::Fixed {
-                remaining: parse_content_length(cl_str)?,
-                buffer: initial,
-            }
+        let mode = if !has_body {
+            H1BodyMode::Empty
         } else {
-            self.should_close = true;
-            H1BodyMode::CloseDelimited { buffer: initial }
+            if is_chunked {
+                H1BodyMode::Chunked { buffer: initial }
+            } else if transfer_encoding_present {
+                self.should_close = true;
+                H1BodyMode::CloseDelimited { buffer: initial }
+            } else if let Some(remaining) = content_length {
+                H1BodyMode::Fixed {
+                    remaining,
+                    buffer: initial,
+                }
+            } else {
+                self.should_close = true;
+                H1BodyMode::CloseDelimited { buffer: initial }
+            }
         };
 
+        let response = Response::new(status, response_headers, Bytes::new(), version);
         Ok((response, mode))
     }
 
@@ -1379,6 +1468,100 @@ impl H1Connection {
     }
 }
 
+async fn write_sized_request_stream_with_head_http(
+    tcp_stream: &mut tokio::net::TcpStream,
+    mut request_bytes: Vec<u8>,
+    mut stream: RequestBodyStream,
+    expected_len: u64,
+) -> Result<()> {
+    let mut sent = 0u64;
+
+    loop {
+        let first_poll = {
+            let waker = std::task::Waker::noop();
+            let mut cx = Context::from_waker(waker);
+            stream.as_mut().poll_next(&mut cx)
+        };
+
+        match first_poll {
+            Poll::Ready(Some(chunk)) => {
+                let chunk = chunk?;
+                if chunk.is_empty() {
+                    continue;
+                }
+                let next_sent = sent + chunk.len() as u64;
+                if next_sent > expected_len {
+                    return Err(Error::HttpProtocol(format!(
+                        "sized streaming request body length mismatch: sent more than Content-Length {}",
+                        expected_len
+                    )));
+                }
+                request_bytes.extend_from_slice(&chunk);
+                tcp_try_write_all(tcp_stream, &request_bytes, "head/body").await?;
+                sent = next_sent;
+                break;
+            }
+            Poll::Ready(None) | Poll::Pending => {
+                tcp_try_write_all(tcp_stream, &request_bytes, "request").await?;
+                break;
+            }
+        }
+    }
+
+    while let Some(chunk) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+        let chunk = chunk?;
+        if chunk.is_empty() {
+            continue;
+        }
+        let next_sent = sent + chunk.len() as u64;
+        if next_sent > expected_len {
+            return Err(Error::HttpProtocol(format!(
+                "sized streaming request body length mismatch: sent more than Content-Length {}",
+                expected_len
+            )));
+        }
+        tcp_try_write_all(tcp_stream, &chunk, "body").await?;
+        sent = next_sent;
+    }
+
+    if sent != expected_len {
+        return Err(Error::HttpProtocol(format!(
+            "sized streaming request body length mismatch: sent {} bytes, Content-Length is {}",
+            sent, expected_len
+        )));
+    }
+
+    Ok(())
+}
+
+async fn tcp_try_write_all(
+    tcp_stream: &mut tokio::net::TcpStream,
+    bytes: &[u8],
+    label: &str,
+) -> Result<()> {
+    match tcp_stream.try_write(bytes) {
+        Ok(n) if n == bytes.len() => Ok(()),
+        Ok(n) => tcp_stream.write_all(&bytes[n..]).await.map_err(|e| {
+            Error::HttpProtocol(format!(
+                "Failed to write sized streaming request {}: {}",
+                label, e
+            ))
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            tcp_stream.write_all(bytes).await.map_err(|e| {
+                Error::HttpProtocol(format!(
+                    "Failed to write sized streaming request {}: {}",
+                    label, e
+                ))
+            })
+        }
+        Err(e) => Err(Error::HttpProtocol(format!(
+            "Failed to write sized streaming request {}: {}",
+            label, e
+        ))),
+    }
+}
+
 /// Find the end of HTTP headers (\r\n\r\n).
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     for i in 0..buffer.len().saturating_sub(3) {
@@ -1392,6 +1575,28 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
 /// Find a header value by name (case-insensitive).
 fn find_header_value<'a>(headers: &'a Headers, name: &str) -> Option<&'a str> {
     headers.get(name)
+}
+
+fn http_1_version_string(version: Option<u8>) -> String {
+    match version.unwrap_or(1) {
+        0 => "HTTP/1.0".to_string(),
+        1 => "HTTP/1.1".to_string(),
+        version => format!("HTTP/1.{}", version),
+    }
+}
+
+fn header_value_contains_token(value: &str, token: &str) -> bool {
+    value
+        .split(',')
+        .any(|part| part.trim().eq_ignore_ascii_case(token))
+}
+
+fn transfer_encoding_final_is_chunked(value: &str) -> bool {
+    value
+        .split(',')
+        .next_back()
+        .map(|part| part.trim().eq_ignore_ascii_case("chunked"))
+        .unwrap_or(false)
 }
 
 /// Parse a chunk size from the buffer, returning (size, end_of_line_position).

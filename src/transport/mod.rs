@@ -2,7 +2,7 @@
 //!
 //! - HTTP/1.1 via httparse + tokio-boring (minimal, no hyper)
 //! - HTTP/2 via custom implementation (full fingerprint control)
-//! - HTTP/3 via quiche
+//! - HTTP/3 via Specter's native QUIC/H3 path
 
 pub mod connector;
 pub mod dns;

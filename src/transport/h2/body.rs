@@ -1,9 +1,9 @@
 //! Poll-based HTTP/2 response body delivery.
 
 use atomic_waker::AtomicWaker;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http_body::{Body as HttpBody, Frame, SizeHint};
-use parking_lot::Mutex;
+use std::cell::UnsafeCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -11,9 +11,14 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::Notify;
-use tokio::time::{sleep, Sleep};
+use tokio::time::{sleep, Instant, Sleep};
 
-use crate::error::Error;
+use crate::error::{Error, Result};
+use crate::transport::connector::MaybeHttpsStream;
+use crate::transport::h2::connection::{
+    H2Connection as RawH2Connection, H2DirectPolledFrame, H2StreamData,
+};
+use crate::transport::h2::frame::FrameHeader;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct H2BodyTimeouts {
@@ -39,62 +44,13 @@ pub(crate) enum H2BodyDataPush {
 /// is a safety bound on the number of distinct chunks queued between the
 /// driver and the consumer, which removes the per-chunk lock-step round-trip
 /// the original single-slot design imposed.
-const H2_BODY_SLOT_CAPACITY: usize = 3;
+const H2_BODY_SLOT_CAPACITY: usize = 5;
+const H2_BODY_CHUNK_COALESCE_LIMIT: usize = 16 * 1024;
+const H2_DIRECT_DEFER_FLOW_BYTES: usize = 1024 * 1024;
 const MIN_RELEASE_NOTIFY_BYTES: usize = 8 * 1024;
 const MAX_RELEASE_NOTIFY_BYTES: usize = 512 * 1024;
 
-struct H2BodyState {
-    slots: [Option<std::result::Result<Bytes, Error>>; H2_BODY_SLOT_CAPACITY],
-    head: usize,
-    len: usize,
-    terminal_error: Option<Error>,
-    ended: bool,
-    closed: bool,
-}
-
-impl Default for H2BodyState {
-    fn default() -> Self {
-        Self {
-            slots: std::array::from_fn(|_| None),
-            head: 0,
-            len: 0,
-            terminal_error: None,
-            ended: false,
-            closed: false,
-        }
-    }
-}
-
-impl H2BodyState {
-    #[inline]
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    #[inline]
-    fn is_full(&self) -> bool {
-        self.len == H2_BODY_SLOT_CAPACITY
-    }
-
-    #[inline]
-    fn push_back(&mut self, item: std::result::Result<Bytes, Error>) {
-        debug_assert!(!self.is_full());
-        let tail = (self.head + self.len) % H2_BODY_SLOT_CAPACITY;
-        self.slots[tail] = Some(item);
-        self.len += 1;
-    }
-
-    #[inline]
-    fn pop_front(&mut self) -> Option<std::result::Result<Bytes, Error>> {
-        if self.is_empty() {
-            return None;
-        }
-        let item = self.slots[self.head].take();
-        self.head = (self.head + 1) % H2_BODY_SLOT_CAPACITY;
-        self.len -= 1;
-        item
-    }
-}
+type H2BodyItem = std::result::Result<Bytes, Error>;
 
 /// Shared DATA slots between the H2 driver and the public `Body` poller.
 ///
@@ -102,7 +58,10 @@ impl H2BodyState {
 /// a consumer `Waker` and a `Notify` to wake the driver when the
 /// consumer drains a chunk and the slot becomes refillable.
 pub struct H2BodyShared {
-    state: Mutex<H2BodyState>,
+    slots: [UnsafeCell<Option<H2BodyItem>>; H2_BODY_SLOT_CAPACITY],
+    head: AtomicUsize,
+    tail: AtomicUsize,
+    ended: AtomicBool,
     consumer_waker: AtomicWaker,
     closed: AtomicBool,
     released_recv_bytes: AtomicUsize,
@@ -110,12 +69,20 @@ pub struct H2BodyShared {
     driver_notify: Arc<Notify>,
 }
 
+// H2BodyShared is an SPSC queue: the H2 driver is the only producer and the
+// public Body poller is the only consumer. Slot access is coordinated by the
+// atomic head/tail indexes below.
+unsafe impl Sync for H2BodyShared {}
+
 impl H2BodyShared {
     pub(crate) fn new(driver_notify: Arc<Notify>, initial_window_size: u32) -> Arc<Self> {
         let release_notify_bytes = ((initial_window_size as usize) / 4)
             .clamp(MIN_RELEASE_NOTIFY_BYTES, MAX_RELEASE_NOTIFY_BYTES);
         Arc::new(Self {
-            state: Mutex::new(H2BodyState::default()),
+            slots: std::array::from_fn(|_| UnsafeCell::new(None)),
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            ended: AtomicBool::new(false),
             consumer_waker: AtomicWaker::new(),
             closed: AtomicBool::new(false),
             released_recv_bytes: AtomicUsize::new(0),
@@ -128,48 +95,122 @@ impl H2BodyShared {
         self.push_result(item, false)
     }
 
-    pub(crate) fn push_data(&self, data: Bytes, end_stream: bool) -> H2BodyDataPush {
-        let (wake_consumer, queued_len) = {
-            let mut state = self.state.lock();
-            if state.closed {
-                return H2BodyDataPush::Closed;
-            }
-            if state.is_full() {
-                return H2BodyDataPush::Full(data);
-            }
-            let wake_consumer = state.is_empty() || end_stream;
-            state.push_back(Ok(data));
-            if end_stream {
-                state.ended = true;
-            }
-            (wake_consumer, state.len)
-        };
-        if wake_consumer {
-            self.consumer_waker.wake();
-        }
-        H2BodyDataPush::Accepted { queued_len }
+    #[inline(always)]
+    fn queued_len_from(&self, head: usize, tail: usize) -> usize {
+        tail.saturating_sub(head)
     }
 
-    fn push_result(&self, item: std::result::Result<Bytes, Error>, end_stream: bool) -> H2BodyPush {
-        let wake_consumer = {
-            let mut state = self.state.lock();
-            if state.closed {
-                return H2BodyPush::Closed;
-            }
-            if state.is_full() {
-                return H2BodyPush::Full(item);
-            }
-            let wake_consumer = state.is_empty() || end_stream;
-            state.push_back(item);
-            if end_stream {
-                state.ended = true;
-            }
-            wake_consumer
-        };
+    #[inline(always)]
+    fn try_push_item(&self, item: H2BodyItem, end_stream: bool) -> H2BodyPush {
+        if self.closed.load(Ordering::Acquire) {
+            return H2BodyPush::Closed;
+        }
+
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
+        let queued_len = self.queued_len_from(head, tail);
+        if queued_len >= H2_BODY_SLOT_CAPACITY {
+            return H2BodyPush::Full(item);
+        }
+
+        let wake_consumer = queued_len == 0 || end_stream;
+        let slot = tail % H2_BODY_SLOT_CAPACITY;
+        // SAFETY: the producer is single-threaded, and queued_len < capacity
+        // means the consumer has released this slot before advancing head.
+        unsafe {
+            *self.slots[slot].get() = Some(item);
+        }
+        self.tail.store(tail + 1, Ordering::Release);
+        if end_stream {
+            self.ended.store(true, Ordering::Release);
+        }
         if wake_consumer {
             self.consumer_waker.wake();
         }
         H2BodyPush::Accepted
+    }
+
+    #[inline(always)]
+    fn pop_item(&self) -> Option<(H2BodyItem, bool)> {
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
+        let queued_len = self.queued_len_from(head, tail);
+        if queued_len == 0 {
+            return None;
+        }
+
+        let slot = head % H2_BODY_SLOT_CAPACITY;
+        // SAFETY: the consumer is single-threaded, and tail > head means the
+        // producer initialized this slot before publishing tail.
+        let item = unsafe { (*self.slots[slot].get()).take() };
+        self.head.store(head + 1, Ordering::Release);
+        item.map(|item| (item, queued_len >= H2_BODY_SLOT_CAPACITY))
+    }
+
+    #[inline(always)]
+    fn front_data_len(&self) -> Option<usize> {
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
+        if self.queued_len_from(head, tail) == 0 {
+            return None;
+        }
+
+        let slot = head % H2_BODY_SLOT_CAPACITY;
+        // SAFETY: the consumer is the only reader of the front slot, and
+        // tail > head means the producer has fully initialized it.
+        unsafe {
+            (*self.slots[slot].get())
+                .as_ref()
+                .and_then(|item| item.as_ref().ok().map(Bytes::len))
+        }
+    }
+
+    #[inline(always)]
+    fn has_data(&self) -> bool {
+        let head = self.head.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Acquire);
+        self.queued_len_from(head, tail) > 0
+    }
+
+    #[inline(always)]
+    fn has_data_or_end(&self) -> bool {
+        self.has_data() || self.ended.load(Ordering::Acquire)
+    }
+
+    #[inline(always)]
+    pub(crate) fn push_data(&self, data: Bytes, end_stream: bool) -> H2BodyDataPush {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
+        let queued_len = self.queued_len_from(head, tail);
+        if self.closed.load(Ordering::Acquire) {
+            return H2BodyDataPush::Closed;
+        }
+        if queued_len >= H2_BODY_SLOT_CAPACITY {
+            return H2BodyDataPush::Full(data);
+        }
+
+        let wake_consumer = queued_len == 0 || end_stream;
+        let slot = tail % H2_BODY_SLOT_CAPACITY;
+        // SAFETY: the producer is single-threaded, and queued_len < capacity
+        // means this slot is not currently visible to the consumer.
+        unsafe {
+            *self.slots[slot].get() = Some(Ok(data));
+        }
+        self.tail.store(tail + 1, Ordering::Release);
+        if end_stream {
+            self.ended.store(true, Ordering::Release);
+        }
+        if wake_consumer {
+            self.consumer_waker.wake();
+        }
+        H2BodyDataPush::Accepted {
+            queued_len: queued_len + 1,
+        }
+    }
+
+    #[inline]
+    fn push_result(&self, item: std::result::Result<Bytes, Error>, end_stream: bool) -> H2BodyPush {
+        self.try_push_item(item, end_stream)
     }
 
     fn push_error(&self, error: Error) -> H2BodyPush {
@@ -177,14 +218,8 @@ impl H2BodyShared {
     }
 
     pub(crate) fn finish(&self) {
-        let wake_consumer = {
-            let mut state = self.state.lock();
-            state.ended = true;
-            state.is_empty()
-        };
-        if wake_consumer {
-            self.consumer_waker.wake();
-        }
+        self.ended.store(true, Ordering::Release);
+        self.consumer_waker.wake();
     }
 
     pub(crate) fn fail(&self, error: Error) -> H2BodyPush {
@@ -196,8 +231,10 @@ impl H2BodyShared {
     }
 
     pub(crate) fn is_slot_available(&self) -> bool {
-        let state = self.state.lock();
-        !state.closed && !state.is_full()
+        let head = self.head.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Acquire);
+        !self.closed.load(Ordering::Acquire)
+            && self.queued_len_from(head, tail) < H2_BODY_SLOT_CAPACITY
     }
 
     pub(crate) fn take_released_recv_bytes(&self) -> usize {
@@ -205,20 +242,10 @@ impl H2BodyShared {
     }
 
     fn close(&self) {
-        let wake_consumer = {
-            let mut state = self.state.lock();
-            if !state.closed {
-                state.closed = true;
-                self.closed.store(true, Ordering::Release);
-                true
-            } else {
-                false
-            }
-        };
-        if wake_consumer {
+        if !self.closed.swap(true, Ordering::AcqRel) {
             self.consumer_waker.wake();
+            self.driver_notify.notify_one();
         }
-        self.driver_notify.notify_one();
     }
 }
 
@@ -262,9 +289,9 @@ impl H2Body {
         self.total_sleep.is_some() || self.read_idle_timeout.is_some()
     }
 
-    #[inline]
+    #[inline(always)]
     fn release_recv_bytes(&mut self, released: usize, notify_slot_available: bool) {
-        self.pending_release_bytes = self.pending_release_bytes.saturating_add(released);
+        self.pending_release_bytes += released;
         if notify_slot_available || self.pending_release_bytes >= self.shared.release_notify_bytes {
             let released = std::mem::take(&mut self.pending_release_bytes);
             if released > 0 {
@@ -276,13 +303,188 @@ impl H2Body {
         }
     }
 
-    fn close_with_error(
-        &mut self,
-        error: Error,
-    ) -> Poll<Option<std::result::Result<Frame<Bytes>, Error>>> {
-        self.terminal = true;
-        self.shared.close();
-        Poll::Ready(Some(Err(error)))
+    #[inline(always)]
+    pub(crate) fn poll_data(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Bytes, Error>>> {
+        if self.terminal {
+            return Poll::Ready(None);
+        }
+
+        loop {
+            if let Some((item, was_full)) = self.shared.pop_item() {
+                let notify_slot_available = was_full && !self.shared.ended.load(Ordering::Acquire);
+                match item {
+                    Ok(bytes) => {
+                        let released = bytes.len();
+                        self.release_recv_bytes(released, notify_slot_available);
+                        self.reset_read_idle();
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        return Poll::Ready(Some(Ok(bytes)));
+                    }
+                    Err(error) => {
+                        self.terminal = true;
+                        self.shared.close();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+            }
+
+            if self.shared.ended.load(Ordering::Acquire) {
+                if self.shared.has_data() {
+                    continue;
+                }
+                self.terminal = true;
+                self.shared.closed.store(true, Ordering::Release);
+                return Poll::Ready(None);
+            }
+
+            self.shared.consumer_waker.register(cx.waker());
+            if self.shared.has_data_or_end() {
+                continue;
+            }
+            break;
+        }
+
+        if self.timeouts_enabled() {
+            if let Some(total_sleep) = self.total_sleep.as_mut() {
+                if total_sleep.as_mut().poll(cx).is_ready() {
+                    self.terminal = true;
+                    self.shared.close();
+                    let duration = self.total_timeout.expect("total sleep without duration");
+                    return Poll::Ready(Some(Err(Error::TotalTimeout(duration))));
+                }
+            }
+
+            if let Some(read_idle_sleep) = self.read_idle_sleep.as_mut() {
+                if read_idle_sleep.as_mut().poll(cx).is_ready() {
+                    self.terminal = true;
+                    self.shared.close();
+                    let duration = self
+                        .read_idle_timeout
+                        .expect("read-idle sleep without duration");
+                    return Poll::Ready(Some(Err(Error::ReadIdleTimeout(duration))));
+                }
+            }
+        }
+
+        Poll::Pending
+    }
+
+    #[inline(always)]
+    pub(crate) fn poll_data_coalesced(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Bytes, Error>>> {
+        if self.terminal {
+            return Poll::Ready(None);
+        }
+
+        loop {
+            if let Some((item, was_full)) = self.shared.pop_item() {
+                match item {
+                    Ok(first) => {
+                        let mut released = first.len();
+                        let mut total_len = first.len();
+                        let mut extra: Option<Vec<Bytes>> = None;
+                        let mut notify_slot_available =
+                            was_full && !self.shared.ended.load(Ordering::Acquire);
+
+                        if first.len() < H2_BODY_CHUNK_COALESCE_LIMIT {
+                            while let Some(front_len) = self.shared.front_data_len() {
+                                if front_len > 0
+                                    && total_len + front_len > H2_BODY_CHUNK_COALESCE_LIMIT
+                                {
+                                    break;
+                                }
+                                let Some((next_item, next_was_full)) = self.shared.pop_item()
+                                else {
+                                    break;
+                                };
+                                let Ok(bytes) = next_item else {
+                                    break;
+                                };
+                                notify_slot_available |=
+                                    next_was_full && !self.shared.ended.load(Ordering::Acquire);
+                                released += bytes.len();
+                                if bytes.is_empty() {
+                                    continue;
+                                }
+                                total_len += bytes.len();
+                                extra
+                                    .get_or_insert_with(|| {
+                                        Vec::with_capacity(H2_BODY_SLOT_CAPACITY)
+                                    })
+                                    .push(bytes);
+                            }
+                        }
+
+                        self.release_recv_bytes(released, notify_slot_available);
+                        self.reset_read_idle();
+
+                        match extra {
+                            Some(extra) => {
+                                let mut combined = BytesMut::with_capacity(total_len);
+                                combined.extend_from_slice(&first);
+                                for chunk in extra {
+                                    combined.extend_from_slice(&chunk);
+                                }
+                                return Poll::Ready(Some(Ok(combined.freeze())));
+                            }
+                            None if first.is_empty() => continue,
+                            None => return Poll::Ready(Some(Ok(first))),
+                        }
+                    }
+                    Err(error) => {
+                        self.terminal = true;
+                        self.shared.close();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+            }
+
+            if self.shared.ended.load(Ordering::Acquire) {
+                if self.shared.has_data() {
+                    continue;
+                }
+                self.terminal = true;
+                self.shared.closed.store(true, Ordering::Release);
+                return Poll::Ready(None);
+            }
+
+            self.shared.consumer_waker.register(cx.waker());
+            if self.shared.has_data_or_end() {
+                continue;
+            }
+            break;
+        }
+
+        if self.timeouts_enabled() {
+            if let Some(total_sleep) = self.total_sleep.as_mut() {
+                if total_sleep.as_mut().poll(cx).is_ready() {
+                    self.terminal = true;
+                    self.shared.close();
+                    let duration = self.total_timeout.expect("total sleep without duration");
+                    return Poll::Ready(Some(Err(Error::TotalTimeout(duration))));
+                }
+            }
+
+            if let Some(read_idle_sleep) = self.read_idle_sleep.as_mut() {
+                if read_idle_sleep.as_mut().poll(cx).is_ready() {
+                    self.terminal = true;
+                    self.shared.close();
+                    let duration = self
+                        .read_idle_timeout
+                        .expect("read-idle sleep without duration");
+                    return Poll::Ready(Some(Err(Error::ReadIdleTimeout(duration))));
+                }
+            }
+        }
+
+        Poll::Pending
     }
 }
 
@@ -299,98 +501,428 @@ impl HttpBody for H2Body {
     type Error = Error;
 
     fn poll_frame(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
-        if self.terminal {
+        match self.poll_data(cx) {
+            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.terminal
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::default()
+    }
+}
+
+pub(crate) type H2DirectReuseHook = Box<dyn FnOnce(RawH2Connection<MaybeHttpsStream>) + Send>;
+
+type H2DirectReadFuture =
+    Pin<Box<dyn Future<Output = (RawH2Connection<MaybeHttpsStream>, Result<H2StreamData>)> + Send>>;
+
+/// HTTP/2 response body that owns the raw connection until EOF.
+///
+/// This path is used only for ordinary single-stream, empty-request-body
+/// downloads when no multiplexed driver connection is already active. It lets
+/// the caller task poll DATA frames directly, avoiding the background
+/// driver-to-body queue handoff on the H2 download hot path.
+pub(crate) struct H2DirectBody {
+    conn: Option<RawH2Connection<MaybeHttpsStream>>,
+    read_future: Option<H2DirectReadFuture>,
+    stream_id: u32,
+    conn_recv_window: i32,
+    recv_window: i32,
+    deferred_recv_bytes: usize,
+    terminal: bool,
+    end_after_current_chunk: bool,
+    on_reusable: Option<H2DirectReuseHook>,
+    read_idle_timeout: Option<Duration>,
+    read_idle_sleep: Option<Pin<Box<Sleep>>>,
+    total_timeout: Option<Duration>,
+    total_sleep: Option<Pin<Box<Sleep>>>,
+}
+
+impl H2DirectBody {
+    pub(crate) fn new(
+        conn: RawH2Connection<MaybeHttpsStream>,
+        stream_id: u32,
+        timeouts: H2BodyTimeouts,
+        on_reusable: H2DirectReuseHook,
+    ) -> Self {
+        let conn_recv_window = conn.connection_recv_window();
+        let recv_window = conn.local_initial_window_size() as i32;
+        Self {
+            conn: Some(conn),
+            read_future: None,
+            stream_id,
+            conn_recv_window,
+            recv_window,
+            deferred_recv_bytes: 0,
+            terminal: false,
+            end_after_current_chunk: false,
+            on_reusable: Some(on_reusable),
+            read_idle_timeout: timeouts.read_idle,
+            read_idle_sleep: None,
+            total_timeout: timeouts.total,
+            total_sleep: timeouts.total.map(|duration| Box::pin(sleep(duration))),
+        }
+    }
+
+    pub(crate) fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
+    fn reset_read_idle(&mut self) {
+        self.read_idle_sleep = None;
+    }
+
+    #[inline]
+    fn timeouts_enabled(&self) -> bool {
+        self.total_sleep.is_some() || self.read_idle_timeout.is_some()
+    }
+
+    fn poll_timeouts(&mut self, cx: &mut Context<'_>) -> Option<Error> {
+        if let Some(total) = self.total_sleep.as_mut() {
+            if total.as_mut().poll(cx).is_ready() {
+                return Some(Error::TotalTimeout(self.total_timeout.unwrap_or_else(
+                    || total.deadline().saturating_duration_since(Instant::now()),
+                )));
+            }
+        }
+
+        if let Some(read_idle) = self.read_idle_timeout {
+            let sleep = self
+                .read_idle_sleep
+                .get_or_insert_with(|| Box::pin(tokio::time::sleep(read_idle)));
+            if sleep.as_mut().poll(cx).is_ready() {
+                return Some(Error::ReadIdleTimeout(read_idle));
+            }
+        }
+
+        None
+    }
+
+    fn release_to_pool(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            let mut conn = conn;
+            if self.deferred_recv_bytes > 0 {
+                let deferred = self.deferred_recv_bytes as i32;
+                self.conn_recv_window = self.conn_recv_window.saturating_sub(deferred);
+                self.recv_window = self.recv_window.saturating_sub(deferred);
+                self.deferred_recv_bytes = 0;
+            }
+            conn.remove_stream(self.stream_id);
+            conn.set_connection_recv_window(self.conn_recv_window);
+            conn.set_stream_recv_window(self.stream_id, self.recv_window);
+            if conn.is_reusable()
+                && self.conn_recv_window >= conn.flow_control_refresh_threshold()
+                && self.recv_window >= conn.flow_control_refresh_threshold()
+            {
+                if let Some(on_reusable) = self.on_reusable.take() {
+                    on_reusable(conn);
+                }
+            }
+        }
+        self.read_future = None;
+        self.on_reusable = None;
+        self.terminal = true;
+    }
+
+    fn return_to_pool(&mut self) -> Poll<Option<std::result::Result<Bytes, Error>>> {
+        self.release_to_pool();
+        Poll::Ready(None)
+    }
+
+    fn fail(&mut self, error: Error) -> Poll<Option<std::result::Result<Bytes, Error>>> {
+        self.conn = None;
+        self.read_future = None;
+        self.on_reusable = None;
+        self.terminal = true;
+        Poll::Ready(Some(Err(error)))
+    }
+
+    #[inline(always)]
+    fn poll_data_without_timeouts(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Bytes, Error>>> {
+        loop {
+            let polled_frame = {
+                let Some(conn) = self.conn.as_mut() else {
+                    return self.fail(Error::HttpProtocol(
+                        "H2 direct response body connection is no longer available".into(),
+                    ));
+                };
+
+                match conn.poll_read_direct_frame(cx, self.stream_id) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(frame)) => frame,
+                    Poll::Ready(Err(error)) => return self.fail(error),
+                }
+            };
+
+            if let H2DirectPolledFrame::Data { bytes, end_stream } = polled_frame {
+                let data_len = bytes.len();
+                if end_stream {
+                    self.deferred_recv_bytes += data_len;
+                    if data_len == 0 {
+                        return self.return_to_pool();
+                    }
+                    self.end_after_current_chunk = true;
+                    return Poll::Ready(Some(Ok(bytes)));
+                }
+
+                let deferred_recv_bytes = self.deferred_recv_bytes + data_len;
+                if deferred_recv_bytes <= H2_DIRECT_DEFER_FLOW_BYTES {
+                    self.deferred_recv_bytes = deferred_recv_bytes;
+                    if data_len == 0 {
+                        continue;
+                    }
+                    return Poll::Ready(Some(Ok(bytes)));
+                }
+
+                return self.poll_deferred_flow_update(cx, bytes, false);
+            }
+
+            return self.poll_direct_fallback(cx, polled_frame);
+        }
+    }
+
+    #[cold]
+    fn poll_deferred_flow_update(
+        &mut self,
+        cx: &mut Context<'_>,
+        bytes: Bytes,
+        end_stream: bool,
+    ) -> Poll<Option<std::result::Result<Bytes, Error>>> {
+        let data_len = bytes.len();
+        let Some(conn) = self.conn.as_mut() else {
+            return self.fail(Error::HttpProtocol(
+                "H2 direct response body connection is no longer available".into(),
+            ));
+        };
+
+        if self.deferred_recv_bytes > 0 {
+            let deferred = self.deferred_recv_bytes as i32;
+            self.conn_recv_window = self.conn_recv_window.saturating_sub(deferred);
+            self.recv_window = self.recv_window.saturating_sub(deferred);
+            self.deferred_recv_bytes = 0;
+        }
+        self.conn_recv_window -= data_len as i32;
+        let conn_increment = if self.conn_recv_window < conn.flow_control_refresh_threshold() {
+            let increment = conn.flow_control_refresh_increment();
+            self.conn_recv_window = self.conn_recv_window.saturating_add(increment as i32);
+            Some(increment)
+        } else {
+            None
+        };
+        if data_len > 0 {
+            self.recv_window -= data_len as i32;
+        }
+        let stream_increment = if self.recv_window < conn.flow_control_refresh_threshold() {
+            let increment = conn.flow_control_refresh_increment();
+            self.recv_window = self.recv_window.saturating_add(increment as i32);
+            Some(increment)
+        } else {
+            None
+        };
+
+        if conn_increment.is_none() && stream_increment.is_none() {
+            if self.read_idle_timeout.is_some() {
+                self.reset_read_idle();
+            }
+            if data_len == 0 {
+                if end_stream {
+                    return self.return_to_pool();
+                }
+                return self.poll_data_slow(cx);
+            }
+            return Poll::Ready(Some(Ok(bytes)));
+        }
+
+        let Some(mut conn) = self.conn.take() else {
+            return self.fail(Error::HttpProtocol(
+                "H2 direct response body connection is no longer available".into(),
+            ));
+        };
+        let stream_id = self.stream_id;
+        self.read_future = Some(Box::pin(async move {
+            let result = async {
+                conn.send_inbound_window_updates(stream_id, conn_increment, stream_increment)
+                    .await?;
+                Ok(H2StreamData::Data { bytes, end_stream })
+            }
+            .await;
+            (conn, result)
+        }));
+        self.poll_data_slow(cx)
+    }
+
+    #[cold]
+    fn poll_direct_fallback(
+        &mut self,
+        cx: &mut Context<'_>,
+        polled_frame: H2DirectPolledFrame,
+    ) -> Poll<Option<std::result::Result<Bytes, Error>>> {
+        let Some(mut conn) = self.conn.take() else {
+            return self.fail(Error::HttpProtocol(
+                "H2 direct response body connection is no longer available".into(),
+            ));
+        };
+        let stream_id = self.stream_id;
+        conn.set_connection_recv_window(self.conn_recv_window);
+        conn.set_stream_recv_window(stream_id, self.recv_window);
+        let first_frame: Option<(FrameHeader, Bytes)> = match polled_frame {
+            H2DirectPolledFrame::Other(header, payload) => Some((header, payload)),
+            H2DirectPolledFrame::Data { .. } => unreachable!(),
+        };
+        self.read_future = Some(Box::pin(async move {
+            let result = conn
+                .read_stream_data_direct_from(stream_id, first_frame)
+                .await;
+            (conn, result)
+        }));
+        self.poll_data_slow(cx)
+    }
+
+    #[cold]
+    fn poll_data_slow(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Bytes, Error>>> {
+        if self.timeouts_enabled() {
+            if let Some(error) = self.poll_timeouts(cx) {
+                return self.fail(error);
+            }
+        }
+
+        loop {
+            if let Some(future) = self.read_future.as_mut() {
+                match future.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready((conn, Ok(H2StreamData::Data { bytes, end_stream }))) => {
+                        self.conn = Some(conn);
+                        self.read_future = None;
+                        if self.read_idle_timeout.is_some() {
+                            self.reset_read_idle();
+                        }
+                        if bytes.is_empty() {
+                            if end_stream {
+                                return self.return_to_pool();
+                            }
+                            continue;
+                        }
+                        if end_stream {
+                            self.end_after_current_chunk = true;
+                        }
+                        return Poll::Ready(Some(Ok(bytes)));
+                    }
+                    Poll::Ready((conn, Ok(H2StreamData::End))) => {
+                        self.conn = Some(conn);
+                        self.read_future = None;
+                        return self.return_to_pool();
+                    }
+                    Poll::Ready((_conn, Err(error))) => {
+                        self.read_future = None;
+                        return self.fail(error);
+                    }
+                }
+            }
+
+            let polled_frame = {
+                let Some(conn) = self.conn.as_mut() else {
+                    return self.fail(Error::HttpProtocol(
+                        "H2 direct response body connection is no longer available".into(),
+                    ));
+                };
+
+                match conn.poll_read_direct_frame(cx, self.stream_id) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(frame)) => frame,
+                    Poll::Ready(Err(error)) => return self.fail(error),
+                }
+            };
+
+            if let H2DirectPolledFrame::Data { bytes, end_stream } = polled_frame {
+                let data_len = bytes.len();
+                if end_stream {
+                    self.deferred_recv_bytes += data_len;
+                    if bytes.is_empty() {
+                        return self.return_to_pool();
+                    }
+                    self.end_after_current_chunk = true;
+                    return Poll::Ready(Some(Ok(bytes)));
+                }
+
+                let deferred_recv_bytes = self.deferred_recv_bytes + data_len;
+                if deferred_recv_bytes <= H2_DIRECT_DEFER_FLOW_BYTES {
+                    self.deferred_recv_bytes = deferred_recv_bytes;
+                    if self.read_idle_timeout.is_some() {
+                        self.reset_read_idle();
+                    }
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    return Poll::Ready(Some(Ok(bytes)));
+                }
+
+                return self.poll_deferred_flow_update(cx, bytes, end_stream);
+            }
+
+            return self.poll_direct_fallback(cx, polled_frame);
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn poll_data(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Bytes, Error>>> {
+        let this = &mut *self;
+        if this.terminal {
             return Poll::Ready(None);
         }
 
-        enum StatePoll {
-            Item {
-                item: std::result::Result<Bytes, Error>,
-                notify_slot_available: bool,
-            },
-            Error(Error),
-            End,
-            Pending,
+        if this.end_after_current_chunk {
+            return this.return_to_pool();
         }
 
-        let poll_state = |shared: &H2BodyShared| {
-            let mut state = shared.state.lock();
-            let was_full = state.is_full();
-            if let Some(item) = state.pop_front() {
-                StatePoll::Item {
-                    item,
-                    notify_slot_available: was_full,
-                }
-            } else if let Some(error) = state.terminal_error.take() {
-                state.closed = true;
-                StatePoll::Error(error)
-            } else if state.ended {
-                state.closed = true;
-                StatePoll::End
-            } else {
-                StatePoll::Pending
-            }
-        };
-
-        let mut state_poll = poll_state(&self.shared);
-        if matches!(state_poll, StatePoll::Pending) {
-            self.shared.consumer_waker.register(cx.waker());
-            state_poll = poll_state(&self.shared);
+        if this.read_future.is_none() && !this.timeouts_enabled() {
+            return this.poll_data_without_timeouts(cx);
         }
 
-        match state_poll {
-            StatePoll::Error(error) => {
-                self.terminal = true;
-                return Poll::Ready(Some(Err(error)));
-            }
-            StatePoll::End => {
-                self.terminal = true;
-                return Poll::Ready(None);
-            }
-            StatePoll::Pending => {}
-            StatePoll::Item {
-                item,
-                notify_slot_available,
-            } => match item {
-                Ok(bytes) => {
-                    let released = bytes.len();
-                    self.release_recv_bytes(released, notify_slot_available);
-                    self.reset_read_idle();
-                    if bytes.is_empty() {
-                        return self.poll_frame(cx);
-                    }
-                    return Poll::Ready(Some(Ok(Frame::data(bytes))));
-                }
-                Err(error) => {
-                    self.terminal = true;
-                    self.shared.close();
-                    return Poll::Ready(Some(Err(error)));
-                }
-            },
+        this.poll_data_slow(cx)
+    }
+}
+
+impl Drop for H2DirectBody {
+    fn drop(&mut self) {
+        if !self.terminal && self.end_after_current_chunk {
+            let _ = self.return_to_pool();
         }
+    }
+}
 
-        if self.timeouts_enabled() {
-            if let Some(total_sleep) = self.total_sleep.as_mut() {
-                if total_sleep.as_mut().poll(cx).is_ready() {
-                    let duration = self.total_timeout.expect("total sleep without duration");
-                    return self.close_with_error(Error::TotalTimeout(duration));
-                }
-            }
+impl HttpBody for H2DirectBody {
+    type Data = Bytes;
+    type Error = Error;
 
-            if let Some(read_idle_sleep) = self.read_idle_sleep.as_mut() {
-                if read_idle_sleep.as_mut().poll(cx).is_ready() {
-                    let duration = self
-                        .read_idle_timeout
-                        .expect("read-idle sleep without duration");
-                    return self.close_with_error(Error::ReadIdleTimeout(duration));
-                }
-            }
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+        match self.poll_data(cx) {
+            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
-
-        Poll::Pending
     }
 
     fn is_end_stream(&self) -> bool {

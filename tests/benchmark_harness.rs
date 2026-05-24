@@ -7,6 +7,7 @@ fn streaming_benchmark_declares_enforceable_h3_gate() {
 
     assert!(source.contains("struct H3Gate"));
     assert!(source.contains("fixture_address: \"127.0.0.1:3203/udp\""));
+    assert!(source.contains("const H3_BENCH_STREAM_SEGMENT_SIZE: usize = 8192;"));
     assert!(source.contains("reqwest_h3_unavailable_specter_regression_gate"));
     assert!(source.contains("--self-test-h3-threshold-failure"));
     assert!(!source.contains("SPECTER_BENCH_FORCE_H3_THRESHOLD_FAIL"));
@@ -56,8 +57,9 @@ fn streaming_benchmark_declares_enforceable_request_body_streaming_gate() {
     assert!(source.contains("--request-body-streaming"));
     assert!(source.contains("--self-test-request-threshold-failure"));
     assert!(source.contains(
-        "request_body_transfer_duration(offsets.first().copied(), response_headers_offset_ns)"
+        "request_body_transfer_duration(offsets.first().copied(), upload_complete_offset_ns)"
     ));
+    assert!(source.contains("upload_complete_fallback_count"));
     assert!(source.contains("client_overhead_unclamped_duration_ns"));
     assert!(source.contains("client_overhead_denominator_floor_count"));
     assert!(source.contains("client_write_overhead_unclamped_duration_ns"));
@@ -69,11 +71,12 @@ fn streaming_benchmark_declares_enforceable_request_body_streaming_gate() {
     assert!(source.contains("BENCH_REQ_BODY_LEN"));
     assert!(source.contains("corrected upload-complete TTFT"));
     assert!(source.contains("used as the request-row threshold denominator"));
+    assert!(source.contains(".h2_direct_streaming_responses(protocol == \"h2\")"));
     assert!(
         source.contains("PacingRequestBodyStream::<specter::Error>::new(\n        stream_anchor")
     );
     assert!(source.contains("PacingRequestBodyStream::<io::Error>::new(\n        stream_anchor"));
-    assert!(source.contains("response status/headers"));
+    assert!(source.contains("response headers only as an emitted fallback count"));
     assert!(!source.contains("producer-bottlenecked"));
     assert!(!source.contains(
         "Throughput numbers (median, Wilcoxon, p95) remain in the JSON as audit-only telemetry"

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-05-24
+
+### Added
+- **Chrome 147-148 fingerprint profiles**: Added Rust fingerprint profiles and header presets for Chrome 147 and 148, including version-specific User-Agent strings, UA-CH GREASE brand order, full-version client hints, and shared TLS/HTTP/2/HTTP/3 mappings.
+- **Chrome 142-148 fingerprint certification docs**: Documented supported profile names, desktop macOS full versions, Chromium UA-CH GREASE derivation, binding support, and validation coverage.
+
+### Fixed
+- **Chrome UA-CH GREASE versions**: Corrected Chrome 142, 143, 145, and 146 `Sec-Ch-Ua` and `Sec-Ch-Ua-Full-Version-List` GREASE versions to match Chromium's current seeded algorithm.
+
 ## [3.1.0] - 2026-05-22
 
 ### Added
@@ -118,8 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.1.2] - 2026-03-30
 
 ### Added
-- **Chrome 143-146 fingerprint profiles**: Added browser fingerprint support for Chrome 143, 144, 145, and 146 (current stable). Each version has correct Sec-Ch-Ua brand strings derived from the Chromium GREASE algorithm, version-specific User-Agent strings, and full header presets (navigation, AJAX, form).
-- **Shared TLS constants**: TLS cipher suites, signature algorithms, curves, and extensions are identical across Chrome 142-146 and now use shared `CHROME_*` constants with backwards-compatible `CHROME_142_*` aliases.
+- **Chrome 143-146 fingerprint profiles**: Added browser fingerprint support for Chrome 143, 144, 145, and 146. Each version has correct Sec-Ch-Ua brand strings derived from the Chromium GREASE algorithm, version-specific User-Agent strings, and full header presets (navigation, AJAX, form).
+- **Shared TLS constants**: TLS cipher suites, signature algorithms, curves, and extensions are identical across the implemented Chrome profile range and now use shared `CHROME_*` constants with backwards-compatible `CHROME_142_*` aliases.
 - **`TlsFingerprint::chrome()` constructor**: Unified constructor for Chrome TLS fingerprints, with version-specific aliases (`chrome_143()` through `chrome_146()`).
 - **Chrome version test suite**: Comprehensive tests validating Sec-Ch-Ua brand strings, UA version strings, TLS/HTTP2 identity, and header preset completeness for all Chrome versions.
 - **Node.js and Python bindings**: `Chrome143`, `Chrome144`, `Chrome145`, `Chrome146` variants added to `FingerprintProfile` enum in both bindings.

@@ -14,7 +14,7 @@ use crate::headers::Headers;
 use crate::request::RequestBody;
 use crate::response::{Body, Response};
 use crate::transport::h3::body::{H3Body, H3BodyShared, H3BodyTimeouts};
-use crate::transport::h3::driver::DriverCommand;
+use crate::transport::h3::command::DriverCommand;
 use crate::transport::h3::H3Tunnel;
 
 /// HTTP/3 connection handle for sending requests
@@ -61,7 +61,7 @@ impl H3Handle {
 
     /// Send an HTTP/3 request and receive the response.
     /// This is non-blocking - it sends the request to the driver and awaits the response channel.
-    /// The driver allocates stream IDs internally via quiche.
+    /// The driver allocates stream IDs internally.
     pub async fn send_request(
         &self,
         method: http::Method,

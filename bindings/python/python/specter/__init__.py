@@ -39,7 +39,7 @@ With headers and body:
 
 With fingerprinting:
     >>> builder = specter.Client.builder()
-    >>> builder.fingerprint(specter.FingerprintProfile.Chrome142)
+    >>> builder.fingerprint(specter.FingerprintProfile.Chrome148)
     >>> client = builder.build()
 
 With custom timeouts:

@@ -2,6 +2,8 @@
 
 Python bindings for the Specter HTTP client with TLS, HTTP/2, HTTP/3, RFC 6455 WebSocket, and RFC 8441 Extended CONNECT support.
 
+Supported Chrome fingerprints are `specter.FingerprintProfile.Chrome142` through `specter.FingerprintProfile.Chrome148`; examples use `Chrome148`, the latest implemented profile.
+
 ## Installation
 
 ```bash
@@ -14,7 +16,7 @@ pip install specters
 import specter
 
 builder = specter.Client.builder()
-builder.fingerprint(specter.FingerprintProfile.Chrome142)
+builder.fingerprint(specter.FingerprintProfile.Chrome148)
 client = builder.build()
 
 response = await client.get("https://example.com/").send()

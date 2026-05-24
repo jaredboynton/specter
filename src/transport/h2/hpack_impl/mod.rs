@@ -14,6 +14,18 @@ mod static_table;
 pub use decoder::Decoder;
 pub use encoder::Encoder;
 
+pub fn huffman_encode_bytes(input: &[u8]) -> Vec<u8> {
+    huffman::huffman_encode(input)
+}
+
+pub fn huffman_encode_if_smaller_bytes(input: &[u8]) -> (Vec<u8>, bool) {
+    huffman::huffman_encode_if_smaller(input)
+}
+
+pub fn huffman_decode_bytes(input: &[u8]) -> Result<Vec<u8>, String> {
+    huffman::huffman_decode(input).map_err(|err| err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

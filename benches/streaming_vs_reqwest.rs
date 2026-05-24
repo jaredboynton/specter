@@ -2,9 +2,14 @@ use boring::ssl::{SslAcceptor, SslAcceptorBuilder, SslFiletype, SslMethod};
 use bytes::Bytes;
 use futures_core::Stream;
 use http_body::{Body as HttpBody, Frame, SizeHint};
-use quiche::h3::NameValue;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use specter::fingerprint::Http3Fingerprint;
+use specter::transport::h3::handshake::{ClientH3Event, NativeQuicServerHandshake};
+use specter::transport::h3::native::{decode_header_block, encode_frame, H3Frame, H3Header};
+use specter::transport::h3::quic::{
+    split_long_header_datagram, ConnectionId, LongHeaderDatagramPacket, LongHeaderType,
+};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io;
@@ -13,6 +18,7 @@ use std::net::{SocketAddr, TcpListener as StdTcpListener, UdpSocket};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -36,6 +42,7 @@ const BENCH_REQ_CHUNK_SIZE: usize = 1024;
 const BENCH_REQ_CHUNK_COUNT: usize = 5;
 const BENCH_REQ_CHUNK_DELAY_MS: u64 = 2;
 const BENCH_REQ_BODY_LEN: u64 = (BENCH_REQ_CHUNK_SIZE as u64) * (BENCH_REQ_CHUNK_COUNT as u64);
+const BENCH_UPLOAD_ID_HEADER: &str = "x-specter-bench-upload-id";
 
 const FIXTURE_PACING_MODE: &str = "monotonic_deadline_spin_wait";
 const FIXTURE_MONOTONIC_CLOCK_SOURCE: &str = "std::time::Instant";
@@ -43,12 +50,37 @@ const PACING_SPIN_LEAD_IN: Duration = Duration::from_micros(150);
 const DENOMINATOR_FLOOR_NS: f64 = 1.0;
 const FIXTURE_CHUNK_MAGIC: &[u8; 4] = b"SPCT";
 const FIXTURE_CHUNK_STAMP_LEN: usize = 16;
+const H3_BENCH_STREAM_SEGMENT_SIZE: usize = 8192;
 
 static FIXTURE_EPOCH: OnceLock<Instant> = OnceLock::new();
+static NEXT_UPLOAD_ID: AtomicU64 = AtomicU64::new(1);
+static UPLOAD_COMPLETIONS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 #[inline]
 fn fixture_epoch() -> Instant {
     *FIXTURE_EPOCH.get_or_init(Instant::now)
+}
+
+fn upload_completions() -> &'static Mutex<HashMap<String, Instant>> {
+    UPLOAD_COMPLETIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_upload_id() -> String {
+    NEXT_UPLOAD_ID.fetch_add(1, Ordering::Relaxed).to_string()
+}
+
+fn record_upload_complete(upload_id: Option<String>) {
+    if let Some(upload_id) = upload_id {
+        if let Ok(mut completions) = upload_completions().lock() {
+            completions.insert(upload_id, Instant::now());
+        }
+    }
+}
+
+fn take_upload_complete_offset_ns(upload_id: &str, anchor: Instant) -> Option<f64> {
+    let completed_at = upload_completions().lock().ok()?.remove(upload_id)?;
+    let elapsed = completed_at.checked_duration_since(anchor)?;
+    Some(elapsed.as_nanos() as f64)
 }
 
 #[inline]
@@ -282,14 +314,13 @@ pub(crate) struct Metrics {
     pub(crate) client_overhead_duration_ns: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) client_overhead_unclamped_duration_ns: Option<f64>,
-    #[serde(skip_serializing_if = "is_zero_usize")]
     pub(crate) client_overhead_denominator_floor_count: usize,
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub(crate) client_write_overhead_duration_ns: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) client_write_overhead_unclamped_duration_ns: Option<f64>,
-    #[serde(skip_serializing_if = "is_zero_usize")]
     pub(crate) client_write_overhead_denominator_floor_count: usize,
+    pub(crate) upload_complete_fallback_count: usize,
     pub(crate) p50_ns: f64,
     pub(crate) p95_ns: f64,
     pub(crate) p99_ns: f64,
@@ -376,10 +407,6 @@ fn is_zero_f64(v: &f64) -> bool {
     *v == 0.0
 }
 
-fn is_zero_usize(v: &usize) -> bool {
-    *v == 0
-}
-
 impl Metrics {
     fn failed(warmup_count: usize, sample_count: usize) -> Self {
         Self {
@@ -394,6 +421,7 @@ impl Metrics {
             client_write_overhead_duration_ns: 0.0,
             client_write_overhead_unclamped_duration_ns: None,
             client_write_overhead_denominator_floor_count: 0,
+            upload_complete_fallback_count: 0,
             p50_ns: 0.0,
             p95_ns: 0.0,
             p99_ns: 0.0,
@@ -421,6 +449,7 @@ impl Metrics {
             client_write_overhead_duration_ns: 0.0,
             client_write_overhead_unclamped_duration_ns: None,
             client_write_overhead_denominator_floor_count: 0,
+            upload_complete_fallback_count: 0,
             p50_ns: 0.0,
             p95_ns: 0.0,
             p99_ns: 0.0,
@@ -573,8 +602,7 @@ struct PacingRequestBodyStream<E> {
     // For chunk i in 0..N-1, this records when the consumer (transport)
     // came back to ask for chunk i+1, which is the post-flush completion
     // signal for chunk i. The final chunk's consumed-at timestamp is
-    // captured outside the stream by the measure_*_request_streaming
-    // function (response-headers-arrival).
+    // captured outside the stream by the fixture upload-complete timestamp.
     consumed_chunk_offsets_ns: Arc<Mutex<Vec<f64>>>,
     last_yield_index: Option<usize>,
     _error: PhantomData<E>,
@@ -797,6 +825,7 @@ async fn handle_h1_connection(mut stream: tokio::net::TcpStream) {
                             let mut keep_alive = false;
                             let mut content_length: Option<usize> = None;
                             let mut is_chunked = false;
+                            let mut upload_id: Option<String> = None;
                             for h in req.headers.iter() {
                                 if h.name.eq_ignore_ascii_case("connection")
                                     && std::str::from_utf8(h.value)
@@ -819,15 +848,29 @@ async fn handle_h1_connection(mut stream: tokio::net::TcpStream) {
                                 {
                                     is_chunked = true;
                                 }
+                                if h.name.eq_ignore_ascii_case(BENCH_UPLOAD_ID_HEADER) {
+                                    if let Ok(s) = std::str::from_utf8(h.value) {
+                                        upload_id = Some(s.to_string());
+                                    }
+                                }
                             }
-                            Some((path, method, keep_alive, content_length, is_chunked, amt))
+                            Some((
+                                path,
+                                method,
+                                keep_alive,
+                                content_length,
+                                is_chunked,
+                                upload_id,
+                                amt,
+                            ))
                         }
                         Ok(httparse::Status::Partial) => None,
                         Err(_) => return,
                     }
                 };
 
-                let Some((path, method, keep_alive, content_length, is_chunked, amt)) = parsed
+                let Some((path, method, keep_alive, content_length, is_chunked, upload_id, amt)) =
+                    parsed
                 else {
                     if read_bytes >= buf.len() {
                         return;
@@ -848,12 +891,20 @@ async fn handle_h1_connection(mut stream: tokio::net::TcpStream) {
                     buf.copy_within(amt..read_bytes, 0);
                     read_bytes -= amt;
                     if is_chunked {
-                        if !drain_h1_chunked_body(&mut stream, &mut buf, &mut read_bytes).await {
+                        if !drain_h1_chunked_body(&mut stream, &mut buf, &mut read_bytes, upload_id)
+                            .await
+                        {
                             return;
                         }
                     } else if let Some(expected) = content_length {
-                        if !drain_h1_fixed_body(&mut stream, &mut buf, &mut read_bytes, expected)
-                            .await
+                        if !drain_h1_fixed_body(
+                            &mut stream,
+                            &mut buf,
+                            &mut read_bytes,
+                            expected,
+                            upload_id,
+                        )
+                        .await
                         {
                             return;
                         }
@@ -920,10 +971,19 @@ async fn drain_h1_fixed_body(
     buf: &mut Vec<u8>,
     read_bytes: &mut usize,
     expected: usize,
+    upload_id: Option<String>,
 ) -> bool {
     let mut consumed = std::cmp::min(*read_bytes, expected);
-    buf.copy_within(consumed..*read_bytes, 0);
-    *read_bytes -= consumed;
+    let mut upload_id = upload_id;
+    if consumed == expected {
+        record_upload_complete(upload_id.take());
+    }
+    if consumed == *read_bytes {
+        *read_bytes = 0;
+    } else {
+        buf.copy_within(consumed..*read_bytes, 0);
+        *read_bytes -= consumed;
+    }
     while consumed < expected {
         if *read_bytes == buf.len() {
             buf.resize(buf.len() * 2, 0);
@@ -934,8 +994,15 @@ async fn drain_h1_fixed_body(
                 *read_bytes += n;
                 let take = std::cmp::min(*read_bytes, expected - consumed);
                 consumed += take;
-                buf.copy_within(take..*read_bytes, 0);
-                *read_bytes -= take;
+                if consumed == expected {
+                    record_upload_complete(upload_id.take());
+                }
+                if take == *read_bytes {
+                    *read_bytes = 0;
+                } else {
+                    buf.copy_within(take..*read_bytes, 0);
+                    *read_bytes -= take;
+                }
             }
             Err(_) => return false,
         }
@@ -947,7 +1014,9 @@ async fn drain_h1_chunked_body(
     stream: &mut tokio::net::TcpStream,
     buf: &mut Vec<u8>,
     read_bytes: &mut usize,
+    upload_id: Option<String>,
 ) -> bool {
+    let mut upload_id = upload_id;
     loop {
         // Need a chunk size line.
         let line_end = loop {
@@ -992,6 +1061,7 @@ async fn drain_h1_chunked_body(
         buf.copy_within(needed..*read_bytes, 0);
         *read_bytes -= needed;
         if chunk_size == 0 {
+            record_upload_complete(upload_id.take());
             return true;
         }
     }
@@ -1018,6 +1088,7 @@ async fn handle_h2_connection<
     // consumed for upload accounting instead of echoed back as response body.
     let mut upload_streams: HashSet<u32> = HashSet::new();
     let mut upload_bytes: HashMap<u32, u64> = HashMap::new();
+    let mut upload_ids: HashMap<u32, String> = HashMap::new();
     let mut response_chunk_indices: HashMap<u32, usize> = HashMap::new();
 
     loop {
@@ -1046,6 +1117,7 @@ async fn handle_h2_connection<
                         let mut path = "/";
                         let mut method = "GET";
                         let mut is_websocket = false;
+                        let mut upload_id = None;
 
                         for (name, value) in headers.iter() {
                             if name == ":path" {
@@ -1054,6 +1126,8 @@ async fn handle_h2_connection<
                                 method = value;
                             } else if name == ":protocol" && value == "websocket" {
                                 is_websocket = true;
+                            } else if name == BENCH_UPLOAD_ID_HEADER {
+                                upload_id = Some(value.to_string());
                             }
                         }
 
@@ -1073,6 +1147,7 @@ async fn handle_h2_connection<
                         } else if path.starts_with("/upload") && method == "POST" {
                             if end_stream_on_headers {
                                 // Empty body upload, immediately respond.
+                                record_upload_complete(upload_id);
                                 let tx_clone = tx.clone();
                                 tokio::spawn(async move {
                                     let _ = tx_clone.send((0x01, 0x04, stream_id, vec![0x88])).await;
@@ -1081,6 +1156,9 @@ async fn handle_h2_connection<
                             } else {
                                 upload_streams.insert(stream_id);
                                 upload_bytes.insert(stream_id, 0);
+                                if let Some(upload_id) = upload_id {
+                                    upload_ids.insert(stream_id, upload_id);
+                                }
                             }
                         } else if path.starts_with("/stream") {
                             let tx_clone = tx.clone();
@@ -1123,6 +1201,10 @@ async fn handle_h2_connection<
                             let entry = upload_bytes.entry(stream_id).or_insert(0);
                             *entry += received;
                             let end_stream = flags & 0x01 != 0;
+
+                            if end_stream {
+                                record_upload_complete(upload_ids.remove(&stream_id));
+                            }
 
                             // Connection-level WINDOW_UPDATE.
                             if received > 0 {
@@ -1229,16 +1311,12 @@ async fn start_h3_server(
             .await
             .unwrap(),
     );
-    let cert_path = cert_path.to_string();
-    let key_path = key_path.to_string();
+    let cert_pem = fs::read(cert_path).unwrap();
+    let key_pem = fs::read(key_path).unwrap();
 
     tokio::spawn(async move {
         let mut buf = [0u8; 65535];
-        let mut connections: HashMap<
-            quiche::ConnectionId<'static>,
-            mpsc::Sender<(Vec<u8>, SocketAddr)>,
-        > = HashMap::new();
-        let local_addr = socket.local_addr().unwrap();
+        let mut connections: HashMap<Vec<u8>, mpsc::Sender<Vec<u8>>> = HashMap::new();
 
         loop {
             let (len, peer) = match socket.recv_from(&mut buf).await {
@@ -1246,231 +1324,342 @@ async fn start_h3_server(
                 Err(_) => break,
             };
             let packet = buf[..len].to_vec();
+            let long_packets = split_long_header_datagram(&packet).ok();
 
-            let header = match quiche::Header::from_slice(&mut buf[..len], quiche::MAX_CONN_ID_LEN)
+            if let Some(first) = long_packets
+                .as_ref()
+                .and_then(|packets| packets.first())
+                .filter(|packet| packet.packet_type == LongHeaderType::Initial)
             {
-                Ok(h) => h,
-                Err(_) if connections.len() == 1 => {
-                    if let Some(tx) = connections.values().next() {
-                        let _ = tx.send((packet, peer)).await;
-                    }
+                let conn_id = first.destination_cid.as_bytes().to_vec();
+                if !connections.contains_key(&conn_id) {
+                    let (tx, rx) = mpsc::channel(100);
+                    connections.insert(conn_id.clone(), tx.clone());
+                    spawn_native_h3_bench_connection(
+                        socket.clone(),
+                        peer,
+                        rx,
+                        cert_pem.clone(),
+                        key_pem.clone(),
+                        first.destination_cid.clone(),
+                        first.source_cid.clone(),
+                    );
+                    let _ = tx.send(packet).await;
                     continue;
                 }
-                Err(_) => continue,
-            };
-
-            let conn_id = header.dcid.clone();
-
-            if !connections.contains_key(&conn_id) {
-                if header.ty != quiche::Type::Initial {
-                    if connections.len() == 1 {
-                        if let Some(tx) = connections.values().next() {
-                            let _ = tx.send((packet, peer)).await;
-                        }
-                    }
-                    continue;
-                }
-
-                let scid = header.dcid.into_owned();
-                let (tx, mut rx) = mpsc::channel(100);
-                connections.insert(scid.clone(), tx.clone());
-
-                let socket_clone = socket.clone();
-                let cert_path_clone = cert_path.clone();
-                let key_path_clone = key_path.clone();
-                let scid_clone = scid.clone();
-                let odcid = scid.clone();
-
-                tokio::spawn(async move {
-                    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-                    config
-                        .load_cert_chain_from_pem_file(&cert_path_clone)
-                        .unwrap();
-                    config.load_priv_key_from_pem_file(&key_path_clone).unwrap();
-                    config.set_application_protos(&[b"h3"]).unwrap();
-                    config.set_max_idle_timeout(30_000);
-                    config.set_max_recv_udp_payload_size(65535);
-                    config.set_max_send_udp_payload_size(1350);
-                    config.set_initial_max_data(10_000_000);
-                    config.set_initial_max_stream_data_bidi_local(1_000_000);
-                    config.set_initial_max_stream_data_bidi_remote(1_000_000);
-                    config.set_initial_max_stream_data_uni(1_000_000);
-                    config.set_initial_max_streams_bidi(100);
-                    config.set_initial_max_streams_uni(100);
-                    config.set_disable_active_migration(true);
-
-                    let mut conn =
-                        quiche::accept(&scid_clone, Some(&odcid), local_addr, peer, &mut config)
-                            .unwrap();
-                    let mut h3_conn: Option<quiche::h3::Connection> = None;
-                    let mut pending_response_data: VecDeque<(u64, Vec<u8>, usize, bool)> =
-                        VecDeque::new();
-                    let (response_tx, mut response_rx) = mpsc::channel::<(u64, Vec<u8>, bool)>(100);
-                    let mut out = [0u8; 65535];
-                    let mut interval = tokio::time::interval(Duration::from_millis(10));
-
-                    loop {
-                        tokio::select! {
-                            res = rx.recv() => {
-                                match res {
-                                    Some((packet, from)) => {
-                                        let recv_info = quiche::RecvInfo {
-                                            to: socket_clone.local_addr().unwrap(),
-                                            from,
-                                        };
-                                        if conn.recv(&mut packet.clone(), recv_info).is_ok() {
-                                            if conn.is_established() && h3_conn.is_none() {
-                                                let h3_config = quiche::h3::Config::new().unwrap();
-                                                if let Ok(h3) = quiche::h3::Connection::with_transport(&mut conn, &h3_config) {
-                                                    h3_conn = Some(h3);
-                                                }
-                                            }
-
-                                            if conn.is_established() {
-                                                if let Some(h3) = h3_conn.as_mut() {
-                                                    loop {
-                                                        match h3.poll(&mut conn) {
-                                                            Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
-                                                                let mut path = "/";
-                                                                for header in list.iter() {
-                                                                    if header.name() == b":path" {
-                                                                        path = std::str::from_utf8(header.value()).unwrap_or("/");
-                                                                    }
-                                                                }
-
-                                                                if path == "/health" {
-                                                                    let h3_headers = vec![
-                                                                        quiche::h3::Header::new(b":status", b"200"),
-                                                                        quiche::h3::Header::new(b"content-type", b"text/plain"),
-                                                                    ];
-                                                                    let _ = h3.send_response(&mut conn, stream_id, &h3_headers, false);
-                                                                    let _ = h3.send_body(&mut conn, stream_id, b"ok", true);
-                                                                } else if path.starts_with("/stream") {
-                                                                    let h3_headers = vec![
-                                                                        quiche::h3::Header::new(b":status", b"200"),
-                                                                        quiche::h3::Header::new(b"content-type", b"application/octet-stream"),
-                                                                    ];
-                                                                    let _ = h3.send_response(&mut conn, stream_id, &h3_headers, false);
-
-                                                                    let chunk_size = BENCH_CHUNK_SIZE;
-                                                                    let chunk_count = BENCH_CHUNK_COUNT;
-                                                                    let delay_ms = BENCH_CHUNK_DELAY_MS;
-                                                                    let response_tx = response_tx.clone();
-                                                                    tokio::spawn(async move {
-                                                                        let chunk_data = vec![b's'; chunk_size];
-                                                                        let chunk_send_anchor = Instant::now();
-
-                                                                        for i in 0..chunk_count {
-                                                                            if i > 0 {
-                                                                                let target = chunk_send_anchor
-                                                                                    + Duration::from_millis(
-                                                                                        delay_ms.saturating_mul(i as u64),
-                                                                                    );
-                                                                                pace_chunk_until(target).await;
-                                                                            }
-                                                                            let end_stream = i == chunk_count - 1;
-                                                                            if response_tx.send((stream_id, chunk_data.clone(), end_stream)).await.is_err() {
-                                                                                break;
-                                                                            }
-                                                                        }
-                                                                    });
-                                                                }
-                                                            }
-                                                            Err(quiche::h3::Error::Done) => break,
-                                                            Err(_) => break,
-                                                            _ => {}
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None => break,
-                                }
-                            }
-                            _ = interval.tick() => {
-                                conn.on_timeout();
-                            }
-                            Some((stream_id, bytes, fin)) = response_rx.recv() => {
-                                pending_response_data.push_back((stream_id, bytes, 0, fin));
-                            }
-                        }
-
-                        if let Some(h3) = h3_conn.as_mut() {
-                            while let Some((stream_id, bytes, offset, fin)) =
-                                pending_response_data.front_mut()
-                            {
-                                if bytes.is_empty() {
-                                    match h3.send_body(&mut conn, *stream_id, bytes, *fin) {
-                                        Ok(_) => {
-                                            pending_response_data.pop_front();
-                                        }
-                                        Err(quiche::h3::Error::Done)
-                                        | Err(quiche::h3::Error::StreamBlocked) => break,
-                                        Err(_) => {
-                                            pending_response_data.pop_front();
-                                        }
-                                    }
-                                    continue;
-                                }
-
-                                let remaining_len = bytes.len().saturating_sub(*offset);
-                                let capacity = conn.stream_capacity(*stream_id).unwrap_or(0);
-                                let fin_for_call = *fin && capacity > remaining_len + 8;
-                                match h3.send_body(
-                                    &mut conn,
-                                    *stream_id,
-                                    &bytes[*offset..],
-                                    fin_for_call,
-                                ) {
-                                    Ok(sent) if sent > 0 => {
-                                        *offset += sent;
-                                        if *offset >= bytes.len() {
-                                            let needs_fin = *fin && !fin_for_call;
-                                            let finished_stream_id = *stream_id;
-                                            pending_response_data.pop_front();
-                                            if needs_fin {
-                                                pending_response_data.push_front((
-                                                    finished_stream_id,
-                                                    Vec::new(),
-                                                    0,
-                                                    true,
-                                                ));
-                                            }
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                    Ok(_)
-                                    | Err(quiche::h3::Error::Done)
-                                    | Err(quiche::h3::Error::StreamBlocked) => break,
-                                    Err(_) => {
-                                        pending_response_data.pop_front();
-                                    }
-                                }
-                            }
-                        }
-
-                        while let Ok((len, send_info)) = conn.send(&mut out) {
-                            let _ = socket_clone.send_to(&out[..len], send_info.to).await;
-                        }
-
-                        if conn.is_closed() {
-                            break;
-                        }
-                    }
-                });
             }
 
-            if let Some(tx) = connections.get(&conn_id) {
-                let _ = tx.send((packet, peer)).await;
-            } else if connections.len() == 1 {
-                if let Some(tx) = connections.values().next() {
-                    let _ = tx.send((packet, peer)).await;
-                }
+            let tx_to_send = route_h3_connection_id(&packet, long_packets.as_deref())
+                .and_then(|conn_id| connections.get(&conn_id).cloned())
+                .or_else(|| {
+                    if connections.len() == 1 {
+                        connections.values().next().cloned()
+                    } else {
+                        None
+                    }
+                });
+
+            if let Some(tx) = tx_to_send {
+                let _ = tx.send(packet).await;
             }
         }
     })
+}
+
+fn spawn_native_h3_bench_connection(
+    socket: Arc<TokioUdpSocket>,
+    peer: SocketAddr,
+    rx: mpsc::Receiver<Vec<u8>>,
+    cert_pem: Vec<u8>,
+    key_pem: Vec<u8>,
+    client_destination_cid: ConnectionId,
+    client_source_cid: ConnectionId,
+) {
+    let fingerprint = Http3Fingerprint::chrome();
+    let server_source_cid = ConnectionId::from_static(b"bench-h3-scid");
+    let server = match NativeQuicServerHandshake::new(
+        &fingerprint,
+        &cert_pem,
+        &key_pem,
+        client_destination_cid,
+        client_source_cid,
+        server_source_cid,
+    ) {
+        Ok(server) => server,
+        Err(err) => {
+            eprintln!("native H3 benchmark server init failed: {err}");
+            return;
+        }
+    };
+
+    tokio::spawn(async move {
+        let (response_tx, response_rx) = mpsc::channel::<BenchH3Response>(100);
+        NativeBenchH3Connection {
+            socket,
+            peer,
+            handshake: server,
+            fingerprint,
+            settings_sent: false,
+            rx,
+            response_tx,
+            response_rx,
+            uploads: HashMap::new(),
+        }
+        .run()
+        .await;
+    });
+}
+
+struct BenchH3Response {
+    stream_id: u64,
+    bytes: Bytes,
+    fin: bool,
+}
+
+struct BenchUploadState {
+    upload_id: Option<String>,
+}
+
+struct NativeBenchH3Connection {
+    socket: Arc<TokioUdpSocket>,
+    peer: SocketAddr,
+    handshake: NativeQuicServerHandshake,
+    fingerprint: Http3Fingerprint,
+    settings_sent: bool,
+    rx: mpsc::Receiver<Vec<u8>>,
+    response_tx: mpsc::Sender<BenchH3Response>,
+    response_rx: mpsc::Receiver<BenchH3Response>,
+    uploads: HashMap<u64, BenchUploadState>,
+}
+
+impl NativeBenchH3Connection {
+    async fn run(mut self) {
+        loop {
+            tokio::select! {
+                packet = self.rx.recv() => {
+                    let Some(packet) = packet else { break };
+                    if let Err(err) = self.process_datagram(&packet).await {
+                        eprintln!("native H3 benchmark server packet error: {err}");
+                    }
+                }
+                response = self.response_rx.recv() => {
+                    let Some(response) = response else { break };
+                    if let Err(err) = self.send_response_data(response).await {
+                        eprintln!("native H3 benchmark server response error: {err}");
+                    }
+                }
+            }
+        }
+    }
+
+    async fn process_datagram(&mut self, packet: &[u8]) -> specter::Result<()> {
+        if packet.first().is_some_and(|first| first & 0x80 != 0) {
+            let packets = split_long_header_datagram(packet)?;
+            if packets
+                .iter()
+                .any(|packet| packet.packet_type == LongHeaderType::Initial)
+            {
+                let flight = self.handshake.process_client_initial(packet)?;
+                if !flight.datagram.is_empty() {
+                    self.send_packet(flight.datagram).await?;
+                }
+                if let Some(packet) = self.handshake.build_server_initial_ack_packet()? {
+                    self.send_packet(packet.packet).await?;
+                }
+            }
+            if packets
+                .iter()
+                .any(|packet| packet.packet_type == LongHeaderType::Handshake)
+            {
+                self.handshake.process_client_handshake(packet)?;
+                if let Some(packet) = self.handshake.build_server_handshake_ack_packet()? {
+                    self.send_packet(packet.packet).await?;
+                }
+                self.send_settings_if_ready().await?;
+            }
+            return Ok(());
+        }
+
+        let events = self.handshake.open_client_h3_event_packet(packet)?;
+        if let Some(packet) = self.handshake.build_server_application_ack_packet()? {
+            self.send_packet(packet.packet).await?;
+        }
+        for event in events {
+            self.apply_client_event(event).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_settings_if_ready(&mut self) -> specter::Result<()> {
+        if self.settings_sent || !self.handshake.is_application_ready() {
+            return Ok(());
+        }
+        let packet = self
+            .handshake
+            .build_server_h3_settings_packet(&self.fingerprint)?;
+        self.settings_sent = true;
+        self.send_packet(packet.packet).await
+    }
+
+    async fn apply_client_event(&mut self, event: ClientH3Event) -> specter::Result<()> {
+        let ClientH3Event::Stream(event) = event else {
+            return Ok(());
+        };
+
+        for frame in event.frames {
+            match frame {
+                H3Frame::Headers(block) => {
+                    let headers = decode_header_block(block.as_ref())?;
+                    self.handle_request_headers(event.stream_id, headers, event.fin)
+                        .await?;
+                }
+                H3Frame::Data(data) => {
+                    if event.fin {
+                        self.finish_upload_if_needed(event.stream_id).await?;
+                    }
+                    drop(data);
+                }
+                H3Frame::Settings(_) | H3Frame::GoAway { .. } | H3Frame::Unknown { .. } => {}
+            }
+        }
+
+        if event.fin {
+            self.finish_upload_if_needed(event.stream_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_request_headers(
+        &mut self,
+        stream_id: u64,
+        headers: Vec<H3Header>,
+        end_stream: bool,
+    ) -> specter::Result<()> {
+        let mut path = "/";
+        let mut method = "GET";
+        let mut upload_id = None;
+        for header in &headers {
+            if header.name() == ":path" {
+                path = header.value();
+            } else if header.name() == ":method" {
+                method = header.value();
+            } else if header.name().eq_ignore_ascii_case(BENCH_UPLOAD_ID_HEADER) {
+                upload_id = Some(header.value().to_string());
+            }
+        }
+
+        if path == "/health" {
+            self.send_response_packet(
+                stream_id,
+                "text/plain",
+                Some(Bytes::from_static(b"ok")),
+                true,
+            )
+            .await?;
+        } else if path.starts_with("/upload") && method == "POST" {
+            self.uploads
+                .insert(stream_id, BenchUploadState { upload_id });
+            if end_stream {
+                self.finish_upload_if_needed(stream_id).await?;
+            }
+        } else if path.starts_with("/stream") {
+            self.send_response_packet(stream_id, "application/octet-stream", None, false)
+                .await?;
+            let response_tx = self.response_tx.clone();
+            tokio::spawn(async move {
+                let chunk_send_anchor = Instant::now();
+                for i in 0..BENCH_CHUNK_COUNT {
+                    if i > 0 {
+                        let target = chunk_send_anchor
+                            + Duration::from_millis(BENCH_CHUNK_DELAY_MS.saturating_mul(i as u64));
+                        pace_chunk_until(target).await;
+                    }
+                    let mut chunk_data = vec![b's'; BENCH_CHUNK_SIZE];
+                    stamp_fixture_chunk(&mut chunk_data, i);
+                    let end_stream = i == BENCH_CHUNK_COUNT - 1;
+                    if response_tx
+                        .send(BenchH3Response {
+                            stream_id,
+                            bytes: Bytes::from(chunk_data),
+                            fin: end_stream,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+        Ok(())
+    }
+
+    async fn send_response_packet(
+        &mut self,
+        stream_id: u64,
+        content_type: &str,
+        body: Option<Bytes>,
+        fin: bool,
+    ) -> specter::Result<()> {
+        let headers = vec![
+            H3Header::new(":status", "200"),
+            H3Header::new("content-type", content_type),
+        ];
+        let packet = self
+            .handshake
+            .build_server_h3_response_packet(stream_id, headers, body, fin)?;
+        self.send_packet(packet.packet).await
+    }
+
+    async fn send_response_data(&mut self, response: BenchH3Response) -> specter::Result<()> {
+        let encoded_data = encode_frame(&H3Frame::Data(response.bytes));
+        let mut chunks = encoded_data.chunks(H3_BENCH_STREAM_SEGMENT_SIZE).peekable();
+        while let Some(chunk) = chunks.next() {
+            let fin = response.fin && chunks.peek().is_none();
+            let packet = self.handshake.build_server_h3_raw_stream_packet(
+                response.stream_id,
+                Bytes::copy_from_slice(chunk),
+                fin,
+            )?;
+            self.send_packet(packet.packet).await?;
+        }
+        Ok(())
+    }
+
+    async fn finish_upload_if_needed(&mut self, stream_id: u64) -> specter::Result<()> {
+        let Some(upload) = self.uploads.remove(&stream_id) else {
+            return Ok(());
+        };
+        record_upload_complete(upload.upload_id);
+        self.send_response_packet(
+            stream_id,
+            "text/plain",
+            Some(Bytes::from_static(b"ok")),
+            true,
+        )
+        .await
+    }
+
+    async fn send_packet(&self, packet: Bytes) -> specter::Result<()> {
+        self.socket
+            .send_to(packet.as_ref(), self.peer)
+            .await
+            .map_err(specter::Error::Io)?;
+        Ok(())
+    }
+}
+
+fn route_h3_connection_id(
+    packet: &[u8],
+    long_packets: Option<&[LongHeaderDatagramPacket]>,
+) -> Option<Vec<u8>> {
+    if let Some(first) = long_packets.and_then(|packets| packets.first()) {
+        return Some(first.destination_cid.as_bytes().to_vec());
+    }
+    if packet.first().is_some_and(|first| first & 0x80 == 0) && packet.len() > 17 {
+        return Some(packet[1..17].to_vec());
+    }
+    None
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -1649,26 +1838,22 @@ async fn measure_specter_streaming(
     let mut chunk_offsets_ns: Vec<f64> = Vec::with_capacity(BENCH_CHUNK_COUNT);
     let mut final_delivery_overhead_ns = None;
 
-    while let Some(frame_res) = response.body_mut().frame().await {
+    while let Some(chunk_res) = response.body_mut().chunk().await {
         let elapsed = start.elapsed();
         let receive_offset_ns = fixture_epoch().elapsed().as_nanos() as f64;
         if first_chunk_time.is_none() {
             first_chunk_time = Some(elapsed);
         }
-        if let Ok(frame) = frame_res {
-            if let Ok(chunk) = frame.into_data() {
-                if let Some(overhead_ns) = final_fixture_chunk_delivery_overhead_ns(
-                    &chunk,
-                    bytes_received,
-                    receive_offset_ns,
-                ) {
-                    final_delivery_overhead_ns = Some(overhead_ns);
-                }
-                bytes_received += chunk.len();
-                chunk_count += 1;
-                last_chunk_time = Some(elapsed);
-                chunk_offsets_ns.push(elapsed.as_nanos() as f64);
+        if let Ok(chunk) = chunk_res {
+            if let Some(overhead_ns) =
+                final_fixture_chunk_delivery_overhead_ns(&chunk, bytes_received, receive_offset_ns)
+            {
+                final_delivery_overhead_ns = Some(overhead_ns);
             }
+            bytes_received += chunk.len();
+            chunk_count += 1;
+            last_chunk_time = Some(elapsed);
+            chunk_offsets_ns.push(elapsed.as_nanos() as f64);
         }
     }
 
@@ -1967,8 +2152,8 @@ pub(crate) fn request_body_transfer_duration(
 // Compute client wire-flush overhead from per-chunk yielded vs consumed
 // timestamps. For each chunk i in 0..N-1, the consumed_at[i] is the start
 // of the next poll_next invocation. For chunk N-1 (the final chunk), the
-// consumed_at is the response-headers-arrival timestamp captured by the
-// caller (`final_consumed_offset_ns`). The deterministic schedule gap
+// consumed_at is the fixture's upload-complete timestamp captured after the
+// server drains the request body (`final_consumed_offset_ns`). The deterministic schedule gap
 // after chunk i (i < N-1) is BENCH_REQ_CHUNK_DELAY_MS milliseconds; the
 // gap after the final chunk is zero by definition.
 fn client_write_overhead_from_offsets(
@@ -2019,10 +2204,12 @@ async fn measure_specter_request_streaming(
         DenominatorEvidence,
         usize,
         usize,
+        usize,
         Vec<f64>,
     ),
     Box<dyn std::error::Error>,
 > {
+    let upload_id = next_upload_id();
     let observed_offsets = Arc::new(Mutex::new(Vec::with_capacity(BENCH_REQ_CHUNK_COUNT)));
     let consumed_offsets = Arc::new(Mutex::new(Vec::with_capacity(BENCH_REQ_CHUNK_COUNT)));
     let stream_anchor = Instant::now();
@@ -2033,19 +2220,21 @@ async fn measure_specter_request_streaming(
     );
     let mut request = client
         .post(url)
+        .header(BENCH_UPLOAD_ID_HEADER, upload_id.clone())
         .body_stream_sized(body_stream, BENCH_REQ_BODY_LEN);
     if protocol == "h3" {
         request = request.version(specter::HttpVersion::Http3Only);
     }
     let mut response = request.send_streaming().await?;
-    // Response-headers-arrival is the upload-complete timing endpoint for this
-    // fixture: both H1 and H2 servers emit headers only after draining the
-    // request body.
     let response_headers_offset_ns = stream_anchor.elapsed().as_nanos() as f64;
+    let (upload_complete_offset_ns, upload_complete_fallback_count) =
+        match take_upload_complete_offset_ns(&upload_id, stream_anchor) {
+            Some(offset_ns) => (offset_ns, 0),
+            None => (response_headers_offset_ns, 1),
+        };
 
-    while let Some(frame_res) = response.body_mut().frame().await {
-        let frame = frame_res?;
-        let _ = frame.into_data();
+    while let Some(chunk_res) = response.body_mut().chunk().await {
+        let _ = chunk_res?;
     }
 
     let offsets = observed_offsets
@@ -2056,19 +2245,20 @@ async fn measure_specter_request_streaming(
         .lock()
         .map(|c| c.clone())
         .unwrap_or_default();
-    let response_headers_time =
-        Duration::from_nanos(response_headers_offset_ns.max(DENOMINATOR_FLOOR_NS).ceil() as u64);
+    let upload_complete_time =
+        Duration::from_nanos(upload_complete_offset_ns.max(DENOMINATOR_FLOOR_NS).ceil() as u64);
     let transfer_duration =
-        request_body_transfer_duration(offsets.first().copied(), response_headers_offset_ns);
+        request_body_transfer_duration(offsets.first().copied(), upload_complete_offset_ns);
     let write_overhead =
-        client_write_overhead_from_offsets(&offsets, &consumed, response_headers_offset_ns);
+        client_write_overhead_from_offsets(&offsets, &consumed, upload_complete_offset_ns);
     let gaps_ns = inter_chunk_gaps_ns(&offsets);
     Ok((
-        response_headers_time,
+        upload_complete_time,
         transfer_duration,
         write_overhead,
         BENCH_REQ_BODY_LEN as usize,
         BENCH_REQ_CHUNK_COUNT,
+        upload_complete_fallback_count,
         gaps_ns,
     ))
 }
@@ -2083,10 +2273,12 @@ async fn measure_reqwest_request_streaming(
         DenominatorEvidence,
         usize,
         usize,
+        usize,
         Vec<f64>,
     ),
     Box<dyn std::error::Error>,
 > {
+    let upload_id = next_upload_id();
     let observed_offsets = Arc::new(Mutex::new(Vec::with_capacity(BENCH_REQ_CHUNK_COUNT)));
     let consumed_offsets = Arc::new(Mutex::new(Vec::with_capacity(BENCH_REQ_CHUNK_COUNT)));
     let stream_anchor = Instant::now();
@@ -2097,10 +2289,16 @@ async fn measure_reqwest_request_streaming(
     );
     let mut response = client
         .post(url)
+        .header(BENCH_UPLOAD_ID_HEADER, upload_id.clone())
         .body(reqwest::Body::wrap(PacingRequestHttpBody::new(body_stream)))
         .send()
         .await?;
     let response_headers_offset_ns = stream_anchor.elapsed().as_nanos() as f64;
+    let (upload_complete_offset_ns, upload_complete_fallback_count) =
+        match take_upload_complete_offset_ns(&upload_id, stream_anchor) {
+            Some(offset_ns) => (offset_ns, 0),
+            None => (response_headers_offset_ns, 1),
+        };
 
     while let Some(chunk) = response.chunk().await? {
         let _ = chunk;
@@ -2113,19 +2311,20 @@ async fn measure_reqwest_request_streaming(
         .lock()
         .map(|c| c.clone())
         .unwrap_or_default();
-    let response_headers_time =
-        Duration::from_nanos(response_headers_offset_ns.max(DENOMINATOR_FLOOR_NS).ceil() as u64);
+    let upload_complete_time =
+        Duration::from_nanos(upload_complete_offset_ns.max(DENOMINATOR_FLOOR_NS).ceil() as u64);
     let transfer_duration =
-        request_body_transfer_duration(offsets.first().copied(), response_headers_offset_ns);
+        request_body_transfer_duration(offsets.first().copied(), upload_complete_offset_ns);
     let write_overhead =
-        client_write_overhead_from_offsets(&offsets, &consumed, response_headers_offset_ns);
+        client_write_overhead_from_offsets(&offsets, &consumed, upload_complete_offset_ns);
     let gaps_ns = inter_chunk_gaps_ns(&offsets);
     Ok((
-        response_headers_time,
+        upload_complete_time,
         transfer_duration,
         write_overhead,
         BENCH_REQ_BODY_LEN as usize,
         BENCH_REQ_CHUNK_COUNT,
+        upload_complete_fallback_count,
         gaps_ns,
     ))
 }
@@ -2142,6 +2341,7 @@ async fn measure_specter_request_streaming_batch(
         DenominatorEvidence,
         usize,
         usize,
+        usize,
         Vec<f64>,
     ),
     Box<dyn std::error::Error>,
@@ -2151,16 +2351,18 @@ async fn measure_specter_request_streaming_batch(
     let mut write_overhead_total = DenominatorEvidence::zero();
     let mut bytes_sent = 0;
     let mut chunk_count = 0;
+    let mut upload_complete_fallback_count = 0;
     let mut all_gaps_ns: Vec<f64> = Vec::with_capacity(request_count * BENCH_REQ_CHUNK_COUNT);
 
     for _ in 0..request_count {
-        let (ttft, request_duration, write_overhead, bytes, chunks, gaps_ns) =
+        let (ttft, request_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns) =
             measure_specter_request_streaming(protocol, client, url).await?;
         ttft_values.push(ttft.as_nanos() as f64);
         transfer_duration += request_duration;
         write_overhead_total = write_overhead_total.add(write_overhead);
         bytes_sent += bytes;
         chunk_count += chunks;
+        upload_complete_fallback_count += fallback_count;
         all_gaps_ns.extend(gaps_ns);
     }
 
@@ -2171,6 +2373,7 @@ async fn measure_specter_request_streaming_batch(
         write_overhead_total,
         bytes_sent,
         chunk_count,
+        upload_complete_fallback_count,
         all_gaps_ns,
     ))
 }
@@ -2186,6 +2389,7 @@ async fn measure_reqwest_request_streaming_batch(
         DenominatorEvidence,
         usize,
         usize,
+        usize,
         Vec<f64>,
     ),
     Box<dyn std::error::Error>,
@@ -2195,16 +2399,18 @@ async fn measure_reqwest_request_streaming_batch(
     let mut write_overhead_total = DenominatorEvidence::zero();
     let mut bytes_sent = 0;
     let mut chunk_count = 0;
+    let mut upload_complete_fallback_count = 0;
     let mut all_gaps_ns: Vec<f64> = Vec::with_capacity(request_count * BENCH_REQ_CHUNK_COUNT);
 
     for _ in 0..request_count {
-        let (ttft, request_duration, write_overhead, bytes, chunks, gaps_ns) =
+        let (ttft, request_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns) =
             measure_reqwest_request_streaming(client, url).await?;
         ttft_values.push(ttft.as_nanos() as f64);
         transfer_duration += request_duration;
         write_overhead_total = write_overhead_total.add(write_overhead);
         bytes_sent += bytes;
         chunk_count += chunks;
+        upload_complete_fallback_count += fallback_count;
         all_gaps_ns.extend(gaps_ns);
     }
 
@@ -2215,6 +2421,7 @@ async fn measure_reqwest_request_streaming_batch(
         write_overhead_total,
         bytes_sent,
         chunk_count,
+        upload_complete_fallback_count,
         all_gaps_ns,
     ))
 }
@@ -2296,7 +2503,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
         sample_count: options.sample_count,
         thresholded_origins: vec!["127.0.0.1:3201", "127.0.0.1:3202"],
         comparable_clients_share_workload: true,
-        throughput_timing_window: "corrected client overhead: response rows use paired reqwest/Specter sample order and divide by final fixture DATA write-stamp to final observed body-chunk delivery overhead, falling back to fixed fixture schedule overhead if a stamp is unavailable; per-gap response pacing overage is emitted as jitter evidence only; request rows use per-chunk yielded/consumed timestamps with response headers/upload-complete as the final endpoint; identical for reqwest and Specter",
+        throughput_timing_window: "corrected client overhead: response rows use paired reqwest/Specter sample order and divide by final fixture DATA write-stamp to final observed body-chunk delivery overhead, falling back to fixed fixture schedule overhead if a stamp is unavailable; per-gap response pacing overage is emitted as jitter evidence only; request rows use per-chunk yielded/consumed timestamps with fixture upload-complete as the final endpoint and response headers only as an emitted fallback count; identical for reqwest and Specter",
     };
 
     let mut rows = Vec::new();
@@ -2551,7 +2758,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     },
                 },
                 specter_api_path: if client == "specter" {
-                    Some("specter::Client -> RequestBuilder::send_streaming -> specter::Body::frame")
+                    Some("specter::Client -> RequestBuilder::send_streaming -> specter::Body::chunk")
                 } else {
                     None
                 },
@@ -2768,13 +2975,13 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                         .map(|result| result.p95_ttft_regression_pct),
                     status: if is_row_pass { "pass" } else { "fail" },
                     reason: match (protocol, client) {
-                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable request-body streaming threshold: Specter median corrected upload-complete TTFT must improve by >=5% using per-chunk yielded/consumed timestamps with response status/headers as the final upload-complete endpoint, median upload throughput must improve by >=5% measured against the same corrected upload-complete write-overhead denominator, paired Wilcoxon signed-rank p-values for corrected upload-complete TTFT and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 corrected upload-complete TTFT must not regress by more than 5%; client_write_overhead_duration_ns is retained as duplicate denominator-floor evidence for request rows",
+                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable request-body streaming threshold: Specter median corrected upload-complete TTFT must improve by >=5% using per-chunk yielded/consumed timestamps with the fixture upload-complete timestamp as the final endpoint, median upload throughput must improve by >=5% measured against the same corrected upload-complete write-overhead denominator, paired Wilcoxon signed-rank p-values for corrected upload-complete TTFT and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 corrected upload-complete TTFT must not regress by more than 5%; client_write_overhead_duration_ns is retained as duplicate denominator-floor evidence for request rows",
                         ("h1" | "h2", "reqwest") => "deterministic localhost reqwest baseline request-body streaming row; excluded as a failing threshold subject but included in threshold math",
                         _ => "non-comparable deterministic request-body row excluded from primary H1/H2 reqwest threshold math",
                     },
                 },
                 specter_api_path: if client == "specter" {
-                    Some("specter::Client -> RequestBuilder::body_stream_sized -> send_streaming -> specter::Body::frame")
+                    Some("specter::Client -> RequestBuilder::body_stream_sized -> send_streaming -> specter::Body::chunk")
                 } else {
                     None
                 },
@@ -2806,6 +3013,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
         client_write_overhead_duration_ns: 0.0,
         client_write_overhead_unclamped_duration_ns: None,
         client_write_overhead_denominator_floor_count: 0,
+        upload_complete_fallback_count: 0,
         p50_ns: 0.0,
         p95_ns: 0.0,
         p99_ns: 0.0,
@@ -2901,18 +3109,37 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
         git: git(),
         fixture_config: FixtureConfig {
             fixtures: vec![
-                Fixture { protocol: "h1", address: format!("127.0.0.1:{}", H1_PORT), health: "healthy", origin_classification: "localhost-threshold" },
-                Fixture { protocol: "h2", address: format!("127.0.0.1:{}", H2_PORT), health: "healthy", origin_classification: "localhost-threshold" },
-                Fixture { protocol: "h3", address: format!("127.0.0.1:{}/udp", H3_PORT), health: "healthy", origin_classification: "localhost-threshold" },
-                Fixture { protocol: "rfc8441", address: format!("127.0.0.1:{}", RFC8441_PORT), health: "healthy", origin_classification: "localhost-threshold" },
+                Fixture {
+                    protocol: "h1",
+                    address: format!("127.0.0.1:{}", H1_PORT),
+                    health: "healthy",
+                    origin_classification: "localhost-threshold",
+                },
+                Fixture {
+                    protocol: "h2",
+                    address: format!("127.0.0.1:{}", H2_PORT),
+                    health: "healthy",
+                    origin_classification: "localhost-threshold",
+                },
+                Fixture {
+                    protocol: "h3",
+                    address: format!("127.0.0.1:{}/udp", H3_PORT),
+                    health: "healthy",
+                    origin_classification: "localhost-threshold",
+                },
+                Fixture {
+                    protocol: "rfc8441",
+                    address: format!("127.0.0.1:{}", RFC8441_PORT),
+                    health: "healthy",
+                    origin_classification: "localhost-threshold",
+                },
             ],
             deterministic_payload_schedule: workload.payload_schedule_ms.clone(),
             pacing_mode: FIXTURE_PACING_MODE,
             monotonic_clock_source: FIXTURE_MONOTONIC_CLOCK_SOURCE,
             inter_chunk_target_deadlines_ms: workload.inter_chunk_target_deadlines_ms.clone(),
             target_inter_chunk_pacing_ms: BENCH_CHUNK_DELAY_MS,
-            pacing_implementation:
-                "spin_wait_until(Instant::now() < anchor + i * delay) per H1/H2/H3 fixture chunk emission and request-body producer poll pacing; request producer wakes/yields until PACING_SPIN_LEAD_IN then spin-waits, so no tokio::time::sleep drives inter-chunk pacing",
+            pacing_implementation: "spin_wait_until(Instant::now() < anchor + i * delay) per H1/H2/H3 fixture chunk emission and request-body producer poll pacing; request producer wakes/yields until PACING_SPIN_LEAD_IN then spin-waits, so no tokio::time::sleep drives inter-chunk pacing",
         },
         workload,
         measurement_config: measurement,
@@ -3175,6 +3402,7 @@ impl ResponseSampleSet {
             client_write_overhead_duration_ns: 0.0,
             client_write_overhead_unclamped_duration_ns: None,
             client_write_overhead_denominator_floor_count: 0,
+            upload_complete_fallback_count: 0,
             p50_ns: p50,
             p95_ns: p95,
             p99_ns: p99,
@@ -3209,6 +3437,7 @@ struct RequestSampleSet {
     client_write_overhead_duration_values: Vec<f64>,
     client_write_overhead_unclamped_duration_values: Vec<f64>,
     client_write_overhead_denominator_floor_count: usize,
+    upload_complete_fallback_count: usize,
     all_send_gaps_ns: Vec<f64>,
 }
 
@@ -3221,8 +3450,10 @@ impl RequestSampleSet {
         client_write_overhead: DenominatorEvidence,
         bytes: usize,
         chunks: usize,
+        upload_complete_fallback_count: usize,
         inter_chunk_send_gaps_ns: &[f64],
     ) {
+        self.upload_complete_fallback_count += upload_complete_fallback_count;
         record_request_sample(
             ttft,
             body_transfer_duration,
@@ -3287,6 +3518,7 @@ impl RequestSampleSet {
             ),
             client_write_overhead_denominator_floor_count: self
                 .client_write_overhead_denominator_floor_count,
+            upload_complete_fallback_count: self.upload_complete_fallback_count,
             p50_ns: p50,
             p95_ns: p95,
             p99_ns: p99,
@@ -3324,6 +3556,7 @@ async fn run_real_measurement(
         let specter_client = specter::Client::builder()
             .danger_accept_invalid_certs(true)
             .prefer_http2(protocol == "h2")
+            .h2_direct_streaming_responses(protocol == "h2")
             .build()?;
         if protocol != "h1" {
             for _ in 0..warmup_count {
@@ -3412,6 +3645,7 @@ async fn run_paired_real_measurements(
     let specter_client = specter::Client::builder()
         .danger_accept_invalid_certs(true)
         .prefer_http2(protocol == "h2")
+        .h2_direct_streaming_responses(protocol == "h2")
         .build()?;
     let reqwest_client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -3647,7 +3881,7 @@ async fn record_reqwest_request_sample(
         pooled_client
     };
 
-    if let Ok((ttft, total_duration, write_overhead, bytes, chunks, gaps_ns)) =
+    if let Ok((ttft, total_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns)) =
         measure_reqwest_request_streaming_batch(client_ref, url, BENCH_REQUEST_COUNT).await
     {
         samples.record(
@@ -3657,6 +3891,7 @@ async fn record_reqwest_request_sample(
             write_overhead,
             bytes,
             chunks,
+            fallback_count,
             &gaps_ns,
         );
     }
@@ -3683,7 +3918,7 @@ async fn record_specter_request_sample(
         pooled_client
     };
 
-    if let Ok((ttft, total_duration, write_overhead, bytes, chunks, gaps_ns)) =
+    if let Ok((ttft, total_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns)) =
         measure_specter_request_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT)
             .await
     {
@@ -3694,6 +3929,7 @@ async fn record_specter_request_sample(
             write_overhead,
             bytes,
             chunks,
+            fallback_count,
             &gaps_ns,
         );
     }
@@ -3717,6 +3953,7 @@ async fn run_real_request_body_measurement(
     let mut client_write_overhead_duration_values: Vec<f64> = Vec::new();
     let mut client_write_overhead_unclamped_duration_values: Vec<f64> = Vec::new();
     let mut client_write_overhead_denominator_floor_count = 0;
+    let mut upload_complete_fallback_count = 0;
     let mut all_send_gaps_ns: Vec<f64> = Vec::new();
     let scheduled_duration = payload_schedule_duration(payload_schedule_ms, BENCH_REQUEST_COUNT);
 
@@ -3747,15 +3984,23 @@ async fn run_real_request_body_measurement(
             } else {
                 &specter_client
             };
-            if let Ok((ttft, total_duration, write_overhead, bytes, chunks, gaps_ns)) =
-                measure_specter_request_streaming_batch(
-                    protocol,
-                    client_ref,
-                    url,
-                    BENCH_REQUEST_COUNT,
-                )
-                .await
+            if let Ok((
+                ttft,
+                total_duration,
+                write_overhead,
+                bytes,
+                chunks,
+                fallback_count,
+                gaps_ns,
+            )) = measure_specter_request_streaming_batch(
+                protocol,
+                client_ref,
+                url,
+                BENCH_REQUEST_COUNT,
+            )
+            .await
             {
+                upload_complete_fallback_count += fallback_count;
                 record_request_sample(
                     ttft,
                     total_duration,
@@ -3802,9 +4047,18 @@ async fn run_real_request_body_measurement(
             } else {
                 &reqwest_client
             };
-            if let Ok((ttft, total_duration, write_overhead, bytes, chunks, gaps_ns)) =
+            if let Ok((
+                ttft,
+                total_duration,
+                write_overhead,
+                bytes,
+                chunks,
+                fallback_count,
+                gaps_ns,
+            )) =
                 measure_reqwest_request_streaming_batch(client_ref, url, BENCH_REQUEST_COUNT).await
             {
+                upload_complete_fallback_count += fallback_count;
                 record_request_sample(
                     ttft,
                     total_duration,
@@ -3861,6 +4115,7 @@ async fn run_real_request_body_measurement(
             median_client_write_overhead_unclamped_duration_ns,
         ),
         client_write_overhead_denominator_floor_count,
+        upload_complete_fallback_count,
         p50_ns: p50,
         p95_ns: p95,
         p99_ns: p99,
@@ -3932,8 +4187,8 @@ pub(crate) fn record_sample(
 }
 
 // Request-row variant: threshold TTFT and throughput use corrected
-// upload-complete write-overhead. The raw first-yielded-chunk through
-// response-headers duration remains serialized as body_transfer_duration_ns.
+// upload-complete write-overhead. The raw first-yielded-chunk through fixture
+// upload-complete duration remains serialized as body_transfer_duration_ns.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_request_sample(
     _ttft: Duration,
@@ -3999,7 +4254,7 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
         (
             "ttft_ns",
-            "response rows: elapsed nanoseconds from request start until first response body byte is observable; request rows: corrected upload-complete write-overhead in nanoseconds using per-chunk yielded/consumed timestamps and response status/headers as the final upload-complete endpoint",
+            "response rows: elapsed nanoseconds from request start until first response body byte is observable; request rows: corrected upload-complete write-overhead in nanoseconds using per-chunk yielded/consumed timestamps and the fixture upload-complete timestamp as the final endpoint",
         ),
         (
             "chunks_per_sec",
@@ -4015,7 +4270,7 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "body_transfer_duration_ns",
-            "median raw body-transfer duration denominator in nanoseconds before subtracting fixture pacing; response rows measure first observed response body byte through final observed response body byte, while request rows measure first yielded request body chunk through response headers/upload-complete",
+            "median raw body-transfer duration denominator in nanoseconds before subtracting fixture pacing; response rows measure first observed response body byte through final observed response body byte, while request rows measure first yielded request body chunk through fixture upload-complete",
         ),
         (
             "client_overhead_duration_ns",
@@ -4031,7 +4286,7 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "client_write_overhead_duration_ns",
-            "request-row denominator evidence: median sum across chunks of (consumed_at - yielded_at - scheduled_gap) where consumed_at[i<N-1] is the wall-clock at the start of the next poll_next call and consumed_at[N-1] is response-headers-arrival; used as the request-row threshold denominator",
+            "request-row denominator evidence: median sum across chunks of (consumed_at - yielded_at - scheduled_gap) where consumed_at[i<N-1] is the wall-clock at the start of the next poll_next call and consumed_at[N-1] is the fixture upload-complete timestamp; used as the request-row threshold denominator",
         ),
         (
             "client_write_overhead_unclamped_duration_ns",
@@ -4040,6 +4295,10 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         (
             "client_write_overhead_denominator_floor_count",
             "request-row denominator evidence: number of measured request uploads whose per-chunk write-overhead denominator reached the 1ns floor/clamp",
+        ),
+        (
+            "upload_complete_fallback_count",
+            "request-row evidence: number of request uploads that could not match the fixture upload-complete timestamp and therefore fell back to response-headers timing; release evidence should be zero",
         ),
         (
             "p50_ns",

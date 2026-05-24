@@ -467,6 +467,7 @@ impl MaybeHttpsStream {
 }
 
 impl AsyncRead for MaybeHttpsStream {
+    #[inline(always)]
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -480,6 +481,7 @@ impl AsyncRead for MaybeHttpsStream {
 }
 
 impl AsyncWrite for MaybeHttpsStream {
+    #[inline(always)]
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -491,6 +493,7 @@ impl AsyncWrite for MaybeHttpsStream {
         }
     }
 
+    #[inline(always)]
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
             MaybeHttpsStream::Http(stream) => Pin::new(stream).poll_flush(cx),
@@ -498,6 +501,7 @@ impl AsyncWrite for MaybeHttpsStream {
         }
     }
 
+    #[inline(always)]
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
             MaybeHttpsStream::Http(stream) => Pin::new(stream).poll_shutdown(cx),

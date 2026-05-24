@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use specter::{Client, H3TunnelEvent};
+use specter::{Client, H3Backend, H3TunnelEvent};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -74,6 +74,59 @@ async fn rfc9220_tunnel_carries_websocket_frame_bytes_in_h3_data() {
         .expect("timed out waiting for tunnel DATA")
         .expect("tunnel event stream ended")
         .expect("tunnel recv failed");
+    assert_eq!(inbound, Bytes::from_static(b"\x81\x02ok"));
+}
+
+#[tokio::test]
+async fn native_h3_rfc9220_tunnel_carries_websocket_frame_bytes_in_h3_data() {
+    let server = MockH3Server::new_with_extended_connect().await.unwrap();
+    let url = server.url().replace("https://", "wss://") + "/chat";
+
+    server.start(|conn| async move {
+        let stream_id = accept_tunnel(&conn).await;
+
+        loop {
+            match timeout(Duration::from_secs(5), conn.read_event())
+                .await
+                .expect("timed out waiting for native client DATA")
+                .expect("mock connection closed before native DATA")
+            {
+                MockEvent::Data {
+                    stream_id: sid,
+                    data,
+                    ..
+                } if sid == stream_id => {
+                    assert_eq!(data, b"\x81\x02hi");
+                    conn.send_response_data(stream_id, b"\x81\x02ok", false)
+                        .await;
+                    return;
+                }
+                _ => continue,
+            }
+        }
+    });
+
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .h3_backend(H3Backend::Native)
+        .build()
+        .unwrap();
+
+    let mut tunnel = timeout(Duration::from_secs(5), client.websocket_h3(&url).open())
+        .await
+        .expect("native RFC 9220 open timed out")
+        .expect("native tunnel should open");
+
+    tunnel
+        .send_bytes(Bytes::from_static(b"\x81\x02hi"), false)
+        .await
+        .unwrap();
+
+    let inbound = timeout(Duration::from_secs(5), tunnel.recv_bytes())
+        .await
+        .expect("timed out waiting for native tunnel DATA")
+        .expect("native tunnel event stream ended")
+        .expect("native tunnel recv failed");
     assert_eq!(inbound, Bytes::from_static(b"\x81\x02ok"));
 }
 

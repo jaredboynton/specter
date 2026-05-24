@@ -1,7 +1,9 @@
 //! Browser fingerprint profiles.
 
 use super::http2::Http2Settings;
+use super::http3::Http3Fingerprint;
 use super::tls::TlsFingerprint;
+use crate::transport::h2::PseudoHeaderOrder;
 
 /// Browser fingerprint profile for impersonation.
 ///
@@ -19,8 +21,12 @@ pub enum FingerprintProfile {
     Chrome144,
     /// Chrome 145 on macOS
     Chrome145,
-    /// Chrome 146 on macOS (current stable, March 2026)
+    /// Chrome 146 on macOS
     Chrome146,
+    /// Chrome 147 on macOS
+    Chrome147,
+    /// Chrome 148 on macOS
+    Chrome148,
     /// Firefox 133 on macOS - basic fingerprint (cipher suites, curves, sigalgs)
     /// TLS extension order is randomized by Firefox, so this fingerprint
     /// will not match real Firefox exactly. Firefox does NOT use GREASE.
@@ -48,6 +54,12 @@ impl FingerprintProfile {
             Self::Chrome146 => {
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
             }
+            Self::Chrome147 => {
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+            }
+            Self::Chrome148 => {
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+            }
             Self::Firefox133 => {
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"
             }
@@ -62,7 +74,9 @@ impl FingerprintProfile {
             | FingerprintProfile::Chrome143
             | FingerprintProfile::Chrome144
             | FingerprintProfile::Chrome145
-            | FingerprintProfile::Chrome146 => TlsFingerprint::chrome(),
+            | FingerprintProfile::Chrome146
+            | FingerprintProfile::Chrome147
+            | FingerprintProfile::Chrome148 => TlsFingerprint::chrome(),
             FingerprintProfile::Firefox133 => TlsFingerprint::firefox_133(),
             FingerprintProfile::None => TlsFingerprint::default(),
         }
@@ -75,9 +89,41 @@ impl FingerprintProfile {
             | FingerprintProfile::Chrome143
             | FingerprintProfile::Chrome144
             | FingerprintProfile::Chrome145
-            | FingerprintProfile::Chrome146 => Http2Settings::default(),
+            | FingerprintProfile::Chrome146
+            | FingerprintProfile::Chrome147
+            | FingerprintProfile::Chrome148 => Http2Settings::default(),
             FingerprintProfile::Firefox133 => Http2Settings::firefox(),
             FingerprintProfile::None => Http2Settings::default(),
+        }
+    }
+
+    /// Get the HTTP/2 pseudo-header order for this profile.
+    pub fn http2_pseudo_order(&self) -> PseudoHeaderOrder {
+        match self {
+            FingerprintProfile::Firefox133 => PseudoHeaderOrder::Firefox,
+            FingerprintProfile::Chrome142
+            | FingerprintProfile::Chrome143
+            | FingerprintProfile::Chrome144
+            | FingerprintProfile::Chrome145
+            | FingerprintProfile::Chrome146
+            | FingerprintProfile::Chrome147
+            | FingerprintProfile::Chrome148
+            | FingerprintProfile::None => PseudoHeaderOrder::Chrome,
+        }
+    }
+
+    /// Get the HTTP/3 and QUIC fingerprint for this profile.
+    pub fn http3_fingerprint(&self) -> Http3Fingerprint {
+        match self {
+            FingerprintProfile::Chrome142
+            | FingerprintProfile::Chrome143
+            | FingerprintProfile::Chrome144
+            | FingerprintProfile::Chrome145
+            | FingerprintProfile::Chrome146
+            | FingerprintProfile::Chrome147
+            | FingerprintProfile::Chrome148 => Http3Fingerprint::chrome(),
+            FingerprintProfile::Firefox133 => Http3Fingerprint::firefox(),
+            FingerprintProfile::None => Http3Fingerprint::default(),
         }
     }
 }

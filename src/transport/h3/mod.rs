@@ -1,14 +1,19 @@
 //! HTTP/3 Transport Module
 
 mod body;
+mod command;
 mod connection;
-mod driver;
 mod handle;
+pub mod handshake;
+pub mod native;
+pub mod native_driver;
+pub mod quic;
+pub mod tls;
 mod tunnel;
 
 pub(crate) use body::{H3Body, H3BodyTimeouts};
+pub use command::DriverCommand;
 pub use connection::H3Connection;
-pub use driver::DriverCommand;
 pub use handle::H3Handle;
 pub use tunnel::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 
@@ -19,27 +24,40 @@ pub use tunnel::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 // For now, let's keep H3Client as a factory/pool manager.
 
 use crate::error::{Error, Result};
-use crate::fingerprint::tls::TlsFingerprint;
+use crate::fingerprint::{Http3Fingerprint, TlsFingerprint};
 use crate::request::RequestBody;
 use crate::response::Response;
 use crate::transport::dns::DnsConfig;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum H3Backend {
+    Native,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct H3PoolKey {
     host: String,
     port: u16,
     verify_peer: bool,
+    root_store: String,
+    backend: H3Backend,
     fingerprint: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct H3Client {
     tls_fingerprint: Option<TlsFingerprint>,
+    http3_fingerprint: Http3Fingerprint,
     verify_peer: bool,
+    root_certs: Vec<Vec<u8>>,
+    use_platform_roots: bool,
+    backend: H3Backend,
     max_idle_timeout: Option<u64>,
     dns_config: DnsConfig,
     pool: Arc<RwLock<HashMap<H3PoolKey, H3Handle>>>,
@@ -59,7 +77,11 @@ impl H3Client {
     pub fn new() -> Self {
         Self {
             tls_fingerprint: None,
+            http3_fingerprint: Http3Fingerprint::default(),
             verify_peer: true,
+            root_certs: Vec::new(),
+            use_platform_roots: false,
+            backend: H3Backend::Native,
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
@@ -70,7 +92,11 @@ impl H3Client {
     pub fn with_fingerprint(fp: TlsFingerprint) -> Self {
         Self {
             tls_fingerprint: Some(fp),
+            http3_fingerprint: Http3Fingerprint::default(),
             verify_peer: true,
+            root_certs: Vec::new(),
+            use_platform_roots: false,
+            backend: H3Backend::Native,
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
@@ -91,6 +117,24 @@ impl H3Client {
         self.pool_reuse_counter.load(Ordering::Relaxed)
     }
 
+    pub fn with_http3_fingerprint(mut self, fingerprint: Http3Fingerprint) -> Self {
+        self.http3_fingerprint = fingerprint;
+        self
+    }
+
+    pub fn http3_fingerprint(&self) -> &Http3Fingerprint {
+        &self.http3_fingerprint
+    }
+
+    pub fn with_h3_backend(mut self, backend: H3Backend) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    pub fn h3_backend(&self) -> H3Backend {
+        self.backend
+    }
+
     /// Set a custom idle timeout (in milliseconds)
     pub fn with_max_idle_timeout(mut self, timeout_ms: u64) -> Self {
         self.max_idle_timeout = Some(timeout_ms);
@@ -106,6 +150,24 @@ impl H3Client {
     /// Disable server certificate verification (for testing)
     pub fn danger_accept_invalid_certs(mut self, accept: bool) -> Self {
         self.verify_peer = !accept;
+        self
+    }
+
+    /// Add a custom root certificate (DER or PEM) to the H3 trust store.
+    pub fn add_root_certificate(mut self, cert: Vec<u8>) -> Self {
+        self.root_certs.push(cert);
+        self
+    }
+
+    /// Replace custom root certificates (DER or PEM) used by the H3 trust store.
+    pub fn with_root_certificates(mut self, certs: Vec<Vec<u8>>) -> Self {
+        self.root_certs = certs;
+        self
+    }
+
+    /// Load platform root certificates into the H3 trust store.
+    pub fn with_platform_roots(mut self, enabled: bool) -> Self {
+        self.use_platform_roots = enabled;
         self
     }
 
@@ -280,11 +342,14 @@ impl H3Client {
             pool.remove(&key);
         }
 
-        let config = self.create_quic_config()?;
         let handle = H3Connection::connect(
             url,
-            config,
+            self.tls_fingerprint.clone(),
+            self.http3_fingerprint.clone(),
             self.max_idle_timeout.unwrap_or(30_000),
+            self.verify_peer,
+            self.root_certs.clone(),
+            self.use_platform_roots,
             &self.dns_config,
         )
         .await?;
@@ -298,107 +363,31 @@ impl H3Client {
             host,
             port,
             verify_peer: self.verify_peer,
-            fingerprint: self
-                .tls_fingerprint
-                .as_ref()
-                .map(|fp| fp.pool_key_string())
-                .unwrap_or_else(|| "default".to_string()),
+            backend: self.backend,
+            fingerprint: format!(
+                "tls={};h3={}",
+                self.tls_fingerprint
+                    .as_ref()
+                    .map(|fp| fp.pool_key_string())
+                    .unwrap_or_else(|| "default".to_string()),
+                self.http3_fingerprint.pool_key_string(),
+            ),
+            root_store: root_store_pool_key(&self.root_certs, self.use_platform_roots),
         })
     }
+}
 
-    pub(crate) fn create_quic_config(&self) -> Result<quiche::Config> {
-        let mut config = if let Some(ref fp) = self.tls_fingerprint {
-            // Use BoringSSL context builder for TLS fingerprinting
-            use boring::ssl::{SslContextBuilder, SslMethod};
-
-            let mut ssl_ctx_builder = SslContextBuilder::new(SslMethod::tls_client())
-                .map_err(|e| Error::Tls(format!("Failed to create SSL context: {}", e)))?;
-
-            // Load system default root certificates
-            let _ = ssl_ctx_builder.set_default_verify_paths();
-
-            // TLS 1.3 cipher suites (TLS_AES_128_GCM_SHA256, etc.) are not configurable
-            // as they are determined by the QUIC implementation.
-            // via set_cipher_list() in BoringSSL. QUIC uses TLS 1.3 exclusively.
-
-            // Apply TLS 1.2 cipher suites only if they look like TLS 1.2 names (contain ECDHE/RSA/etc)
-            let tls12_ciphers: Vec<&str> = fp
-                .cipher_list
-                .iter()
-                .filter(|c| !c.starts_with("TLS_"))
-                .map(|s| s.as_ref())
-                .collect();
-            if !tls12_ciphers.is_empty() {
-                let cipher_str = tls12_ciphers.join(":");
-                ssl_ctx_builder
-                    .set_cipher_list(&cipher_str)
-                    .map_err(|e| Error::Tls(format!("Failed to set cipher list: {}", e)))?;
-            }
-
-            // Apply curves/groups
-            // If Kyber is enabled, prepend X25519Kyber768Draft00 to the curves list
-            if !fp.curves.is_empty() {
-                let curves_str = if fp.enable_kyber {
-                    format!("X25519Kyber768Draft00:{}", fp.curves.join(":"))
-                } else {
-                    fp.curves.join(":")
-                };
-                ssl_ctx_builder
-                    .set_curves_list(&curves_str)
-                    .map_err(|e| Error::Tls(format!("Failed to set curves: {}", e)))?;
-            } else if fp.enable_kyber {
-                // If no curves specified but Kyber is enabled, set Kyber as the only group
-                ssl_ctx_builder
-                    .set_curves_list("X25519Kyber768Draft00")
-                    .map_err(|e| Error::Tls(format!("Failed to set curves: {}", e)))?;
-            }
-
-            // Apply signature algorithms
-            if !fp.sigalgs.is_empty() {
-                let sigalgs_str = fp.sigalgs.join(":");
-                ssl_ctx_builder
-                    .set_sigalgs_list(&sigalgs_str)
-                    .map_err(|e| {
-                        Error::Tls(format!("Failed to set signature algorithms: {}", e))
-                    })?;
-            }
-
-            // Create config with custom SSL context
-            quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, ssl_ctx_builder)
-                .map_err(|e| {
-                Error::Quic(format!(
-                    "Failed to create quiche config with TLS fingerprint: {}",
-                    e
-                ))
-            })?
-        } else {
-            quiche::Config::new(quiche::PROTOCOL_VERSION)
-                .map_err(|e| Error::Quic(format!("Failed to create quiche config: {}", e)))?
-        };
-
-        config
-            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
-            .map_err(|e| Error::Quic(format!("Failed to set ALPN: {}", e)))?;
-
-        // Configure QUIC parameters to match Chrome behavior
-        // Chrome uses 15663105 (15MB) for initial_max_data
-        const CHROME_INITIAL_MAX_DATA: u64 = 15_663_105;
-
-        config.set_max_idle_timeout(self.max_idle_timeout.unwrap_or(30_000));
-        config.set_max_recv_udp_payload_size(65535);
-        config.set_max_send_udp_payload_size(1350);
-        config.set_initial_max_data(CHROME_INITIAL_MAX_DATA);
-        config.set_initial_max_stream_data_bidi_local(1_000_000);
-        config.set_initial_max_stream_data_bidi_remote(1_000_000);
-        config.set_initial_max_stream_data_uni(1_000_000);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
-        config.set_disable_active_migration(true);
-
-        config.verify_peer(self.verify_peer);
-
-        Ok(config)
+fn root_store_pool_key(root_certs: &[Vec<u8>], use_platform_roots: bool) -> String {
+    let mut hasher = DefaultHasher::new();
+    use_platform_roots.hash(&mut hasher);
+    root_certs.len().hash(&mut hasher);
+    for cert in root_certs {
+        cert.hash(&mut hasher);
     }
+    format!(
+        "platform={use_platform_roots};roots={:016x}",
+        hasher.finish()
+    )
 }
 
 fn parse_url_host(url: &str) -> Result<(String, u16, String)> {

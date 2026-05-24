@@ -2,27 +2,49 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
+use crate::fingerprint::{Http3Fingerprint, TlsFingerprint};
 use crate::transport::dns::DnsConfig;
-use crate::transport::h3::driver::H3Driver;
 use crate::transport::h3::handle::H3Handle;
+use crate::transport::h3::handshake::NativeQuicHandshake;
+use crate::transport::h3::quic::ConnectionId;
 
+use crate::transport::h3::native_driver::spawn_native_h3_driver;
+use bytes::Bytes;
 use getrandom::fill as getrandom_fill;
-use quiche;
+
+const MAX_CONNECTION_ID_LEN: usize = 20;
+const H3_UDP_SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct H3Connection;
+
+struct NativeH3Connect {
+    host: String,
+    socket: Arc<UdpSocket>,
+    peer_addr: SocketAddr,
+    tls_fingerprint: Option<TlsFingerprint>,
+    fingerprint: Http3Fingerprint,
+    max_idle_timeout: u64,
+    verify_peer: bool,
+    root_certs: Vec<Vec<u8>>,
+    use_platform_roots: bool,
+}
 
 impl H3Connection {
     /// Connect to an HTTP/3 server and return a handle.
     /// This spawns a background driver task.
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect(
         url: &str,
-        mut config: quiche::Config,
+        tls_fingerprint: Option<TlsFingerprint>,
+        fingerprint: Http3Fingerprint,
         max_idle_timeout: u64,
+        verify_peer: bool,
+        root_certs: Vec<Vec<u8>>,
+        use_platform_roots: bool,
         dns_config: &DnsConfig,
     ) -> Result<H3Handle> {
         let (host, port, _path) = parse_url(url)?;
@@ -36,116 +58,155 @@ impl H3Connection {
             .ok_or_else(|| Error::Connection("DNS/IP not found".into()))?;
 
         // Bind local socket
-        let local_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let socket = UdpSocket::bind(local_addr).await.map_err(Error::Io)?;
-        let socket = Arc::new(socket);
+        let local_addr: SocketAddr = if peer_addr.is_ipv4() {
+            "0.0.0.0:0".parse().unwrap()
+        } else {
+            "[::]:0".parse().unwrap()
+        };
+        let socket = Arc::new(bind_udp_socket(local_addr)?);
 
-        // Generate CID
-        let mut scid = [0u8; 16];
-        getrandom_fill(&mut scid).map_err(|e| Error::Quic(format!("RNG error: {}", e)))?;
-        let scid = quiche::ConnectionId::from_ref(&scid);
-
-        // Create QUIC connection
-        let mut conn = quiche::connect(
-            Some(&host),
-            &scid,
-            socket.local_addr().unwrap(),
+        Self::connect_native(NativeH3Connect {
+            host,
+            socket,
             peer_addr,
-            &mut config,
-        )
-        .map_err(|e| Error::Quic(format!("Connect failed: {}", e)))?;
+            tls_fingerprint,
+            fingerprint,
+            max_idle_timeout,
+            verify_peer,
+            root_certs,
+            use_platform_roots,
+        })
+        .await
+    }
 
-        // Handshake Loop
-        // We must drive the handshake until established BEFORE spawning driver
-        // to return errors early.
-        let mut buf = vec![0u8; 65535];
-        let mut out = vec![0u8; 1350];
+    async fn connect_native(request: NativeH3Connect) -> Result<H3Handle> {
+        let NativeH3Connect {
+            host,
+            socket,
+            peer_addr,
+            tls_fingerprint,
+            fingerprint,
+            max_idle_timeout,
+            verify_peer,
+            root_certs,
+            use_platform_roots,
+        } = request;
+        let destination_cid =
+            random_connection_id(fingerprint.transport.destination_connection_id_len)?;
+        let source_cid = random_connection_id(fingerprint.transport.source_connection_id_len)?;
 
-        let start = Instant::now();
-        let timeout_dur = std::time::Duration::from_secs(10);
+        let mut handshake = NativeQuicHandshake::client_with_tls_fingerprint(
+            &host,
+            &fingerprint,
+            tls_fingerprint.as_ref(),
+            destination_cid,
+            source_cid,
+            verify_peer,
+            &root_certs,
+            use_platform_roots,
+        )?;
+
+        socket
+            .send_to(handshake.client_initial().packet.as_ref(), peer_addr)
+            .await
+            .map_err(Error::Io)?;
+
+        let deadline = Instant::now() + Duration::from_millis(max_idle_timeout.max(1));
+        let mut buf = vec![0u8; fingerprint.transport.max_recv_udp_payload_size.max(1200)];
 
         loop {
-            if start.elapsed() > timeout_dur {
-                return Err(Error::Timeout("H3 Handshake timeout".into()));
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::Timeout("native H3 handshake timeout".into()));
             }
 
-            // Flush egress
-            loop {
-                match conn.send(&mut out) {
-                    Ok((len, _)) => {
+            match tokio::time::timeout(
+                remaining.min(Duration::from_millis(25)),
+                socket.recv_from(&mut buf),
+            )
+            .await
+            {
+                Ok(Ok((len, from))) if from == peer_addr => {
+                    if buf[..len].first().is_some_and(|first| first & 0x80 == 0) {
+                        if handshake.is_application_ready() {
+                            return spawn_native_h3_driver(
+                                handshake,
+                                fingerprint,
+                                socket,
+                                peer_addr,
+                                max_idle_timeout,
+                                Some(Bytes::copy_from_slice(&buf[..len])),
+                            );
+                        }
+                        continue;
+                    }
+                    let processed_packets = handshake.process_server_datagram(&buf[..len])?;
+                    if let Some(packet) = handshake.build_client_initial_ack_packet()? {
                         socket
-                            .send_to(&out[..len], peer_addr)
+                            .send_to(packet.packet.as_ref(), peer_addr)
                             .await
                             .map_err(Error::Io)?;
                     }
-                    Err(quiche::Error::Done) => break,
-                    Err(e) => return Err(Error::Quic(format!("Send error: {}", e))),
-                }
-            }
-
-            if conn.is_established() {
-                break;
-            }
-            if conn.is_closed() {
-                return Err(Error::Quic("Connection closed during handshake".into()));
-            }
-
-            // Recv ingress
-            let recv_timeout = conn
-                .timeout()
-                .unwrap_or(std::time::Duration::from_millis(100));
-            // Use small timeout for recv to allow sending keep-alives/re-transmits
-            match tokio::time::timeout(recv_timeout, socket.recv_from(&mut buf)).await {
-                Ok(Ok((len, from))) => {
-                    if from == peer_addr {
-                        let info = quiche::RecvInfo {
-                            from,
-                            to: socket.local_addr().unwrap(),
-                        };
-                        let _ = conn.recv(&mut buf[..len], info);
+                    if let Some(packet) = handshake.build_client_handshake_ack_packet()? {
+                        socket
+                            .send_to(packet.packet.as_ref(), peer_addr)
+                            .await
+                            .map_err(Error::Io)?;
+                    }
+                    for processed in processed_packets {
+                        if let Some(packet) = handshake
+                            .build_client_handshake_crypto_packet(processed.handshake_crypto_out)?
+                        {
+                            socket
+                                .send_to(packet.packet.as_ref(), peer_addr)
+                                .await
+                                .map_err(Error::Io)?;
+                        }
+                    }
+                    if handshake.is_application_ready() {
+                        return spawn_native_h3_driver(
+                            handshake,
+                            fingerprint,
+                            socket,
+                            peer_addr,
+                            max_idle_timeout,
+                            None,
+                        );
                     }
                 }
-                Ok(Err(e)) => return Err(Error::Io(e)),
-                Err(_) => {
-                    conn.on_timeout();
-                }
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => return Err(Error::Io(err)),
+                Err(_) => {}
             }
         }
-
-        // Create HTTP/3 connection context
-        let h3_config = quiche::h3::Config::new()
-            .map_err(|e| Error::Quic(format!("H3 Config error: {}", e)))?;
-        let h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)
-            .map_err(|e| Error::Quic(format!("H3 Init error: {}", e)))?;
-
-        // Spawn Driver
-        let (tx, rx) = mpsc::channel(32);
-        let is_draining = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let body_progress_notify = Arc::new(tokio::sync::Notify::new());
-        let driver = H3Driver::new(
-            tx.clone(),
-            rx,
-            conn,
-            h3_conn,
-            socket.clone(),
-            peer_addr,
-            is_draining.clone(),
-            body_progress_notify.clone(),
-            max_idle_timeout,
-        );
-
-        tokio::spawn(async move {
-            if let Err(e) = driver.drive().await {
-                tracing::error!("H3 Driver crashed: {:?}", e);
-            }
-        });
-
-        Ok(H3Handle::new_with_notify(
-            tx,
-            is_draining,
-            body_progress_notify,
-        ))
     }
+}
+
+fn random_connection_id(len: usize) -> Result<ConnectionId> {
+    if len > MAX_CONNECTION_ID_LEN {
+        return Err(Error::Quic(format!(
+            "QUIC connection id length exceeds {MAX_CONNECTION_ID_LEN} bytes"
+        )));
+    }
+    let mut bytes = vec![0u8; len];
+    getrandom_fill(&mut bytes).map_err(|e| Error::Quic(format!("RNG error: {}", e)))?;
+    ConnectionId::from_bytes(Bytes::from(bytes))
+}
+
+fn bind_udp_socket(local_addr: SocketAddr) -> Result<UdpSocket> {
+    let domain = if local_addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
+        .map_err(Error::Io)?;
+    let _ = socket.set_recv_buffer_size(H3_UDP_SOCKET_BUFFER_BYTES);
+    let _ = socket.set_send_buffer_size(H3_UDP_SOCKET_BUFFER_BYTES);
+    socket.set_nonblocking(true).map_err(Error::Io)?;
+    socket.bind(&local_addr.into()).map_err(Error::Io)?;
+    let std_socket: std::net::UdpSocket = socket.into();
+    UdpSocket::from_std(std_socket).map_err(Error::Io)
 }
 
 fn parse_url(url: &str) -> Result<(String, u16, String)> {

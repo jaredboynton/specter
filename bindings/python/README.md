@@ -10,6 +10,8 @@ Python bindings for Specter, a high-performance async HTTP client with TLS, HTTP
 - Cookie store and shared cookie jar support across HTTP and WebSocket handshakes
 - Granular connect, TTFB, read/write idle, total, pool, and WebSocket handshake timeouts
 
+Supported Chrome profiles are `specter.FingerprintProfile.Chrome142` through `specter.FingerprintProfile.Chrome148`; examples use `Chrome148`, the latest implemented profile.
+
 ## Installation
 
 ```bash
@@ -22,7 +24,7 @@ pip install specters
 import specter
 
 builder = specter.Client.builder()
-builder.fingerprint(specter.FingerprintProfile.Chrome142)
+builder.fingerprint(specter.FingerprintProfile.Chrome148)
 builder.cookie_store(True)
 client = builder.build()
 

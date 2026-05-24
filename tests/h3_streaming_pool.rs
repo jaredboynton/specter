@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use specter::transport::h3::H3Client;
+use specter::transport::h3::{H3Backend, H3Client};
 use specter::RequestBody;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -122,6 +122,60 @@ async fn h3_pool_reuses_live_same_key_connection() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn native_h3_backend_streams_response_chunks_incrementally() {
+    let server = MockH3Server::new().await.unwrap();
+    let url = server.url();
+
+    server.start(|conn| async move {
+        let stream_id = loop {
+            match conn.read_event().await {
+                Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                Some(_) => continue,
+                None => return,
+            }
+        };
+
+        conn.send_response_headers(stream_id, vec![(":status", "200")], false)
+            .await;
+        conn.send_response_data(stream_id, b"native-", false).await;
+        conn.send_response_data(stream_id, b"stream", true).await;
+    });
+
+    let client = H3Client::new()
+        .danger_accept_invalid_certs(true)
+        .with_h3_backend(H3Backend::Native);
+
+    let mut response = client
+        .send_streaming(&url, "GET", vec![], RequestBody::Empty)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .body_mut()
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap(),
+        bytes::Bytes::from_static(b"native-")
+    );
+    assert_eq!(
+        response
+            .body_mut()
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap(),
+        bytes::Bytes::from_static(b"stream")
+    );
+    assert!(response.body_mut().frame().await.is_none());
 }
 
 #[tokio::test]
@@ -419,4 +473,266 @@ async fn h3_pool_evicts_closed_or_draining_connections() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn native_h3_pool_evicts_draining_connection_after_goaway() {
+    let server = MockH3Server::new().await.unwrap();
+    let connection_count = server.connection_count();
+    let url = server.url();
+
+    let connection_count_clone = connection_count.clone();
+    server.start(move |conn| {
+        let connection_count = connection_count_clone.clone();
+        async move {
+            let is_first = connection_count.load(Ordering::SeqCst) <= 1;
+
+            if is_first {
+                let stream_id1 = loop {
+                    match conn.read_event().await {
+                        Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                        Some(_) => continue,
+                        None => return,
+                    }
+                };
+                conn.send_response_headers(stream_id1, vec![(":status", "200")], false)
+                    .await;
+                conn.send_response_data(stream_id1, b"first", true).await;
+
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                conn.send_goaway(8).await;
+            } else {
+                let stream_id2 = loop {
+                    match conn.read_event().await {
+                        Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                        Some(_) => continue,
+                        None => return,
+                    }
+                };
+                conn.send_response_headers(stream_id2, vec![(":status", "200")], false)
+                    .await;
+                conn.send_response_data(stream_id2, b"second", true).await;
+            }
+        }
+    });
+
+    let client = H3Client::new()
+        .danger_accept_invalid_certs(true)
+        .with_h3_backend(H3Backend::Native);
+
+    let mut resp1 = client
+        .send_streaming(&url, "GET", vec![], RequestBody::Empty)
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), 200);
+    assert_eq!(
+        resp1
+            .body_mut()
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap(),
+        bytes::Bytes::from_static(b"first")
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut resp2 = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.send_streaming(&url, "GET", vec![], RequestBody::Empty),
+    )
+    .await
+    .expect("second request should open a fresh native H3 connection")
+    .unwrap();
+    assert_eq!(resp2.status(), 200);
+    assert_eq!(
+        resp2
+            .body_mut()
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap(),
+        bytes::Bytes::from_static(b"second")
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(connection_count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn native_h3_streaming_response_reset_wakes_body_with_error() {
+    let server = MockH3Server::new().await.unwrap();
+    let url = server.url();
+
+    server.start(|conn| async move {
+        let stream_id = loop {
+            match conn.read_event().await {
+                Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                Some(_) => continue,
+                None => return,
+            }
+        };
+
+        conn.send_response_headers(stream_id, vec![(":status", "200")], false)
+            .await;
+        conn.send_response_data(stream_id, b"before-reset", false)
+            .await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        conn.reset_stream(stream_id, 0x010c).await;
+    });
+
+    let client = H3Client::new()
+        .danger_accept_invalid_certs(true)
+        .with_h3_backend(H3Backend::Native);
+
+    let mut response = client
+        .send_streaming(&url, "GET", vec![], RequestBody::Empty)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .body_mut()
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap(),
+        bytes::Bytes::from_static(b"before-reset")
+    );
+
+    let reset = tokio::time::timeout(Duration::from_secs(1), response.body_mut().frame())
+        .await
+        .expect("native reset should wake the streaming body")
+        .expect("reset should surface as a body frame error")
+        .expect_err("reset must not be reported as a successful DATA frame");
+    assert!(
+        reset.to_string().contains("Stream reset: 268"),
+        "unexpected reset error: {reset}"
+    );
+}
+
+#[tokio::test]
+async fn native_h3_dropped_response_body_sends_stream_cancel() {
+    let server = MockH3Server::new().await.unwrap();
+    let url = server.url();
+
+    server.start(|conn| async move {
+        let first_stream_id = loop {
+            match conn.read_event().await {
+                Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                Some(_) => continue,
+                None => return,
+            }
+        };
+        conn.send_response_headers(first_stream_id, vec![(":status", "200")], false)
+            .await;
+
+        let cancel_seen = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let Some(stats) = conn.stats().await else {
+                    panic!("mock connection closed before stats");
+                };
+                if stats.stopped_stream_count_remote > 0 || stats.reset_stream_count_remote > 0 {
+                    break stats;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropped native response body should cancel the stream");
+        assert!(
+            cancel_seen.stopped_stream_count_remote > 0
+                || cancel_seen.reset_stream_count_remote > 0,
+            "server did not observe native STOP_SENDING or RESET_STREAM: {cancel_seen:?}"
+        );
+
+        let second_stream_id = loop {
+            match conn.read_event().await {
+                Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                Some(_) => continue,
+                None => return,
+            }
+        };
+        conn.send_response_headers(second_stream_id, vec![(":status", "200")], false)
+            .await;
+        conn.send_response_data(second_stream_id, b"after-drop", true)
+            .await;
+    });
+
+    let client = H3Client::new()
+        .danger_accept_invalid_certs(true)
+        .with_h3_backend(H3Backend::Native);
+
+    let response = client
+        .send_streaming(&url, "GET", vec![], RequestBody::Empty)
+        .await
+        .unwrap();
+    drop(response);
+
+    let mut followup = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.send_streaming(&url, "GET", vec![], RequestBody::Empty),
+    )
+    .await
+    .expect("follow-up request should not hang after native cancel")
+    .unwrap();
+    assert_eq!(
+        followup
+            .body_mut()
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap(),
+        Bytes::from_static(b"after-drop")
+    );
+}
+
+#[tokio::test]
+async fn native_h3_connection_close_wakes_active_streaming_body() {
+    let server = MockH3Server::new().await.unwrap();
+    let url = server.url();
+
+    server.start(|conn| async move {
+        let stream_id = loop {
+            match conn.read_event().await {
+                Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                Some(_) => continue,
+                None => return,
+            }
+        };
+        conn.send_response_headers(stream_id, vec![(":status", "200")], false)
+            .await;
+        conn.close_connection(true, 0x0100, b"native close").await;
+    });
+
+    let client = H3Client::new()
+        .danger_accept_invalid_certs(true)
+        .with_h3_backend(H3Backend::Native);
+
+    let mut response = client
+        .send_streaming(&url, "GET", vec![], RequestBody::Empty)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let close = tokio::time::timeout(Duration::from_secs(1), response.body_mut().frame())
+        .await
+        .expect("native connection close should wake active body")
+        .expect("connection close should surface as a body error")
+        .expect_err("connection close must not be reported as successful DATA");
+    let close = close.to_string();
+    assert!(
+        close.contains("Connection close")
+            && close.contains("0x100")
+            && close.contains("native close"),
+        "unexpected connection close error: {close}"
+    );
 }

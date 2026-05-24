@@ -6,7 +6,7 @@
 //! signature algorithm, and curve ordering - but extension ordering may not
 //! match real browsers.
 //!
-//! Current implementation: Chrome 142-146, Firefox 133
+//! Current implementation: Chrome 142-148, Firefox 133
 //!
 //! ## Post-Quantum Cryptography (Kyber)
 //!
@@ -18,8 +18,8 @@
 //! To verify Kyber support, check if connections show "X25519Kyber768" in the key
 //! exchange algorithm when connecting to servers that support it (e.g., Google, Cloudflare).
 
-/// Chrome 142-146 cipher suites in exact order.
-/// Unchanged across Chrome 142 through 146.
+/// Chrome 142-148 cipher suites in exact order.
+/// Unchanged across Chrome 142 through 148.
 pub const CHROME_CIPHER_SUITES: &[&str] = &[
     "TLS_AES_128_GCM_SHA256",
     "TLS_AES_256_GCM_SHA384",
@@ -41,8 +41,8 @@ pub const CHROME_CIPHER_SUITES: &[&str] = &[
 /// Backwards-compatible alias for Chrome 142 cipher suites.
 pub const CHROME_142_CIPHER_SUITES: &[&str] = CHROME_CIPHER_SUITES;
 
-/// Chrome 142-146 signature algorithms.
-/// Unchanged across Chrome 142 through 146.
+/// Chrome 142-148 signature algorithms.
+/// Unchanged across Chrome 142 through 148.
 pub const CHROME_SIGNATURE_ALGORITHMS: &[&str] = &[
     "ecdsa_secp256r1_sha256",
     "rsa_pss_rsae_sha256",
@@ -57,15 +57,15 @@ pub const CHROME_SIGNATURE_ALGORITHMS: &[&str] = &[
 /// Backwards-compatible alias for Chrome 142 signature algorithms.
 pub const CHROME_142_SIGNATURE_ALGORITHMS: &[&str] = CHROME_SIGNATURE_ALGORITHMS;
 
-/// Chrome 142-146 supported curves.
-/// Unchanged across Chrome 142 through 146.
+/// Chrome 142-148 supported curves.
+/// Unchanged across Chrome 142 through 148.
 pub const CHROME_CURVES: &[&str] = &["x25519", "P-256", "P-384"];
 
 /// Backwards-compatible alias for Chrome 142 curves.
 pub const CHROME_142_CURVES: &[&str] = CHROME_CURVES;
 
-/// Chrome 142-146 extension IDs in exact order.
-/// Unchanged across Chrome 142 through 146.
+/// Chrome 142-148 extension IDs in exact order.
+/// Unchanged across Chrome 142 through 148.
 pub const CHROME_EXTENSION_IDS: &[u16] =
     &[0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43, 27, 21];
 
@@ -171,7 +171,7 @@ impl Default for TlsFingerprint {
 }
 
 impl TlsFingerprint {
-    /// Create a TLS fingerprint matching Chrome 142-146.
+    /// Create a TLS fingerprint matching Chrome 142-148.
     /// The TLS configuration is identical across these versions.
     pub fn chrome() -> Self {
         Self {
@@ -208,6 +208,16 @@ impl TlsFingerprint {
 
     /// Create a TLS fingerprint for Chrome 146.
     pub fn chrome_146() -> Self {
+        Self::chrome()
+    }
+
+    /// Create a TLS fingerprint for Chrome 147.
+    pub fn chrome_147() -> Self {
+        Self::chrome()
+    }
+
+    /// Create a TLS fingerprint for Chrome 148.
+    pub fn chrome_148() -> Self {
         Self::chrome()
     }
 

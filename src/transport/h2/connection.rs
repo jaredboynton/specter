@@ -2,12 +2,15 @@
 //!
 //! Handles the connection lifecycle, frame I/O, and stream multiplexing.
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{Method, Request, Response, StatusCode, Uri};
 use std::collections::HashMap;
+use std::mem::MaybeUninit;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
 use tracing;
 
@@ -33,6 +36,8 @@ pub const CHROME_WINDOW_UPDATE: u32 = 15663105;
 
 /// Initial window size per RFC 9113.
 const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 65535;
+const DEFAULT_READ_BUFFER_CAPACITY: usize =
+    (DEFAULT_MAX_FRAME_SIZE as usize + FRAME_HEADER_SIZE) * 2;
 
 /// Threshold for sending WINDOW_UPDATE frames (16KB).
 /// When receive window drops below this, send WINDOW_UPDATE.
@@ -80,6 +85,17 @@ pub enum ControlAction {
     PingAck([u8; 8]),
     /// PUSH_PROMISE received (stream_id, promised_stream_id).
     RefusePush(u32, u32),
+}
+
+/// Result of polling a single direct-owned streaming response body.
+pub(crate) enum H2StreamData {
+    Data { bytes: Bytes, end_stream: bool },
+    End,
+}
+
+pub(crate) enum H2DirectPolledFrame {
+    Data { bytes: Bytes, end_stream: bool },
+    Other(FrameHeader, Bytes),
 }
 
 /// HTTP/2 connection with full fingerprint control.
@@ -241,7 +257,7 @@ where
             conn_recv_window: (DEFAULT_INITIAL_WINDOW_SIZE + settings.initial_window_update) as i32,
             peer_settings: PeerSettings::default(),
             peer_max_frame_size: Arc::new(AtomicU32::new(DEFAULT_MAX_FRAME_SIZE)),
-            read_buf: BytesMut::with_capacity(DEFAULT_MAX_FRAME_SIZE as usize + FRAME_HEADER_SIZE),
+            read_buf: BytesMut::with_capacity(DEFAULT_READ_BUFFER_CAPACITY),
             pending_headers: None,
             goaway_last_stream_id: None,
         };
@@ -773,6 +789,111 @@ where
         Ok((header, payload_bytes))
     }
 
+    #[inline(always)]
+    fn poll_read_into_frame_buffer(&mut self, cx: &mut Context<'_>) -> Poll<Result<usize>> {
+        if self.read_buf.capacity() == self.read_buf.len() {
+            self.read_buf.reserve(DEFAULT_MAX_FRAME_SIZE as usize);
+        }
+
+        let n = {
+            let dst = self.read_buf.chunk_mut();
+            let dst_slice: &mut [MaybeUninit<u8>] =
+                unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast(), dst.len()) };
+            let mut read = ReadBuf::uninit(dst_slice);
+            match Pin::new(&mut self.reader).poll_read(cx, &mut read) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(err)) => {
+                    return Poll::Ready(Err(Error::HttpProtocol(format!("Read error: {}", err))));
+                }
+                Poll::Ready(Ok(())) => read.filled().len(),
+            }
+        };
+
+        unsafe {
+            self.read_buf.advance_mut(n);
+        }
+        Poll::Ready(Ok(n))
+    }
+
+    /// Poll the next frame with a no-allocation fast path for unpadded DATA
+    /// on the direct-owned stream.
+    #[inline(always)]
+    pub(crate) fn poll_read_direct_frame(
+        &mut self,
+        cx: &mut Context<'_>,
+        expected_stream_id: u32,
+    ) -> Poll<Result<H2DirectPolledFrame>> {
+        while self.read_buf.len() < FRAME_HEADER_SIZE {
+            match self.poll_read_into_frame_buffer(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(Error::HttpProtocol("Connection closed".into())));
+                }
+                Poll::Ready(Ok(_)) => {}
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            }
+        }
+
+        let header_bytes = &self.read_buf[..FRAME_HEADER_SIZE];
+        let length = ((header_bytes[0] as u32) << 16)
+            | ((header_bytes[1] as u32) << 8)
+            | (header_bytes[2] as u32);
+        let frame_type = header_bytes[3];
+        let flags = header_bytes[4];
+        if (header_bytes[5] & 0x80) != 0 {
+            return Poll::Ready(Err(Error::HttpProtocol(
+                "Invalid frame header (reserved bits set)".into(),
+            )));
+        }
+        let stream_id = ((header_bytes[5] as u32 & 0x7f) << 24)
+            | ((header_bytes[6] as u32) << 16)
+            | ((header_bytes[7] as u32) << 8)
+            | (header_bytes[8] as u32);
+
+        if length > self.peer_settings.max_frame_size {
+            return Poll::Ready(Err(Error::HttpProtocol(format!(
+                "FRAME_SIZE_ERROR: Frame size {} exceeds MAX_FRAME_SIZE {}",
+                length, self.peer_settings.max_frame_size
+            ))));
+        }
+
+        let frame_len = FRAME_HEADER_SIZE + length as usize;
+        while self.read_buf.len() < frame_len {
+            match self.poll_read_into_frame_buffer(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(Error::HttpProtocol("Connection closed".into())));
+                }
+                Poll::Ready(Ok(_)) => {}
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            }
+        }
+
+        self.read_buf.advance(FRAME_HEADER_SIZE);
+        let payload_len = length as usize;
+        let payload = if self.read_buf.len() == payload_len {
+            self.read_buf.split().freeze()
+        } else {
+            self.read_buf.split_to(payload_len).freeze()
+        };
+        if frame_type == 0x0 && stream_id == expected_stream_id && (flags & flags::PADDED) == 0 {
+            return Poll::Ready(Ok(H2DirectPolledFrame::Data {
+                bytes: payload,
+                end_stream: (flags & flags::END_STREAM) != 0,
+            }));
+        }
+
+        Poll::Ready(Ok(H2DirectPolledFrame::Other(
+            FrameHeader {
+                length,
+                frame_type: FrameType::from(frame_type),
+                flags,
+                stream_id,
+            },
+            payload,
+        )))
+    }
+
     /// Handle a control frame (SETTINGS, PING, WINDOW_UPDATE, GOAWAY, RST_STREAM).
     /// Returns an action if the driver needs to react (e.g. close a stream channel).
     pub async fn handle_control_frame(
@@ -911,6 +1032,7 @@ where
     /// `DriverStreamState` and applies its own stream-level flow control on
     /// the hot path. Returns the application bytes after stripping any
     /// padding declared by the frame.
+    #[inline]
     pub fn parse_inbound_data_payload(
         &self,
         stream_id: u32,
@@ -948,11 +1070,20 @@ where
     /// Apply connection-level inbound flow-control bookkeeping without
     /// awaiting. Returns the connection WINDOW_UPDATE increment when the
     /// refresh threshold is crossed.
+    #[inline]
     pub fn apply_conn_inbound_flow_control_delta(&mut self, data_len: usize) -> Option<u32> {
-        self.conn_recv_window -= data_len as i32;
-        if self.conn_recv_window < WINDOW_UPDATE_THRESHOLD {
+        Self::apply_conn_inbound_flow_control_delta_to(&mut self.conn_recv_window, data_len)
+    }
+
+    #[inline]
+    pub(crate) fn apply_conn_inbound_flow_control_delta_to(
+        recv_window: &mut i32,
+        data_len: usize,
+    ) -> Option<u32> {
+        *recv_window -= data_len as i32;
+        if *recv_window < WINDOW_UPDATE_THRESHOLD {
             let increment = DEFAULT_INITIAL_WINDOW_SIZE;
-            self.conn_recv_window += increment as i32;
+            *recv_window += increment as i32;
             Some(increment)
         } else {
             None
@@ -1361,7 +1492,7 @@ where
         Ok((status, headers))
     }
 
-    async fn read_response_headers_with_end_stream(
+    pub(crate) async fn read_response_headers_with_end_stream(
         &mut self,
         stream_id: u32,
     ) -> Result<(StatusCode, Vec<(String, String)>, bool)> {
@@ -1452,6 +1583,23 @@ where
                                     Error::HttpProtocol("Missing :status header".into())
                                 })?;
 
+                            let status_code = StatusCode::from_u16(status)
+                                .map_err(|_| Error::HttpProtocol("Invalid status code".into()))?;
+                            if status_code == StatusCode::SWITCHING_PROTOCOLS {
+                                return Err(Error::HttpProtocol(
+                                    "HTTP/2 WebSocket response must not use 101 Switching Protocols"
+                                        .into(),
+                                ));
+                            }
+                            if status_code.is_informational() {
+                                if (header.flags & flags::END_STREAM) != 0 {
+                                    return Err(Error::HttpProtocol(
+                                        "Informational response ended stream".into(),
+                                    ));
+                                }
+                                continue;
+                            }
+
                             // Filter out pseudo-headers, keep only real headers
                             let real_headers: Vec<(String, String)> = decoded
                                 .into_iter()
@@ -1459,9 +1607,7 @@ where
                                 .collect();
 
                             return Ok((
-                                StatusCode::from_u16(status).map_err(|_| {
-                                    Error::HttpProtocol("Invalid status code".into())
-                                })?,
+                                status_code,
                                 real_headers,
                                 (header.flags & flags::END_STREAM) != 0,
                             ));
@@ -1510,6 +1656,21 @@ where
                                         Error::HttpProtocol("Missing :status header".into())
                                     })?;
 
+                                let status_code = StatusCode::from_u16(status).map_err(|_| {
+                                    Error::HttpProtocol("Invalid status code".into())
+                                })?;
+                                if status_code == StatusCode::SWITCHING_PROTOCOLS {
+                                    self.pending_headers = None;
+                                    return Err(Error::HttpProtocol(
+                                        "HTTP/2 WebSocket response must not use 101 Switching Protocols"
+                                            .into(),
+                                    ));
+                                }
+                                if status_code.is_informational() {
+                                    self.pending_headers = None;
+                                    continue;
+                                }
+
                                 // Filter out pseudo-headers, keep only real headers
                                 let real_headers: Vec<(String, String)> = decoded
                                     .into_iter()
@@ -1517,13 +1678,7 @@ where
                                     .collect();
 
                                 self.pending_headers = None;
-                                return Ok((
-                                    StatusCode::from_u16(status).map_err(|_| {
-                                        Error::HttpProtocol("Invalid status code".into())
-                                    })?,
-                                    real_headers,
-                                    false,
-                                ));
+                                return Ok((status_code, real_headers, false));
                             }
                         }
                     }
@@ -1533,6 +1688,123 @@ where
                     self.handle_control_frame(&header, payload_bytes.clone())
                         .await?;
                 }
+            }
+        }
+    }
+
+    async fn consume_header_block(
+        &mut self,
+        stream_id: u32,
+        header: FrameHeader,
+        payload: Bytes,
+    ) -> Result<bool> {
+        if header.stream_id != stream_id {
+            return Ok(false);
+        }
+
+        let mut block = BytesMut::from(payload);
+        if (header.flags & flags::END_HEADERS) == 0 {
+            loop {
+                let (next_header, next_payload) = self.read_next_frame().await?;
+                if next_header.frame_type != FrameType::Continuation
+                    || next_header.stream_id != stream_id
+                {
+                    return Err(Error::HttpProtocol(
+                        "Expected CONTINUATION frame for stream".into(),
+                    ));
+                }
+                block.extend_from_slice(&next_payload);
+                if (next_header.flags & flags::END_HEADERS) != 0 {
+                    break;
+                }
+            }
+        }
+
+        let decoded = self.decode_header_block(block.freeze())?;
+        for (name, _) in decoded {
+            if name.starts_with(':') {
+                return Err(Error::HttpProtocol(format!(
+                    "PROTOCOL_ERROR: pseudo-header {} in response trailers",
+                    name
+                )));
+            }
+        }
+        Ok((header.flags & flags::END_STREAM) != 0)
+    }
+
+    /// Read one DATA chunk for a direct-owned streaming response.
+    ///
+    /// This is used only when the response body owns the raw H2 connection
+    /// until EOF. It keeps normal control-frame handling but returns DATA
+    /// directly to the caller without the background driver/body queue handoff.
+    pub(crate) async fn read_stream_data_direct_from(
+        &mut self,
+        stream_id: u32,
+        first_frame: Option<(FrameHeader, Bytes)>,
+    ) -> Result<H2StreamData> {
+        let mut first_frame = first_frame;
+        loop {
+            let (header, payload) = match first_frame.take() {
+                Some(frame) => frame,
+                None => self.read_next_frame().await?,
+            };
+
+            match self.handle_control_frame(&header, payload.clone()).await? {
+                ControlAction::RstStream(sid, code) if sid == stream_id => {
+                    self.remove_stream(stream_id);
+                    return Err(Error::HttpProtocol(format!(
+                        "Stream {} reset by server: {:?}",
+                        sid, code
+                    )));
+                }
+                ControlAction::GoAway(last_sid) if stream_id > last_sid => {
+                    self.remove_stream(stream_id);
+                    return Err(Error::HttpProtocol(format!(
+                        "Server sent GOAWAY, last_stream_id={}",
+                        last_sid
+                    )));
+                }
+                _ => {}
+            }
+
+            if header.frame_type == FrameType::Headers && header.stream_id == stream_id {
+                if self
+                    .consume_header_block(stream_id, header, payload)
+                    .await?
+                {
+                    self.remove_stream(stream_id);
+                    return Ok(H2StreamData::End);
+                }
+                continue;
+            }
+
+            match header.frame_type {
+                FrameType::Data if header.stream_id == stream_id => {
+                    let end_stream = (header.flags & flags::END_STREAM) != 0;
+                    let data = self
+                        .process_inbound_data_frame(stream_id, header.flags, payload)
+                        .await?;
+                    if end_stream {
+                        self.remove_stream(stream_id);
+                    }
+                    if data.is_empty() {
+                        if end_stream {
+                            return Ok(H2StreamData::End);
+                        }
+                        continue;
+                    }
+                    return Ok(H2StreamData::Data {
+                        bytes: data,
+                        end_stream,
+                    });
+                }
+                FrameType::Data => {
+                    return Err(Error::HttpProtocol(format!(
+                        "Unexpected DATA frame for stream {} while direct stream {} is active",
+                        header.stream_id, stream_id
+                    )));
+                }
+                _ => {}
             }
         }
     }
@@ -1562,21 +1834,17 @@ where
 
             // Handle control frames
             match self.handle_control_frame(&header, payload.clone()).await? {
-                ControlAction::RstStream(sid, code) => {
-                    if sid == stream_id {
-                        return Err(Error::HttpProtocol(format!(
-                            "Stream {} reset by server: {:?}",
-                            sid, code
-                        )));
-                    }
+                ControlAction::RstStream(sid, code) if sid == stream_id => {
+                    return Err(Error::HttpProtocol(format!(
+                        "Stream {} reset by server: {:?}",
+                        sid, code
+                    )));
                 }
-                ControlAction::GoAway(last_sid) => {
-                    if stream_id > last_sid {
-                        return Err(Error::HttpProtocol(format!(
-                            "Server sent GOAWAY, last_stream_id={}",
-                            last_sid
-                        )));
-                    }
+                ControlAction::GoAway(last_sid) if stream_id > last_sid => {
+                    return Err(Error::HttpProtocol(format!(
+                        "Server sent GOAWAY, last_stream_id={}",
+                        last_sid
+                    )));
                 }
                 _ => {}
             }
@@ -1677,11 +1945,23 @@ where
         payload_len: usize,
         end_stream: bool,
     ) -> Result<()> {
+        let (conn_increment, stream_increment) =
+            self.apply_inbound_data_payload_delta(stream_id, payload_len, end_stream)?;
+        self.send_inbound_window_updates(stream_id, conn_increment, stream_increment)
+            .await
+    }
+
+    pub(crate) fn apply_inbound_data_payload_delta(
+        &mut self,
+        stream_id: u32,
+        payload_len: usize,
+        end_stream: bool,
+    ) -> Result<(Option<u32>, Option<u32>)> {
         let payload_len = payload_len as i32;
 
         self.conn_recv_window -= payload_len;
 
-        let mut needs_stream_update = false;
+        let mut stream_increment = None;
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             if stream.id != stream_id {
                 return Err(Error::HttpProtocol(
@@ -1689,7 +1969,10 @@ where
                 ));
             }
             stream.recv_window -= payload_len;
-            needs_stream_update = stream.recv_window < WINDOW_UPDATE_THRESHOLD;
+            if stream.recv_window < WINDOW_UPDATE_THRESHOLD {
+                stream_increment = Some(DEFAULT_INITIAL_WINDOW_SIZE);
+                stream.recv_window += DEFAULT_INITIAL_WINDOW_SIZE as i32;
+            }
 
             if end_stream {
                 stream.state = match stream.state {
@@ -1701,20 +1984,28 @@ where
             }
         }
 
-        if self.conn_recv_window < WINDOW_UPDATE_THRESHOLD {
-            let increment = DEFAULT_INITIAL_WINDOW_SIZE;
+        let conn_increment = if self.conn_recv_window < WINDOW_UPDATE_THRESHOLD {
+            self.conn_recv_window += DEFAULT_INITIAL_WINDOW_SIZE as i32;
+            Some(DEFAULT_INITIAL_WINDOW_SIZE)
+        } else {
+            None
+        };
+
+        Ok((conn_increment, stream_increment))
+    }
+
+    pub(crate) async fn send_inbound_window_updates(
+        &mut self,
+        stream_id: u32,
+        conn_increment: Option<u32>,
+        stream_increment: Option<u32>,
+    ) -> Result<()> {
+        if let Some(increment) = conn_increment {
             self.send_window_update(0, increment).await?;
-            self.conn_recv_window += increment as i32;
         }
 
-        if needs_stream_update {
-            let increment = DEFAULT_INITIAL_WINDOW_SIZE;
-            if let Some(stream) = self.streams.get(&stream_id) {
-                self.send_window_update(stream.id, increment).await?;
-            }
-            if let Some(stream) = self.streams.get_mut(&stream_id) {
-                stream.recv_window += increment as i32;
-            }
+        if let Some(increment) = stream_increment {
+            self.send_window_update(stream_id, increment).await?;
         }
 
         Ok(())
@@ -1740,6 +2031,27 @@ where
     /// Drop local bookkeeping for a stream that has fully closed outside normal response routing.
     pub fn remove_stream(&mut self, stream_id: u32) {
         self.streams.remove(&stream_id);
+    }
+
+    pub(crate) fn connection_recv_window(&self) -> i32 {
+        self.conn_recv_window
+    }
+
+    pub(crate) fn set_connection_recv_window(&mut self, recv_window: i32) {
+        self.conn_recv_window = recv_window;
+    }
+
+    /// Update direct-owned stream receive-window bookkeeping before falling
+    /// back to generic async frame handling.
+    pub(crate) fn set_stream_recv_window(&mut self, stream_id: u32, recv_window: i32) {
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.recv_window = recv_window;
+        }
+    }
+
+    /// True when this connection can safely be returned to an idle direct pool.
+    pub(crate) fn is_reusable(&self) -> bool {
+        self.goaway_last_stream_id.is_none()
     }
 
     /// Get the settings.

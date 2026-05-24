@@ -8,11 +8,42 @@
     "wilcoxon_p_value_less_than": 0.01,
     "p95_regression_pct_at_most": 5
   },
+  "request_body_gate": {
+    "request_count": 8,
+    "chunk_count": 5,
+    "chunk_size_bytes": 1024,
+    "inter_chunk_delay_ms": 2,
+    "payload_schedule_ms": [
+      0,
+      2,
+      2,
+      2,
+      2
+    ],
+    "timing_endpoint": "fixture upload-complete timestamp",
+    "fallback_endpoint": "response headers only when fixture upload-complete is unavailable",
+    "fallback_count_total": 0,
+    "denominator_floor_count_total": 0,
+    "client_write_denominator_floor_count_total": 0
+  },
+  "h2_response_repeat_summary": {
+    "artifact_count": 4,
+    "all_passed": true,
+    "weakest_throughput_artifact": "final2-h2-response-repeat1-s100.json",
+    "weakest_throughput_improvement_pct": 5.712858472034233,
+    "weakest_throughput_wilcoxon_signed_rank_p_value": 0.0000014757137400955855
+  },
+  "superseded_artifacts_removed": [
+    "h1h2-response-pushdata-budget-s100.json",
+    "h1h2-request-pushdata-budget-s100.json",
+    "rfc8441-pushdata-budget-live.json"
+  ],
   "artifacts": [
     {
-      "kind": "response-body streaming",
-      "file": "h1h2-response-pushdata-budget-s100.json",
-      "command": "cargo bench --bench streaming_vs_reqwest -- --protocol h1,h2 --response-body-streaming --samples 100 --warmups 5 --require-thresholds --json target/bench-results/h1h2-response-pushdata-budget-s100.json",
+      "kind": "request-body streaming",
+      "file": "final2-h1-request-s100.json",
+      "command": "cargo bench --bench streaming_vs_reqwest -- --protocol h1 --request-body-streaming --samples 100 --warmups 5 --require-thresholds --json target/bench-results/final2-h1-request-s100.json",
+      "primary": true,
       "threshold_summary": {
         "required_thresholds_passed": true,
         "failed_rows": [],
@@ -25,35 +56,41 @@
         "tunnel_stream_id": 1,
         "streaming_stream_id": 3
       },
-      "rows": [
-        {
-          "protocol": "h1",
-          "client": "specter",
-          "sample_count": 100,
-          "ttft_improvement_pct": 64.18983435506415,
-          "throughput_improvement_pct": 28.81044215099515,
-          "throughput_wilcoxon_signed_rank_p_value": 3.968705764023639e-8,
-          "p95_throughput_regression_pct": -20.038359705513066,
-          "client_overhead_duration_ns": 540562.5,
-          "status": "pass"
-        },
-        {
-          "protocol": "h2",
-          "client": "specter",
-          "sample_count": 100,
-          "ttft_improvement_pct": 32.85008403361345,
-          "throughput_improvement_pct": 5.978724887687112,
-          "throughput_wilcoxon_signed_rank_p_value": 0.0025784201862453227,
-          "p95_throughput_regression_pct": -4.860241622463833,
-          "client_overhead_duration_ns": 564728.5,
-          "status": "pass"
-        }
-      ]
+      "row": {
+        "protocol": "h1",
+        "client": "specter",
+        "sample_count": 100,
+        "chunk_size": 1024,
+        "request_count": 8,
+        "concurrency": 1,
+        "payload_schedule_ms": [
+          0,
+          2,
+          2,
+          2,
+          2
+        ],
+        "ttft_improvement_pct": 10.33512218244897,
+        "throughput_improvement_pct": 11.526391122617065,
+        "ttft_wilcoxon_signed_rank_p_value": 3.353761712787673e-12,
+        "throughput_wilcoxon_signed_rank_p_value": 8.768541448489486e-13,
+        "p95_ttft_regression_pct": -3.0771627416714233,
+        "p95_throughput_regression_pct": -13.03484689397909,
+        "client_overhead_duration_ns": 394395,
+        "client_overhead_unclamped_duration_ns": 394395,
+        "denominator_floor_count": 0,
+        "client_write_overhead_duration_ns": 394395,
+        "client_write_overhead_unclamped_duration_ns": 394395,
+        "client_write_denominator_floor_count": 0,
+        "upload_complete_fallback_count": 0,
+        "status": "pass"
+      }
     },
     {
       "kind": "request-body streaming",
-      "file": "h1h2-request-pushdata-budget-s100.json",
-      "command": "cargo bench --bench streaming_vs_reqwest -- --protocol h1,h2 --request-body-streaming --samples 100 --warmups 5 --require-thresholds --json target/bench-results/h1h2-request-pushdata-budget-s100.json",
+      "file": "final2-h2-request-s100.json",
+      "command": "cargo bench --bench streaming_vs_reqwest -- --protocol h2 --request-body-streaming --samples 100 --warmups 5 --require-thresholds --json target/bench-results/final2-h2-request-s100.json",
+      "primary": true,
       "threshold_summary": {
         "required_thresholds_passed": true,
         "failed_rows": [],
@@ -66,35 +103,41 @@
         "tunnel_stream_id": 1,
         "streaming_stream_id": 3
       },
-      "rows": [
-        {
-          "protocol": "h1",
-          "client": "specter",
-          "sample_count": 100,
-          "ttft_improvement_pct": 10.820881942509311,
-          "throughput_improvement_pct": 12.13416540192791,
-          "throughput_wilcoxon_signed_rank_p_value": 3.2101166169695716e-10,
-          "p95_throughput_regression_pct": -10.793184122893914,
-          "client_overhead_duration_ns": 820875.5,
-          "status": "pass"
-        },
-        {
-          "protocol": "h2",
-          "client": "specter",
-          "sample_count": 100,
-          "ttft_improvement_pct": 17.72923623226003,
-          "throughput_improvement_pct": 21.550946312382667,
-          "throughput_wilcoxon_signed_rank_p_value": 0,
-          "p95_throughput_regression_pct": -18.281643060085884,
-          "client_overhead_duration_ns": 864186.5,
-          "status": "pass"
-        }
-      ]
+      "row": {
+        "protocol": "h2",
+        "client": "specter",
+        "sample_count": 100,
+        "chunk_size": 1024,
+        "request_count": 8,
+        "concurrency": 1,
+        "payload_schedule_ms": [
+          0,
+          2,
+          2,
+          2,
+          2
+        ],
+        "ttft_improvement_pct": 17.266788558291406,
+        "throughput_improvement_pct": 20.869872202480277,
+        "ttft_wilcoxon_signed_rank_p_value": 4.440892098500626e-16,
+        "throughput_wilcoxon_signed_rank_p_value": 0,
+        "p95_ttft_regression_pct": -27.558350614712857,
+        "p95_throughput_regression_pct": -20.14662610601261,
+        "client_overhead_duration_ns": 397291.5,
+        "client_overhead_unclamped_duration_ns": 397291.5,
+        "denominator_floor_count": 0,
+        "client_write_overhead_duration_ns": 397291.5,
+        "client_write_overhead_unclamped_duration_ns": 397291.5,
+        "client_write_denominator_floor_count": 0,
+        "upload_complete_fallback_count": 0,
+        "status": "pass"
+      }
     },
     {
-      "kind": "RFC 8441 coexistence",
-      "file": "rfc8441-pushdata-budget-live.json",
-      "command": "cargo bench --bench streaming_vs_reqwest -- --protocol rfc8441 --json target/bench-results/rfc8441-pushdata-budget-live.json",
+      "kind": "response-body streaming",
+      "file": "final2-h1-response-s100.json",
+      "command": "cargo bench --bench streaming_vs_reqwest -- --protocol h1 --response-body-streaming --samples 100 --warmups 5 --require-thresholds --json target/bench-results/final2-h1-response-s100.json",
+      "primary": true,
       "threshold_summary": {
         "required_thresholds_passed": true,
         "failed_rows": [],
@@ -107,19 +150,213 @@
         "tunnel_stream_id": 1,
         "streaming_stream_id": 3
       },
-      "rows": [
-        {
-          "protocol": "rfc8441",
-          "client": "specter",
-          "sample_count": 30,
-          "ttft_improvement_pct": null,
-          "throughput_improvement_pct": null,
-          "throughput_wilcoxon_signed_rank_p_value": null,
-          "p95_throughput_regression_pct": null,
-          "client_overhead_duration_ns": 0,
-          "status": "pass"
-        }
-      ]
+      "row": {
+        "protocol": "h1",
+        "client": "specter",
+        "sample_count": 100,
+        "chunk_size": 16384,
+        "request_count": 8,
+        "concurrency": 1,
+        "payload_schedule_ms": [
+          0,
+          1,
+          1,
+          1,
+          1
+        ],
+        "ttft_improvement_pct": 65.59235052375467,
+        "throughput_improvement_pct": 19.969366698673436,
+        "ttft_wilcoxon_signed_rank_p_value": 0,
+        "throughput_wilcoxon_signed_rank_p_value": 4.440892098500626e-16,
+        "p95_ttft_regression_pct": -63.81869817802188,
+        "p95_throughput_regression_pct": -16.865626482788983,
+        "client_overhead_duration_ns": 395812.5,
+        "client_overhead_unclamped_duration_ns": 395812.5,
+        "denominator_floor_count": 0,
+        "client_write_denominator_floor_count": 0,
+        "upload_complete_fallback_count": 0,
+        "status": "pass"
+      }
+    },
+    {
+      "kind": "response-body streaming",
+      "file": "final2-h2-response-s100.json",
+      "command": "cargo bench --bench streaming_vs_reqwest -- --protocol h2 --response-body-streaming --samples 100 --warmups 5 --require-thresholds --json target/bench-results/final2-h2-response-s100.json",
+      "primary": true,
+      "threshold_summary": {
+        "required_thresholds_passed": true,
+        "failed_rows": [],
+        "negative_threshold_self_check": "implemented: --require-thresholds exits non-zero when required_thresholds_passed is false; --self-test-threshold-failure induces required H1/H2 comparable threshold failures, including median win and p95 regression failures; Wilcoxon p-value failures are part of the same required_thresholds_passed gate; --self-test-h3-threshold-failure induces an H3 gate failure"
+      },
+      "rfc8441_coexistence": {
+        "status": "pass",
+        "contamination_detected": false,
+        "concurrency_level": 2,
+        "tunnel_stream_id": 1,
+        "streaming_stream_id": 3
+      },
+      "row": {
+        "protocol": "h2",
+        "client": "specter",
+        "sample_count": 100,
+        "chunk_size": 16384,
+        "request_count": 8,
+        "concurrency": 1,
+        "payload_schedule_ms": [
+          0,
+          1,
+          1,
+          1,
+          1
+        ],
+        "ttft_improvement_pct": 26.122588849253535,
+        "throughput_improvement_pct": 7.8809751382006885,
+        "ttft_wilcoxon_signed_rank_p_value": 0,
+        "throughput_wilcoxon_signed_rank_p_value": 4.0450350402565505e-8,
+        "p95_ttft_regression_pct": -27.741394855476003,
+        "p95_throughput_regression_pct": -3.4736031076417215,
+        "client_overhead_duration_ns": 421375.5,
+        "client_overhead_unclamped_duration_ns": 421375.5,
+        "denominator_floor_count": 0,
+        "client_write_denominator_floor_count": 0,
+        "upload_complete_fallback_count": 0,
+        "status": "pass"
+      }
+    },
+    {
+      "kind": "response-body streaming h2 repeat",
+      "file": "final2-h2-response-repeat1-s100.json",
+      "command": "cargo bench --bench streaming_vs_reqwest -- --protocol h2 --response-body-streaming --samples 100 --warmups 5 --require-thresholds --json target/bench-results/final2-h2-response-repeat1-s100.json",
+      "primary": false,
+      "threshold_summary": {
+        "required_thresholds_passed": true,
+        "failed_rows": [],
+        "negative_threshold_self_check": "implemented: --require-thresholds exits non-zero when required_thresholds_passed is false; --self-test-threshold-failure induces required H1/H2 comparable threshold failures, including median win and p95 regression failures; Wilcoxon p-value failures are part of the same required_thresholds_passed gate; --self-test-h3-threshold-failure induces an H3 gate failure"
+      },
+      "rfc8441_coexistence": {
+        "status": "pass",
+        "contamination_detected": false,
+        "concurrency_level": 2,
+        "tunnel_stream_id": 1,
+        "streaming_stream_id": 3
+      },
+      "row": {
+        "protocol": "h2",
+        "client": "specter",
+        "sample_count": 100,
+        "chunk_size": 16384,
+        "request_count": 8,
+        "concurrency": 1,
+        "payload_schedule_ms": [
+          0,
+          1,
+          1,
+          1,
+          1
+        ],
+        "ttft_improvement_pct": 25.426436532892588,
+        "throughput_improvement_pct": 5.712858472034233,
+        "ttft_wilcoxon_signed_rank_p_value": 0,
+        "throughput_wilcoxon_signed_rank_p_value": 0.0000014757137400955855,
+        "p95_ttft_regression_pct": -27.368207739732863,
+        "p95_throughput_regression_pct": -3.5896223909008893,
+        "client_overhead_duration_ns": 409207,
+        "client_overhead_unclamped_duration_ns": 409207,
+        "denominator_floor_count": 0,
+        "client_write_denominator_floor_count": 0,
+        "upload_complete_fallback_count": 0,
+        "status": "pass"
+      }
+    },
+    {
+      "kind": "response-body streaming h2 repeat",
+      "file": "final2-h2-response-repeat2-s100.json",
+      "command": "cargo bench --bench streaming_vs_reqwest -- --protocol h2 --response-body-streaming --samples 100 --warmups 5 --require-thresholds --json target/bench-results/final2-h2-response-repeat2-s100.json",
+      "primary": false,
+      "threshold_summary": {
+        "required_thresholds_passed": true,
+        "failed_rows": [],
+        "negative_threshold_self_check": "implemented: --require-thresholds exits non-zero when required_thresholds_passed is false; --self-test-threshold-failure induces required H1/H2 comparable threshold failures, including median win and p95 regression failures; Wilcoxon p-value failures are part of the same required_thresholds_passed gate; --self-test-h3-threshold-failure induces an H3 gate failure"
+      },
+      "rfc8441_coexistence": {
+        "status": "pass",
+        "contamination_detected": false,
+        "concurrency_level": 2,
+        "tunnel_stream_id": 1,
+        "streaming_stream_id": 3
+      },
+      "row": {
+        "protocol": "h2",
+        "client": "specter",
+        "sample_count": 100,
+        "chunk_size": 16384,
+        "request_count": 8,
+        "concurrency": 1,
+        "payload_schedule_ms": [
+          0,
+          1,
+          1,
+          1,
+          1
+        ],
+        "ttft_improvement_pct": 25.25883440577324,
+        "throughput_improvement_pct": 7.8192176783172584,
+        "ttft_wilcoxon_signed_rank_p_value": 0,
+        "throughput_wilcoxon_signed_rank_p_value": 1.036928276576532e-8,
+        "p95_ttft_regression_pct": -25.68382507471406,
+        "p95_throughput_regression_pct": -6.235621792910812,
+        "client_overhead_duration_ns": 408688,
+        "client_overhead_unclamped_duration_ns": 408688,
+        "denominator_floor_count": 0,
+        "client_write_denominator_floor_count": 0,
+        "upload_complete_fallback_count": 0,
+        "status": "pass"
+      }
+    },
+    {
+      "kind": "response-body streaming h2 repeat",
+      "file": "final2-h2-response-repeat3-s100.json",
+      "command": "cargo bench --bench streaming_vs_reqwest -- --protocol h2 --response-body-streaming --samples 100 --warmups 5 --require-thresholds --json target/bench-results/final2-h2-response-repeat3-s100.json",
+      "primary": false,
+      "threshold_summary": {
+        "required_thresholds_passed": true,
+        "failed_rows": [],
+        "negative_threshold_self_check": "implemented: --require-thresholds exits non-zero when required_thresholds_passed is false; --self-test-threshold-failure induces required H1/H2 comparable threshold failures, including median win and p95 regression failures; Wilcoxon p-value failures are part of the same required_thresholds_passed gate; --self-test-h3-threshold-failure induces an H3 gate failure"
+      },
+      "rfc8441_coexistence": {
+        "status": "pass",
+        "contamination_detected": false,
+        "concurrency_level": 2,
+        "tunnel_stream_id": 1,
+        "streaming_stream_id": 3
+      },
+      "row": {
+        "protocol": "h2",
+        "client": "specter",
+        "sample_count": 100,
+        "chunk_size": 16384,
+        "request_count": 8,
+        "concurrency": 1,
+        "payload_schedule_ms": [
+          0,
+          1,
+          1,
+          1,
+          1
+        ],
+        "ttft_improvement_pct": 25.335861100124113,
+        "throughput_improvement_pct": 6.660699917862685,
+        "ttft_wilcoxon_signed_rank_p_value": 0,
+        "throughput_wilcoxon_signed_rank_p_value": 9.965496206021385e-9,
+        "p95_ttft_regression_pct": -26.03203628197845,
+        "p95_throughput_regression_pct": -7.019487432071042,
+        "client_overhead_duration_ns": 411624,
+        "client_overhead_unclamped_duration_ns": 411624,
+        "denominator_floor_count": 0,
+        "client_write_denominator_floor_count": 0,
+        "upload_complete_fallback_count": 0,
+        "status": "pass"
+      }
     }
   ]
 }

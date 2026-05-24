@@ -1,16 +1,29 @@
 //! Chrome multi-version fingerprint validation tests.
 //!
-//! Validates Chrome 142-146 fingerprint profiles produce correct
-//! User-Agent strings, Sec-Ch-Ua headers, and shared TLS/HTTP2 config.
+//! Validates Chrome 142-148 fingerprint profiles produce correct
+//! User-Agent strings, Sec-Ch-Ua headers, and shared TLS/HTTP/2/HTTP/3 config.
 
 use specter::fingerprint::profiles::FingerprintProfile;
 use specter::fingerprint::tls::{CertCompression, TlsFingerprint};
+use specter::fingerprint::Http3Fingerprint;
 use specter::headers::{
     chrome_142_ajax_headers, chrome_142_form_headers, chrome_142_headers, chrome_143_ajax_headers,
     chrome_143_form_headers, chrome_143_headers, chrome_144_ajax_headers, chrome_144_form_headers,
     chrome_144_headers, chrome_145_ajax_headers, chrome_145_form_headers, chrome_145_headers,
-    chrome_146_ajax_headers, chrome_146_form_headers, chrome_146_headers,
+    chrome_146_ajax_headers, chrome_146_form_headers, chrome_146_headers, chrome_147_ajax_headers,
+    chrome_147_form_headers, chrome_147_headers, chrome_148_ajax_headers, chrome_148_form_headers,
+    chrome_148_headers,
 };
+
+const CHROME_PROFILES: &[(FingerprintProfile, u16)] = &[
+    (FingerprintProfile::Chrome142, 142),
+    (FingerprintProfile::Chrome143, 143),
+    (FingerprintProfile::Chrome144, 144),
+    (FingerprintProfile::Chrome145, 145),
+    (FingerprintProfile::Chrome146, 146),
+    (FingerprintProfile::Chrome147, 147),
+    (FingerprintProfile::Chrome148, 148),
+];
 
 #[test]
 fn test_default_profile_is_chrome142() {
@@ -20,18 +33,11 @@ fn test_default_profile_is_chrome142() {
 
 #[test]
 fn test_chrome_user_agents_contain_correct_version() {
-    let cases = [
-        (FingerprintProfile::Chrome142, "Chrome/142.0.0.0"),
-        (FingerprintProfile::Chrome143, "Chrome/143.0.0.0"),
-        (FingerprintProfile::Chrome144, "Chrome/144.0.0.0"),
-        (FingerprintProfile::Chrome145, "Chrome/145.0.0.0"),
-        (FingerprintProfile::Chrome146, "Chrome/146.0.0.0"),
-    ];
-
-    for (profile, expected_version) in &cases {
+    for (profile, major_version) in CHROME_PROFILES {
+        let expected_version = format!("Chrome/{major_version}.0.0.0");
         let ua = profile.user_agent();
         assert!(
-            ua.contains(expected_version),
+            ua.contains(&expected_version),
             "Profile {:?} UA should contain '{}', got: {}",
             profile,
             expected_version,
@@ -52,17 +58,9 @@ fn test_chrome_user_agents_contain_correct_version() {
 
 #[test]
 fn test_chrome_tls_fingerprints_identical_across_versions() {
-    let profiles = [
-        FingerprintProfile::Chrome142,
-        FingerprintProfile::Chrome143,
-        FingerprintProfile::Chrome144,
-        FingerprintProfile::Chrome145,
-        FingerprintProfile::Chrome146,
-    ];
+    let base = CHROME_PROFILES[0].0.tls_fingerprint();
 
-    let base = profiles[0].tls_fingerprint();
-
-    for profile in &profiles[1..] {
+    for (profile, _) in &CHROME_PROFILES[1..] {
         let fp = profile.tls_fingerprint();
         assert_eq!(
             fp.cipher_list, base.cipher_list,
@@ -113,110 +111,234 @@ fn test_chrome_tls_fingerprints_identical_across_versions() {
 
 #[test]
 fn test_chrome_http2_settings_identical_across_versions() {
-    let profiles = [
-        FingerprintProfile::Chrome142,
-        FingerprintProfile::Chrome143,
-        FingerprintProfile::Chrome144,
-        FingerprintProfile::Chrome145,
-        FingerprintProfile::Chrome146,
-    ];
+    let base = CHROME_PROFILES[0].0.http2_settings();
 
-    let base = profiles[0].http2_settings();
-
-    for profile in &profiles[1..] {
+    for (profile, _) in &CHROME_PROFILES[1..] {
         let settings = profile.http2_settings();
         assert_eq!(settings.initial_window_size, base.initial_window_size);
         assert_eq!(settings.initial_window_update, base.initial_window_update);
         assert_eq!(settings.header_table_size, base.header_table_size);
+        assert_eq!(settings.enable_push, base.enable_push);
+        assert_eq!(settings.max_concurrent_streams, base.max_concurrent_streams);
         assert_eq!(settings.max_frame_size, base.max_frame_size);
+        assert_eq!(settings.max_header_list_size, base.max_header_list_size);
+        assert_eq!(settings.send_all_settings, base.send_all_settings);
+        assert_eq!(settings.ping_interval, base.ping_interval);
+        assert_eq!(settings.handshake_timeout, base.handshake_timeout);
+        assert_eq!(
+            settings
+                .priority_tree
+                .as_ref()
+                .map(|priority_tree| &priority_tree.priorities),
+            base.priority_tree
+                .as_ref()
+                .map(|priority_tree| &priority_tree.priorities),
+        );
+    }
+}
+
+#[test]
+fn test_chrome_http3_fingerprints_identical_across_versions() {
+    let shared = Http3Fingerprint::chrome();
+
+    for (profile, _) in CHROME_PROFILES {
+        assert_eq!(
+            profile.http3_fingerprint(),
+            shared,
+            "HTTP/3 fingerprint should be shared for {:?}",
+            profile
+        );
     }
 }
 
 #[test]
 fn test_chrome_sec_ch_ua_brand_strings() {
-    // Verify each version has the correct GREASE brand string from Chromium algorithm
-    let nav_142 = chrome_142_headers();
-    let nav_143 = chrome_143_headers();
-    let nav_144 = chrome_144_headers();
-    let nav_145 = chrome_145_headers();
-    let nav_146 = chrome_146_headers();
-
     fn get_sec_ch_ua<'a>(headers: &'a [(&str, &str)]) -> &'a str {
         headers.iter().find(|(k, _)| *k == "Sec-Ch-Ua").unwrap().1
     }
 
-    let ua_142 = get_sec_ch_ua(&nav_142);
-    let ua_143 = get_sec_ch_ua(&nav_143);
-    let ua_144 = get_sec_ch_ua(&nav_144);
-    let ua_145 = get_sec_ch_ua(&nav_145);
-    let ua_146 = get_sec_ch_ua(&nav_146);
-
-    // Chrome 142: "Not_A Brand" v="24", order: Chromium, GC, GREASE
-    assert!(
-        ua_142.contains(r#""Not_A Brand";v="24""#),
-        "Chrome 142 brand: {}",
-        ua_142
-    );
-    assert!(
-        ua_142.starts_with(r#""Chromium""#),
-        "Chrome 142 order: {}",
-        ua_142
-    );
-
-    // Chrome 143: "Not A(Brand" v="99", order: GC, Chromium, GREASE
-    assert!(
-        ua_143.contains(r#""Not A(Brand";v="99""#),
-        "Chrome 143 brand: {}",
-        ua_143
-    );
-    assert!(
-        ua_143.starts_with(r#""Google Chrome""#),
-        "Chrome 143 order: {}",
-        ua_143
-    );
-
-    // Chrome 144: "Not(A:Brand" v="8", order: GREASE, Chromium, GC
-    assert!(
-        ua_144.contains(r#""Not(A:Brand";v="8""#),
-        "Chrome 144 brand: {}",
-        ua_144
-    );
-    assert!(
-        ua_144.starts_with(r#""Not(A:Brand""#),
-        "Chrome 144 order: {}",
-        ua_144
-    );
-
-    // Chrome 145: "Not:A-Brand" v="24", order: GREASE, GC, Chromium
-    assert!(
-        ua_145.contains(r#""Not:A-Brand";v="24""#),
-        "Chrome 145 brand: {}",
-        ua_145
-    );
-    assert!(
-        ua_145.starts_with(r#""Not:A-Brand""#),
-        "Chrome 145 order: {}",
-        ua_145
-    );
-
-    // Chrome 146: "Not-A.Brand" v="99", order: Chromium, GREASE, GC
-    assert!(
-        ua_146.contains(r#""Not-A.Brand";v="99""#),
-        "Chrome 146 brand: {}",
-        ua_146
-    );
-    assert!(
-        ua_146.starts_with(r#""Chromium""#),
-        "Chrome 146 order: {}",
-        ua_146
-    );
+    let cases = [
+        (
+            142,
+            chrome_142_headers(),
+            r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99""#,
+        ),
+        (
+            143,
+            chrome_143_headers(),
+            r#""Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24""#,
+        ),
+        (
+            144,
+            chrome_144_headers(),
+            r#""Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144""#,
+        ),
+        (
+            145,
+            chrome_145_headers(),
+            r#""Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145""#,
+        ),
+        (
+            146,
+            chrome_146_headers(),
+            r#""Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146""#,
+        ),
+        (
+            147,
+            chrome_147_headers(),
+            r#""Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147""#,
+        ),
+        (
+            148,
+            chrome_148_headers(),
+            r#""Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99""#,
+        ),
+    ];
 
     // All should be distinct
-    let all = [ua_142, ua_143, ua_144, ua_145, ua_146];
+    let all: Vec<_> = cases
+        .iter()
+        .map(|(version, headers, expected)| {
+            let actual = get_sec_ch_ua(headers);
+            assert_eq!(actual, *expected, "Chrome {version} Sec-Ch-Ua");
+            actual
+        })
+        .collect();
     for i in 0..all.len() {
         for j in (i + 1)..all.len() {
             assert_ne!(all[i], all[j], "Sec-Ch-Ua should differ between versions");
         }
+    }
+}
+
+#[test]
+fn test_chrome_sec_ch_ua_matches_chromium_grease_algorithm() {
+    fn header_value<'a>(headers: &'a [(&str, &str)], name: &str) -> &'a str {
+        headers
+            .iter()
+            .find(|(header_name, _)| *header_name == name)
+            .unwrap()
+            .1
+    }
+
+    fn chromium_brand_list(major_version: u16, full_version: Option<&str>) -> String {
+        let greasey_chars = [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"];
+        let greasey_versions = ["8", "99", "24"];
+        let brand_order = [
+            [0usize, 1usize, 2usize],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ][usize::from(major_version % 6)];
+
+        let greasey_version = greasey_versions[usize::from(major_version % 3)];
+        let greasey_brand = format!(
+            "Not{}A{}Brand",
+            greasey_chars[usize::from(major_version % 11)],
+            greasey_chars[usize::from((major_version + 1) % 11)]
+        );
+
+        let chrome_version = full_version
+            .map(str::to_owned)
+            .unwrap_or_else(|| major_version.to_string());
+        let greasey_version = if full_version.is_some() {
+            format!("{greasey_version}.0.0.0")
+        } else {
+            greasey_version.to_string()
+        };
+
+        let unshuffled_brands = [
+            format!(r#""{greasey_brand}";v="{greasey_version}""#),
+            format!(r#""Chromium";v="{chrome_version}""#),
+            format!(r#""Google Chrome";v="{chrome_version}""#),
+        ];
+        let mut shuffled_brands = vec![String::new(); unshuffled_brands.len()];
+        for (input_index, output_index) in brand_order.iter().enumerate() {
+            shuffled_brands[*output_index] = unshuffled_brands[input_index].clone();
+        }
+        shuffled_brands.join(", ")
+    }
+
+    let cases = [
+        (142, chrome_142_headers(), "142.0.7444.176"),
+        (143, chrome_143_headers(), "143.0.7499.193"),
+        (144, chrome_144_headers(), "144.0.7559.133"),
+        (145, chrome_145_headers(), "145.0.7632.117"),
+        (146, chrome_146_headers(), "146.0.7680.165"),
+        (147, chrome_147_headers(), "147.0.7727.138"),
+        (148, chrome_148_headers(), "148.0.7778.179"),
+    ];
+
+    for (major_version, headers, full_version) in cases {
+        assert_eq!(
+            header_value(&headers, "Sec-Ch-Ua"),
+            chromium_brand_list(major_version, None),
+            "Chrome {major_version} Sec-Ch-Ua should match Chromium GREASE"
+        );
+        assert_eq!(
+            header_value(&headers, "Sec-Ch-Ua-Full-Version-List"),
+            chromium_brand_list(major_version, Some(full_version)),
+            "Chrome {major_version} full version list should match Chromium GREASE"
+        );
+    }
+}
+
+#[test]
+fn test_chrome_sec_ch_ua_full_version_lists_match_brand_order() {
+    fn get_full_version_list<'a>(headers: &'a [(&str, &str)]) -> &'a str {
+        headers
+            .iter()
+            .find(|(k, _)| *k == "Sec-Ch-Ua-Full-Version-List")
+            .unwrap()
+            .1
+    }
+
+    let cases = [
+        (
+            142,
+            chrome_142_headers(),
+            r#""Chromium";v="142.0.7444.176", "Google Chrome";v="142.0.7444.176", "Not_A Brand";v="99.0.0.0""#,
+        ),
+        (
+            143,
+            chrome_143_headers(),
+            r#""Google Chrome";v="143.0.7499.193", "Chromium";v="143.0.7499.193", "Not A(Brand";v="24.0.0.0""#,
+        ),
+        (
+            144,
+            chrome_144_headers(),
+            r#""Not(A:Brand";v="8.0.0.0", "Chromium";v="144.0.7559.133", "Google Chrome";v="144.0.7559.133""#,
+        ),
+        (
+            145,
+            chrome_145_headers(),
+            r#""Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.7632.117", "Chromium";v="145.0.7632.117""#,
+        ),
+        (
+            146,
+            chrome_146_headers(),
+            r#""Chromium";v="146.0.7680.165", "Not-A.Brand";v="24.0.0.0", "Google Chrome";v="146.0.7680.165""#,
+        ),
+        (
+            147,
+            chrome_147_headers(),
+            r#""Google Chrome";v="147.0.7727.138", "Not.A/Brand";v="8.0.0.0", "Chromium";v="147.0.7727.138""#,
+        ),
+        (
+            148,
+            chrome_148_headers(),
+            r#""Chromium";v="148.0.7778.179", "Google Chrome";v="148.0.7778.179", "Not/A)Brand";v="99.0.0.0""#,
+        ),
+    ];
+
+    for (version, headers, expected) in cases {
+        assert_eq!(
+            get_full_version_list(&headers),
+            expected,
+            "Chrome {version} Sec-Ch-Ua-Full-Version-List"
+        );
     }
 }
 
@@ -248,6 +370,16 @@ fn test_chrome_all_versions_have_three_header_types() {
             chrome_146_headers(),
             chrome_146_ajax_headers(),
             chrome_146_form_headers(),
+        ),
+        (
+            chrome_147_headers(),
+            chrome_147_ajax_headers(),
+            chrome_147_form_headers(),
+        ),
+        (
+            chrome_148_headers(),
+            chrome_148_ajax_headers(),
+            chrome_148_form_headers(),
         ),
     ];
 
@@ -311,6 +443,8 @@ fn test_chrome_tls_constructors_match_shared() {
         TlsFingerprint::chrome_144(),
         TlsFingerprint::chrome_145(),
         TlsFingerprint::chrome_146(),
+        TlsFingerprint::chrome_147(),
+        TlsFingerprint::chrome_148(),
     ];
 
     for (i, fp) in constructors.iter().enumerate() {

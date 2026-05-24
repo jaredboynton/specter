@@ -1,0 +1,1595 @@
+//! Native HTTP/3 driver state.
+
+use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::task::{Poll, Wake, Waker};
+use std::time::{Duration, Instant};
+
+use bytes::{Bytes, BytesMut};
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, oneshot, Notify};
+
+use crate::error::{Error, Result};
+use crate::fingerprint::Http3Fingerprint;
+use crate::request::{RequestBody, RequestBodyStream};
+use crate::transport::h3::body::{H3BodyPush, H3BodyShared};
+use crate::transport::h3::command::{DriverCommand, StreamResponse, StreamingHeadersResult};
+use crate::transport::h3::handle::H3Handle;
+use crate::transport::h3::handshake::{NativeQuicHandshake, ServerH3Event, ServerH3StreamEvent};
+use crate::transport::h3::native::{
+    decode_header_block, H3Frame, H3Header, H3Setting, H3StreamType,
+};
+use crate::transport::h3::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
+
+struct NotifyWake(Arc<Notify>);
+
+impl Wake for NotifyWake {
+    fn wake(self: Arc<Self>) {
+        self.0.notify_one();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.notify_one();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeH3Event {
+    PeerSettings,
+    Headers {
+        stream_id: u64,
+        headers: Vec<H3Header>,
+    },
+    Data {
+        stream_id: u64,
+        bytes: Bytes,
+    },
+    Finished {
+        stream_id: u64,
+    },
+    GoAway {
+        id: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeH3Response {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Bytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeH3StreamingResponseEvent {
+    Headers {
+        status: u16,
+        headers: Vec<(String, String)>,
+    },
+    Data(Bytes),
+    Finished,
+    GoAway {
+        id: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeH3TunnelEvent {
+    Open {
+        status: u16,
+        headers: Vec<(String, String)>,
+    },
+    Data(Bytes),
+    Finished,
+    GoAway {
+        id: u64,
+    },
+}
+
+#[derive(Debug, Default)]
+pub struct NativeH3DriverState {
+    peer_settings: Option<Vec<H3Setting>>,
+    response_streams: HashMap<u64, NativeH3ResponseState>,
+    streaming_response_streams: HashMap<u64, NativeH3StreamingResponseState>,
+    tunnel_streams: HashMap<u64, NativeH3TunnelState>,
+}
+
+#[derive(Debug, Default)]
+struct NativeH3ResponseState {
+    status: Option<u16>,
+    headers: Vec<(String, String)>,
+    body: BytesMut,
+}
+
+#[derive(Debug, Default)]
+struct NativeH3StreamingResponseState {
+    opened: bool,
+}
+
+#[derive(Debug, Default)]
+struct NativeH3TunnelState {
+    opened: bool,
+    status: Option<u16>,
+    headers: Vec<(String, String)>,
+}
+
+impl NativeH3DriverState {
+    pub fn apply_stream_event(&mut self, event: ServerH3StreamEvent) -> Result<Vec<NativeH3Event>> {
+        match event.stream_type {
+            Some(H3StreamType::Control) => self.apply_control_stream_event(event),
+            Some(
+                H3StreamType::QpackEncoder | H3StreamType::QpackDecoder | H3StreamType::Grease(_),
+            ) => Ok(Vec::new()),
+            Some(H3StreamType::Push | H3StreamType::Unknown(_)) => Ok(Vec::new()),
+            None => self.apply_request_stream_event(event),
+        }
+    }
+
+    pub fn extended_connect_enabled_by_peer(&self) -> bool {
+        self.peer_settings
+            .as_ref()
+            .is_some_and(|settings| settings.iter().any(is_enable_connect_protocol))
+    }
+
+    pub fn peer_settings_received(&self) -> bool {
+        self.peer_settings.is_some()
+    }
+
+    pub fn track_response_stream(&mut self, stream_id: u64) {
+        self.response_streams.entry(stream_id).or_default();
+    }
+
+    pub fn track_streaming_response_stream(&mut self, stream_id: u64) {
+        self.streaming_response_streams
+            .entry(stream_id)
+            .or_default();
+    }
+
+    pub fn track_tunnel_stream(&mut self, stream_id: u64) {
+        self.tunnel_streams.entry(stream_id).or_default();
+    }
+
+    pub fn apply_tracked_response_event(
+        &mut self,
+        event: ServerH3StreamEvent,
+    ) -> Result<Option<NativeH3Response>> {
+        let stream_id = event.stream_id;
+        let events = self.apply_stream_event(event)?;
+        let Some(state) = self.response_streams.get_mut(&stream_id) else {
+            return Ok(None);
+        };
+        for event in events {
+            match event {
+                NativeH3Event::Headers { headers, .. } => {
+                    for header in headers {
+                        if header.name() == ":status" {
+                            state.status = header.value().parse().ok();
+                        } else if !header.name().starts_with(':') {
+                            state
+                                .headers
+                                .push((header.name().to_owned(), header.value().to_owned()));
+                        }
+                    }
+                }
+                NativeH3Event::Data { bytes, .. } => {
+                    state.body.extend_from_slice(&bytes);
+                }
+                NativeH3Event::Finished { .. } => {
+                    let state = self
+                        .response_streams
+                        .remove(&stream_id)
+                        .expect("stream exists");
+                    let status = state.status.ok_or_else(|| {
+                        Error::HttpProtocol(format!(
+                            "native H3 stream {stream_id} completed without status code"
+                        ))
+                    })?;
+                    return Ok(Some(NativeH3Response {
+                        status,
+                        headers: state.headers,
+                        body: state.body.freeze(),
+                    }));
+                }
+                NativeH3Event::PeerSettings | NativeH3Event::GoAway { .. } => {}
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn apply_tracked_streaming_response_event(
+        &mut self,
+        event: ServerH3StreamEvent,
+    ) -> Result<Vec<NativeH3StreamingResponseEvent>> {
+        let stream_id = event.stream_id;
+        let events = self.apply_stream_event(event)?;
+        if !self.streaming_response_streams.contains_key(&stream_id) {
+            return Ok(Vec::new());
+        }
+
+        let mut streaming_events = Vec::new();
+        for event in events {
+            match event {
+                NativeH3Event::Headers { headers, .. } => {
+                    self.apply_streaming_response_headers(
+                        stream_id,
+                        headers,
+                        &mut streaming_events,
+                    )?;
+                }
+                NativeH3Event::Data { bytes, .. } => {
+                    if self
+                        .streaming_response_streams
+                        .get(&stream_id)
+                        .is_some_and(|state| state.opened)
+                    {
+                        streaming_events.push(NativeH3StreamingResponseEvent::Data(bytes));
+                    } else {
+                        self.streaming_response_streams.remove(&stream_id);
+                        return Err(Error::HttpProtocol(format!(
+                            "native H3 streaming stream {stream_id} received DATA before response headers"
+                        )));
+                    }
+                }
+                NativeH3Event::Finished { .. } => {
+                    let state = self
+                        .streaming_response_streams
+                        .remove(&stream_id)
+                        .expect("stream exists");
+                    if state.opened {
+                        streaming_events.push(NativeH3StreamingResponseEvent::Finished);
+                    } else {
+                        return Err(Error::HttpProtocol(format!(
+                            "native H3 streaming stream {stream_id} completed without status code"
+                        )));
+                    }
+                }
+                NativeH3Event::GoAway { id } => {
+                    streaming_events.push(NativeH3StreamingResponseEvent::GoAway { id });
+                }
+                NativeH3Event::PeerSettings => {}
+            }
+        }
+        Ok(streaming_events)
+    }
+
+    fn apply_streaming_response_headers(
+        &mut self,
+        stream_id: u64,
+        headers: Vec<H3Header>,
+        streaming_events: &mut Vec<NativeH3StreamingResponseEvent>,
+    ) -> Result<()> {
+        let state = self
+            .streaming_response_streams
+            .get_mut(&stream_id)
+            .expect("stream exists");
+        if state.opened {
+            return Ok(());
+        }
+
+        let mut status = None;
+        let mut response_headers = Vec::new();
+        for header in headers {
+            if header.name() == ":status" {
+                status = header.value().parse().ok();
+            } else if !header.name().starts_with(':') {
+                response_headers.push((header.name().to_owned(), header.value().to_owned()));
+            }
+        }
+        let status = status.ok_or_else(|| {
+            Error::HttpProtocol(format!(
+                "native H3 streaming stream {stream_id} received response headers without status code"
+            ))
+        })?;
+        state.opened = true;
+        streaming_events.push(NativeH3StreamingResponseEvent::Headers {
+            status,
+            headers: response_headers,
+        });
+        Ok(())
+    }
+
+    pub fn apply_tracked_tunnel_event(
+        &mut self,
+        event: ServerH3StreamEvent,
+    ) -> Result<Vec<NativeH3TunnelEvent>> {
+        let stream_id = event.stream_id;
+        let events = self.apply_stream_event(event)?;
+        if !self.tunnel_streams.contains_key(&stream_id) {
+            return Ok(Vec::new());
+        }
+
+        let mut tunnel_events = Vec::new();
+        for event in events {
+            match event {
+                NativeH3Event::Headers { headers, .. } => {
+                    self.apply_tunnel_headers(stream_id, headers, &mut tunnel_events)?;
+                }
+                NativeH3Event::Data { bytes, .. } => {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    if self
+                        .tunnel_streams
+                        .get(&stream_id)
+                        .is_some_and(|state| state.opened)
+                    {
+                        tunnel_events.push(NativeH3TunnelEvent::Data(bytes));
+                    } else {
+                        self.tunnel_streams.remove(&stream_id);
+                        return Err(Error::HttpProtocol(
+                            "RFC 9220 tunnel DATA received before :status 200".into(),
+                        ));
+                    }
+                }
+                NativeH3Event::Finished { .. } => {
+                    let state = self
+                        .tunnel_streams
+                        .remove(&stream_id)
+                        .expect("stream exists");
+                    if state.opened {
+                        tunnel_events.push(NativeH3TunnelEvent::Finished);
+                    } else {
+                        return Err(Error::HttpProtocol(
+                            "RFC 9220 tunnel completed before :status 200".into(),
+                        ));
+                    }
+                }
+                NativeH3Event::GoAway { id } => {
+                    tunnel_events.push(NativeH3TunnelEvent::GoAway { id })
+                }
+                NativeH3Event::PeerSettings => {}
+            }
+        }
+        Ok(tunnel_events)
+    }
+
+    fn apply_tunnel_headers(
+        &mut self,
+        stream_id: u64,
+        headers: Vec<H3Header>,
+        tunnel_events: &mut Vec<NativeH3TunnelEvent>,
+    ) -> Result<()> {
+        let state = self
+            .tunnel_streams
+            .get_mut(&stream_id)
+            .expect("stream exists");
+        for header in headers {
+            if header.name() == ":status" {
+                state.status = header.value().parse().ok();
+            } else if !header.name().starts_with(':') && !state.opened {
+                state
+                    .headers
+                    .push((header.name().to_owned(), header.value().to_owned()));
+            }
+        }
+
+        let Some(status) = state.status else {
+            return Ok(());
+        };
+        if status == 200 && !state.opened {
+            state.opened = true;
+            tunnel_events.push(NativeH3TunnelEvent::Open {
+                status,
+                headers: state.headers.clone(),
+            });
+            return Ok(());
+        }
+        if status != 200 && !state.opened {
+            let headers = state.headers.clone();
+            self.tunnel_streams.remove(&stream_id);
+            return Err(Error::WebSocketHandshake {
+                status,
+                headers: crate::headers::Headers::from(headers),
+            });
+        }
+        Ok(())
+    }
+
+    fn apply_control_stream_event(
+        &mut self,
+        event: ServerH3StreamEvent,
+    ) -> Result<Vec<NativeH3Event>> {
+        let mut events = Vec::new();
+        for frame in event.frames {
+            match frame {
+                H3Frame::Settings(settings) => {
+                    self.peer_settings = Some(settings);
+                    events.push(NativeH3Event::PeerSettings);
+                }
+                H3Frame::GoAway { id } => events.push(NativeH3Event::GoAway { id }),
+                H3Frame::Unknown { .. } => {}
+                H3Frame::Data(_) | H3Frame::Headers(_) => {
+                    return Err(Error::HttpProtocol(
+                        "server control stream carried request/response frame".into(),
+                    ));
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    fn apply_request_stream_event(
+        &mut self,
+        event: ServerH3StreamEvent,
+    ) -> Result<Vec<NativeH3Event>> {
+        let mut events = Vec::new();
+        for frame in event.frames {
+            match frame {
+                H3Frame::Headers(block) => events.push(NativeH3Event::Headers {
+                    stream_id: event.stream_id,
+                    headers: decode_header_block(&block)?,
+                }),
+                H3Frame::Data(bytes) => events.push(NativeH3Event::Data {
+                    stream_id: event.stream_id,
+                    bytes,
+                }),
+                H3Frame::GoAway { id } => events.push(NativeH3Event::GoAway { id }),
+                H3Frame::Unknown { .. } => {}
+                H3Frame::Settings(_) => {
+                    return Err(Error::HttpProtocol(
+                        "request stream carried SETTINGS frame".into(),
+                    ));
+                }
+            }
+        }
+        if event.fin {
+            events.push(NativeH3Event::Finished {
+                stream_id: event.stream_id,
+            });
+        }
+        Ok(events)
+    }
+}
+
+pub fn spawn_native_h3_driver(
+    handshake: NativeQuicHandshake,
+    fingerprint: Http3Fingerprint,
+    socket: Arc<UdpSocket>,
+    peer_addr: SocketAddr,
+    max_idle_timeout_ms: u64,
+    initial_datagram: Option<Bytes>,
+) -> Result<H3Handle> {
+    let (command_tx, command_rx) = mpsc::channel(32);
+    let is_draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let body_progress_notify = Arc::new(Notify::new());
+    let driver = NativeH3Driver {
+        command_tx: command_tx.clone(),
+        command_rx,
+        handshake,
+        fingerprint,
+        socket,
+        peer_addr,
+        state: NativeH3DriverState::default(),
+        pending_responses: HashMap::new(),
+        pending_streaming_responses: HashMap::new(),
+        pending_tunnels: HashMap::new(),
+        pending_commands: VecDeque::new(),
+        is_draining: is_draining.clone(),
+        body_progress_notify: body_progress_notify.clone(),
+        max_idle_timeout: Duration::from_millis(max_idle_timeout_ms.max(1)),
+        last_activity: Instant::now(),
+        initial_datagram,
+    };
+
+    tokio::spawn(async move {
+        if let Err(error) = driver.drive().await {
+            tracing::error!("native H3 driver crashed: {error:?}");
+        }
+    });
+
+    Ok(H3Handle::new_with_notify(
+        command_tx,
+        is_draining,
+        body_progress_notify,
+    ))
+}
+
+struct NativeH3Driver {
+    command_tx: mpsc::Sender<DriverCommand>,
+    command_rx: mpsc::Receiver<DriverCommand>,
+    handshake: NativeQuicHandshake,
+    fingerprint: Http3Fingerprint,
+    socket: Arc<UdpSocket>,
+    peer_addr: SocketAddr,
+    state: NativeH3DriverState,
+    pending_responses: HashMap<u64, oneshot::Sender<Result<StreamResponse>>>,
+    pending_streaming_responses: HashMap<u64, NativeDriverStreamingResponseState>,
+    pending_tunnels: HashMap<u64, NativeDriverTunnelState>,
+    pending_commands: VecDeque<DriverCommand>,
+    is_draining: Arc<std::sync::atomic::AtomicBool>,
+    body_progress_notify: Arc<Notify>,
+    max_idle_timeout: Duration,
+    last_activity: Instant,
+    initial_datagram: Option<Bytes>,
+}
+
+struct NativeDriverStreamingResponseState {
+    headers_tx: Option<oneshot::Sender<StreamingHeadersResult>>,
+    body_shared: Arc<H3BodyShared>,
+    pending_body: VecDeque<Bytes>,
+    request_stream: Option<NativeDriverStreamingRequestBody>,
+    finished: bool,
+}
+
+impl NativeDriverStreamingResponseState {
+    fn new(
+        headers_tx: oneshot::Sender<StreamingHeadersResult>,
+        body_shared: Arc<H3BodyShared>,
+        request_stream: Option<NativeDriverStreamingRequestBody>,
+    ) -> Self {
+        Self {
+            headers_tx: Some(headers_tx),
+            body_shared,
+            pending_body: VecDeque::new(),
+            request_stream,
+            finished: false,
+        }
+    }
+}
+
+struct NativeDriverStreamingRequestBody {
+    stream: RequestBodyStream,
+    content_length: Option<u64>,
+    current_chunk: Option<Bytes>,
+    current_offset: usize,
+    sent: u64,
+    finished: bool,
+    end_stream_sent: bool,
+}
+
+impl NativeDriverStreamingRequestBody {
+    fn new(stream: RequestBodyStream, content_length: Option<u64>) -> Self {
+        Self {
+            stream,
+            content_length,
+            current_chunk: None,
+            current_offset: 0,
+            sent: 0,
+            finished: false,
+            end_stream_sent: false,
+        }
+    }
+}
+
+struct NativeDriverTunnelState {
+    response_tx: Option<oneshot::Sender<Result<H3Tunnel>>>,
+    outbound_tx: Option<mpsc::Sender<H3TunnelOutbound>>,
+    outbound_rx: Option<mpsc::Receiver<H3TunnelOutbound>>,
+    inbound_tx: mpsc::Sender<Result<H3TunnelEvent>>,
+    inbound_rx: Option<mpsc::Receiver<Result<H3TunnelEvent>>>,
+    opened: bool,
+}
+
+impl NativeDriverTunnelState {
+    fn new(response_tx: oneshot::Sender<Result<H3Tunnel>>) -> Self {
+        let (outbound_tx, outbound_rx) = mpsc::channel(32);
+        let (inbound_tx, inbound_rx) = mpsc::channel(32);
+        Self {
+            response_tx: Some(response_tx),
+            outbound_tx: Some(outbound_tx),
+            outbound_rx: Some(outbound_rx),
+            inbound_tx,
+            inbound_rx: Some(inbound_rx),
+            opened: false,
+        }
+    }
+
+    fn fail(&mut self, error: Error) {
+        if let Some(response_tx) = self.response_tx.take() {
+            let _ = response_tx.send(Err(error));
+        } else {
+            let _ = self.inbound_tx.try_send(Err(error));
+        }
+    }
+}
+
+fn fail_pending_command_with_quic_message(command: DriverCommand, message: String) {
+    match command {
+        DriverCommand::SendRequest { response_tx, .. } => {
+            let _ = response_tx.send(Err(Error::Quic(message)));
+        }
+        DriverCommand::SendStreamingRequest {
+            headers_tx,
+            body_shared,
+            ..
+        } => {
+            let _ = headers_tx.send(Err(Error::Quic(message.clone())));
+            let _ = body_shared.fail(Error::Quic(message));
+        }
+        DriverCommand::OpenWebSocketTunnel { response_tx, .. } => {
+            let _ = response_tx.send(Err(Error::Quic(message)));
+        }
+        DriverCommand::SendTunnelData { .. } => {}
+    }
+}
+
+fn is_flow_control_blocked_error(error: &Error) -> bool {
+    matches!(error, Error::Quic(message) if message.contains("flow control blocked"))
+}
+
+impl NativeH3Driver {
+    async fn drive(mut self) -> Result<()> {
+        let result = self.drive_loop().await;
+        if let Err(error) = result {
+            let message = format!("native H3 driver error: {error}");
+            self.fail_all_with_quic_message(message);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn fail_all_with_quic_message(&mut self, message: String) {
+        self.is_draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        for (_, response_tx) in self.pending_responses.drain() {
+            let _ = response_tx.send(Err(Error::Quic(message.clone())));
+        }
+        for (_, mut stream) in self.pending_streaming_responses.drain() {
+            if let Some(headers_tx) = stream.headers_tx.take() {
+                let _ = headers_tx.send(Err(Error::Quic(message.clone())));
+            } else {
+                let _ = stream.body_shared.fail(Error::Quic(message.clone()));
+            }
+        }
+        for (_, mut tunnel) in self.pending_tunnels.drain() {
+            tunnel.fail(Error::Quic(message.clone()));
+        }
+        for command in self.pending_commands.drain(..) {
+            fail_pending_command_with_quic_message(command, message.clone());
+        }
+    }
+
+    async fn drive_loop(&mut self) -> Result<()> {
+        self.send_preface().await?;
+        if let Some(datagram) = self.initial_datagram.take() {
+            self.process_datagram(&datagram).await?;
+            self.process_pending_commands().await?;
+        }
+
+        let mut buf = vec![
+            0u8;
+            self.fingerprint
+                .transport
+                .max_recv_udp_payload_size
+                .max(1200)
+        ];
+        loop {
+            self.flush_request_stream_bodies().await?;
+            self.flush_streaming_responses();
+            if self.last_activity.elapsed() > self.max_idle_timeout && !self.has_pending_work() {
+                self.send_connection_close(0x00, Bytes::from_static(b"Idle timeout"))
+                    .await?;
+                return Ok(());
+            }
+            let remaining_idle = self
+                .max_idle_timeout
+                .checked_sub(self.last_activity.elapsed())
+                .unwrap_or(Duration::ZERO);
+
+            tokio::select! {
+                command = self.command_rx.recv() => {
+                    self.last_activity = Instant::now();
+                    match command {
+                        Some(command) => self.handle_command(command).await?,
+                        None => {
+                            self.send_connection_close(0x00, Bytes::from_static(b"Client shutdown"))
+                                .await?;
+                            return Ok(());
+                        }
+                    }
+                }
+                recv = self.socket.recv_from(&mut buf) => {
+                    self.last_activity = Instant::now();
+                    let (len, from) = recv.map_err(Error::Io)?;
+                    if from == self.peer_addr {
+                        self.process_datagram(&buf[..len]).await?;
+                    }
+                }
+                _ = tokio::time::sleep(remaining_idle) => {
+                    if !self.has_pending_work() {
+                        self.send_connection_close(0x00, Bytes::from_static(b"Idle timeout"))
+                            .await?;
+                        return Ok(());
+                    }
+                }
+                _ = self.body_progress_notify.notified() => {
+                    self.cancel_closed_streaming_bodies().await?;
+                    self.flush_request_stream_bodies().await?;
+                    self.flush_streaming_responses();
+                }
+            }
+        }
+    }
+
+    fn has_pending_work(&self) -> bool {
+        !self.pending_responses.is_empty()
+            || !self.pending_streaming_responses.is_empty()
+            || !self.pending_tunnels.is_empty()
+            || !self.pending_commands.is_empty()
+    }
+
+    async fn send_preface(&mut self) -> Result<()> {
+        for packet in self
+            .handshake
+            .build_client_h3_preface_packets(&self.fingerprint)?
+        {
+            self.socket
+                .send_to(packet.packet.as_ref(), self.peer_addr)
+                .await
+                .map_err(Error::Io)?;
+        }
+        Ok(())
+    }
+
+    async fn send_connection_close(&mut self, error_code: u64, reason: Bytes) -> Result<()> {
+        let packet = self
+            .handshake
+            .build_client_connection_close_packet(error_code, reason)?;
+        self.socket
+            .send_to(packet.packet.as_ref(), self.peer_addr)
+            .await
+            .map_err(Error::Io)?;
+        Ok(())
+    }
+
+    async fn send_receive_flow_control_updates(&mut self) -> Result<()> {
+        for packet in self
+            .handshake
+            .build_client_receive_flow_control_update_packets()?
+        {
+            self.socket
+                .send_to(packet.packet.as_ref(), self.peer_addr)
+                .await
+                .map_err(Error::Io)?;
+        }
+        Ok(())
+    }
+
+    async fn send_lost_application_stream_retransmits(&mut self) -> Result<()> {
+        for packet in self
+            .handshake
+            .retransmit_lost_client_application_stream_packets()?
+        {
+            self.socket
+                .send_to(packet.packet.as_ref(), self.peer_addr)
+                .await
+                .map_err(Error::Io)?;
+        }
+        Ok(())
+    }
+
+    async fn handle_command(&mut self, command: DriverCommand) -> Result<()> {
+        match command {
+            DriverCommand::SendRequest {
+                method,
+                uri,
+                headers,
+                body,
+                response_tx,
+            } => {
+                if self.is_draining.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = response_tx.send(Err(Error::HttpProtocol(
+                        "HTTP/3 GOAWAY received; refusing new request".into(),
+                    )));
+                    return Ok(());
+                }
+                let packet = match self.handshake.build_client_h3_request_packet(
+                    &method,
+                    &uri,
+                    &headers,
+                    body.clone(),
+                ) {
+                    Ok(packet) => packet,
+                    Err(error) if is_flow_control_blocked_error(&error) => {
+                        self.queue_flow_control_blocked_command(DriverCommand::SendRequest {
+                            method,
+                            uri,
+                            headers,
+                            body,
+                            response_tx,
+                        })
+                        .await?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+                self.state.track_response_stream(packet.stream_id);
+                self.pending_responses.insert(packet.stream_id, response_tx);
+                self.socket
+                    .send_to(packet.packet.as_ref(), self.peer_addr)
+                    .await
+                    .map_err(Error::Io)?;
+            }
+            DriverCommand::SendStreamingRequest {
+                method,
+                uri,
+                headers,
+                body,
+                headers_tx,
+                body_shared,
+            } => {
+                if self.is_draining.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = headers_tx.send(Err(Error::HttpProtocol(
+                        "HTTP/3 GOAWAY received; refusing new streaming request".into(),
+                    )));
+                    return Ok(());
+                }
+                let (packet, request_stream) = if let RequestBody::Stream {
+                    stream,
+                    content_length,
+                } = body
+                {
+                    match self
+                        .handshake
+                        .build_client_h3_request_start_packet(&method, &uri, &headers, None, false)
+                    {
+                        Ok(packet) => (
+                            packet,
+                            Some(NativeDriverStreamingRequestBody::new(
+                                stream,
+                                content_length,
+                            )),
+                        ),
+                        Err(error) if is_flow_control_blocked_error(&error) => {
+                            self.queue_flow_control_blocked_command(
+                                DriverCommand::SendStreamingRequest {
+                                    method,
+                                    uri,
+                                    headers,
+                                    body: RequestBody::Stream {
+                                        stream,
+                                        content_length,
+                                    },
+                                    headers_tx,
+                                    body_shared,
+                                },
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    let retry_body = body.clone();
+                    let body = body.into_bytes()?;
+                    match self.handshake.build_client_h3_request_packet(
+                        &method,
+                        &uri,
+                        &headers,
+                        (!body.is_empty()).then_some(body),
+                    ) {
+                        Ok(packet) => (packet, None),
+                        Err(error) if is_flow_control_blocked_error(&error) => {
+                            self.queue_flow_control_blocked_command(
+                                DriverCommand::SendStreamingRequest {
+                                    method,
+                                    uri,
+                                    headers,
+                                    body: retry_body,
+                                    headers_tx,
+                                    body_shared,
+                                },
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                self.state.track_streaming_response_stream(packet.stream_id);
+                self.pending_streaming_responses.insert(
+                    packet.stream_id,
+                    NativeDriverStreamingResponseState::new(
+                        headers_tx,
+                        body_shared,
+                        request_stream,
+                    ),
+                );
+                self.socket
+                    .send_to(packet.packet.as_ref(), self.peer_addr)
+                    .await
+                    .map_err(Error::Io)?;
+                self.flush_request_stream_bodies().await?;
+            }
+            DriverCommand::OpenWebSocketTunnel {
+                uri,
+                headers,
+                response_tx,
+            } => {
+                if self.is_draining.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = response_tx.send(Err(Error::HttpProtocol(
+                        "HTTP/3 GOAWAY received; refusing new RFC 9220 tunnel".into(),
+                    )));
+                    return Ok(());
+                }
+                if !self.state.peer_settings_received() {
+                    self.pending_commands
+                        .push_back(DriverCommand::OpenWebSocketTunnel {
+                            uri,
+                            headers,
+                            response_tx,
+                        });
+                    return Ok(());
+                }
+                if !self.state.extended_connect_enabled_by_peer() {
+                    let _ = response_tx.send(Err(Error::WebSocketUnsupported(
+                        "RFC 9220 requires peer SETTINGS_ENABLE_CONNECT_PROTOCOL = 1".into(),
+                    )));
+                    return Ok(());
+                }
+                let packet = match self
+                    .handshake
+                    .build_client_h3_websocket_connect_packet(&uri, &headers)
+                {
+                    Ok(packet) => packet,
+                    Err(error) if is_flow_control_blocked_error(&error) => {
+                        self.queue_flow_control_blocked_command(
+                            DriverCommand::OpenWebSocketTunnel {
+                                uri,
+                                headers,
+                                response_tx,
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        let _ = response_tx.send(Err(error));
+                        return Ok(());
+                    }
+                };
+                self.state.track_tunnel_stream(packet.stream_id);
+                self.pending_tunnels
+                    .insert(packet.stream_id, NativeDriverTunnelState::new(response_tx));
+                self.socket
+                    .send_to(packet.packet.as_ref(), self.peer_addr)
+                    .await
+                    .map_err(Error::Io)?;
+            }
+            DriverCommand::SendTunnelData {
+                stream_id,
+                outbound,
+            } => {
+                self.send_tunnel_data(stream_id, outbound).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn queue_flow_control_blocked_command(&mut self, command: DriverCommand) -> Result<()> {
+        self.pending_commands.push_back(command);
+        self.send_flow_control_blocked_packet().await
+    }
+
+    async fn send_flow_control_blocked_packet(&mut self) -> Result<()> {
+        if let Some(packet) = self.handshake.build_client_flow_control_blocked_packet()? {
+            self.socket
+                .send_to(packet.packet.as_ref(), self.peer_addr)
+                .await
+                .map_err(Error::Io)?;
+        }
+        Ok(())
+    }
+
+    async fn process_pending_commands(&mut self) -> Result<()> {
+        let original_len = self.pending_commands.len();
+        for _ in 0..original_len {
+            let Some(command) = self.pending_commands.pop_front() else {
+                break;
+            };
+            self.handle_command(command).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_tunnel_data(&mut self, stream_id: u64, outbound: H3TunnelOutbound) -> Result<()> {
+        if !self.pending_tunnels.contains_key(&stream_id) {
+            return Ok(());
+        }
+        if let Some(packet) =
+            self.handshake
+                .build_client_h3_data_packet(stream_id, outbound.bytes, outbound.fin)?
+        {
+            self.socket
+                .send_to(packet.packet.as_ref(), self.peer_addr)
+                .await
+                .map_err(Error::Io)?;
+        }
+        Ok(())
+    }
+
+    async fn flush_request_stream_bodies(&mut self) -> Result<()> {
+        let stream_ids = self
+            .pending_streaming_responses
+            .iter()
+            .filter_map(|(stream_id, stream)| stream.request_stream.is_some().then_some(*stream_id))
+            .collect::<Vec<_>>();
+        for stream_id in stream_ids {
+            self.flush_request_stream_body(stream_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_request_stream_body(&mut self, stream_id: u64) -> Result<()> {
+        loop {
+            if self
+                .pending_streaming_responses
+                .get(&stream_id)
+                .and_then(|stream| stream.request_stream.as_ref())
+                .is_none()
+            {
+                return Ok(());
+            }
+
+            let has_current_chunk = self
+                .pending_streaming_responses
+                .get(&stream_id)
+                .and_then(|stream| stream.request_stream.as_ref())
+                .and_then(|body| body.current_chunk.as_ref())
+                .is_some();
+
+            if !has_current_chunk {
+                let poll_result = {
+                    let stream = self
+                        .pending_streaming_responses
+                        .get_mut(&stream_id)
+                        .expect("stream exists");
+                    let body = stream
+                        .request_stream
+                        .as_mut()
+                        .expect("request stream exists");
+                    if body.finished {
+                        Poll::Ready(None)
+                    } else {
+                        let waker =
+                            Waker::from(Arc::new(NotifyWake(self.body_progress_notify.clone())));
+                        let mut context = std::task::Context::from_waker(&waker);
+                        body.stream.as_mut().poll_next(&mut context)
+                    }
+                };
+
+                match poll_result {
+                    Poll::Pending => return Ok(()),
+                    Poll::Ready(Some(Ok(chunk))) => {
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        let stream = self
+                            .pending_streaming_responses
+                            .get_mut(&stream_id)
+                            .expect("stream exists");
+                        let body = stream
+                            .request_stream
+                            .as_mut()
+                            .expect("request stream exists");
+                        body.current_chunk = Some(chunk);
+                        body.current_offset = 0;
+                    }
+                    Poll::Ready(Some(Err(error))) => {
+                        self.fail_streaming_response(
+                            stream_id,
+                            Error::HttpProtocol(format!("request body stream error: {error}")),
+                        );
+                        return Ok(());
+                    }
+                    Poll::Ready(None) => {
+                        let (valid_len, sent, expected, already_sent_end) = {
+                            let stream = self
+                                .pending_streaming_responses
+                                .get_mut(&stream_id)
+                                .expect("stream exists");
+                            let body = stream
+                                .request_stream
+                                .as_mut()
+                                .expect("request stream exists");
+                            body.finished = true;
+                            (
+                                body.content_length
+                                    .map(|expected| expected == body.sent)
+                                    .unwrap_or(true),
+                                body.sent,
+                                body.content_length,
+                                body.end_stream_sent,
+                            )
+                        };
+                        if !valid_len {
+                            self.fail_streaming_response(
+                                stream_id,
+                                Error::HttpProtocol(format!(
+                                    "sized streaming request body length mismatch: sent {} bytes, Content-Length is {}",
+                                    sent,
+                                    expected.unwrap_or_default()
+                                )),
+                            );
+                            return Ok(());
+                        }
+                        if already_sent_end {
+                            return Ok(());
+                        }
+                        if let Some(packet) = self.handshake.build_client_h3_data_packet(
+                            stream_id,
+                            Bytes::new(),
+                            true,
+                        )? {
+                            self.socket
+                                .send_to(packet.packet.as_ref(), self.peer_addr)
+                                .await
+                                .map_err(Error::Io)?;
+                        }
+                        if let Some(stream) = self.pending_streaming_responses.get_mut(&stream_id) {
+                            if let Some(body) = stream.request_stream.as_mut() {
+                                body.end_stream_sent = true;
+                            }
+                            stream.request_stream = None;
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+
+            let (chunk, offset) = {
+                let stream = self
+                    .pending_streaming_responses
+                    .get(&stream_id)
+                    .expect("stream exists");
+                let body = stream
+                    .request_stream
+                    .as_ref()
+                    .expect("request stream exists");
+                (
+                    body.current_chunk.as_ref().expect("current chunk").clone(),
+                    body.current_offset,
+                )
+            };
+            let remaining = chunk.slice(offset..);
+            if let Some(packet) =
+                self.handshake
+                    .build_client_h3_data_packet(stream_id, remaining.clone(), false)?
+            {
+                self.socket
+                    .send_to(packet.packet.as_ref(), self.peer_addr)
+                    .await
+                    .map_err(Error::Io)?;
+            }
+
+            if let Some(stream) = self.pending_streaming_responses.get_mut(&stream_id) {
+                let body = stream
+                    .request_stream
+                    .as_mut()
+                    .expect("request stream exists");
+                body.current_offset += remaining.len();
+                body.sent += remaining.len() as u64;
+                if body.current_offset >= chunk.len() {
+                    body.current_chunk = None;
+                    body.current_offset = 0;
+                }
+            }
+        }
+    }
+
+    async fn process_datagram(&mut self, datagram: &[u8]) -> Result<()> {
+        if datagram.first().is_some_and(|first| first & 0x80 != 0) {
+            let processed_packets = self.handshake.process_server_datagram(datagram)?;
+            if let Some(packet) = self.handshake.build_client_initial_ack_packet()? {
+                self.socket
+                    .send_to(packet.packet.as_ref(), self.peer_addr)
+                    .await
+                    .map_err(Error::Io)?;
+            }
+            if let Some(packet) = self.handshake.build_client_handshake_ack_packet()? {
+                self.socket
+                    .send_to(packet.packet.as_ref(), self.peer_addr)
+                    .await
+                    .map_err(Error::Io)?;
+            }
+            for processed in processed_packets {
+                if let Some(packet) = self
+                    .handshake
+                    .build_client_handshake_crypto_packet(processed.handshake_crypto_out)?
+                {
+                    self.socket
+                        .send_to(packet.packet.as_ref(), self.peer_addr)
+                        .await
+                        .map_err(Error::Io)?;
+                }
+            }
+            return Ok(());
+        }
+
+        let events = self.handshake.open_server_h3_event_packet(datagram)?;
+        if native_h3_driver_trace_enabled() {
+            let streams = events
+                .iter()
+                .filter_map(|event| match event {
+                    ServerH3Event::Stream(event) => Some(format!(
+                        "stream={} frames={} fin={}",
+                        event.stream_id,
+                        event.frames.len(),
+                        event.fin
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!(
+                "native H3 driver datagram len={} events={} {}",
+                datagram.len(),
+                events.len(),
+                streams
+            );
+        }
+        if let Some(packet) = self.handshake.build_client_application_ack_packet()? {
+            self.socket
+                .send_to(packet.packet.as_ref(), self.peer_addr)
+                .await
+                .map_err(Error::Io)?;
+        }
+        self.send_receive_flow_control_updates().await?;
+        self.send_lost_application_stream_retransmits().await?;
+        for event in events {
+            match event {
+                ServerH3Event::PathChallenge(data) => {
+                    let packet = self.handshake.build_client_path_response_packet(data)?;
+                    self.socket
+                        .send_to(packet.packet.as_ref(), self.peer_addr)
+                        .await
+                        .map_err(Error::Io)?;
+                }
+                event => self.apply_h3_event(event)?,
+            }
+        }
+        self.cancel_closed_streaming_bodies().await?;
+        self.process_pending_commands().await?;
+        Ok(())
+    }
+
+    fn apply_h3_event(&mut self, event: ServerH3Event) -> Result<()> {
+        match event {
+            ServerH3Event::Stream(event) => self.apply_stream_event(event),
+            ServerH3Event::ResetStream {
+                stream_id,
+                error_code,
+                ..
+            } => {
+                self.apply_reset_event(stream_id, error_code);
+                Ok(())
+            }
+            ServerH3Event::StopSending {
+                stream_id,
+                error_code,
+            } => {
+                self.apply_stop_sending_event(stream_id, error_code);
+                Ok(())
+            }
+            ServerH3Event::ConnectionClose {
+                error_code,
+                frame_type,
+                reason,
+            } => {
+                let reason = String::from_utf8_lossy(&reason);
+                let frame_type = frame_type
+                    .map(|frame_type| format!(" frame={frame_type:#x}"))
+                    .unwrap_or_default();
+                self.fail_all_with_quic_message(format!(
+                    "Connection close error={error_code:#x}{frame_type} reason={reason}"
+                ));
+                Ok(())
+            }
+            ServerH3Event::PathChallenge(_) => Ok(()),
+        }
+    }
+
+    fn apply_stream_event(&mut self, event: ServerH3StreamEvent) -> Result<()> {
+        let stream_id = event.stream_id;
+        if event.stream_type == Some(H3StreamType::Control) {
+            for event in self.state.apply_stream_event(event)? {
+                self.apply_connection_event(event);
+            }
+            return Ok(());
+        }
+
+        if self.pending_tunnels.contains_key(&stream_id) {
+            match self.state.apply_tracked_tunnel_event(event) {
+                Ok(events) => {
+                    for event in events {
+                        self.apply_tunnel_event(stream_id, event);
+                    }
+                }
+                Err(error) => {
+                    if let Some(mut tunnel) = self.pending_tunnels.remove(&stream_id) {
+                        tunnel.fail(error);
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        if self.pending_streaming_responses.contains_key(&stream_id) {
+            match self.state.apply_tracked_streaming_response_event(event) {
+                Ok(events) => {
+                    for event in events {
+                        self.apply_streaming_response_event(stream_id, event);
+                    }
+                }
+                Err(error) => {
+                    self.fail_streaming_response(stream_id, error);
+                }
+            }
+            return Ok(());
+        }
+
+        if let Some(response) = self.state.apply_tracked_response_event(event)? {
+            if let Some(response_tx) = self.pending_responses.remove(&stream_id) {
+                let _ = response_tx.send(Ok(StreamResponse {
+                    status: response.status,
+                    headers: response.headers,
+                    body: response.body,
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_reset_event(&mut self, stream_id: u64, error_code: u64) {
+        let error = Error::Quic(format!("Stream reset: {error_code}"));
+        if let Some(response_tx) = self.pending_responses.remove(&stream_id) {
+            let _ = response_tx.send(Err(error));
+            return;
+        }
+        if self.pending_streaming_responses.contains_key(&stream_id) {
+            self.fail_streaming_response(stream_id, error);
+            return;
+        }
+        if let Some(mut tunnel) = self.pending_tunnels.remove(&stream_id) {
+            if tunnel.opened {
+                let _ = tunnel
+                    .inbound_tx
+                    .try_send(Ok(H3TunnelEvent::Reset(error_code.to_string())));
+            } else {
+                tunnel.fail(error);
+            }
+        }
+    }
+
+    fn apply_stop_sending_event(&mut self, stream_id: u64, error_code: u64) {
+        let error = Error::Quic(format!("Stream stopped: {error_code}"));
+        if let Some(response_tx) = self.pending_responses.remove(&stream_id) {
+            let _ = response_tx.send(Err(error));
+            return;
+        }
+        if self.pending_streaming_responses.contains_key(&stream_id) {
+            self.fail_streaming_response(stream_id, error);
+            return;
+        }
+        if let Some(mut tunnel) = self.pending_tunnels.remove(&stream_id) {
+            tunnel.fail(error);
+        }
+    }
+
+    async fn cancel_closed_streaming_bodies(&mut self) -> Result<()> {
+        let stream_ids = self
+            .pending_streaming_responses
+            .iter()
+            .filter_map(|(stream_id, stream)| stream.body_shared.is_closed().then_some(*stream_id))
+            .collect::<Vec<_>>();
+
+        for stream_id in stream_ids {
+            self.send_stream_cancel(stream_id).await?;
+            self.pending_streaming_responses.remove(&stream_id);
+        }
+        Ok(())
+    }
+
+    async fn send_stream_cancel(&mut self, stream_id: u64) -> Result<()> {
+        const H3_REQUEST_CANCELLED: u64 = 0x010c;
+        let reset = self
+            .handshake
+            .build_client_reset_stream_packet(stream_id, H3_REQUEST_CANCELLED)?;
+        self.socket
+            .send_to(reset.packet.as_ref(), self.peer_addr)
+            .await
+            .map_err(Error::Io)?;
+
+        let stop = self
+            .handshake
+            .build_client_stop_sending_packet(stream_id, H3_REQUEST_CANCELLED)?;
+        self.socket
+            .send_to(stop.packet.as_ref(), self.peer_addr)
+            .await
+            .map_err(Error::Io)?;
+        Ok(())
+    }
+
+    fn apply_connection_event(&mut self, event: NativeH3Event) {
+        match event {
+            NativeH3Event::GoAway { .. } => {
+                self.is_draining
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            NativeH3Event::PeerSettings
+            | NativeH3Event::Headers { .. }
+            | NativeH3Event::Data { .. }
+            | NativeH3Event::Finished { .. } => {}
+        }
+    }
+
+    fn apply_streaming_response_event(
+        &mut self,
+        stream_id: u64,
+        event: NativeH3StreamingResponseEvent,
+    ) {
+        let Some(stream) = self.pending_streaming_responses.get_mut(&stream_id) else {
+            return;
+        };
+        match event {
+            NativeH3StreamingResponseEvent::Headers { status, headers } => {
+                if native_h3_driver_trace_enabled() {
+                    eprintln!("native H3 driver headers stream={stream_id} status={status}");
+                }
+                if let Some(headers_tx) = stream.headers_tx.take() {
+                    let _ = headers_tx.send(Ok((status, headers)));
+                }
+            }
+            NativeH3StreamingResponseEvent::Data(bytes) => {
+                if native_h3_driver_trace_enabled() {
+                    eprintln!(
+                        "native H3 driver data stream={stream_id} len={}",
+                        bytes.len()
+                    );
+                }
+                push_streaming_body(stream, bytes);
+            }
+            NativeH3StreamingResponseEvent::Finished => {
+                if native_h3_driver_trace_enabled() {
+                    eprintln!("native H3 driver finished stream={stream_id}");
+                }
+                stream.finished = true;
+            }
+            NativeH3StreamingResponseEvent::GoAway { .. } => {
+                self.is_draining
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        self.flush_streaming_response(stream_id);
+    }
+
+    fn fail_streaming_response(&mut self, stream_id: u64, error: Error) {
+        if let Some(mut stream) = self.pending_streaming_responses.remove(&stream_id) {
+            if let Some(headers_tx) = stream.headers_tx.take() {
+                let _ = headers_tx.send(Err(error));
+            } else {
+                let _ = stream.body_shared.fail(error);
+            }
+        }
+    }
+
+    fn flush_streaming_responses(&mut self) {
+        let stream_ids = self
+            .pending_streaming_responses
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for stream_id in stream_ids {
+            self.flush_streaming_response(stream_id);
+        }
+    }
+
+    fn flush_streaming_response(&mut self, stream_id: u64) {
+        let mut remove = false;
+        if let Some(stream) = self.pending_streaming_responses.get_mut(&stream_id) {
+            loop {
+                if stream.body_shared.is_closed() {
+                    break;
+                }
+                if stream.pending_body.is_empty() || !stream.body_shared.is_slot_available() {
+                    break;
+                }
+                let Some(bytes) = stream.pending_body.pop_front() else {
+                    break;
+                };
+                match stream.body_shared.push(Ok(bytes.clone())) {
+                    H3BodyPush::Accepted => {}
+                    H3BodyPush::Full => {
+                        stream.pending_body.push_front(bytes);
+                        break;
+                    }
+                    H3BodyPush::Closed => {
+                        remove = true;
+                        break;
+                    }
+                }
+            }
+            if stream.finished && stream.pending_body.is_empty() {
+                stream.body_shared.finish();
+                remove = true;
+            }
+        }
+        if remove {
+            self.pending_streaming_responses.remove(&stream_id);
+        }
+    }
+
+    fn apply_tunnel_event(&mut self, stream_id: u64, event: NativeH3TunnelEvent) {
+        match event {
+            NativeH3TunnelEvent::Open { .. } => {
+                let Some(tunnel) = self.pending_tunnels.get_mut(&stream_id) else {
+                    return;
+                };
+                if tunnel.opened {
+                    return;
+                }
+                let Some(response_tx) = tunnel.response_tx.take() else {
+                    return;
+                };
+                let Some(outbound_tx) = tunnel.outbound_tx.take() else {
+                    return;
+                };
+                let Some(inbound_rx) = tunnel.inbound_rx.take() else {
+                    return;
+                };
+                let Some(mut outbound_rx) = tunnel.outbound_rx.take() else {
+                    return;
+                };
+                let command_tx = self.command_tx.clone();
+                tokio::spawn(async move {
+                    while let Some(outbound) = outbound_rx.recv().await {
+                        if command_tx
+                            .send(DriverCommand::SendTunnelData {
+                                stream_id,
+                                outbound,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                tunnel.opened = true;
+                let _ = response_tx.send(Ok(H3Tunnel::new(outbound_tx, inbound_rx)));
+            }
+            NativeH3TunnelEvent::Data(bytes) => {
+                if let Some(tunnel) = self.pending_tunnels.get(&stream_id) {
+                    let _ = tunnel.inbound_tx.try_send(Ok(H3TunnelEvent::Data(bytes)));
+                }
+            }
+            NativeH3TunnelEvent::Finished => {
+                if let Some(tunnel) = self.pending_tunnels.remove(&stream_id) {
+                    let _ = tunnel.inbound_tx.try_send(Ok(H3TunnelEvent::EndStream));
+                }
+            }
+            NativeH3TunnelEvent::GoAway { id } => {
+                if let Some(tunnel) = self.pending_tunnels.get(&stream_id) {
+                    let _ = tunnel.inbound_tx.try_send(Ok(H3TunnelEvent::GoAway { id }));
+                }
+            }
+        }
+    }
+}
+
+fn push_streaming_body(stream: &mut NativeDriverStreamingResponseState, bytes: Bytes) {
+    if bytes.is_empty() {
+        return;
+    }
+    if !stream.pending_body.is_empty() {
+        stream.pending_body.push_back(bytes);
+        return;
+    }
+    match stream.body_shared.push(Ok(bytes.clone())) {
+        H3BodyPush::Accepted => {}
+        H3BodyPush::Full => {
+            stream.pending_body.push_back(bytes);
+        }
+        H3BodyPush::Closed => {
+            stream.finished = true;
+        }
+    }
+}
+
+fn native_h3_driver_trace_enabled() -> bool {
+    std::env::var_os("SPECTER_NATIVE_H3_DRIVER_TRACE").is_some()
+}
+
+fn is_enable_connect_protocol(setting: &H3Setting) -> bool {
+    matches!(setting, H3Setting::EnableConnectProtocol(value) if *value == 1)
+}

@@ -246,6 +246,12 @@ describe('Timeouts', () => {
 describe('FingerprintProfile', () => {
   test('profiles exist', () => {
     expect(FingerprintProfile.Chrome142).toBeDefined();
+    expect(FingerprintProfile.Chrome143).toBeDefined();
+    expect(FingerprintProfile.Chrome144).toBeDefined();
+    expect(FingerprintProfile.Chrome145).toBeDefined();
+    expect(FingerprintProfile.Chrome146).toBeDefined();
+    expect(FingerprintProfile.Chrome147).toBeDefined();
+    expect(FingerprintProfile.Chrome148).toBeDefined();
     expect(FingerprintProfile.Firefox133).toBeDefined();
     expect(FingerprintProfile.None).toBeDefined();
   });

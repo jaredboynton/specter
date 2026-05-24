@@ -46,7 +46,7 @@ pub fn generate_cert_bundle() -> (SslAcceptorBuilder, Vec<u8>) {
     (builder, c.cert_pem.clone())
 }
 
-/// PEM bytes (cert and key) for components that load from PEM directly (e.g., quiche).
+/// PEM bytes (cert and key) for components that load from PEM directly.
 #[allow(dead_code)]
 pub fn cached_cert_and_key_pem() -> (Vec<u8>, Vec<u8>) {
     let c = cached();

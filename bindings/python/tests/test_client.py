@@ -123,6 +123,12 @@ class TestClientBuilder:
     def test_fingerprint_profiles(self):
         for profile in (
             specter.FingerprintProfile.Chrome142,
+            specter.FingerprintProfile.Chrome143,
+            specter.FingerprintProfile.Chrome144,
+            specter.FingerprintProfile.Chrome145,
+            specter.FingerprintProfile.Chrome146,
+            specter.FingerprintProfile.Chrome147,
+            specter.FingerprintProfile.Chrome148,
             specter.FingerprintProfile.Firefox133,
             specter.FingerprintProfile.NoFingerprint,
         ):
@@ -230,6 +236,12 @@ class TestTimeouts:
 class TestEnumsAndCookieJar:
     def test_fingerprint_profiles_exist(self):
         assert specter.FingerprintProfile.Chrome142 is not None
+        assert specter.FingerprintProfile.Chrome143 is not None
+        assert specter.FingerprintProfile.Chrome144 is not None
+        assert specter.FingerprintProfile.Chrome145 is not None
+        assert specter.FingerprintProfile.Chrome146 is not None
+        assert specter.FingerprintProfile.Chrome147 is not None
+        assert specter.FingerprintProfile.Chrome148 is not None
         assert specter.FingerprintProfile.Firefox133 is not None
         assert specter.FingerprintProfile.NoFingerprint is not None
 

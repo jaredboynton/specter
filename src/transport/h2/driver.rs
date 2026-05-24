@@ -663,9 +663,12 @@ where
 
             if header.stream_id == stream_id && header.frame_type == FrameType::Data {
                 let end_stream = (header.flags & flags::END_STREAM) != 0;
-                let data =
+                let data = if (header.flags & flags::PADDED) == 0 {
+                    payload
+                } else {
                     self.connection
-                        .parse_inbound_data_payload(stream_id, header.flags, payload)?;
+                        .parse_inbound_data_payload(stream_id, header.flags, payload)?
+                };
                 let data_len = data.len();
                 let mut should_yield_for_body_queue = false;
                 if let Some(increment) = self

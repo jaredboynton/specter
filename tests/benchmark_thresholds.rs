@@ -28,6 +28,7 @@ fn metrics(ttft_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64
         client_write_overhead_duration_ns: 0.0,
         client_write_overhead_unclamped_duration_ns: None,
         client_write_overhead_denominator_floor_count: 0,
+        upload_complete_fallback_count: 0,
         p50_ns: ttft_ns,
         p95_ns,
         p99_ns: p95_ns,
@@ -40,6 +41,14 @@ fn metrics(ttft_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64
         bytes_per_sec_samples,
         response_gap_overhead_by_index_ns: Vec::new(),
     }
+}
+
+#[test]
+fn metrics_json_emits_zero_denominator_floor_counts() {
+    let json = serde_json::to_value(metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0)).unwrap();
+
+    assert_eq!(json["client_overhead_denominator_floor_count"], 0);
+    assert_eq!(json["client_write_overhead_denominator_floor_count"], 0);
 }
 
 #[test]

@@ -1,21 +1,29 @@
 #![allow(dead_code)]
 
-use quiche::h3::NameValue;
-use std::collections::{HashMap, VecDeque};
+use bytes::Bytes;
+use specter::fingerprint::Http3Fingerprint;
+use specter::transport::h3::handshake::{ClientH3Event, NativeQuicServerHandshake};
+use specter::transport::h3::native::{decode_header_block, H3Frame, H3Header};
+use specter::transport::h3::quic::{split_long_header_datagram, ConnectionId, LongHeaderType};
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::time::Instant;
+
+const SHORT_HEADER_CID_LEN: usize = 16;
+const MOCK_IDLE_TIMEOUT: Duration = Duration::from_millis(150);
 
 /// A mock HTTP/3 server for testing.
 #[allow(dead_code)]
 pub struct MockH3Server {
     socket: Arc<UdpSocket>,
     port: u16,
-    cert_path: String,
-    key_path: String,
     enable_extended_connect: bool,
+    fingerprint: Http3Fingerprint,
     connection_count: Arc<AtomicUsize>,
 }
 
@@ -25,25 +33,19 @@ impl MockH3Server {
         let port = socket.local_addr()?.port();
         let socket = Arc::new(socket);
 
-        // precise frame control requires handling the connection manually
-
-        // Reuse the process-wide cached ECDSA P-256 cert (rcgen default) instead of
-        // forking openssl per server. quiche loads cert+key from PEM files, so write
-        // the cached PEM bytes once per server (paths must be unique per UDP port).
-        let (cert_pem, key_pem) = super::tls::cached_cert_and_key_pem();
-        let cert_path = std::env::temp_dir().join(format!("mock_h3_{}.crt", port));
-        let key_path = std::env::temp_dir().join(format!("mock_h3_{}.key", port));
-        std::fs::write(&cert_path, &cert_pem)?;
-        std::fs::write(&key_path, &key_pem)?;
-
         Ok(Self {
             socket,
             port,
-            cert_path: cert_path.to_str().unwrap().to_string(),
-            key_path: key_path.to_str().unwrap().to_string(),
             enable_extended_connect: false,
+            fingerprint: Http3Fingerprint::chrome(),
             connection_count: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    pub async fn new_with_fingerprint(fingerprint: Http3Fingerprint) -> std::io::Result<Self> {
+        let mut server = Self::new().await?;
+        server.fingerprint = fingerprint;
+        Ok(server)
     }
 
     pub async fn new_with_extended_connect() -> std::io::Result<Self> {
@@ -80,38 +82,11 @@ impl MockH3Server {
         Fut: std::future::Future<Output = ()> + Send,
     {
         let mut buf = [0u8; 65535];
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file(&self.cert_path)
-            .unwrap();
-        config.load_priv_key_from_pem_file(&self.key_path).unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
-        config.set_max_idle_timeout(5000);
-        config.set_initial_max_data(10_000_000);
-        config.set_initial_max_stream_data_bidi_local(1_000_000);
-        config.set_initial_max_stream_data_bidi_remote(1_000_000);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
-        config.set_disable_active_migration(true);
-
-        config.set_disable_active_migration(true);
-
-        // Ring usage removed (unused)
-
-        let connections = Arc::new(Mutex::new(HashMap::<
-            Vec<u8>,
-            mpsc::Sender<(Vec<u8>, SocketAddr)>,
-        >::new()));
-        let socket = self.socket.clone();
-        // Need local addr for accept
-        let local_addr = socket.local_addr().unwrap();
-
+        let connections = Arc::new(Mutex::new(HashMap::<Vec<u8>, mpsc::Sender<Vec<u8>>>::new()));
         let handler = Arc::new(handler);
-
-        // Clone paths for task
-        let cert_path = self.cert_path.clone();
-        let key_path = self.key_path.clone();
+        let socket = self.socket.clone();
         let enable_extended_connect = self.enable_extended_connect;
+        let fingerprint = self.fingerprint.clone();
         let connection_count = self.connection_count.clone();
 
         loop {
@@ -123,388 +98,475 @@ impl MockH3Server {
                 }
             };
             let packet = buf[..len].to_vec();
+            let long_packets = split_long_header_datagram(&packet).ok();
 
-            let header = match quiche::Header::from_slice(&mut buf[..len], 16) {
-                Ok(h) => h,
-                Err(_) => {
-                    let conns = connections.lock().await;
-                    if conns.len() == 1 {
-                        if let Some(tx) = conns.values().next() {
-                            let _ = tx.send((packet, peer)).await;
-                        }
-                    }
-                    continue;
-                }
-            };
-
-            let conn_id = header.dcid.as_ref().to_vec();
-            println!(
-                "MockH3Server: received packet, dcid: {:?}, type: {:?}",
-                header.dcid, header.ty
-            );
-
-            // If new connection
-            let is_new = {
-                let conns = connections.lock().await;
-                !conns.contains_key(&conn_id)
-            };
-
-            if is_new {
+            if let Some(first) = long_packets
+                .as_ref()
+                .and_then(|packets| packets.first())
+                .filter(|packet| packet.packet_type == LongHeaderType::Initial)
+            {
+                let conn_id = first.destination_cid.as_bytes().to_vec();
                 let mut conns = connections.lock().await;
-                if header.ty != quiche::Type::Initial {
-                    println!(
-                        "MockH3Server: non-initial packet for unknown connection, dcid: {:?}",
-                        header.dcid
+                if !conns.contains_key(&conn_id) {
+                    let (tx, rx) = mpsc::channel(100);
+                    conns.insert(conn_id.clone(), tx.clone());
+                    drop(conns);
+
+                    connection_count.fetch_add(1, Ordering::SeqCst);
+                    spawn_native_connection(
+                        socket.clone(),
+                        peer,
+                        rx,
+                        handler.clone(),
+                        enable_extended_connect,
+                        fingerprint.clone(),
+                        first.destination_cid.clone(),
+                        first.source_cid.clone(),
                     );
-                    if conns.len() == 1 {
-                        if let Some(tx) = conns.values().next().cloned() {
-                            drop(conns);
-                            let _ = tx.send((packet.clone(), peer)).await;
-                        }
-                    }
+                    let _ = tx.send(packet).await;
                     continue;
                 }
-
-                if !quiche::version_is_supported(header.version) {
-                    // Version negotiation?
-                    continue;
-                }
-
-                // Actually need to clone it to static
-                let scid = header.dcid.into_owned();
-                println!("MockH3Server: new connection, client scid: {:?}", scid);
-
-                let (tx, mut rx) = mpsc::channel(100);
-                conns.insert(scid.as_ref().to_vec(), tx.clone());
-                drop(conns);
-
-                connection_count.fetch_add(1, Ordering::SeqCst);
-
-                // Spawn connection handler
-                let socket_clone = socket.clone();
-                let mut config_clone = match quiche::Config::new(quiche::PROTOCOL_VERSION) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-
-                config_clone
-                    .load_cert_chain_from_pem_file(&cert_path)
-                    .unwrap();
-                config_clone.load_priv_key_from_pem_file(&key_path).unwrap();
-                config_clone.set_application_protos(&[b"h3"]).unwrap();
-                config_clone.set_max_idle_timeout(30_000);
-                config_clone.set_max_recv_udp_payload_size(65535);
-                config_clone.set_max_send_udp_payload_size(1350);
-                config_clone.set_initial_max_data(15_663_105);
-                config_clone.set_initial_max_stream_data_bidi_local(1_000_000);
-                config_clone.set_initial_max_stream_data_bidi_remote(1_000_000);
-                config_clone.set_initial_max_stream_data_uni(1_000_000);
-                config_clone.set_initial_max_streams_bidi(100);
-                config_clone.set_initial_max_streams_uni(100);
-                config_clone.set_disable_active_migration(true);
-
-                let handler_clone = handler.clone();
-                let scid_clone = scid.clone();
-                let odcid = scid.clone();
-
-                let cert_path_clone = cert_path.clone();
-                let key_path_clone = key_path.clone();
-                let connections_clone = connections.clone();
-                let tx_clone = tx.clone();
-
-                tokio::spawn(async move {
-                    // Create configuration for this connection
-                    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-                    if let Err(e) = config.load_cert_chain_from_pem_file(&cert_path_clone) {
-                        tracing::error!("MockServer: Failed to load cert: {}", e);
-                        return;
-                    }
-                    if let Err(e) = config.load_priv_key_from_pem_file(&key_path_clone) {
-                        tracing::error!("MockServer: Failed to load key: {}", e);
-                        return;
-                    }
-                    config.set_application_protos(&[b"h3"]).unwrap();
-                    config.set_max_idle_timeout(30_000);
-                    config.set_max_recv_udp_payload_size(65535);
-                    config.set_max_send_udp_payload_size(1350);
-                    config.set_initial_max_data(15_663_105);
-                    config.set_initial_max_stream_data_bidi_local(1_000_000);
-                    config.set_initial_max_stream_data_bidi_remote(1_000_000);
-                    config.set_initial_max_stream_data_uni(1_000_000);
-                    config.set_initial_max_streams_bidi(100);
-                    config.set_initial_max_streams_uni(100);
-                    config.set_disable_active_migration(true);
-
-                    let mut conn =
-                        quiche::accept(&scid_clone, Some(&odcid), local_addr, peer, &mut config)
-                            .unwrap();
-
-                    // Register the server's generated source connection ID!
-                    let server_scid = conn.source_id().as_ref().to_vec();
-                    println!(
-                        "MockH3Server: registering server source connection ID: {:?}",
-                        conn.source_id()
-                    );
-                    connections_clone.lock().await.insert(server_scid, tx_clone);
-
-                    let mut h3_conn: Option<quiche::h3::Connection> = None;
-                    let mut pending_response_data: VecDeque<(u64, Vec<u8>, usize, bool)> =
-                        VecDeque::new();
-
-                    let (cmd_tx, mut cmd_rx) = mpsc::channel(100);
-                    let (evt_tx, evt_rx) = mpsc::channel(100);
-
-                    let mock_conn = MockH3Connection {
-                        cmd_tx,
-                        evt_rx: Arc::new(Mutex::new(evt_rx)),
-                    };
-
-                    tokio::spawn(async move {
-                        handler_clone(mock_conn).await;
-                    });
-
-                    let mut out = [0u8; 65535];
-
-                    let mut interval = tokio::time::interval(std::time::Duration::from_millis(10));
-
-                    loop {
-                        tokio::select! {
-                            res = rx.recv() => {
-                                match res {
-                                    Some((packet, from)) => {
-                                        println!("MockH3Server Task: rx.recv received packet of len {}", packet.len());
-                                        let recv_info = quiche::RecvInfo {
-                                            to: socket_clone.local_addr().unwrap(),
-                                            from,
-                                        };
-                                        match conn.recv(&mut packet.clone(), recv_info) {
-                                            Ok(_) => {
-                                                println!("MockH3Server Task: conn.recv succeeded");
-                                                if conn.is_established() && h3_conn.is_none() {
-                                                    let mut h3_config = quiche::h3::Config::new().unwrap();
-                                                    if enable_extended_connect {
-                                                        h3_config.enable_extended_connect(true);
-                                                    }
-                                                    match quiche::h3::Connection::with_transport(&mut conn, &h3_config) {
-                                                        Ok(h3) => h3_conn = Some(h3),
-                                                        Err(e) => {
-                                                            tracing::debug!("h3 init error: {}", e);
-                                                        }
-                                                    }
-                                                }
-
-                                                if conn.is_established() {
-                                                    if let Some(h3) = h3_conn.as_mut() {
-                                                        loop {
-                                                            match h3.poll(&mut conn) {
-                                                                Ok((stream_id, quiche::h3::Event::Data)) => {
-                                                                    let mut body = vec![0u8; 1024];
-                                                                    loop {
-                                                                        match h3.recv_body(&mut conn, stream_id, &mut body) {
-                                                                            Ok(n) if n > 0 => {
-                                                                                let _ = evt_tx.send(MockEvent::Data { stream_id, data: body[..n].to_vec(), fin: false }).await;
-                                                                            }
-                                                                            Ok(_) | Err(quiche::h3::Error::Done) => break,
-                                                                            Err(_) => break,
-                                                                        }
-                                                                    }
-                                                                },
-                                                                Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
-                                                                    let headers = list
-                                                                        .iter()
-                                                                        .map(|header| {
-                                                                            (
-                                                                                String::from_utf8_lossy(header.name()).into_owned(),
-                                                                                String::from_utf8_lossy(header.value()).into_owned(),
-                                                                            )
-                                                                        })
-                                                                        .collect();
-                                                                    let _ = evt_tx.send(MockEvent::Headers { stream_id, headers }).await;
-                                                                },
-                                                                Ok((stream_id, quiche::h3::Event::Finished)) => {
-                                                                    let _ = evt_tx.send(MockEvent::Finished { stream_id }).await;
-                                                                },
-                                                                Ok((stream_id, quiche::h3::Event::Reset(code))) => {
-                                                                    let _ = evt_tx.send(MockEvent::Reset { stream_id, code }).await;
-                                                                },
-                                                                Ok((id, quiche::h3::Event::GoAway)) => {
-                                                                    let _ = evt_tx.send(MockEvent::GoAway { id }).await;
-                                                                },
-                                                                Err(quiche::h3::Error::Done) => break,
-                                                                Err(_) => break,
-                                                                _ => {}
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                            Err(e) => tracing::debug!("quiche recv error: {}", e),
-                                        }
-                                    },
-                                    None => break,
-                                }
-                            }
-
-                            _ = interval.tick() => {
-                                conn.on_timeout();
-                            }
-
-                            cmd = cmd_rx.recv() => {
-                                match cmd {
-                                    Some(MockCommand::SendFrame { stream_id, payload }) => {
-                                        let _ = conn.stream_send(stream_id, &payload, false);
-                                    }
-                                    Some(MockCommand::SendBytes { stream_id, bytes }) => {
-                                         let _ = conn.stream_send(stream_id, &bytes, false);
-                                    }
-                                    Some(MockCommand::SendResponseHeaders { stream_id, headers, fin }) => {
-                                        if let Some(h3) = h3_conn.as_mut() {
-                                            let h3_headers = headers
-                                                .iter()
-                                                .map(|(name, value)| {
-                                                    quiche::h3::Header::new(name.as_bytes(), value.as_bytes())
-                                                })
-                                                .collect::<Vec<_>>();
-                                            if let Err(e) = h3.send_response(&mut conn, stream_id, &h3_headers, fin) {
-                                                tracing::debug!("mock h3 send_response error: {}", e);
-                                            }
-                                        }
-                                    }
-                                    Some(MockCommand::SendResponseData { stream_id, bytes, fin }) => {
-                                        pending_response_data.push_back((stream_id, bytes, 0, fin));
-                                    }
-                                    Some(MockCommand::SendGoAway { id }) => {
-                                        if let Some(h3) = h3_conn.as_mut() {
-                                            let _ = h3.send_goaway(&mut conn, id);
-                                        }
-                                    }
-                                    Some(MockCommand::ResetStream { stream_id, error_code }) => {
-                                        let _ = conn.stream_shutdown(
-                                            stream_id,
-                                            quiche::Shutdown::Write,
-                                            error_code,
-                                        );
-                                    }
-                                    None => {},
-                                }
-                            }
-                        }
-
-                        if let Some(h3) = h3_conn.as_mut() {
-                            while let Some((stream_id, bytes, offset, fin)) =
-                                pending_response_data.front_mut()
-                            {
-                                if bytes.is_empty() {
-                                    match h3.send_body(&mut conn, *stream_id, bytes, *fin) {
-                                        Ok(_) => {
-                                            pending_response_data.pop_front();
-                                        }
-                                        Err(quiche::h3::Error::Done)
-                                        | Err(quiche::h3::Error::StreamBlocked) => break,
-                                        Err(e) => {
-                                            tracing::debug!("mock h3 send_body error: {}", e);
-                                            pending_response_data.pop_front();
-                                        }
-                                    }
-                                    continue;
-                                }
-
-                                let remaining_len = bytes.len().saturating_sub(*offset);
-                                let capacity = conn.stream_capacity(*stream_id).unwrap_or(0);
-                                let fin_for_call = *fin && capacity > remaining_len + 8;
-                                match h3.send_body(
-                                    &mut conn,
-                                    *stream_id,
-                                    &bytes[*offset..],
-                                    fin_for_call,
-                                ) {
-                                    Ok(sent) if sent > 0 => {
-                                        *offset += sent;
-                                        if *offset >= bytes.len() {
-                                            let needs_fin = *fin && !fin_for_call;
-                                            let finished_stream_id = *stream_id;
-                                            pending_response_data.pop_front();
-                                            if needs_fin {
-                                                pending_response_data.push_front((
-                                                    finished_stream_id,
-                                                    Vec::new(),
-                                                    0,
-                                                    true,
-                                                ));
-                                            }
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                    Ok(_)
-                                    | Err(quiche::h3::Error::Done)
-                                    | Err(quiche::h3::Error::StreamBlocked) => break,
-                                    Err(e) => {
-                                        tracing::debug!("mock h3 send_body error: {}", e);
-                                        pending_response_data.pop_front();
-                                    }
-                                }
-                            }
-                        }
-
-                        while let Ok((len, send_info)) = conn.send(&mut out) {
-                            println!(
-                                "MockH3Server Task: conn.send sending packet of len {} to {}",
-                                len, send_info.to
-                            );
-                            let _ = socket_clone.send_to(&out[..len], send_info.to).await;
-                        }
-
-                        if conn.is_closed() {
-                            println!("MockH3Server Task: connection is closed, breaking loop");
-                            break;
-                        }
-                    }
-                });
             }
 
             let tx_to_send = {
                 let conns = connections.lock().await;
-                if let Some(tx) = conns.get(&conn_id).cloned() {
-                    println!(
-                        "MockH3Server: routed packet of len {} to connection {:?}",
-                        packet.len(),
-                        conn_id
-                    );
-                    Some(tx)
-                } else if let Some((matched_id, tx)) =
-                    conns.iter().find(|(k, _)| k.starts_with(&conn_id))
-                {
-                    println!(
-                        "MockH3Server: routed packet of len {} to prefix-matched connection {:?}",
-                        packet.len(),
-                        matched_id
-                    );
-                    Some(tx.clone())
-                } else if conns.len() == 1 {
-                    if let Some(tx) = conns.values().next().cloned() {
-                        println!(
-                            "MockH3Server: routed packet of len {} to single connection fallback",
-                            packet.len()
-                        );
-                        Some(tx)
-                    } else {
-                        None
-                    }
-                } else {
-                    println!(
-                        "MockH3Server: dropped packet of len {} with no matching connection",
-                        packet.len()
-                    );
-                    None
-                }
+                route_connection_id(&packet, long_packets.as_deref())
+                    .and_then(|conn_id| conns.get(&conn_id).cloned())
+                    .or_else(|| {
+                        if conns.len() == 1 {
+                            conns.values().next().cloned()
+                        } else {
+                            None
+                        }
+                    })
             };
 
             if let Some(tx) = tx_to_send {
-                let _ = tx.send((packet, peer)).await;
+                let _ = tx.send(packet).await;
             }
         }
     }
+}
+
+fn spawn_native_connection<F, Fut>(
+    socket: Arc<UdpSocket>,
+    peer: SocketAddr,
+    rx: mpsc::Receiver<Vec<u8>>,
+    handler: Arc<F>,
+    enable_extended_connect: bool,
+    mut fingerprint: Http3Fingerprint,
+    client_destination_cid: ConnectionId,
+    client_source_cid: ConnectionId,
+) where
+    F: Fn(MockH3Connection) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    let (cert_pem, key_pem) = super::tls::cached_cert_and_key_pem();
+    if enable_extended_connect {
+        fingerprint.settings.enable_extended_connect = true;
+    }
+    let server_source_cid = ConnectionId::from_static(b"mock-h3-server");
+    let server = match NativeQuicServerHandshake::new(
+        &fingerprint,
+        &cert_pem,
+        &key_pem,
+        client_destination_cid,
+        client_source_cid,
+        server_source_cid,
+    ) {
+        Ok(server) => server,
+        Err(err) => {
+            tracing::error!("native mock H3 server handshake init failed: {}", err);
+            return;
+        }
+    };
+
+    tokio::spawn(async move {
+        let (cmd_tx, cmd_rx) = mpsc::channel(100);
+        let (evt_tx, evt_rx) = mpsc::channel(100);
+        let mock_conn = MockH3Connection {
+            cmd_tx,
+            evt_rx: Arc::new(Mutex::new(evt_rx)),
+        };
+        tokio::spawn(async move {
+            handler(mock_conn).await;
+        });
+
+        NativeMockH3Connection {
+            socket,
+            peer,
+            handshake: server,
+            fingerprint,
+            settings_sent: false,
+            rx,
+            cmd_rx,
+            evt_tx,
+            stats: MockH3Stats::default(),
+            last_activity: Instant::now(),
+            finished_client_streams: HashSet::new(),
+            seen_request_headers: false,
+            last_request_headers_at: None,
+            closed: false,
+        }
+        .run()
+        .await;
+    });
+}
+
+struct NativeMockH3Connection {
+    socket: Arc<UdpSocket>,
+    peer: SocketAddr,
+    handshake: NativeQuicServerHandshake,
+    fingerprint: Http3Fingerprint,
+    settings_sent: bool,
+    rx: mpsc::Receiver<Vec<u8>>,
+    cmd_rx: mpsc::Receiver<MockCommand>,
+    evt_tx: mpsc::Sender<MockEvent>,
+    stats: MockH3Stats,
+    last_activity: Instant,
+    finished_client_streams: HashSet<u64>,
+    seen_request_headers: bool,
+    last_request_headers_at: Option<Instant>,
+    closed: bool,
+}
+
+impl NativeMockH3Connection {
+    async fn run(mut self) {
+        loop {
+            if self.closed {
+                break;
+            }
+            if self.last_activity.elapsed() >= MOCK_IDLE_TIMEOUT {
+                if self.handshake.is_application_ready() {
+                    let _ = self
+                        .process_command(MockCommand::CloseConnection {
+                            app: true,
+                            error_code: 0,
+                            reason: b"Idle timeout".to_vec(),
+                        })
+                        .await;
+                }
+                self.closed = true;
+                break;
+            }
+            let idle_remaining = MOCK_IDLE_TIMEOUT
+                .checked_sub(self.last_activity.elapsed())
+                .unwrap_or(Duration::ZERO);
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep(idle_remaining) => {
+                    if self.handshake.is_application_ready() {
+                        let _ = self
+                            .process_command(MockCommand::CloseConnection {
+                                app: true,
+                                error_code: 0,
+                                reason: b"Idle timeout".to_vec(),
+                            })
+                            .await;
+                    }
+                    break;
+                }
+                packet = self.rx.recv() => {
+                    let Some(packet) = packet else { break };
+                    match self.process_datagram(&packet).await {
+                        Ok(true) => self.last_activity = Instant::now(),
+                        Ok(false) => {}
+                        Err(err) => tracing::debug!("native mock H3 process_datagram error: {}", err),
+                    }
+                }
+                command = self.cmd_rx.recv() => {
+                    let Some(command) = command else { break };
+                    self.last_activity = Instant::now();
+                    if let Err(err) = self.process_command(command).await {
+                        tracing::debug!("native mock H3 command error: {}", err);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn process_datagram(&mut self, packet: &[u8]) -> specter::Result<bool> {
+        if packet.first().is_some_and(|first| first & 0x80 != 0) {
+            let packets = split_long_header_datagram(packet)?;
+            let mut active = false;
+            if packets
+                .iter()
+                .any(|packet| packet.packet_type == LongHeaderType::Initial)
+            {
+                active = true;
+                let flight = self.handshake.process_client_initial(packet)?;
+                if !flight.datagram.is_empty() {
+                    self.send_packet(flight.datagram).await?;
+                }
+                if let Some(packet) = self.handshake.build_server_initial_ack_packet()? {
+                    self.send_packet(packet.packet).await?;
+                }
+            }
+            if packets
+                .iter()
+                .any(|packet| packet.packet_type == LongHeaderType::Handshake)
+            {
+                active = true;
+                self.handshake.process_client_handshake(packet)?;
+                if let Some(packet) = self.handshake.build_server_handshake_ack_packet()? {
+                    self.send_packet(packet.packet).await?;
+                }
+                self.send_settings_if_ready().await?;
+            }
+            return Ok(active);
+        }
+
+        let events = self.handshake.open_client_h3_event_packet(packet)?;
+        if self.seen_request_headers
+            && self
+                .last_request_headers_at
+                .is_some_and(|last| last.elapsed() >= MOCK_IDLE_TIMEOUT)
+            && events.iter().any(is_request_headers_event)
+        {
+            self.process_command(MockCommand::CloseConnection {
+                app: true,
+                error_code: 0,
+                reason: b"Idle timeout".to_vec(),
+            })
+            .await?;
+            self.closed = true;
+            return Ok(false);
+        }
+        if let Some(packet) = self.handshake.build_server_application_ack_packet()? {
+            self.send_packet(packet.packet).await?;
+        }
+        for packet in self
+            .handshake
+            .build_server_receive_flow_control_update_packets()?
+        {
+            self.send_packet(packet.packet).await?;
+        }
+        for packet in self
+            .handshake
+            .retransmit_lost_server_application_stream_packets()?
+        {
+            self.send_packet(packet.packet).await?;
+        }
+        let mut active = false;
+        for event in events {
+            if self.apply_client_event(event).await? {
+                active = true;
+            }
+        }
+        Ok(active)
+    }
+
+    async fn send_settings_if_ready(&mut self) -> specter::Result<()> {
+        if self.settings_sent || !self.handshake.is_application_ready() {
+            return Ok(());
+        }
+        let packet = self
+            .handshake
+            .build_server_h3_settings_packet(&self.fingerprint)?;
+        self.settings_sent = true;
+        self.send_packet(packet.packet).await
+    }
+
+    async fn apply_client_event(&mut self, event: ClientH3Event) -> specter::Result<bool> {
+        match event {
+            ClientH3Event::Stream(event) => {
+                let mut active = false;
+                for frame in event.frames {
+                    match frame {
+                        H3Frame::Headers(block) => {
+                            active = true;
+                            self.seen_request_headers = true;
+                            self.last_request_headers_at = Some(Instant::now());
+                            let headers = decode_header_block(block.as_ref())?
+                                .into_iter()
+                                .map(|header| {
+                                    (header.name().to_string(), header.value().to_string())
+                                })
+                                .collect();
+                            let _ = self
+                                .evt_tx
+                                .send(MockEvent::Headers {
+                                    stream_id: event.stream_id,
+                                    headers,
+                                })
+                                .await;
+                        }
+                        H3Frame::Data(data) => {
+                            if !data.is_empty() {
+                                active = true;
+                                let _ = self
+                                    .evt_tx
+                                    .send(MockEvent::Data {
+                                        stream_id: event.stream_id,
+                                        data: data.to_vec(),
+                                        fin: false,
+                                    })
+                                    .await;
+                            }
+                        }
+                        H3Frame::GoAway { id } => {
+                            active = true;
+                            let _ = self.evt_tx.send(MockEvent::GoAway { id }).await;
+                        }
+                        H3Frame::Settings(_) | H3Frame::Unknown { .. } => {}
+                    }
+                }
+                if event.fin && self.finished_client_streams.insert(event.stream_id) {
+                    active = true;
+                    let _ = self
+                        .evt_tx
+                        .send(MockEvent::Finished {
+                            stream_id: event.stream_id,
+                        })
+                        .await;
+                }
+                Ok(active)
+            }
+            ClientH3Event::ResetStream {
+                stream_id,
+                error_code,
+                ..
+            } => {
+                self.stats.reset_stream_count_remote += 1;
+                let _ = self
+                    .evt_tx
+                    .send(MockEvent::Reset {
+                        stream_id,
+                        code: error_code,
+                    })
+                    .await;
+                Ok(true)
+            }
+            ClientH3Event::StopSending { .. } => {
+                self.stats.stopped_stream_count_remote += 1;
+                Ok(true)
+            }
+            ClientH3Event::ConnectionClose { .. } | ClientH3Event::PathChallenge(_) => Ok(true),
+        }
+    }
+
+    async fn process_command(&mut self, command: MockCommand) -> specter::Result<()> {
+        match command {
+            MockCommand::SendFrame { stream_id, payload }
+            | MockCommand::SendBytes {
+                stream_id,
+                bytes: payload,
+            } => {
+                let packet = self.handshake.build_server_h3_raw_stream_packet(
+                    stream_id,
+                    Bytes::from(payload),
+                    false,
+                )?;
+                self.send_packet(packet.packet).await?;
+            }
+            MockCommand::SendResponseHeaders {
+                stream_id,
+                headers,
+                fin,
+            } => {
+                let headers = headers
+                    .into_iter()
+                    .map(|(name, value)| H3Header::new(name, value))
+                    .collect();
+                let packet = self
+                    .handshake
+                    .build_server_h3_response_packet(stream_id, headers, None, fin)?;
+                self.send_packet(packet.packet).await?;
+            }
+            MockCommand::SendResponseData {
+                stream_id,
+                bytes,
+                fin,
+            } => {
+                let packet = if bytes.is_empty() {
+                    self.handshake.build_server_h3_raw_stream_packet(
+                        stream_id,
+                        Bytes::new(),
+                        fin,
+                    )?
+                } else {
+                    self.handshake.build_server_h3_response_data_packet(
+                        stream_id,
+                        Bytes::from(bytes),
+                        fin,
+                    )?
+                };
+                self.send_packet(packet.packet).await?;
+            }
+            MockCommand::SendGoAway { id } => {
+                let packet = self.handshake.build_server_h3_goaway_packet(id)?;
+                self.send_packet(packet.packet).await?;
+            }
+            MockCommand::SendMaxStreams {
+                bidirectional,
+                max_streams,
+            } => {
+                let packet = self
+                    .handshake
+                    .build_server_max_streams_packet(bidirectional, max_streams)?;
+                self.send_packet(packet.packet).await?;
+            }
+            MockCommand::ResetStream {
+                stream_id,
+                error_code,
+            } => {
+                self.stats.reset_stream_count_local += 1;
+                let packet = self
+                    .handshake
+                    .build_server_reset_stream_packet(stream_id, error_code)?;
+                self.send_packet(packet.packet).await?;
+            }
+            MockCommand::CloseConnection {
+                app: _,
+                error_code,
+                reason,
+            } => {
+                let packet = self
+                    .handshake
+                    .build_server_connection_close_packet(error_code, Bytes::from(reason))?;
+                self.send_packet(packet.packet).await?;
+                self.closed = true;
+            }
+            MockCommand::GetStats { response_tx } => {
+                let _ = response_tx.send(self.stats);
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_packet(&self, packet: Bytes) -> specter::Result<()> {
+        self.socket
+            .send_to(packet.as_ref(), self.peer)
+            .await
+            .map_err(specter::Error::Io)?;
+        Ok(())
+    }
+}
+
+fn is_request_headers_event(event: &ClientH3Event) -> bool {
+    matches!(
+        event,
+        ClientH3Event::Stream(event)
+            if event
+                .frames
+                .iter()
+                .any(|frame| matches!(frame, H3Frame::Headers(_)))
+    )
+}
+
+fn route_connection_id(
+    packet: &[u8],
+    long_packets: Option<&[specter::transport::h3::quic::LongHeaderDatagramPacket]>,
+) -> Option<Vec<u8>> {
+    if let Some(first) = long_packets.and_then(|packets| packets.first()) {
+        return Some(first.destination_cid.as_bytes().to_vec());
+    }
+    if packet.first().is_some_and(|first| first & 0x80 == 0)
+        && packet.len() > 1 + SHORT_HEADER_CID_LEN
+    {
+        return Some(packet[1..1 + SHORT_HEADER_CID_LEN].to_vec());
+    }
+    None
 }
 
 #[allow(dead_code)]
@@ -531,10 +593,31 @@ enum MockCommand {
     SendGoAway {
         id: u64,
     },
+    SendMaxStreams {
+        bidirectional: bool,
+        max_streams: u64,
+    },
     ResetStream {
         stream_id: u64,
         error_code: u64,
     },
+    CloseConnection {
+        app: bool,
+        error_code: u64,
+        reason: Vec<u8>,
+    },
+    GetStats {
+        response_tx: oneshot::Sender<MockH3Stats>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct MockH3Stats {
+    pub reset_stream_count_local: u64,
+    pub reset_stream_count_remote: u64,
+    pub stopped_stream_count_local: u64,
+    pub stopped_stream_count_remote: u64,
 }
 
 #[derive(Debug)]
@@ -582,11 +665,8 @@ impl MockH3Connection {
     /// Helper to construct and send a simple frame
     pub async fn send_frame(&self, stream_id: u64, frame_type: u64, payload: &[u8]) {
         let mut buf = Vec::new();
-        // Encode Type (VarInt)
         encode_varint(&mut buf, frame_type);
-        // Encode Length (VarInt)
         encode_varint(&mut buf, payload.len() as u64);
-        // Payload
         buf.extend_from_slice(payload);
 
         self.send_bytes(stream_id, &buf).await;
@@ -631,6 +711,16 @@ impl MockH3Connection {
         let _ = self.cmd_tx.send(MockCommand::SendGoAway { id }).await;
     }
 
+    pub async fn send_max_streams(&self, bidirectional: bool, max_streams: u64) {
+        let _ = self
+            .cmd_tx
+            .send(MockCommand::SendMaxStreams {
+                bidirectional,
+                max_streams,
+            })
+            .await;
+    }
+
     pub async fn reset_stream(&self, stream_id: u64, error_code: u64) {
         let _ = self
             .cmd_tx
@@ -639,6 +729,26 @@ impl MockH3Connection {
                 error_code,
             })
             .await;
+    }
+
+    pub async fn close_connection(&self, app: bool, error_code: u64, reason: &[u8]) {
+        let _ = self
+            .cmd_tx
+            .send(MockCommand::CloseConnection {
+                app,
+                error_code,
+                reason: reason.to_vec(),
+            })
+            .await;
+    }
+
+    pub async fn stats(&self) -> Option<MockH3Stats> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(MockCommand::GetStats { response_tx })
+            .await
+            .ok()?;
+        response_rx.await.ok()
     }
 
     /// Read next event from the connection

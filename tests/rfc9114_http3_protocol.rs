@@ -24,7 +24,7 @@ async fn test_h3_clean_shutdown() {
         |conn: helpers::mock_h3_server::MockH3Connection| async move {
             tracing::info!("Mock Server: Connection accepted");
 
-            // quiche::h3::Connection (on server side) sends SETTINGS automatically.
+            // The mock H3 server sends SETTINGS as part of connection setup.
 
             // Wait for handshake/settings exchange to settle
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -42,9 +42,7 @@ async fn test_h3_clean_shutdown() {
     // Client request
     // We need to disable cert verification because our mock uses a self-signed cert
     // H3Client might strictly verify. We might need to configure H3Client for testing.
-    // Unlike H2Client which uses `danger_accept_invalid_certs`, H3Client wraps `quiche`.
-    // We simulated `TlsFingerprint` earlier, let's see if we can relax it.
-    // If H3Client doesn't expose it, we might fail here.
+    // H3Client exposes test certificate verification controls just like the other transports.
 
     // We need to disable cert verification because our mock uses a self-signed cert
     let client = H3Client::new().danger_accept_invalid_certs(true);

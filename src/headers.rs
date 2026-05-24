@@ -1,6 +1,6 @@
 //! Browser header presets for HTTP requests.
 //!
-//! Supported Chrome versions: 142, 143, 144, 145, 146
+//! Supported Chrome versions: 142, 143, 144, 145, 146, 147, 148
 //! Supported Firefox versions: 133
 
 use crate::cookie::CookieJar;
@@ -9,20 +9,32 @@ use http::HeaderMap;
 /// Chrome 142 browser headers for page navigation.
 pub fn chrome_142_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Sec-Fetch-Dest", "document"),
         ("Sec-Fetch-Mode", "navigate"),
         ("Sec-Fetch-Site", "none"),
         ("Sec-Fetch-User", "?1"),
-        ("Sec-Ch-Ua", r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="24""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Sec-Ch-Ua-Arch", r#""arm64""#),
         ("Sec-Ch-Ua-Bitness", r#""64""#),
-        ("Sec-Ch-Ua-Full-Version-List", r#""Chromium";v="142.0.6367.118", "Google Chrome";v="142.0.6367.118", "Not_A Brand";v="24.0.0.0""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Chromium";v="142.0.7444.176", "Google Chrome";v="142.0.7444.176", "Not_A Brand";v="99.0.0.0""#,
+        ),
         ("Sec-Ch-Ua-Model", r#""""#),
         ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
         ("Sec-Ch-Ua-Wow64", "?0"),
@@ -36,7 +48,10 @@ pub fn chrome_142_headers() -> Vec<(&'static str, &'static str)> {
 /// not on AJAX/API requests unless explicitly requested by the server.
 pub fn chrome_142_ajax_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+        ),
         ("Accept", "application/json, text/plain, */*"),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
@@ -44,7 +59,10 @@ pub fn chrome_142_ajax_headers() -> Vec<(&'static str, &'static str)> {
         ("Sec-Fetch-Dest", "empty"),
         ("Sec-Fetch-Mode", "cors"),
         ("Sec-Fetch-Site", "same-origin"),
-        ("Sec-Ch-Ua", r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="24""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Connection", "keep-alive"),
@@ -54,20 +72,32 @@ pub fn chrome_142_ajax_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 142 headers for form submissions.
 pub fn chrome_142_form_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Content-Type", "application/x-www-form-urlencoded"),
         ("Sec-Fetch-Dest", "document"),
         ("Sec-Fetch-Mode", "navigate"),
         ("Sec-Fetch-Site", "same-origin"),
-        ("Sec-Ch-Ua", r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="24""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Sec-Ch-Ua-Arch", r#""arm64""#),
         ("Sec-Ch-Ua-Bitness", r#""64""#),
-        ("Sec-Ch-Ua-Full-Version-List", r#""Chromium";v="142.0.6367.118", "Google Chrome";v="142.0.6367.118", "Not_A Brand";v="24.0.0.0""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Chromium";v="142.0.7444.176", "Google Chrome";v="142.0.7444.176", "Not_A Brand";v="99.0.0.0""#,
+        ),
         ("Sec-Ch-Ua-Model", r#""""#),
         ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
         ("Sec-Ch-Ua-Wow64", "?0"),
@@ -79,20 +109,32 @@ pub fn chrome_142_form_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 143 browser headers for page navigation.
 pub fn chrome_143_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Sec-Fetch-Dest", "document"),
         ("Sec-Fetch-Mode", "navigate"),
         ("Sec-Fetch-Site", "none"),
         ("Sec-Fetch-User", "?1"),
-        ("Sec-Ch-Ua", r#""Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="99""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Sec-Ch-Ua-Arch", r#""arm64""#),
         ("Sec-Ch-Ua-Bitness", r#""64""#),
-        ("Sec-Ch-Ua-Full-Version-List", r#""Google Chrome";v="143.0.7499.40", "Chromium";v="143.0.7499.40", "Not A(Brand";v="99.0.0.0""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Google Chrome";v="143.0.7499.193", "Chromium";v="143.0.7499.193", "Not A(Brand";v="24.0.0.0""#,
+        ),
         ("Sec-Ch-Ua-Model", r#""""#),
         ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
         ("Sec-Ch-Ua-Wow64", "?0"),
@@ -104,7 +146,10 @@ pub fn chrome_143_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 143 headers for AJAX/API requests.
 pub fn chrome_143_ajax_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+        ),
         ("Accept", "application/json, text/plain, */*"),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
@@ -112,7 +157,10 @@ pub fn chrome_143_ajax_headers() -> Vec<(&'static str, &'static str)> {
         ("Sec-Fetch-Dest", "empty"),
         ("Sec-Fetch-Mode", "cors"),
         ("Sec-Fetch-Site", "same-origin"),
-        ("Sec-Ch-Ua", r#""Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="99""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Connection", "keep-alive"),
@@ -122,20 +170,32 @@ pub fn chrome_143_ajax_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 143 headers for form submissions.
 pub fn chrome_143_form_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Content-Type", "application/x-www-form-urlencoded"),
         ("Sec-Fetch-Dest", "document"),
         ("Sec-Fetch-Mode", "navigate"),
         ("Sec-Fetch-Site", "same-origin"),
-        ("Sec-Ch-Ua", r#""Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="99""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Sec-Ch-Ua-Arch", r#""arm64""#),
         ("Sec-Ch-Ua-Bitness", r#""64""#),
-        ("Sec-Ch-Ua-Full-Version-List", r#""Google Chrome";v="143.0.7499.40", "Chromium";v="143.0.7499.40", "Not A(Brand";v="99.0.0.0""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Google Chrome";v="143.0.7499.193", "Chromium";v="143.0.7499.193", "Not A(Brand";v="24.0.0.0""#,
+        ),
         ("Sec-Ch-Ua-Model", r#""""#),
         ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
         ("Sec-Ch-Ua-Wow64", "?0"),
@@ -147,20 +207,32 @@ pub fn chrome_143_form_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 144 browser headers for page navigation.
 pub fn chrome_144_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Sec-Fetch-Dest", "document"),
         ("Sec-Fetch-Mode", "navigate"),
         ("Sec-Fetch-Site", "none"),
         ("Sec-Fetch-User", "?1"),
-        ("Sec-Ch-Ua", r#""Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Sec-Ch-Ua-Arch", r#""arm64""#),
         ("Sec-Ch-Ua-Bitness", r#""64""#),
-        ("Sec-Ch-Ua-Full-Version-List", r#""Not(A:Brand";v="8.0.0.0", "Chromium";v="144.0.7559.133", "Google Chrome";v="144.0.7559.133""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Not(A:Brand";v="8.0.0.0", "Chromium";v="144.0.7559.133", "Google Chrome";v="144.0.7559.133""#,
+        ),
         ("Sec-Ch-Ua-Model", r#""""#),
         ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
         ("Sec-Ch-Ua-Wow64", "?0"),
@@ -172,7 +244,10 @@ pub fn chrome_144_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 144 headers for AJAX/API requests.
 pub fn chrome_144_ajax_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+        ),
         ("Accept", "application/json, text/plain, */*"),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
@@ -180,7 +255,10 @@ pub fn chrome_144_ajax_headers() -> Vec<(&'static str, &'static str)> {
         ("Sec-Fetch-Dest", "empty"),
         ("Sec-Fetch-Mode", "cors"),
         ("Sec-Fetch-Site", "same-origin"),
-        ("Sec-Ch-Ua", r#""Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Connection", "keep-alive"),
@@ -190,20 +268,32 @@ pub fn chrome_144_ajax_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 144 headers for form submissions.
 pub fn chrome_144_form_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Content-Type", "application/x-www-form-urlencoded"),
         ("Sec-Fetch-Dest", "document"),
         ("Sec-Fetch-Mode", "navigate"),
         ("Sec-Fetch-Site", "same-origin"),
-        ("Sec-Ch-Ua", r#""Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Sec-Ch-Ua-Arch", r#""arm64""#),
         ("Sec-Ch-Ua-Bitness", r#""64""#),
-        ("Sec-Ch-Ua-Full-Version-List", r#""Not(A:Brand";v="8.0.0.0", "Chromium";v="144.0.7559.133", "Google Chrome";v="144.0.7559.133""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Not(A:Brand";v="8.0.0.0", "Chromium";v="144.0.7559.133", "Google Chrome";v="144.0.7559.133""#,
+        ),
         ("Sec-Ch-Ua-Model", r#""""#),
         ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
         ("Sec-Ch-Ua-Wow64", "?0"),
@@ -215,20 +305,32 @@ pub fn chrome_144_form_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 145 browser headers for page navigation.
 pub fn chrome_145_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Sec-Fetch-Dest", "document"),
         ("Sec-Fetch-Mode", "navigate"),
         ("Sec-Fetch-Site", "none"),
         ("Sec-Fetch-User", "?1"),
-        ("Sec-Ch-Ua", r#""Not:A-Brand";v="24", "Google Chrome";v="145", "Chromium";v="145""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Sec-Ch-Ua-Arch", r#""arm64""#),
         ("Sec-Ch-Ua-Bitness", r#""64""#),
-        ("Sec-Ch-Ua-Full-Version-List", r#""Not:A-Brand";v="24.0.0.0", "Google Chrome";v="145.0.7632.117", "Chromium";v="145.0.7632.117""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.7632.117", "Chromium";v="145.0.7632.117""#,
+        ),
         ("Sec-Ch-Ua-Model", r#""""#),
         ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
         ("Sec-Ch-Ua-Wow64", "?0"),
@@ -240,7 +342,10 @@ pub fn chrome_145_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 145 headers for AJAX/API requests.
 pub fn chrome_145_ajax_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        ),
         ("Accept", "application/json, text/plain, */*"),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
@@ -248,7 +353,10 @@ pub fn chrome_145_ajax_headers() -> Vec<(&'static str, &'static str)> {
         ("Sec-Fetch-Dest", "empty"),
         ("Sec-Fetch-Mode", "cors"),
         ("Sec-Fetch-Site", "same-origin"),
-        ("Sec-Ch-Ua", r#""Not:A-Brand";v="24", "Google Chrome";v="145", "Chromium";v="145""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Connection", "keep-alive"),
@@ -258,20 +366,32 @@ pub fn chrome_145_ajax_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 145 headers for form submissions.
 pub fn chrome_145_form_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Content-Type", "application/x-www-form-urlencoded"),
         ("Sec-Fetch-Dest", "document"),
         ("Sec-Fetch-Mode", "navigate"),
         ("Sec-Fetch-Site", "same-origin"),
-        ("Sec-Ch-Ua", r#""Not:A-Brand";v="24", "Google Chrome";v="145", "Chromium";v="145""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Sec-Ch-Ua-Arch", r#""arm64""#),
         ("Sec-Ch-Ua-Bitness", r#""64""#),
-        ("Sec-Ch-Ua-Full-Version-List", r#""Not:A-Brand";v="24.0.0.0", "Google Chrome";v="145.0.7632.117", "Chromium";v="145.0.7632.117""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.7632.117", "Chromium";v="145.0.7632.117""#,
+        ),
         ("Sec-Ch-Ua-Model", r#""""#),
         ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
         ("Sec-Ch-Ua-Wow64", "?0"),
@@ -283,20 +403,32 @@ pub fn chrome_145_form_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 146 browser headers for page navigation.
 pub fn chrome_146_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Sec-Fetch-Dest", "document"),
         ("Sec-Fetch-Mode", "navigate"),
         ("Sec-Fetch-Site", "none"),
         ("Sec-Fetch-User", "?1"),
-        ("Sec-Ch-Ua", r#""Chromium";v="146", "Not-A.Brand";v="99", "Google Chrome";v="146""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Sec-Ch-Ua-Arch", r#""arm64""#),
         ("Sec-Ch-Ua-Bitness", r#""64""#),
-        ("Sec-Ch-Ua-Full-Version-List", r#""Chromium";v="146.0.7680.165", "Not-A.Brand";v="99.0.0.0", "Google Chrome";v="146.0.7680.165""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Chromium";v="146.0.7680.165", "Not-A.Brand";v="24.0.0.0", "Google Chrome";v="146.0.7680.165""#,
+        ),
         ("Sec-Ch-Ua-Model", r#""""#),
         ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
         ("Sec-Ch-Ua-Wow64", "?0"),
@@ -308,7 +440,10 @@ pub fn chrome_146_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 146 headers for AJAX/API requests.
 pub fn chrome_146_ajax_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        ),
         ("Accept", "application/json, text/plain, */*"),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
@@ -316,7 +451,10 @@ pub fn chrome_146_ajax_headers() -> Vec<(&'static str, &'static str)> {
         ("Sec-Fetch-Dest", "empty"),
         ("Sec-Fetch-Mode", "cors"),
         ("Sec-Fetch-Site", "same-origin"),
-        ("Sec-Ch-Ua", r#""Chromium";v="146", "Not-A.Brand";v="99", "Google Chrome";v="146""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Connection", "keep-alive"),
@@ -326,20 +464,228 @@ pub fn chrome_146_ajax_headers() -> Vec<(&'static str, &'static str)> {
 /// Chrome 146 headers for form submissions.
 pub fn chrome_146_form_headers() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"),
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
         ("Accept-Language", "en-US,en;q=0.9"),
         ("Accept-Encoding", "gzip, deflate, br, zstd"),
         ("Content-Type", "application/x-www-form-urlencoded"),
         ("Sec-Fetch-Dest", "document"),
         ("Sec-Fetch-Mode", "navigate"),
         ("Sec-Fetch-Site", "same-origin"),
-        ("Sec-Ch-Ua", r#""Chromium";v="146", "Not-A.Brand";v="99", "Google Chrome";v="146""#),
+        (
+            "Sec-Ch-Ua",
+            r#""Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146""#,
+        ),
         ("Sec-Ch-Ua-Mobile", "?0"),
         ("Sec-Ch-Ua-Platform", r#""macOS""#),
         ("Sec-Ch-Ua-Arch", r#""arm64""#),
         ("Sec-Ch-Ua-Bitness", r#""64""#),
-        ("Sec-Ch-Ua-Full-Version-List", r#""Chromium";v="146.0.7680.165", "Not-A.Brand";v="99.0.0.0", "Google Chrome";v="146.0.7680.165""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Chromium";v="146.0.7680.165", "Not-A.Brand";v="24.0.0.0", "Google Chrome";v="146.0.7680.165""#,
+        ),
+        ("Sec-Ch-Ua-Model", r#""""#),
+        ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
+        ("Sec-Ch-Ua-Wow64", "?0"),
+        ("Upgrade-Insecure-Requests", "1"),
+        ("Connection", "keep-alive"),
+    ]
+}
+
+/// Chrome 147 browser headers for page navigation.
+pub fn chrome_147_headers() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Accept-Encoding", "gzip, deflate, br, zstd"),
+        ("Sec-Fetch-Dest", "document"),
+        ("Sec-Fetch-Mode", "navigate"),
+        ("Sec-Fetch-Site", "none"),
+        ("Sec-Fetch-User", "?1"),
+        (
+            "Sec-Ch-Ua",
+            r#""Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147""#,
+        ),
+        ("Sec-Ch-Ua-Mobile", "?0"),
+        ("Sec-Ch-Ua-Platform", r#""macOS""#),
+        ("Sec-Ch-Ua-Arch", r#""arm64""#),
+        ("Sec-Ch-Ua-Bitness", r#""64""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Google Chrome";v="147.0.7727.138", "Not.A/Brand";v="8.0.0.0", "Chromium";v="147.0.7727.138""#,
+        ),
+        ("Sec-Ch-Ua-Model", r#""""#),
+        ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
+        ("Sec-Ch-Ua-Wow64", "?0"),
+        ("Upgrade-Insecure-Requests", "1"),
+        ("Connection", "keep-alive"),
+    ]
+}
+
+/// Chrome 147 headers for AJAX/API requests.
+pub fn chrome_147_ajax_headers() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        ),
+        ("Accept", "application/json, text/plain, */*"),
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Accept-Encoding", "gzip, deflate, br, zstd"),
+        ("Content-Type", "application/json"),
+        ("Sec-Fetch-Dest", "empty"),
+        ("Sec-Fetch-Mode", "cors"),
+        ("Sec-Fetch-Site", "same-origin"),
+        (
+            "Sec-Ch-Ua",
+            r#""Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147""#,
+        ),
+        ("Sec-Ch-Ua-Mobile", "?0"),
+        ("Sec-Ch-Ua-Platform", r#""macOS""#),
+        ("Connection", "keep-alive"),
+    ]
+}
+
+/// Chrome 147 headers for form submissions.
+pub fn chrome_147_form_headers() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Accept-Encoding", "gzip, deflate, br, zstd"),
+        ("Content-Type", "application/x-www-form-urlencoded"),
+        ("Sec-Fetch-Dest", "document"),
+        ("Sec-Fetch-Mode", "navigate"),
+        ("Sec-Fetch-Site", "same-origin"),
+        (
+            "Sec-Ch-Ua",
+            r#""Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147""#,
+        ),
+        ("Sec-Ch-Ua-Mobile", "?0"),
+        ("Sec-Ch-Ua-Platform", r#""macOS""#),
+        ("Sec-Ch-Ua-Arch", r#""arm64""#),
+        ("Sec-Ch-Ua-Bitness", r#""64""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Google Chrome";v="147.0.7727.138", "Not.A/Brand";v="8.0.0.0", "Chromium";v="147.0.7727.138""#,
+        ),
+        ("Sec-Ch-Ua-Model", r#""""#),
+        ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
+        ("Sec-Ch-Ua-Wow64", "?0"),
+        ("Upgrade-Insecure-Requests", "1"),
+        ("Connection", "keep-alive"),
+    ]
+}
+
+/// Chrome 148 browser headers for page navigation.
+pub fn chrome_148_headers() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Accept-Encoding", "gzip, deflate, br, zstd"),
+        ("Sec-Fetch-Dest", "document"),
+        ("Sec-Fetch-Mode", "navigate"),
+        ("Sec-Fetch-Site", "none"),
+        ("Sec-Fetch-User", "?1"),
+        (
+            "Sec-Ch-Ua",
+            r#""Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99""#,
+        ),
+        ("Sec-Ch-Ua-Mobile", "?0"),
+        ("Sec-Ch-Ua-Platform", r#""macOS""#),
+        ("Sec-Ch-Ua-Arch", r#""arm64""#),
+        ("Sec-Ch-Ua-Bitness", r#""64""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Chromium";v="148.0.7778.179", "Google Chrome";v="148.0.7778.179", "Not/A)Brand";v="99.0.0.0""#,
+        ),
+        ("Sec-Ch-Ua-Model", r#""""#),
+        ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
+        ("Sec-Ch-Ua-Wow64", "?0"),
+        ("Upgrade-Insecure-Requests", "1"),
+        ("Connection", "keep-alive"),
+    ]
+}
+
+/// Chrome 148 headers for AJAX/API requests.
+pub fn chrome_148_ajax_headers() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+        ),
+        ("Accept", "application/json, text/plain, */*"),
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Accept-Encoding", "gzip, deflate, br, zstd"),
+        ("Content-Type", "application/json"),
+        ("Sec-Fetch-Dest", "empty"),
+        ("Sec-Fetch-Mode", "cors"),
+        ("Sec-Fetch-Site", "same-origin"),
+        (
+            "Sec-Ch-Ua",
+            r#""Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99""#,
+        ),
+        ("Sec-Ch-Ua-Mobile", "?0"),
+        ("Sec-Ch-Ua-Platform", r#""macOS""#),
+        ("Connection", "keep-alive"),
+    ]
+}
+
+/// Chrome 148 headers for form submissions.
+pub fn chrome_148_form_headers() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+        ),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        ),
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Accept-Encoding", "gzip, deflate, br, zstd"),
+        ("Content-Type", "application/x-www-form-urlencoded"),
+        ("Sec-Fetch-Dest", "document"),
+        ("Sec-Fetch-Mode", "navigate"),
+        ("Sec-Fetch-Site", "same-origin"),
+        (
+            "Sec-Ch-Ua",
+            r#""Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99""#,
+        ),
+        ("Sec-Ch-Ua-Mobile", "?0"),
+        ("Sec-Ch-Ua-Platform", r#""macOS""#),
+        ("Sec-Ch-Ua-Arch", r#""arm64""#),
+        ("Sec-Ch-Ua-Bitness", r#""64""#),
+        (
+            "Sec-Ch-Ua-Full-Version-List",
+            r#""Chromium";v="148.0.7778.179", "Google Chrome";v="148.0.7778.179", "Not/A)Brand";v="99.0.0.0""#,
+        ),
         ("Sec-Ch-Ua-Model", r#""""#),
         ("Sec-Ch-Ua-Platform-Version", r#""15.5.0""#),
         ("Sec-Ch-Ua-Wow64", "?0"),
@@ -422,9 +768,7 @@ impl Headers {
 
     pub fn insert(&mut self, name: impl Into<String>, value: impl Into<String>) {
         let name = name.into();
-        let name_lower = name.to_ascii_lowercase();
-        self.headers
-            .retain(|(k, _)| k.to_ascii_lowercase() != name_lower);
+        self.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(&name));
         self.headers.push((name, value.into()));
     }
 
@@ -433,10 +777,9 @@ impl Headers {
     }
 
     pub fn remove(&mut self, name: &str) -> Option<Vec<String>> {
-        let name_lower = name.to_ascii_lowercase();
         let mut removed = Vec::new();
         self.headers.retain(|(k, v)| {
-            if k.to_ascii_lowercase() == name_lower {
+            if k.eq_ignore_ascii_case(name) {
                 removed.push(v.clone());
                 false
             } else {
@@ -451,9 +794,8 @@ impl Headers {
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
-        let name_lower = name.to_ascii_lowercase();
         self.headers.iter().find_map(|(k, v)| {
-            if k.to_ascii_lowercase() == name_lower {
+            if k.eq_ignore_ascii_case(name) {
                 Some(v.as_str())
             } else {
                 None
@@ -462,11 +804,10 @@ impl Headers {
     }
 
     pub fn get_all(&self, name: &str) -> Vec<&str> {
-        let name_lower = name.to_ascii_lowercase();
         self.headers
             .iter()
             .filter_map(|(k, v)| {
-                if k.to_ascii_lowercase() == name_lower {
+                if k.eq_ignore_ascii_case(name) {
                     Some(v.as_str())
                 } else {
                     None
@@ -557,9 +898,9 @@ impl OrderedHeaders {
     }
 
     /// Create Chrome navigation headers with exact order.
-    /// Uses Chrome 146 (latest) by default.
+    /// Uses Chrome 148 (latest implemented) by default.
     pub fn chrome_navigation() -> Self {
-        Self::new(headers_to_owned(chrome_146_headers()))
+        Self::new(headers_to_owned(chrome_148_headers()))
     }
 
     /// Create Firefox navigation headers with exact order.

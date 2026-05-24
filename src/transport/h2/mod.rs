@@ -55,7 +55,7 @@ pub use handle::H2Handle;
 pub use hpack::{HpackDecoder, HpackEncoder, PseudoHeaderOrder};
 pub use tunnel::{H2Tunnel, H2TunnelEvent, H2TunnelOutbound};
 
-pub(crate) use body::{H2Body, H2BodyTimeouts};
+pub(crate) use body::{H2Body, H2BodyTimeouts, H2DirectBody, H2DirectReuseHook};
 use handle::H2InlineState;
 
 // Re-export wrapper types for convenience
