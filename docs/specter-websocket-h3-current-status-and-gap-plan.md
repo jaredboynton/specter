@@ -116,7 +116,7 @@ Specter status:
 - `quinn_transport` and `s2n_quic_transport` are no longer pending adapters; both have transport-only echo rows and are explicitly outside the H3 superiority gate.
 - Specter RFC9220 local tunnel throughput/latency rows and low-level `quiche`/`tokio-quiche` raw tunnel comparator rows are no longer pending; only larger p99-scale samples, unsupported higher-level client capability rows, and a dedicated tunnel superiority gate remain open.
 - TLS certificate compression and raw ordered QUIC transport-parameter encoding are no longer silent gaps; native H3 ClientHello coverage now proves `compress_certificate`, raw ordered parameter emission, and dynamic connection-ID placeholder substitution inside raw ordered parameter lists.
-- TLS extension-order behavior is no longer an evidence-free gap: native H3 honors deterministic-vs-browser-permuted ClientHello generation policy. Session-ticket capture/replay, `NativeH3SessionCache`, H3Client cache injection/access, connection-establishment session lookup/eviction fallback, driver-side ticket drain, TLS-level 0-RTT accept/reject status, non-0RTT replay suppression, and 0-RTT early-data context helpers also exist; the remaining high-level gap is safe end-to-end 0-RTT request send/replay policy with connection/H3Client-level acceptance propagation.
+- TLS extension-order behavior is no longer an evidence-free gap: native H3 honors deterministic-vs-browser-permuted ClientHello generation policy. Session-ticket capture/replay, `NativeH3SessionCache`, H3Client cache injection/access, connection-establishment session lookup/eviction fallback, driver-side ticket drain, TLS-level 0-RTT accept/reject status, non-0RTT replay suppression, 0-RTT early-data context helpers, and per-connection `H3Handle`/`H3Client` handshake-status reporting also exist; the remaining high-level gap is safe end-to-end 0-RTT request send/replay policy.
 - ACK_ECN is no longer just parse/round-trip coverage: native loss detection validates counters, tracks CE growth, disables ECN on invalid counters, reduces congestion window on CE growth, and the native UDP socket can mark outbound packets with a fingerprint-selected ECT(0)/ECT(1) codepoint; only receive-side ECN reporting, ACK_ECN generation from received marks, and probing policy remain open.
 - RTT sampling is no longer a disconnected helper: newly ACKed largest sent packets update the native loss detector's latest/min/smoothed RTT, RTT variance, and PTO estimate.
 - Client Initial PTO replay is no longer just a helper: H3 connection establishment records Initial sends, arms the loss-detection timer, retransmits Initial CRYPTO on PTO, retires ACKed Initial CRYPTO, and releases recovery bytes-in-flight on Initial ACKs.
@@ -140,7 +140,7 @@ Specter status:
 
 ### P1
 
-1. **0-RTT policy:** certificate compression, session-ticket capture/install helpers, `NativeH3SessionCache`, H3Client/session-cache wiring, TLS session replay, non-0RTT replay suppression, TLS-level accept/reject status, and 0-RTT early-data context setup exist, but native H3 still lacks safe end-to-end 0-RTT request send/replay policy and connection/H3Client-level acceptance propagation.
+1. **0-RTT policy:** certificate compression, session-ticket capture/install helpers, `NativeH3SessionCache`, H3Client/session-cache wiring, TLS session replay, non-0RTT replay suppression, TLS-level accept/reject status, 0-RTT early-data context setup, and H3Handle/H3Client status propagation exist, but native H3 still lacks safe end-to-end 0-RTT request send/replay policy.
 
 ### P2
 
