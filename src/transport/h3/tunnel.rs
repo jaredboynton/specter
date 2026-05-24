@@ -27,8 +27,9 @@ pub enum H3TunnelEvent {
 /// Cap on the outbound byte budget. Tokio's `Semaphore` permits are `usize`,
 /// but acquisitions are `u32`-bounded internally; pinning the budget at
 /// `u32::MAX as usize` keeps every cast lossless without putting an arbitrary
-/// lower bound on the configured value.
+    /// lower bound on the configured value.
 pub(crate) const MAX_TUNNEL_OUTBOUND_BYTE_BUDGET: usize = u32::MAX as usize;
+pub(crate) const MAX_TUNNEL_INBOUND_BYTE_BUDGET: usize = u32::MAX as usize;
 
 #[derive(Debug)]
 pub(crate) struct H3TunnelCredit {
@@ -45,16 +46,25 @@ pub(crate) struct H3TunnelCredit {
     /// drain rather than being split, and the same value bounds the
     /// per-outbound credit accounting on the driver side.
     send_budget: usize,
+    recv_semaphore: Arc<Semaphore>,
+    recv_budget: usize,
 }
 
 impl H3TunnelCredit {
-    pub(crate) fn new(driver_notify: Arc<Notify>, send_budget: usize) -> Arc<Self> {
+    pub(crate) fn new(
+        driver_notify: Arc<Notify>,
+        send_budget: usize,
+        recv_budget: usize,
+    ) -> Arc<Self> {
         let send_budget = send_budget.min(MAX_TUNNEL_OUTBOUND_BYTE_BUDGET);
+        let recv_budget = recv_budget.min(MAX_TUNNEL_INBOUND_BYTE_BUDGET);
         Arc::new(Self {
             released_recv_bytes: AtomicUsize::new(0),
             driver_notify,
             send_semaphore: Arc::new(Semaphore::new(send_budget)),
             send_budget,
+            recv_semaphore: Arc::new(Semaphore::new(recv_budget)),
+            recv_budget,
         })
     }
 
@@ -70,9 +80,54 @@ impl H3TunnelCredit {
         self.send_semaphore.add_permits(capped);
     }
 
+    pub(crate) fn try_reserve_inbound_bytes(&self, bytes: usize) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        let capped = bytes.min(self.recv_budget);
+        match self.recv_semaphore.try_acquire_many(capped as u32) {
+            Ok(permit) => {
+                permit.forget();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    pub(crate) fn release_inbound_bytes(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.recv_semaphore.add_permits(bytes.min(self.recv_budget));
+    }
+
+    pub(crate) fn has_inbound_capacity(&self) -> bool {
+        self.recv_semaphore.available_permits() > 0
+    }
+
     #[cfg(test)]
     pub(crate) fn available_send_permits(&self) -> usize {
         self.send_semaphore.available_permits()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_inbound_permits(&self) -> usize {
+        self.recv_semaphore.available_permits()
+    }
+}
+
+#[derive(Debug)]
+enum H3TunnelInboundReceiver {
+    Bounded(mpsc::Receiver<Result<H3TunnelEvent>>),
+    Unbounded(mpsc::UnboundedReceiver<Result<H3TunnelEvent>>),
+}
+
+impl H3TunnelInboundReceiver {
+    async fn recv(&mut self) -> Option<Result<H3TunnelEvent>> {
+        match self {
+            Self::Bounded(rx) => rx.recv().await,
+            Self::Unbounded(rx) => rx.recv().await,
+        }
     }
 }
 
@@ -80,7 +135,7 @@ impl H3TunnelCredit {
 #[derive(Debug)]
 pub struct H3Tunnel {
     outbound_tx: mpsc::UnboundedSender<H3TunnelOutbound>,
-    inbound_rx: mpsc::Receiver<Result<H3TunnelEvent>>,
+    inbound_rx: H3TunnelInboundReceiver,
     credit: Option<Arc<H3TunnelCredit>>,
 }
 
@@ -91,19 +146,19 @@ impl H3Tunnel {
     ) -> Self {
         Self {
             outbound_tx,
-            inbound_rx,
+            inbound_rx: H3TunnelInboundReceiver::Bounded(inbound_rx),
             credit: None,
         }
     }
 
     pub(crate) fn new_with_credit(
         outbound_tx: mpsc::UnboundedSender<H3TunnelOutbound>,
-        inbound_rx: mpsc::Receiver<Result<H3TunnelEvent>>,
+        inbound_rx: mpsc::UnboundedReceiver<Result<H3TunnelEvent>>,
         credit: Arc<H3TunnelCredit>,
     ) -> Self {
         Self {
             outbound_tx,
-            inbound_rx,
+            inbound_rx: H3TunnelInboundReceiver::Unbounded(inbound_rx),
             credit: Some(credit),
         }
     }
@@ -160,6 +215,7 @@ impl H3Tunnel {
             return;
         };
         if released > 0 {
+            credit.release_inbound_bytes(released);
             credit
                 .released_recv_bytes
                 .fetch_add(data_frame_encoded_len(released), Ordering::Relaxed);
@@ -261,8 +317,8 @@ mod tests {
         Arc<H3TunnelCredit>,
     ) {
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<H3TunnelOutbound>();
-        let (_inbound_tx, inbound_rx) = mpsc::channel::<Result<H3TunnelEvent>>(1);
-        let credit = H3TunnelCredit::new(Arc::new(Notify::new()), budget);
+        let (_inbound_tx, inbound_rx) = mpsc::unbounded_channel::<Result<H3TunnelEvent>>();
+        let credit = H3TunnelCredit::new(Arc::new(Notify::new()), budget, budget);
         let tunnel = H3Tunnel::new_with_credit(outbound_tx, inbound_rx, credit.clone());
         (tunnel, outbound_rx, credit)
     }
