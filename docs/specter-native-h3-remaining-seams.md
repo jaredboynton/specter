@@ -12,44 +12,43 @@ Repo: `/Users/jaredboynton/__devlocal/specter`
 - Native QUIC frame codec now round-trips RFC9000 ACK_ECN frames (`0x03`) with ECN counters, and loss detection applies ACK_ECN ranges like ordinary ACK ranges.
 - Native H3 now exposes a reusable `H3Handle` path for low-overhead repeated requests and a same-URL hot handle cache for the higher-level `H3Client` path.
 - The local benchmark fixture now starts a fresh native H3 server fixture per client in the full matrix, avoiding cross-client fixture state/noise.
-- Same-fixture measured proof is live again: `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-smoke.json` passed `--require-superiority` with real measured rows for `specter_native`, `quiche_direct`, `tokio_quiche`, `h3_quinn`, `reqwest_h3`, `quinn_transport`, and `specter_native_rfc9220_tunnel`.
+- Release-grade measured proof is now `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-n30.json`, produced from n=30 per-client runs and merged through the import-precedence path. It passes `--require-superiority` for required H3 HTTP rows and includes n=30 RFC9220 echo, close/FIN, and mixed slow-consumer rows; several merged measured rows omit serialized `sample_count`, so provenance is documented in `docs/benchmarks/native-h3-vs-rust-clients/README.md`.
+- Same-fixture smoke proof remains available at `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-smoke.json` with measured rows for `specter_native`, `quiche_direct`, `tokio_quiche`, `h3_quinn`, `reqwest_h3`, `quinn_transport`, and `specter_native_rfc9220_tunnel`.
 - The optional feature run `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-with-s2n-smoke.json` also passed `--require-superiority` and includes a real measured `s2n_quic_transport` row.
-- The larger merged artifact `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-n30.json` passes `--require-superiority` with samples >=30 for required H3 rows and includes n=30 RFC9220 echo, close/FIN, and mixed slow-consumer rows.
 - Latest full same-fixture proofs emit no `fixture_events`, so the previous live `tokio_quiche` body/FIN timeout and non-fatal packet-open event noise are not reproducing in the current fixture state.
 - Selected same-fixture RFC9220 and transport-only runs also emit real measured rows under `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-*-local.json`, including close/FIN and slow-consumer mixed tunnel workloads.
 
-## Current passing proof artifact
+## Current release-grade proof artifact
 
 Command:
 
 ```bash
-RUSTFLAGS='--cfg reqwest_unstable' CARGO_TARGET_DIR=/tmp/specter-h3-test-target timeout 180 \
+RUSTFLAGS='--cfg reqwest_unstable' CARGO_TARGET_DIR=/tmp/specter-h3-bench-current-target timeout 180 \
   cargo run --manifest-path benches/native_h3_vs_rust_clients/Cargo.toml \
-  --features reqwest-h3,s2n-quic-transport -- \
+  --features reqwest-h3 -- \
   --measure-local-native-fixture \
-  --warmups 1 --samples 2 \
-  --json docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-with-s2n-smoke.json \
+  --warmups 5 --samples 30 \
+  --json docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-n30.json \
   --require-superiority
 ```
 
-Artifact: `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-with-s2n-smoke.json`
+Artifact: `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-n30.json`
 
-Measured rows from the current passing run:
+Measured H3 HTTP rows from the current proof:
 
 | client | p50 TTFT ns | p95 TTFT ns | bytes/sec |
 |---|---:|---:|---:|
-| `specter_native` | 151,917 | 240,709 | 10,211,679 |
-| `quiche_direct` | 2,859,417 | 2,935,500 | 7,615,609 |
-| `tokio_quiche` | 3,117,000 | 3,117,792 | 6,755,198 |
-| `h3_quinn` | 339,041 | 353,375 | 9,305,610 |
-| `reqwest_h3` | 297,000 | 310,666 | 8,509,493 |
-| `quinn_transport` | 259,917 | 269,875 | 3,865,668 |
-| `s2n_quic_transport` | 246,417 | 282,084 | 3,875,111 |
-| `specter_native_rfc9220_tunnel` | 413,708 | 659,708 | 1,907,928 |
+| `specter_native` | 136,583 | 268,125 | 10,242,260 |
+| `h3_quinn` | 365,542 | 887,250 | 8,563,029 |
+| `reqwest_h3` | 384,000 | 920,458 | 8,842,575 |
+| `quiche_direct` | 2,721,834 | 2,798,875 | 7,867,234 |
+| `tokio_quiche` | 3,316,833 | 3,521,000 | 6,811,371 |
 
 Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 
 Fixture events: none.
+
+Scope: this superiority gate covers HTTP/3 request/response rows only. `quinn_transport` and `s2n_quic_transport` are transport-only baselines, and RFC9220 rows are workload proof outside the gate.
 
 ## Selected RFC9220 tunnel workload artifacts
 
@@ -126,6 +125,7 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - Added transport-only `quinn_transport` and optional `s2n_quic_transport` same-fixture comparator adapters that open a raw QUIC bidirectional stream, echo payload bytes, and record measured TTFT/throughput outside the H3 superiority gate.
 - Added fingerprint-level raw ordered QUIC transport parameters; when supplied, native H3 encodes that list exactly in caller order, bypasses typed/default/GREASE parameter emission, and preserves raw order in the H3 pool key.
 - Wired native QUIC TLS certificate-compression configuration from `TlsFingerprint.cert_compression`, so H3 ClientHello capture can advertise `compress_certificate` for Brotli/Zlib fingerprints.
+- Added client CONNECTION_CLOSE drain replay: local idle/client-shutdown closes retain the protected close packet and replay it to peer packets during a bounded drain window before driver exit.
 
 ## Closed gaps now tracked as regression guards
 
@@ -137,10 +137,11 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - RFC9220/WebSocket-over-H3 has Specter-native same-fixture echo, close/FIN, and slow-consumer mixed rows at n=30; remaining proof work is third-party RFC9220 adapters, p99-scale samples, and any tunnel superiority claim.
 - TLS certificate compression and raw ordered QUIC transport parameters are wired for native H3; remaining fingerprint work is extension ordering, resumption, 0-RTT, capture presets, and dynamic placeholders.
 - H3 scheduling now has in-connection fair send turns for streaming request bodies and RFC9220 tunnel DATA, plus sibling-tunnel and mixed tunnel/response receive-class fairness.
+- Client CONNECTION_CLOSE is retained and replayed during bounded local close drain windows; remaining close-drain work is RFC-grade timer/PTO behavior and broader server/migration close handling.
 
 ## Remaining gaps
 
-- Native QUIC still needs full packet-space RFC9002 PTO/timer-driven recovery, production CRYPTO retransmission by packet space, close drain semantics, key update handling, Version Negotiation/Retry handshake integration beyond packet primitives, ECN socket/counter plumbing beyond ACK_ECN frame parsing, and path migration/validation wiring beyond the frame-level validator helper.
+- Native QUIC still needs full packet-space RFC9002 PTO/timer-driven recovery, production CRYPTO retransmission by packet space, RFC-grade close-drain timing beyond the bounded client replay window, key update handling, Version Negotiation/Retry handshake integration beyond packet primitives, ECN socket/counter plumbing beyond ACK_ECN frame parsing, and path migration/validation wiring beyond the frame-level validator helper.
 - Browser-capture ACK parity remains open for per-browser/version ACK behavior and the tuned `ack_eliciting_threshold = 128` benchmark profile.
 - RFC9220/WebSocket-over-H3 still lacks low-level `quiche` and `tokio-quiche` tunnel comparator adapters, p99-scale samples, and any third-party tunnel superiority claim.
 - TLS/H3 fingerprint gaps remain: extension ordering/permutation evidence and control, session resumption, 0-RTT, capture-derived raw transport-parameter presets, and dynamic connection-ID placeholder handling inside raw ordered transport-parameter lists.
