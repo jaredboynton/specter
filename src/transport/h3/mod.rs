@@ -15,6 +15,7 @@ pub(crate) use body::{H3Body, H3BodyTimeouts, DEFAULT_H3_BODY_SLOT_CAPACITY};
 pub use command::DriverCommand;
 pub use connection::H3Connection;
 pub use handle::H3Handle;
+pub(crate) use tunnel::H3TunnelCredit;
 pub use tunnel::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 
 // Re-implement H3Client using the new H3Connection/Handle architecture

@@ -1,5 +1,8 @@
 use bytes::Bytes;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
 use crate::error::{Error, Result};
 
@@ -19,11 +22,31 @@ pub enum H3TunnelEvent {
     GoAway { id: u64 },
 }
 
+#[derive(Debug)]
+pub(crate) struct H3TunnelCredit {
+    released_recv_bytes: AtomicUsize,
+    driver_notify: Arc<Notify>,
+}
+
+impl H3TunnelCredit {
+    pub(crate) fn new(driver_notify: Arc<Notify>) -> Arc<Self> {
+        Arc::new(Self {
+            released_recv_bytes: AtomicUsize::new(0),
+            driver_notify,
+        })
+    }
+
+    pub(crate) fn take_released_recv_bytes(&self) -> usize {
+        self.released_recv_bytes.swap(0, Ordering::Relaxed)
+    }
+}
+
 /// Byte transport for an RFC 9220 WebSocket-over-HTTP/3 tunnel stream.
 #[derive(Debug)]
 pub struct H3Tunnel {
     outbound_tx: mpsc::Sender<H3TunnelOutbound>,
     inbound_rx: mpsc::Receiver<Result<H3TunnelEvent>>,
+    credit: Option<Arc<H3TunnelCredit>>,
 }
 
 impl H3Tunnel {
@@ -34,6 +57,19 @@ impl H3Tunnel {
         Self {
             outbound_tx,
             inbound_rx,
+            credit: None,
+        }
+    }
+
+    pub(crate) fn new_with_credit(
+        outbound_tx: mpsc::Sender<H3TunnelOutbound>,
+        inbound_rx: mpsc::Receiver<Result<H3TunnelEvent>>,
+        credit: Arc<H3TunnelCredit>,
+    ) -> Self {
+        Self {
+            outbound_tx,
+            inbound_rx,
+            credit: Some(credit),
         }
     }
 
@@ -49,7 +85,13 @@ impl H3Tunnel {
     }
 
     pub async fn recv_event(&mut self) -> Option<Result<H3TunnelEvent>> {
-        self.inbound_rx.recv().await
+        let event = self.inbound_rx.recv().await?;
+        if let Ok(H3TunnelEvent::Data(bytes)) = &event {
+            self.release_recv_bytes(bytes.len());
+        } else if let Some(credit) = self.credit.as_ref() {
+            credit.driver_notify.notify_one();
+        }
+        Some(event)
     }
 
     pub async fn recv_bytes(&mut self) -> Option<Result<Bytes>> {
@@ -64,5 +106,17 @@ impl H3Tunnel {
             )))),
             Err(err) => Some(Err(err)),
         }
+    }
+
+    fn release_recv_bytes(&self, released: usize) {
+        let Some(credit) = self.credit.as_ref() else {
+            return;
+        };
+        if released > 0 {
+            credit
+                .released_recv_bytes
+                .fetch_add(released, Ordering::Relaxed);
+        }
+        credit.driver_notify.notify_one();
     }
 }

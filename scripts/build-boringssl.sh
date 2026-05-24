@@ -34,6 +34,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LIB_DIR="$PROJECT_ROOT/lib/boringssl"
+BORING_SYS_MANIFEST="${BORING_SYS_MANIFEST:-}"
+
+log() { echo "[$(date '+%H:%M:%S')] $*"; }
+error() { echo "[ERROR] $*" >&2; exit 1; }
+
+set_boring_sys_manifest() {
+    local manifest="$1"
+    case "$manifest" in
+        /*) BORING_SYS_MANIFEST="$manifest" ;;
+        *) BORING_SYS_MANIFEST="$PROJECT_ROOT/$manifest" ;;
+    esac
+    [[ -f "$BORING_SYS_MANIFEST" ]] || error "Manifest not found: $manifest"
+}
 
 # boring-sys version: prefer BORING_SYS_VERSION env override, then cargo metadata,
 # then a fallback. Keeping a fallback for offline runs.
@@ -42,45 +55,42 @@ detect_boring_sys_version() {
         echo "$BORING_SYS_VERSION"
         return 0
     fi
-    local manifest_args=()
-    for manifest in \
-        "$PROJECT_ROOT/Cargo.toml" \
-        "$PROJECT_ROOT/bindings/node/Cargo.toml" \
-        "$PROJECT_ROOT/bindings/python/Cargo.toml"; do
-        if [[ -f "$manifest" ]]; then
-            manifest_args=(--manifest-path "$manifest")
-            break
-        fi
-    done
-    if command -v cargo &>/dev/null && [[ ${#manifest_args[@]} -gt 0 ]]; then
-        local v
-        v=$(cargo metadata --format-version 1 --offline "${manifest_args[@]}" 2>/dev/null \
-            | python3 -c 'import json,sys
+    local manifests=()
+    if [[ -n "$BORING_SYS_MANIFEST" ]]; then
+        manifests=("$BORING_SYS_MANIFEST")
+    else
+        for manifest in \
+            "$PROJECT_ROOT/Cargo.toml" \
+            "$PROJECT_ROOT/bindings/node/Cargo.toml" \
+            "$PROJECT_ROOT/bindings/python/Cargo.toml"; do
+            [[ -f "$manifest" ]] && manifests+=("$manifest")
+        done
+    fi
+    if command -v cargo &>/dev/null && [[ ${#manifests[@]} -gt 0 ]]; then
+        local manifest mode v
+        for manifest in "${manifests[@]}"; do
+            for mode in offline-locked locked online; do
+                local metadata_args=(--format-version 1 --manifest-path "$manifest")
+                case "$mode" in
+                    offline-locked) metadata_args+=(--offline --locked) ;;
+                    locked) metadata_args+=(--locked) ;;
+                esac
+                v=$(cargo metadata "${metadata_args[@]}" 2>/dev/null \
+                    | python3 -c 'import json,sys
 data=json.load(sys.stdin)
 for p in data.get("packages",[]):
     if p.get("name")=="boring-sys":
         print(p.get("version",""))
         break' 2>/dev/null || true)
-        if [[ -n "$v" ]]; then
-            echo "$v"
-            return 0
-        fi
-        # Try non-offline metadata if offline failed
-        v=$(cargo metadata --format-version 1 "${manifest_args[@]}" 2>/dev/null \
-            | python3 -c 'import json,sys
-data=json.load(sys.stdin)
-for p in data.get("packages",[]):
-    if p.get("name")=="boring-sys":
-        print(p.get("version",""))
-        break' 2>/dev/null || true)
-        if [[ -n "$v" ]]; then
-            echo "$v"
-            return 0
-        fi
+                if [[ -n "$v" ]]; then
+                    echo "$v"
+                    return 0
+                fi
+            done
+        done
     fi
     echo "4.21.2"
 }
-BORING_SYS_VERSION="$(detect_boring_sys_version)"
 
 # All supported targets
 ALL_TARGETS=(
@@ -94,9 +104,6 @@ ALL_TARGETS=(
     "aarch64-pc-windows-msvc"
 )
 
-log() { echo "[$(date '+%H:%M:%S')] $*"; }
-error() { echo "[ERROR] $*" >&2; exit 1; }
-
 find_boring_sys_source() {
     local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
     local registry_src="$cargo_home/registry/src"
@@ -107,7 +114,9 @@ find_boring_sys_source() {
     
     if [[ -z "$boring_sys_dir" ]] || [[ ! -d "$boring_sys_dir/deps/boringssl" ]]; then
         log "boring-sys $BORING_SYS_VERSION not in cargo cache. Fetching..."
-        (cd "$PROJECT_ROOT" && cargo fetch)
+        local fetch_args=()
+        [[ -n "$BORING_SYS_MANIFEST" ]] && fetch_args=(--manifest-path "$BORING_SYS_MANIFEST")
+        (cd "$PROJECT_ROOT" && cargo fetch "${fetch_args[@]}")
         boring_sys_dir=$(find "$registry_src" -maxdepth 2 -type d -name "boring-sys-$BORING_SYS_VERSION" 2>/dev/null | head -1)
     fi
     
@@ -122,12 +131,53 @@ copy_headers() {
     local boring_sys_dir="$1"
     local include_src="$boring_sys_dir/deps/boringssl/src/include"
     local include_dst="$LIB_DIR/include"
+    local required_headers=(
+        "openssl/base.h"
+        "openssl/crypto.h"
+        "openssl/ssl.h"
+        "openssl/x509v3.h"
+    )
+
+    [[ -d "$include_src/openssl" ]] || error "Missing BoringSSL include source: $include_src/openssl"
+    local header
+    for header in "${required_headers[@]}"; do
+        [[ -s "$include_src/$header" ]] || error "Missing BoringSSL header in boring-sys source: $include_src/$header"
+    done
     
     log "Copying headers from boring-sys vendored source..."
     rm -rf "$include_dst"
     mkdir -p "$include_dst"
     cp -r "$include_src/openssl" "$include_dst/"
+    for header in "${required_headers[@]}"; do
+        [[ -s "$include_dst/$header" ]] || error "Failed to install BoringSSL header: $include_dst/$header"
+    done
     log "Headers installed to $include_dst"
+}
+
+link_target_includes() {
+    local output_dir="$1"
+
+    mkdir -p "$output_dir/build"
+    rm -rf "$output_dir/include" "$output_dir/build/include"
+    ln -s ../include "$output_dir/include"
+    ln -s ../../include "$output_dir/build/include"
+}
+
+validate_target_outputs() {
+    local target="$1"
+    local output_dir="$LIB_DIR/$target"
+    local libs=()
+
+    case "$target" in
+        *-pc-windows-msvc) libs=(crypto.lib ssl.lib) ;;
+        *) libs=(libcrypto.a libssl.a) ;;
+    esac
+
+    local lib
+    for lib in "${libs[@]}"; do
+        [[ -s "$output_dir/build/$lib" ]] || error "Missing BoringSSL library for $target: $output_dir/build/$lib"
+    done
+    [[ -s "$output_dir/build/include/openssl/x509v3.h" ]] || error "Missing BoringSSL include symlink for $target"
 }
 
 get_generator() {
@@ -175,9 +225,7 @@ build_native_macos() {
     mkdir -p "$output_dir/build"
     cp libcrypto.a "$output_dir/build/" 2>/dev/null || cp crypto/libcrypto.a "$output_dir/build/"
     cp libssl.a "$output_dir/build/" 2>/dev/null || cp ssl/libssl.a "$output_dir/build/"
-    
-    # Symlink to shared headers
-    ln -sf ../include "$output_dir/include"
+    link_target_includes "$output_dir"
     
     log "Built: $output_dir/build/{libcrypto.a, libssl.a}"
 }
@@ -251,7 +299,7 @@ EOF
     mkdir -p "$output_dir/build"
     cp libcrypto.a "$output_dir/build/" 2>/dev/null || cp crypto/libcrypto.a "$output_dir/build/"
     cp libssl.a "$output_dir/build/" 2>/dev/null || cp ssl/libssl.a "$output_dir/build/"
-    ln -sf ../include "$output_dir/include"
+    link_target_includes "$output_dir"
     
     log "Built: $output_dir/build/{libcrypto.a, libssl.a}"
 }
@@ -284,7 +332,7 @@ build_windows_xwin() {
         mkdir -p "$output_dir/build"
         cp "$lib_dir/crypto.lib" "$output_dir/build/"
         cp "$lib_dir/ssl.lib" "$output_dir/build/"
-        ln -sf ../include "$output_dir/include"
+        link_target_includes "$output_dir"
         log "Copied: $output_dir/build/{crypto.lib, ssl.lib}"
         return 0
     fi
@@ -293,16 +341,14 @@ build_windows_xwin() {
     log "No cached build found. Run: cargo xwin build --release --target $target"
     log "Then re-run this script to extract the libraries."
     
-    mkdir -p "$output_dir"
-    ln -sf ../include "$output_dir/include"
-    
-    return 0
+    error "Windows BoringSSL libraries are not available for $target"
 }
 
 build_target() {
     local target="$1"
     local boring_sys_dir="$2"
     local build_dir="$PROJECT_ROOT/.boringssl-build/$target"
+    local validate=true
     
     case "$target" in
         aarch64-apple-darwin|x86_64-apple-darwin)
@@ -316,8 +362,10 @@ build_target() {
             ;;
         *)
             log "SKIP $target: unsupported"
+            validate=false
             ;;
     esac
+    [[ "$validate" == true ]] && validate_target_outputs "$target"
 }
 
 print_usage() {
@@ -330,6 +378,7 @@ OPTIONS:
     --help          Show this help
     --list          List available targets
     --clean         Remove build artifacts
+    --manifest-path Resolve boring-sys from this Cargo manifest
 
 TARGETS:
     aarch64-apple-darwin        macOS ARM64
@@ -354,6 +403,11 @@ main() {
         case "$1" in
             --help|-h) print_usage; exit 0 ;;
             --list) printf '%s\n' "${ALL_TARGETS[@]}"; exit 0 ;;
+            --manifest-path)
+                [[ $# -ge 2 ]] || error "--manifest-path requires a path"
+                set_boring_sys_manifest "$2"
+                shift 2
+                ;;
             --clean)
                 log "Cleaning..."
                 rm -rf "$PROJECT_ROOT/.boringssl-build"
@@ -366,6 +420,10 @@ main() {
     done
     
     [[ ${#targets[@]} -eq 0 ]] && targets=("${ALL_TARGETS[@]}")
+
+    BORING_SYS_VERSION="$(detect_boring_sys_version)"
+    log "Using boring-sys version: $BORING_SYS_VERSION"
+    [[ -n "$BORING_SYS_MANIFEST" ]] && log "Using manifest: $BORING_SYS_MANIFEST"
     
     local boring_sys_dir
     boring_sys_dir=$(find_boring_sys_source)

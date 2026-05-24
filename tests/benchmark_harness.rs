@@ -183,11 +183,15 @@ fn websocket_benchmark_declares_fastwebsockets_gate() {
     let source = std::fs::read_to_string("benches/websocket_vs_fastwebsockets.rs").unwrap();
 
     assert!(source.contains("fastwebsockets_version: \"0.10.0\""));
+    assert!(source.contains("tokio_tungstenite_version: \"0.24\""));
     assert!(source.contains("pass_match_or_exceed"));
+    assert!(source.contains("pass_tungstenite_match_or_exceed"));
     assert!(source.contains("specter.messages_per_sec >= fast.messages_per_sec"));
+    assert!(source.contains("specter.messages_per_sec >= tungstenite.messages_per_sec"));
     assert!(source.contains("--require-thresholds"));
     assert!(source.contains("DEFAULT_WARMUP_MESSAGES"));
     assert!(source.contains("fastwebsockets::WebSocket::after_handshake(stream, Role::Server)"));
+    assert!(source.contains("tokio_tungstenite::connect_async"));
 }
 
 #[tokio::test]
