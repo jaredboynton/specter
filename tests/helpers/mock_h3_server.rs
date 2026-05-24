@@ -210,6 +210,7 @@ fn spawn_native_connection<F, Fut>(
             seen_request_headers: false,
             last_request_headers_at: None,
             closed: false,
+            closing_connection_close_packet: None,
         }
         .run()
         .await;
@@ -231,15 +232,27 @@ struct NativeMockH3Connection {
     seen_request_headers: bool,
     last_request_headers_at: Option<Instant>,
     closed: bool,
+    closing_connection_close_packet: Option<Bytes>,
 }
 
 impl NativeMockH3Connection {
     async fn run(mut self) {
         loop {
-            if self.closed {
+            if self.closed
+                && self.closing_connection_close_packet.is_none()
+                && !self.handshake.close_state().is_draining()
+            {
                 break;
             }
-            if self.last_activity.elapsed() >= MOCK_IDLE_TIMEOUT {
+            if self.handshake.close_state().is_closing()
+                || self.handshake.close_state().is_draining()
+            {
+                if self.handshake.server_is_close_window_expired(Instant::now()) {
+                    self.closed = true;
+                    break;
+                }
+            }
+            if !self.closed && self.last_activity.elapsed() >= MOCK_IDLE_TIMEOUT {
                 if self.handshake.is_application_ready() {
                     let _ = self
                         .process_command(MockCommand::CloseConnection {
@@ -255,6 +268,7 @@ impl NativeMockH3Connection {
             let idle_remaining = MOCK_IDLE_TIMEOUT
                 .checked_sub(self.last_activity.elapsed())
                 .unwrap_or(Duration::ZERO);
+            let server_close_window_delay = self.server_close_time_until_expiry();
             let server_application_ack_deadline = self.server_application_ack_deadline();
             let server_application_ack_delay = server_application_ack_deadline
                 .map(|deadline| deadline.saturating_duration_since(Instant::now()))
@@ -265,7 +279,13 @@ impl NativeMockH3Connection {
                 .unwrap_or(Duration::ZERO);
             tokio::select! {
                 biased;
-                _ = tokio::time::sleep(idle_remaining) => {
+                _ = tokio::time::sleep(server_close_window_delay.unwrap_or(Duration::ZERO)), if server_close_window_delay.is_some() => {
+                    if let Err(err) = self.run_server_close_window().await {
+                        tracing::debug!("native mock H3 close window error: {}", err);
+                    }
+                    break;
+                }
+                _ = tokio::time::sleep(idle_remaining), if !self.closed => {
                     if self.handshake.is_application_ready() {
                         let _ = self
                             .process_command(MockCommand::CloseConnection {
@@ -275,14 +295,14 @@ impl NativeMockH3Connection {
                             })
                             .await;
                     }
-                    break;
+                    self.closed = true;
                 }
-                _ = tokio::time::sleep(server_application_ack_delay), if server_application_ack_deadline.is_some() => {
+                _ = tokio::time::sleep(server_application_ack_delay), if !self.closed && server_application_ack_deadline.is_some() => {
                     if let Err(err) = self.send_delayed_application_ack().await {
                         tracing::debug!("native mock H3 delayed ACK error: {}", err);
                     }
                 }
-                _ = tokio::time::sleep(server_loss_detection_delay), if server_loss_detection_deadline.is_some() => {
+                _ = tokio::time::sleep(server_loss_detection_delay), if !self.closed && server_loss_detection_deadline.is_some() => {
                     if let Err(err) = self.handle_loss_detection_timeout().await {
                         tracing::debug!("native mock H3 loss detection error: {}", err);
                     }
@@ -295,7 +315,7 @@ impl NativeMockH3Connection {
                         Err(err) => tracing::debug!("native mock H3 process_datagram error: {}", err),
                     }
                 }
-                command = self.cmd_rx.recv() => {
+                command = self.cmd_rx.recv(), if !self.closed => {
                     let Some(command) = command else { break };
                     self.last_activity = Instant::now();
                     if let Err(err) = self.process_command(command).await {
@@ -307,6 +327,20 @@ impl NativeMockH3Connection {
     }
 
     async fn process_datagram(&mut self, packet: &[u8]) -> specter::Result<bool> {
+        if self.handshake.close_state().is_closing() {
+            self.handshake.server_observe_inbound_packet_for_close();
+            if self
+                .handshake
+                .server_should_replay_connection_close(Instant::now())
+            {
+                self.replay_connection_close().await?;
+            }
+            return Ok(false);
+        }
+        if self.handshake.close_state().is_draining() {
+            return Ok(false);
+        }
+
         if packet.first().is_some_and(|first| first & 0x80 != 0) {
             let packets = split_long_header_datagram(packet)?;
             let mut active = false;
@@ -338,6 +372,9 @@ impl NativeMockH3Connection {
         }
 
         let events = self.handshake.open_client_h3_event_packet(packet)?;
+        if self.handshake.close_state().is_draining() {
+            return Ok(false);
+        }
         if self.seen_request_headers
             && self
                 .last_request_headers_at
@@ -394,6 +431,24 @@ impl NativeMockH3Connection {
 
     fn server_loss_detection_deadline(&self) -> Option<Instant> {
         self.handshake.loss_detection_timer()
+    }
+
+    fn server_close_time_until_expiry(&self) -> Option<Duration> {
+        self.handshake.server_close_time_until_expiry(Instant::now())
+    }
+
+    async fn run_server_close_window(&mut self) -> specter::Result<()> {
+        self.closed = true;
+        Ok(())
+    }
+
+    async fn replay_connection_close(&mut self) -> specter::Result<()> {
+        if let Some(close_packet) = self.closing_connection_close_packet.clone() {
+            self.send_packet(close_packet).await?;
+            self.handshake
+                .server_mark_connection_close_replayed(Instant::now());
+        }
+        Ok(())
     }
 
     async fn handle_loss_detection_timeout(&mut self) -> specter::Result<()> {
@@ -619,7 +674,13 @@ impl NativeMockH3Connection {
                 let packet = self
                     .handshake
                     .build_server_connection_close_packet(error_code, Bytes::from(reason))?;
-                self.send_packet(packet.packet).await?;
+                let close_packet = packet.packet.clone();
+                self.closing_connection_close_packet = Some(close_packet.clone());
+                let pto = self.handshake.server_application_pto();
+                let close_state = self.handshake.close_state_mut();
+                close_state.set_replay_min_interval(pto);
+                close_state.set_replay_packet_threshold(1);
+                self.send_packet(close_packet).await?;
                 self.closed = true;
             }
             MockCommand::GetStats { response_tx } => {
