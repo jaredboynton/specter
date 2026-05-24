@@ -866,6 +866,19 @@ impl NativeQuicServerHandshake {
         }))
     }
 
+    pub fn build_server_application_ack_packet_after(
+        &mut self,
+        threshold: usize,
+    ) -> Result<Option<ServerApplicationAckPacket>> {
+        if !self
+            .client_application_ack_tracker
+            .should_ack_after(threshold)
+        {
+            return Ok(None);
+        }
+        self.build_server_application_ack_packet()
+    }
+
     pub fn open_client_h3_stream_packet(
         &mut self,
         packet: &[u8],
@@ -1513,6 +1526,16 @@ impl NativeQuicHandshake {
             packet_number,
             packet_number_offset: 1 + self.destination_cid.as_bytes().len(),
         }))
+    }
+
+    pub fn build_client_application_ack_packet_after(
+        &mut self,
+        threshold: usize,
+    ) -> Result<Option<ClientApplicationAckPacket>> {
+        if !self.application_ack_tracker.should_ack_after(threshold) {
+            return Ok(None);
+        }
+        self.build_client_application_ack_packet()
     }
 
     pub fn build_client_handshake_crypto_packet(

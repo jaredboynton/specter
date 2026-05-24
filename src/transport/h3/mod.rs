@@ -11,7 +11,7 @@ pub mod quic;
 pub mod tls;
 mod tunnel;
 
-pub(crate) use body::{H3Body, H3BodyTimeouts};
+pub(crate) use body::{H3Body, H3BodyTimeouts, DEFAULT_H3_BODY_SLOT_CAPACITY};
 pub use command::DriverCommand;
 pub use connection::H3Connection;
 pub use handle::H3Handle;
@@ -32,12 +32,33 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum H3Backend {
     Native,
+}
+
+/// Runtime HTTP/3 transport tuning that does not affect the wire fingerprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct H3TransportConfig {
+    pub streaming_body_buffer_slots: usize,
+}
+
+impl Default for H3TransportConfig {
+    fn default() -> Self {
+        Self {
+            streaming_body_buffer_slots: DEFAULT_H3_BODY_SLOT_CAPACITY,
+        }
+    }
+}
+
+impl H3TransportConfig {
+    pub(crate) fn normalized(mut self) -> Self {
+        self.streaming_body_buffer_slots = self.streaming_body_buffer_slots.max(1);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -51,6 +72,13 @@ struct H3PoolKey {
 }
 
 #[derive(Debug, Clone)]
+struct H3HotHandle {
+    url: String,
+    key: H3PoolKey,
+    handle: H3Handle,
+}
+
+#[derive(Debug, Clone)]
 pub struct H3Client {
     tls_fingerprint: Option<TlsFingerprint>,
     http3_fingerprint: Http3Fingerprint,
@@ -58,9 +86,11 @@ pub struct H3Client {
     root_certs: Vec<Vec<u8>>,
     use_platform_roots: bool,
     backend: H3Backend,
+    transport_config: H3TransportConfig,
     max_idle_timeout: Option<u64>,
     dns_config: DnsConfig,
     pool: Arc<RwLock<HashMap<H3PoolKey, H3Handle>>>,
+    hot_handle: Arc<StdRwLock<Option<H3HotHandle>>>,
     /// Counter incremented every time a request resolves to an existing
     /// healthy pooled H3Handle. Shared with the parent `Client` so the
     /// public reuse-count surface aggregates H1/H2/H3 hits.
@@ -82,9 +112,11 @@ impl H3Client {
             root_certs: Vec::new(),
             use_platform_roots: false,
             backend: H3Backend::Native,
+            transport_config: H3TransportConfig::default(),
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
+            hot_handle: Arc::new(StdRwLock::new(None)),
             pool_reuse_counter: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -97,9 +129,11 @@ impl H3Client {
             root_certs: Vec::new(),
             use_platform_roots: false,
             backend: H3Backend::Native,
+            transport_config: H3TransportConfig::default(),
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
+            hot_handle: Arc::new(StdRwLock::new(None)),
             pool_reuse_counter: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -133,6 +167,23 @@ impl H3Client {
 
     pub fn h3_backend(&self) -> H3Backend {
         self.backend
+    }
+
+    /// Set runtime HTTP/3 transport tuning.
+    pub fn with_transport_config(mut self, config: H3TransportConfig) -> Self {
+        self.transport_config = config.normalized();
+        self
+    }
+
+    /// Set bounded in-flight response DATA slots per streaming H3 body.
+    pub fn with_streaming_body_buffer_slots(mut self, slots: usize) -> Self {
+        self.transport_config.streaming_body_buffer_slots = slots.max(1);
+        self
+    }
+
+    /// Bounded in-flight response DATA slots per streaming H3 body.
+    pub fn streaming_body_buffer_slots(&self) -> usize {
+        self.transport_config.streaming_body_buffer_slots
     }
 
     /// Set a custom idle timeout (in milliseconds)
@@ -181,8 +232,7 @@ impl H3Client {
         body: Option<Vec<u8>>,
     ) -> Result<Response> {
         let is_idempotent = is_idempotent_method(method);
-        let key = self.pool_key(url)?;
-        let (mut handle, tried_pooled) = self.resolve_handle(url, &key).await?;
+        let (mut handle, tried_pooled, key) = self.resolve_handle_for_request(url).await?;
 
         let body_bytes = body.map(bytes::Bytes::from);
 
@@ -240,8 +290,7 @@ impl H3Client {
         body_timeouts: H3BodyTimeouts,
     ) -> Result<Response> {
         let is_idempotent = is_idempotent_method(method);
-        let key = self.pool_key(url)?;
-        let (mut handle, tried_pooled) = self.resolve_handle(url, &key).await?;
+        let (mut handle, tried_pooled, key) = self.resolve_handle_for_request(url).await?;
 
         let uri: http::Uri = url
             .parse()
@@ -292,12 +341,41 @@ impl H3Client {
         url: &str,
         headers: Vec<(String, String)>,
     ) -> Result<H3Tunnel> {
-        let handle = self.pooled_handle(url).await?;
+        let (handle, _, _) = self.resolve_handle_for_request(url).await?;
         let uri: http::Uri = url
             .parse()
             .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
 
         handle.open_websocket_tunnel(uri, headers).await
+    }
+
+    fn cached_hot_handle(&self, url: &str) -> Option<(H3PoolKey, H3Handle)> {
+        let hot = self.hot_handle.read().ok()?.clone()?;
+        if hot.url == url && !hot.handle.is_closed() && !hot.handle.is_draining() {
+            return Some((hot.key, hot.handle));
+        }
+        None
+    }
+
+    fn store_hot_handle(&self, url: &str, key: &H3PoolKey, handle: &H3Handle) {
+        if handle.is_closed() || handle.is_draining() {
+            return;
+        }
+        if let Ok(mut hot) = self.hot_handle.write() {
+            *hot = Some(H3HotHandle {
+                url: url.to_owned(),
+                key: key.clone(),
+                handle: handle.clone(),
+            });
+        }
+    }
+
+    fn clear_hot_handle_for_key(&self, key: &H3PoolKey) {
+        if let Ok(mut hot) = self.hot_handle.write() {
+            if hot.as_ref().is_some_and(|cached| &cached.key == key) {
+                *hot = None;
+            }
+        }
     }
 
     /// Resolve an H3Handle for the given URL: reuse a healthy pooled handle if
@@ -310,6 +388,7 @@ impl H3Client {
             if let Some(handle) = pool.get(key).cloned() {
                 if !handle.is_closed() && !handle.is_draining() {
                     self.pool_reuse_counter.fetch_add(1, Ordering::Relaxed);
+                    self.store_hot_handle(url, key, &handle);
                     return Ok((handle, true));
                 }
             }
@@ -321,8 +400,21 @@ impl H3Client {
     }
 
     async fn evict_pool_entry(&self, key: &H3PoolKey) {
+        self.clear_hot_handle_for_key(key);
         let mut pool = self.pool.write().await;
         pool.remove(key);
+    }
+
+    async fn resolve_handle_for_request(&self, url: &str) -> Result<(H3Handle, bool, H3PoolKey)> {
+        if let Some((key, handle)) = self.cached_hot_handle(url) {
+            self.pool_reuse_counter.fetch_add(1, Ordering::Relaxed);
+            return Ok((handle, true, key));
+        }
+
+        let key = self.pool_key(url)?;
+        let (handle, tried_pooled) = self.resolve_handle(url, &key).await?;
+        self.store_hot_handle(url, &key, &handle);
+        Ok((handle, tried_pooled, key))
     }
 
     async fn pooled_handle(&self, url: &str) -> Result<H3Handle> {
@@ -330,6 +422,7 @@ impl H3Client {
 
         if let Some(handle) = self.pool.read().await.get(&key).cloned() {
             if !handle.is_closed() && !handle.is_draining() {
+                self.store_hot_handle(url, &key, &handle);
                 return Ok(handle);
             }
         }
@@ -337,6 +430,7 @@ impl H3Client {
         let mut pool = self.pool.write().await;
         if let Some(handle) = pool.get(&key).cloned() {
             if !handle.is_closed() && !handle.is_draining() {
+                self.store_hot_handle(url, &key, &handle);
                 return Ok(handle);
             }
             pool.remove(&key);
@@ -351,9 +445,11 @@ impl H3Client {
             self.root_certs.clone(),
             self.use_platform_roots,
             &self.dns_config,
+            self.transport_config,
         )
         .await?;
         pool.insert(key, handle.clone());
+        self.store_hot_handle(url, &self.pool_key(url)?, &handle);
         Ok(handle)
     }
 

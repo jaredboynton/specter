@@ -63,6 +63,7 @@ pub struct QuicTransportParams {
     pub initial_max_streams_uni: u64,
     pub ack_delay_exponent: u64,
     pub max_ack_delay_ms: u64,
+    pub ack_eliciting_threshold: usize,
     pub active_connection_id_limit: u64,
     pub disable_active_migration: bool,
     pub disable_dcid_reuse: bool,
@@ -96,6 +97,7 @@ impl QuicTransportParams {
             initial_max_streams_uni: 100,
             ack_delay_exponent: 3,
             max_ack_delay_ms: 25,
+            ack_eliciting_threshold: 16,
             active_connection_id_limit: 2,
             disable_active_migration: true,
             disable_dcid_reuse: false,
@@ -139,7 +141,7 @@ impl QuicTransportParams {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "idle={};recv_udp={};send_udp={};initial_dgram={};max_data={};bidi_local={};bidi_remote={};uni_data={};bidi_streams={};uni_streams={};ack_exp={};ack_delay={};cid_limit={};disable_migration={};disable_dcid_reuse={};grease={};additional={additional_transport_parameters};max_datagram={:?};dcid_len={};scid_len={};amp={};rtt={};cwnd={};pacing={};max_pacing={:?};relaxed_loss={};conn_win={};stream_win={}",
+            "idle={};recv_udp={};send_udp={};initial_dgram={};max_data={};bidi_local={};bidi_remote={};uni_data={};bidi_streams={};uni_streams={};ack_exp={};ack_delay={};ack_threshold={};cid_limit={};disable_migration={};disable_dcid_reuse={};grease={};additional={additional_transport_parameters};max_datagram={:?};dcid_len={};scid_len={};amp={};rtt={};cwnd={};pacing={};max_pacing={:?};relaxed_loss={};conn_win={};stream_win={}",
             self.max_idle_timeout_ms,
             self.max_recv_udp_payload_size,
             self.max_send_udp_payload_size,
@@ -152,6 +154,7 @@ impl QuicTransportParams {
             self.initial_max_streams_uni,
             self.ack_delay_exponent,
             self.max_ack_delay_ms,
+            self.ack_eliciting_threshold,
             self.active_connection_id_limit,
             self.disable_active_migration,
             self.disable_dcid_reuse,

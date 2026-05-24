@@ -20,7 +20,7 @@ use crate::transport::h3::handshake::{NativeQuicHandshake, ServerH3Event, Server
 use crate::transport::h3::native::{
     decode_header_block, H3Frame, H3Header, H3Setting, H3StreamType,
 };
-use crate::transport::h3::{H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
+use crate::transport::h3::{H3TransportConfig, H3Tunnel, H3TunnelEvent, H3TunnelOutbound};
 
 struct NotifyWake(Arc<Notify>);
 
@@ -459,6 +459,7 @@ pub fn spawn_native_h3_driver(
     peer_addr: SocketAddr,
     max_idle_timeout_ms: u64,
     initial_datagram: Option<Bytes>,
+    transport_config: H3TransportConfig,
 ) -> Result<H3Handle> {
     let (command_tx, command_rx) = mpsc::channel(32);
     let is_draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -477,6 +478,7 @@ pub fn spawn_native_h3_driver(
         pending_commands: VecDeque::new(),
         is_draining: is_draining.clone(),
         body_progress_notify: body_progress_notify.clone(),
+        transport_config: transport_config.normalized(),
         max_idle_timeout: Duration::from_millis(max_idle_timeout_ms.max(1)),
         last_activity: Instant::now(),
         initial_datagram,
@@ -488,10 +490,11 @@ pub fn spawn_native_h3_driver(
         }
     });
 
-    Ok(H3Handle::new_with_notify(
+    Ok(H3Handle::new_with_transport_config(
         command_tx,
         is_draining,
         body_progress_notify,
+        transport_config,
     ))
 }
 
@@ -509,6 +512,7 @@ struct NativeH3Driver {
     pending_commands: VecDeque<DriverCommand>,
     is_draining: Arc<std::sync::atomic::AtomicBool>,
     body_progress_notify: Arc<Notify>,
+    transport_config: H3TransportConfig,
     max_idle_timeout: Duration,
     last_activity: Instant,
     initial_datagram: Option<Bytes>,
@@ -535,6 +539,11 @@ impl NativeDriverStreamingResponseState {
             request_stream,
             finished: false,
         }
+    }
+
+    fn is_body_backpressured(&self, pending_body_limit: usize) -> bool {
+        !self.body_shared.is_slot_available()
+            && self.pending_body.len() >= pending_body_limit.max(1)
     }
 }
 
@@ -679,6 +688,7 @@ impl NativeH3Driver {
                 .max_idle_timeout
                 .checked_sub(self.last_activity.elapsed())
                 .unwrap_or(Duration::ZERO);
+            let receive_paused_for_body = self.streaming_response_body_backpressured();
 
             tokio::select! {
                 biased;
@@ -694,7 +704,7 @@ impl NativeH3Driver {
                         }
                     }
                 }
-                recv = self.socket.recv_from(&mut buf) => {
+                recv = self.socket.recv_from(&mut buf), if !receive_paused_for_body => {
                     self.last_activity = Instant::now();
                     let (len, from) = recv.map_err(Error::Io)?;
                     if from == self.peer_addr {
@@ -722,6 +732,13 @@ impl NativeH3Driver {
             || !self.pending_streaming_responses.is_empty()
             || !self.pending_tunnels.is_empty()
             || !self.pending_commands.is_empty()
+    }
+
+    fn streaming_response_body_backpressured(&self) -> bool {
+        let pending_body_limit = self.transport_config.streaming_body_buffer_slots;
+        self.pending_streaming_responses
+            .values()
+            .any(|stream| stream.is_body_backpressured(pending_body_limit))
     }
 
     async fn send_preface(&mut self) -> Result<()> {
@@ -1273,7 +1290,9 @@ impl NativeH3Driver {
         }
 
         let events = self.handshake.open_server_h3_event_packet(datagram)?;
-        if let Some(packet) = self.handshake.build_client_application_ack_packet()? {
+        if let Some(packet) = self.handshake.build_client_application_ack_packet_after(
+            self.fingerprint.transport.ack_eliciting_threshold,
+        )? {
             self.socket
                 .send_to(packet.packet.as_ref(), self.peer_addr)
                 .await
@@ -1632,4 +1651,28 @@ fn push_streaming_body(stream: &mut NativeDriverStreamingResponseState, bytes: B
 
 fn is_enable_connect_protocol(setting: &H3Setting) -> bool {
     matches!(setting, H3Setting::EnableConnectProtocol(value) if *value == 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_response_body_reports_backpressure_when_shared_and_pending_slots_are_full() {
+        let (headers_tx, _headers_rx) = oneshot::channel();
+        let body_shared = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 1);
+        let mut stream = NativeDriverStreamingResponseState::new(headers_tx, body_shared, None);
+
+        push_streaming_body(&mut stream, Bytes::from_static(b"one"));
+        assert!(
+            !stream.is_body_backpressured(1),
+            "one chunk in the public body slot should not pause socket reads yet"
+        );
+
+        push_streaming_body(&mut stream, Bytes::from_static(b"two"));
+        assert!(
+            stream.is_body_backpressured(1),
+            "full public body slot plus full pending queue should pause socket reads"
+        );
+    }
 }

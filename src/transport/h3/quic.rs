@@ -320,12 +320,14 @@ impl QuicCryptoAssembler {
 pub struct QuicAckTracker {
     received: BTreeSet<u64>,
     pending_ack: bool,
+    pending_ack_count: usize,
 }
 
 impl QuicAckTracker {
     pub fn observe(&mut self, packet_number: u64) {
         if packet_number <= MAX_PACKET_NUMBER && self.received.insert(packet_number) {
             self.pending_ack = true;
+            self.pending_ack_count = self.pending_ack_count.saturating_add(1);
         }
     }
 
@@ -333,8 +335,13 @@ impl QuicAckTracker {
         !self.pending_ack
     }
 
+    pub fn should_ack_after(&self, threshold: usize) -> bool {
+        self.pending_ack && self.pending_ack_count >= threshold.max(1)
+    }
+
     pub fn mark_ack_sent(&mut self) {
         self.pending_ack = false;
+        self.pending_ack_count = 0;
     }
 
     pub fn to_ack_frame(&self, ack_delay: u64) -> Result<QuicFrame> {

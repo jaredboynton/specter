@@ -11,6 +11,7 @@ use crate::transport::dns::DnsConfig;
 use crate::transport::h3::handle::H3Handle;
 use crate::transport::h3::handshake::NativeQuicHandshake;
 use crate::transport::h3::quic::ConnectionId;
+use crate::transport::h3::H3TransportConfig;
 
 use crate::transport::h3::native_driver::spawn_native_h3_driver;
 use bytes::Bytes;
@@ -31,6 +32,7 @@ struct NativeH3Connect {
     verify_peer: bool,
     root_certs: Vec<Vec<u8>>,
     use_platform_roots: bool,
+    transport_config: H3TransportConfig,
 }
 
 impl H3Connection {
@@ -46,6 +48,7 @@ impl H3Connection {
         root_certs: Vec<Vec<u8>>,
         use_platform_roots: bool,
         dns_config: &DnsConfig,
+        transport_config: H3TransportConfig,
     ) -> Result<H3Handle> {
         let (host, port, _path) = parse_url(url)?;
 
@@ -75,6 +78,7 @@ impl H3Connection {
             verify_peer,
             root_certs,
             use_platform_roots,
+            transport_config,
         })
         .await
     }
@@ -90,6 +94,7 @@ impl H3Connection {
             verify_peer,
             root_certs,
             use_platform_roots,
+            transport_config,
         } = request;
         let destination_cid =
             random_connection_id(fingerprint.transport.destination_connection_id_len)?;
@@ -136,6 +141,7 @@ impl H3Connection {
                                 peer_addr,
                                 max_idle_timeout,
                                 Some(Bytes::copy_from_slice(&buf[..len])),
+                                transport_config,
                             );
                         }
                         continue;
@@ -171,6 +177,7 @@ impl H3Connection {
                             peer_addr,
                             max_idle_timeout,
                             None,
+                            transport_config,
                         );
                     }
                 }

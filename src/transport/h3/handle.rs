@@ -15,7 +15,7 @@ use crate::request::RequestBody;
 use crate::response::{Body, Response};
 use crate::transport::h3::body::{H3Body, H3BodyShared, H3BodyTimeouts};
 use crate::transport::h3::command::DriverCommand;
-use crate::transport::h3::H3Tunnel;
+use crate::transport::h3::{H3TransportConfig, H3Tunnel};
 
 /// HTTP/3 connection handle for sending requests
 #[derive(Debug, Clone)]
@@ -24,6 +24,7 @@ pub struct H3Handle {
     command_tx: mpsc::Sender<DriverCommand>,
     is_draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
     body_progress_notify: Arc<Notify>,
+    transport_config: H3TransportConfig,
 }
 
 impl H3Handle {
@@ -32,20 +33,26 @@ impl H3Handle {
         command_tx: mpsc::Sender<DriverCommand>,
         is_draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
-        Self::new_with_notify(command_tx, is_draining, Arc::new(Notify::new()))
+        Self::new_with_transport_config(
+            command_tx,
+            is_draining,
+            Arc::new(Notify::new()),
+            H3TransportConfig::default(),
+        )
     }
 
-    /// Create a new handle with a command channel and shared body progress
-    /// notifier wired to the driver.
-    pub(crate) fn new_with_notify(
+    /// Create a new handle with runtime transport tuning.
+    pub(crate) fn new_with_transport_config(
         command_tx: mpsc::Sender<DriverCommand>,
         is_draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
         body_progress_notify: Arc<Notify>,
+        transport_config: H3TransportConfig,
     ) -> Self {
         Self {
             command_tx,
             is_draining,
             body_progress_notify,
+            transport_config: transport_config.normalized(),
         }
     }
 
@@ -57,6 +64,11 @@ impl H3Handle {
     /// Return true when the connection is draining (GOAWAY received)
     pub fn is_draining(&self) -> bool {
         self.is_draining.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Bounded in-flight response DATA slots per streaming H3 body.
+    pub fn streaming_body_buffer_slots(&self) -> usize {
+        self.transport_config.streaming_body_buffer_slots
     }
 
     /// Send an HTTP/3 request and receive the response.
@@ -112,7 +124,10 @@ impl H3Handle {
         body_timeouts: H3BodyTimeouts,
     ) -> Result<Response> {
         let (headers_tx, headers_rx) = oneshot::channel();
-        let body_shared = H3BodyShared::new(self.body_progress_notify.clone());
+        let body_shared = H3BodyShared::new_with_capacity(
+            self.body_progress_notify.clone(),
+            self.transport_config.streaming_body_buffer_slots,
+        );
 
         self.command_tx
             .send(DriverCommand::SendStreamingRequest {

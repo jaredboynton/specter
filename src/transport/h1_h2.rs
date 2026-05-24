@@ -36,7 +36,7 @@ use crate::transport::h2::{
     H2BodyTimeouts, H2Connection, H2DirectBody, H2DirectReuseHook, H2PooledConnection,
     H2TransportConfig, H2Tunnel, PseudoHeaderOrder, RawH2Connection,
 };
-use crate::transport::h3::{H3Backend, H3Client, H3Tunnel};
+use crate::transport::h3::{H3Backend, H3Client, H3TransportConfig, H3Tunnel};
 use crate::version::HttpVersion;
 use crate::websocket::{WebSocketBuilder, WebSocketClientParts};
 
@@ -157,6 +157,7 @@ pub struct ClientBuilder {
     h3_max_idle_timeout: Option<u64>,
     h3_fingerprint: Option<Http3Fingerprint>,
     h3_backend: H3Backend,
+    h3_transport_config: H3TransportConfig,
     h2_transport_config: H2TransportConfig,
     h2_direct_streaming_responses: bool,
     tcp_keepalive: Option<Duration>,
@@ -299,6 +300,11 @@ impl Client {
     pub fn h2_max_concurrent_streams_per_connection(&self) -> Option<u32> {
         self.h2_transport_config
             .max_concurrent_streams_per_connection
+    }
+
+    /// Bounded in-flight response DATA slots per streaming H3 body.
+    pub fn h3_streaming_body_buffer_slots(&self) -> usize {
+        self.h3_client.streaming_body_buffer_slots()
     }
 
     async fn acquire_h1_connection_slot(
@@ -1969,6 +1975,7 @@ impl ClientBuilder {
             h3_max_idle_timeout: None,
             h3_fingerprint: None,
             h3_backend: H3Backend::Native,
+            h3_transport_config: H3TransportConfig::default(),
             h2_transport_config: H2TransportConfig::default(),
             h2_direct_streaming_responses: false,
             tcp_keepalive: None,
@@ -2255,6 +2262,83 @@ impl ClientBuilder {
         self
     }
 
+    fn update_h3_fingerprint(mut self, update: impl FnOnce(&mut Http3Fingerprint)) -> Self {
+        let mut fingerprint = self
+            .h3_fingerprint
+            .take()
+            .unwrap_or_else(|| self.fingerprint.http3_fingerprint());
+        update(&mut fingerprint);
+        self.h3_fingerprint = Some(fingerprint);
+        self
+    }
+
+    /// Set the advertised HTTP/3 connection receive window.
+    pub fn h3_initial_max_data(self, bytes: u64) -> Self {
+        self.update_h3_fingerprint(|fingerprint| {
+            fingerprint.transport.initial_max_data = bytes;
+        })
+    }
+
+    /// Set the advertised per-stream receive window for local bidirectional streams.
+    pub fn h3_initial_max_stream_data_bidi_local(self, bytes: u64) -> Self {
+        self.update_h3_fingerprint(|fingerprint| {
+            fingerprint.transport.initial_max_stream_data_bidi_local = bytes;
+        })
+    }
+
+    /// Set the advertised per-stream receive window for remote bidirectional streams.
+    pub fn h3_initial_max_stream_data_bidi_remote(self, bytes: u64) -> Self {
+        self.update_h3_fingerprint(|fingerprint| {
+            fingerprint.transport.initial_max_stream_data_bidi_remote = bytes;
+        })
+    }
+
+    /// Set the advertised per-stream receive window for remote unidirectional streams.
+    pub fn h3_initial_max_stream_data_uni(self, bytes: u64) -> Self {
+        self.update_h3_fingerprint(|fingerprint| {
+            fingerprint.transport.initial_max_stream_data_uni = bytes;
+        })
+    }
+
+    /// Set the advertised bidirectional QUIC stream count.
+    pub fn h3_initial_max_streams_bidi(self, streams: u64) -> Self {
+        self.update_h3_fingerprint(|fingerprint| {
+            fingerprint.transport.initial_max_streams_bidi = streams;
+        })
+    }
+
+    /// Set the advertised unidirectional QUIC stream count.
+    pub fn h3_initial_max_streams_uni(self, streams: u64) -> Self {
+        self.update_h3_fingerprint(|fingerprint| {
+            fingerprint.transport.initial_max_streams_uni = streams;
+        })
+    }
+
+    /// Set the maximum dynamic HTTP/3 connection receive window.
+    pub fn h3_max_connection_window(self, bytes: u64) -> Self {
+        self.update_h3_fingerprint(|fingerprint| {
+            fingerprint.transport.max_connection_window = bytes;
+        })
+    }
+
+    /// Set the maximum dynamic HTTP/3 per-stream receive window.
+    pub fn h3_max_stream_window(self, bytes: u64) -> Self {
+        self.update_h3_fingerprint(|fingerprint| {
+            fingerprint.transport.max_stream_window = bytes;
+        })
+    }
+
+    /// Set bounded in-flight response DATA slots per streaming H3 body.
+    pub fn h3_streaming_body_buffer_slots(mut self, slots: usize) -> Self {
+        self.h3_transport_config.streaming_body_buffer_slots = slots.max(1);
+        self
+    }
+
+    /// Alias for [`ClientBuilder::h3_streaming_body_buffer_slots`].
+    pub fn h3_body_buffer_slots(self, slots: usize) -> Self {
+        self.h3_streaming_body_buffer_slots(slots)
+    }
+
     /// Select the HTTP/3 runtime backend.
     pub fn h3_backend(mut self, backend: H3Backend) -> Self {
         self.h3_backend = backend;
@@ -2407,6 +2491,7 @@ impl ClientBuilder {
         let mut h3_client = H3Client::with_fingerprint(tls_fingerprint)
             .with_http3_fingerprint(h3_fingerprint)
             .with_h3_backend(self.h3_backend)
+            .with_transport_config(self.h3_transport_config)
             .with_root_certificates(root_certs)
             .with_platform_roots(self.use_platform_roots)
             .with_dns_config(self.dns_config.clone());

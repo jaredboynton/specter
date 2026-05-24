@@ -27,8 +27,8 @@ pub(crate) enum H3BodyPush {
     Closed,
 }
 
-/// Bounded in-flight DATA item capacity per H3 stream body.
-const H3_BODY_SLOT_CAPACITY: usize = 8;
+/// Default bounded in-flight DATA item capacity per H3 stream body.
+pub(crate) const DEFAULT_H3_BODY_SLOT_CAPACITY: usize = 8;
 
 struct H3BodyState {
     slots: VecDeque<std::result::Result<Bytes, Error>>,
@@ -42,9 +42,16 @@ struct H3BodyState {
 
 impl Default for H3BodyState {
     fn default() -> Self {
+        Self::with_capacity(DEFAULT_H3_BODY_SLOT_CAPACITY)
+    }
+}
+
+impl H3BodyState {
+    fn with_capacity(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
         Self {
-            slots: VecDeque::with_capacity(H3_BODY_SLOT_CAPACITY),
-            cap: H3_BODY_SLOT_CAPACITY,
+            slots: VecDeque::with_capacity(capacity),
+            cap: capacity,
             terminal_error: None,
             ended: false,
             closed: false,
@@ -77,9 +84,9 @@ impl fmt::Debug for H3BodyShared {
 }
 
 impl H3BodyShared {
-    pub(crate) fn new(driver_notify: Arc<Notify>) -> Arc<Self> {
+    pub(crate) fn new_with_capacity(driver_notify: Arc<Notify>, capacity: usize) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(H3BodyState::default()),
+            state: Mutex::new(H3BodyState::with_capacity(capacity)),
             driver_notify,
         })
     }
@@ -293,5 +300,28 @@ impl HttpBody for H3Body {
 
     fn size_hint(&self) -> SizeHint {
         SizeHint::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h3_body_shared_uses_configured_slot_capacity() {
+        let shared = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 2);
+
+        assert!(matches!(
+            shared.push(Ok(Bytes::from_static(b"one"))),
+            H3BodyPush::Accepted
+        ));
+        assert!(matches!(
+            shared.push(Ok(Bytes::from_static(b"two"))),
+            H3BodyPush::Accepted
+        ));
+        assert!(matches!(
+            shared.push(Ok(Bytes::from_static(b"three"))),
+            H3BodyPush::Full
+        ));
     }
 }
