@@ -48,7 +48,7 @@ struct CompetitorSpec {
     invocation_notes: &'static str,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct BenchmarkRow {
     competitor_id: String,
     status: String,
@@ -56,6 +56,16 @@ struct BenchmarkRow {
     p95_ttft_ns: Option<f64>,
     bytes_per_sec: Option<f64>,
     source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workload: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payload_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sample_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +74,8 @@ struct FixtureEvent {
     level: &'static str,
     kind: &'static str,
     classification: &'static str,
+    category: &'static str,
+    fatal: bool,
     message: String,
     datagram: Option<String>,
     app_ready: Option<bool>,
@@ -99,6 +111,21 @@ struct AdapterSample {
     ttft_ns: f64,
     total_ns: f64,
     bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RowContext {
+    protocol: &'static str,
+    workload: &'static str,
+    default_payload_bytes: Option<usize>,
+    notes: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PacketErrorClassification {
+    classification: &'static str,
+    category: &'static str,
+    fatal: bool,
 }
 
 impl AdapterSample {
@@ -171,6 +198,23 @@ fn competitor_specs() -> Vec<CompetitorSpec> {
                 "Run with --features reqwest-h3 and RUSTFLAGS='--cfg reqwest_unstable'.",
         },
         CompetitorSpec {
+            id: "tokio_tungstenite_rfc9220",
+            crate_name: "tokio-tungstenite",
+            version: "0.24.0",
+            role: "unsupported_h3_websocket_client",
+            required_for_superiority: false,
+            invocation_notes:
+                "RFC 6455-over-H1 WebSocket client; no RFC 9220/H3 transport in this harness.",
+        },
+        CompetitorSpec {
+            id: "reqwest_rfc9220",
+            crate_name: "reqwest",
+            version: "0.13.3",
+            role: "unsupported_h3_websocket_client",
+            required_for_superiority: false,
+            invocation_notes: "HTTP client with H3 support; no native WebSocket/RFC 9220 API.",
+        },
+        CompetitorSpec {
             id: "quinn_transport",
             crate_name: "quinn",
             version: "0.11.9",
@@ -208,7 +252,7 @@ fn specter_row_from_streaming_artifact(artifact_json: &str) -> Option<BenchmarkR
     let p95_ttft_ns = metrics.get("p95_ns").and_then(Value::as_f64);
     let bytes_per_sec = metrics.get("bytes_per_sec").and_then(Value::as_f64);
 
-    Some(BenchmarkRow {
+    let mut row = BenchmarkRow {
         competitor_id: "specter_native".into(),
         status: if pass {
             "measured_pass"
@@ -220,7 +264,10 @@ fn specter_row_from_streaming_artifact(artifact_json: &str) -> Option<BenchmarkR
         p95_ttft_ns,
         bytes_per_sec,
         source: "streaming_vs_reqwest_h3_artifact".into(),
-    })
+        ..BenchmarkRow::default()
+    };
+    apply_row_context(&mut row, None);
+    Some(row)
 }
 
 fn competitor_rows_from_artifact(artifact_json: &str) -> Vec<BenchmarkRow> {
@@ -247,7 +294,7 @@ fn adapter_row_from_samples(
     let total_bytes = samples.iter().map(|sample| sample.bytes).sum::<u64>();
     let total_ns = samples.iter().map(|sample| sample.total_ns).sum::<f64>();
 
-    BenchmarkRow {
+    let mut row = BenchmarkRow {
         competitor_id: competitor_id.into(),
         status: if samples.is_empty() {
             "measured_fail"
@@ -263,7 +310,21 @@ fn adapter_row_from_samples(
             None
         },
         source: source.into(),
+        ..BenchmarkRow::default()
+    };
+    apply_row_context(&mut row, Some(samples.len()));
+    if let Some(payload_bytes) = uniform_payload_bytes(samples) {
+        row.payload_bytes = Some(payload_bytes);
     }
+    row
+}
+
+fn uniform_payload_bytes(samples: &[AdapterSample]) -> Option<usize> {
+    let first = usize::try_from(samples.first()?.bytes).ok()?;
+    samples
+        .iter()
+        .all(|sample| usize::try_from(sample.bytes).ok() == Some(first))
+        .then_some(first)
 }
 
 #[cfg(test)]
@@ -310,6 +371,56 @@ fn percentile(sorted_samples: &[f64], percentile: f64) -> Option<f64> {
     let rank = (percentile * sorted_samples.len() as f64).ceil() as usize;
     let index = rank.saturating_sub(1).min(sorted_samples.len() - 1);
     Some(sorted_samples[index])
+}
+
+fn row_context(competitor_id: &str) -> Option<RowContext> {
+    match competitor_id {
+        "specter_native" | "quiche_direct" | "tokio_quiche" | "h3_quinn" | "reqwest_h3" => {
+            Some(RowContext {
+                protocol: "h3",
+                workload: "http3_streaming_get",
+                default_payload_bytes: Some(LOCAL_FIXTURE_CHUNK_SIZE * LOCAL_FIXTURE_CHUNK_COUNT),
+                notes: None,
+            })
+        }
+        "specter_native_rfc9220_tunnel" => Some(RowContext {
+            protocol: "h3_rfc9220",
+            workload: "websocket_over_h3_raw_tunnel_echo",
+            default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
+            notes: Some("Measured Specter raw byte tunnel over RFC9220 Extended CONNECT; not RFC6455 frame parsing."),
+        }),
+        "tokio_tungstenite_rfc9220" => Some(RowContext {
+            protocol: "h3_rfc9220",
+            workload: "websocket_over_h3_raw_tunnel_echo",
+            default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
+            notes: Some("tokio-tungstenite is an RFC6455-over-H1 client and has no RFC9220/H3 transport here; not a throughput comparator."),
+        }),
+        "reqwest_rfc9220" => Some(RowContext {
+            protocol: "h3_rfc9220",
+            workload: "websocket_over_h3_raw_tunnel_echo",
+            default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
+            notes: Some("reqwest can measure H3 HTTP rows but does not expose a native WebSocket/RFC9220 API; not a throughput comparator."),
+        }),
+        "quinn_transport" | "s2n_quic_transport" => Some(RowContext {
+            protocol: "quic",
+            workload: "bidirectional_echo_transport",
+            default_payload_bytes: Some(LOCAL_FIXTURE_TRANSPORT_PAYLOAD_SIZE),
+            notes: Some("QUIC transport-only echo baseline; not an H3 HTTP or RFC9220 comparator."),
+        }),
+        _ => None,
+    }
+}
+
+fn apply_row_context(row: &mut BenchmarkRow, sample_count: Option<usize>) {
+    let Some(context) = row_context(&row.competitor_id) else {
+        row.sample_count = sample_count;
+        return;
+    };
+    row.protocol = Some(context.protocol.into());
+    row.workload = Some(context.workload.into());
+    row.payload_bytes = context.default_payload_bytes;
+    row.sample_count = sample_count;
+    row.notes = context.notes.map(str::to_string);
 }
 
 fn local_native_fixture_measurement_plan() -> Vec<&'static str> {
@@ -364,7 +475,10 @@ fn placeholder_rows(
                     return row.clone();
                 }
             }
-            BenchmarkRow {
+            if let Some(row) = unsupported_rfc9220_comparator_row(spec.id) {
+                return row;
+            }
+            let mut row = BenchmarkRow {
                 competitor_id: spec.id.into(),
                 status: if spec.id == "specter_native" {
                     "pending_measurement"
@@ -376,9 +490,29 @@ fn placeholder_rows(
                 p95_ttft_ns: None,
                 bytes_per_sec: None,
                 source: "native_h3_vs_rust_clients_harness".into(),
-            }
+                ..BenchmarkRow::default()
+            };
+            apply_row_context(&mut row, None);
+            row
         })
         .collect()
+}
+
+fn unsupported_rfc9220_comparator_row(competitor_id: &str) -> Option<BenchmarkRow> {
+    matches!(
+        competitor_id,
+        "tokio_tungstenite_rfc9220" | "reqwest_rfc9220"
+    )
+    .then(|| {
+        let mut row = BenchmarkRow {
+            competitor_id: competitor_id.into(),
+            status: "unsupported_by_client".into(),
+            source: "capability_audit".into(),
+            ..BenchmarkRow::default()
+        };
+        apply_row_context(&mut row, None);
+        row
+    })
 }
 
 fn best_imported_competitor_row<'a>(
@@ -1130,8 +1264,7 @@ impl LocalNativeH3Connection {
                     if let Err(error) = self.process_datagram(&packet).await {
                         let datagram = describe_local_native_h3_datagram(&packet);
                         let app_ready = self.handshake.is_application_ready();
-                        let classification =
-                            classify_local_native_h3_packet_error(&error, app_ready);
+                        let classification = classify_local_native_h3_packet_error(&error, app_ready);
                         eprintln!(
                             "local native H3 fixture packet error: {error}; {}; app_ready={}",
                             datagram,
@@ -1141,7 +1274,9 @@ impl LocalNativeH3Connection {
                             client: self.client.clone(),
                             level: "warn",
                             kind: "packet_error",
-                            classification,
+                            classification: classification.classification,
+                            category: classification.category,
+                            fatal: classification.fatal,
                             message: error.to_string(),
                             datagram: Some(datagram),
                             app_ready: Some(app_ready),
@@ -1473,16 +1608,35 @@ fn describe_local_native_h3_datagram(packet: &[u8]) -> String {
     )
 }
 
-fn classify_local_native_h3_packet_error(error: &anyhow::Error, app_ready: bool) -> &'static str {
+fn classify_local_native_h3_packet_error(
+    error: &anyhow::Error,
+    app_ready: bool,
+) -> PacketErrorClassification {
     let message = error.to_string();
     if message.contains("QUIC packet open failed") && app_ready {
-        "post_application_packet_open_error"
+        PacketErrorClassification {
+            classification: "post_application_packet_open_error",
+            category: "non_fatal_packet_open_after_application_ready",
+            fatal: false,
+        }
     } else if message.contains("QUIC packet open failed") {
-        "handshake_packet_open_error"
+        PacketErrorClassification {
+            classification: "handshake_packet_open_error",
+            category: "fatal_packet_open_before_application_ready",
+            fatal: true,
+        }
     } else if message.contains("Idle timeout") {
-        "idle_timeout"
+        PacketErrorClassification {
+            classification: "idle_timeout",
+            category: "timeout",
+            fatal: true,
+        }
     } else {
-        "packet_error"
+        PacketErrorClassification {
+            classification: "packet_error",
+            category: "unknown_packet_error",
+            fatal: true,
+        }
     }
 }
 
@@ -2600,6 +2754,37 @@ mod tests {
     }
 
     #[test]
+    fn artifact_surfaces_rfc9220_comparator_rows_as_pending_adapters() {
+        let artifact = super::artifact_with_competitor_artifacts(None, &Vec::<String>::new());
+
+        for competitor_id in [
+            "quiche_direct_rfc9220_tunnel",
+            "tokio_quiche_rfc9220_tunnel",
+            "h3_quinn_rfc9220_tunnel",
+            "reqwest_h3_rfc9220_tunnel",
+        ] {
+            let spec = artifact
+                .competitors
+                .iter()
+                .find(|spec| spec.id == competitor_id)
+                .unwrap_or_else(|| panic!("{competitor_id} spec should be explicit"));
+            assert_eq!(spec.role, "h3_tunnel_comparator");
+            assert!(
+                !spec.required_for_superiority,
+                "{competitor_id} must not affect the HTTP/3 superiority gate"
+            );
+
+            let row = artifact
+                .rows
+                .iter()
+                .find(|row| row.competitor_id == competitor_id)
+                .unwrap_or_else(|| panic!("{competitor_id} row should be explicit"));
+            assert_eq!(row.status, "pending_adapter");
+            assert_eq!(row.source, "native_h3_vs_rust_clients_harness");
+        }
+    }
+
+    #[test]
     fn local_native_fixture_plan_includes_feature_enabled_clients() {
         let mut expected = vec![
             "specter_native",
@@ -2613,6 +2798,8 @@ mod tests {
         #[cfg(feature = "s2n-quic-transport")]
         expected.push("s2n_quic_transport");
         expected.push("specter_native_rfc9220_tunnel");
+        expected.push("specter_native_rfc9220_tunnel_close");
+        expected.push("specter_native_rfc9220_tunnel_mixed");
 
         assert_eq!(super::local_native_fixture_measurement_plan(), expected);
     }
@@ -2630,14 +2817,24 @@ mod tests {
     fn local_native_fixture_classifies_packet_open_errors_by_phase() {
         let error = anyhow::anyhow!("QUIC packet open failed: unknown BoringSSL error");
 
+        let post_application = super::classify_local_native_h3_packet_error(&error, true);
         assert_eq!(
-            super::classify_local_native_h3_packet_error(&error, true),
+            post_application.classification,
             "post_application_packet_open_error"
         );
         assert_eq!(
-            super::classify_local_native_h3_packet_error(&error, false),
-            "handshake_packet_open_error"
+            post_application.category,
+            "non_fatal_packet_open_after_application_ready"
         );
+        assert!(!post_application.fatal);
+
+        let handshake = super::classify_local_native_h3_packet_error(&error, false);
+        assert_eq!(handshake.classification, "handshake_packet_open_error");
+        assert_eq!(
+            handshake.category,
+            "fatal_packet_open_before_application_ready"
+        );
+        assert!(handshake.fatal);
     }
 
     #[test]
@@ -2655,6 +2852,8 @@ mod tests {
             level: "warn",
             kind: "packet_error",
             classification: "post_application_packet_open_error",
+            category: "non_fatal_packet_open_after_application_ready",
+            fatal: false,
             message: "QUIC packet open failed".into(),
             datagram: Some("len=1200 short_prefix=[]".into()),
             app_ready: Some(true),
@@ -2672,6 +2871,11 @@ mod tests {
             artifact.fixture_events[0].classification,
             "post_application_packet_open_error"
         );
+        assert_eq!(
+            artifact.fixture_events[0].category,
+            "non_fatal_packet_open_after_application_ready"
+        );
+        assert!(!artifact.fixture_events[0].fatal);
     }
 
     #[test]
@@ -2799,6 +3003,42 @@ mod tests {
     }
 
     #[test]
+    fn specter_native_rfc9220_tunnel_close_adapter_row_uses_measured_samples() {
+        let samples = vec![
+            super::AdapterSample::new(60.0, 600.0, 6_000),
+            super::AdapterSample::new(10.0, 100.0, 1_000),
+            super::AdapterSample::new(30.0, 300.0, 3_000),
+        ];
+
+        let row = super::specter_native_rfc9220_tunnel_close_row_from_samples(&samples);
+
+        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_close");
+        assert_eq!(row.status, "measured_pass");
+        assert_eq!(row.p50_ttft_ns, Some(30.0));
+        assert_eq!(row.p95_ttft_ns, Some(60.0));
+        assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
+        assert_eq!(row.source, "specter_native_rfc9220_tunnel_close_adapter");
+    }
+
+    #[test]
+    fn specter_native_rfc9220_tunnel_mixed_adapter_row_uses_measured_samples() {
+        let samples = vec![
+            super::AdapterSample::new(70.0, 700.0, 7_000),
+            super::AdapterSample::new(10.0, 100.0, 1_000),
+            super::AdapterSample::new(40.0, 400.0, 4_000),
+        ];
+
+        let row = super::specter_native_rfc9220_tunnel_mixed_row_from_samples(&samples);
+
+        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_mixed");
+        assert_eq!(row.status, "measured_pass");
+        assert_eq!(row.p50_ttft_ns, Some(40.0));
+        assert_eq!(row.p95_ttft_ns, Some(70.0));
+        assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
+        assert_eq!(row.source, "specter_native_rfc9220_tunnel_mixed_adapter");
+    }
+
+    #[test]
     fn quinn_transport_adapter_row_uses_measured_samples() {
         let samples = vec![
             super::AdapterSample::new(40.0, 400.0, 4_000),
@@ -2874,6 +3114,47 @@ mod tests {
         assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "specter_native_rfc9220_tunnel_adapter");
+        assert!(row.p50_ttft_ns.is_some());
+        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
+    }
+
+    #[tokio::test]
+    async fn specter_native_local_fixture_measures_rfc9220_tunnel_close_fin() {
+        let fixture = super::LocalNativeH3Fixture::start("specter_native_rfc9220_tunnel_close")
+            .await
+            .unwrap();
+
+        let row = super::measure_specter_native_rfc9220_tunnel_close(&fixture.tunnel_url(), 0, 1)
+            .await
+            .unwrap();
+
+        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_close");
+        assert_eq!(row.status, "measured_pass");
+        assert_eq!(row.source, "specter_native_rfc9220_tunnel_close_adapter");
+        assert!(row.p50_ttft_ns.is_some());
+        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
+    }
+
+    #[tokio::test]
+    async fn specter_native_local_fixture_measures_rfc9220_tunnel_slow_consumer_mixed_workload() {
+        let fixture = super::LocalNativeH3Fixture::start("specter_native_rfc9220_tunnel_mixed")
+            .await
+            .unwrap();
+
+        let row = super::measure_specter_native_rfc9220_tunnel_mixed(
+            fixture.stream_url(),
+            &fixture.tunnel_url(),
+            0,
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_mixed");
+        assert_eq!(row.status, "measured_pass");
+        assert_eq!(row.source, "specter_native_rfc9220_tunnel_mixed_adapter");
         assert!(row.p50_ttft_ns.is_some());
         assert!(row.p95_ttft_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
