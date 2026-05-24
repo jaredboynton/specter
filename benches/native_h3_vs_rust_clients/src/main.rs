@@ -19,6 +19,7 @@ use serde_json::Value;
 use specter::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
 
 const QUICHE_MAX_DATAGRAM_SIZE: usize = 1350;
+const LOCAL_FIXTURE_MAX_STREAMS: u64 = 10_000;
 const DEFAULT_ADAPTER_TIMEOUT_SECS: u64 = 30;
 fn adapter_timeout() -> Duration {
     let secs = std::env::var("SPECTER_BENCH_ADAPTER_TIMEOUT_SECS")
@@ -2085,6 +2086,8 @@ async fn measure_specter_native_rfc9220_tunnel(
 fn specter_rfc9220_client() -> anyhow::Result<specter::Client> {
     let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
     fingerprint.transport.ack_eliciting_threshold = 128;
+    fingerprint.transport.initial_max_streams_bidi = LOCAL_FIXTURE_MAX_STREAMS;
+    fingerprint.transport.initial_max_streams_uni = LOCAL_FIXTURE_MAX_STREAMS;
     Ok(specter::Client::builder()
         .danger_accept_invalid_certs(true)
         .h3_backend(specter::H3Backend::Native)
