@@ -770,9 +770,10 @@ impl QuicLossDetector {
             return Err(Error::Quic("QUIC ACK_ECN counters decreased".into()));
         }
 
-        let count_increase = counters.total()?.checked_sub(previous.total()?).ok_or_else(|| {
-            Error::HttpProtocol("QUIC ACK_ECN counter total underflow".into())
-        })?;
+        let count_increase = counters
+            .total()?
+            .checked_sub(previous.total()?)
+            .ok_or_else(|| Error::HttpProtocol("QUIC ACK_ECN counter total underflow".into()))?;
         if count_increase > newly_acked_packets {
             self.ecn_validation_failed = true;
             return Err(Error::Quic(format!(
