@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use specter::fingerprint::{QuicTransportParams, RawQuicTransportParameter};
 use specter::transport::h3::quic::{
-    decode_transport_parameters, encode_transport_parameters, TransportParameter,
+    decode_transport_parameters, encode_server_transport_parameters, encode_transport_parameters,
+    encode_transport_parameters_with_initial_source_connection_id, ConnectionId, TransportParameter,
 };
 
 #[test]
@@ -67,4 +68,75 @@ fn native_quic_transport_parameter_pool_key_preserves_raw_order() {
     };
 
     assert_ne!(forward.pool_key_string(), reversed.pool_key_string());
+}
+
+#[test]
+fn native_quic_raw_ordered_transport_parameters_can_place_dynamic_client_cid() {
+    let params = QuicTransportParams {
+        raw_ordered_transport_parameters: Some(vec![
+            RawQuicTransportParameter {
+                id: 0x01,
+                value: vec![42],
+            },
+            RawQuicTransportParameter::initial_source_connection_id(),
+            RawQuicTransportParameter {
+                id: 0x04,
+                value: vec![64],
+            },
+        ]),
+        ..QuicTransportParams::chrome()
+    };
+
+    let decoded = decode_transport_parameters(
+        &encode_transport_parameters_with_initial_source_connection_id(
+            &params,
+            &ConnectionId::from_static(b"client-scid"),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(
+        decoded,
+        vec![
+            TransportParameter::MaxIdleTimeout(42),
+            TransportParameter::InitialSourceConnectionId(Bytes::from_static(b"client-scid")),
+            TransportParameter::InitialMaxData(64),
+        ]
+    );
+}
+
+#[test]
+fn native_quic_raw_ordered_transport_parameters_can_place_dynamic_server_cids() {
+    let params = QuicTransportParams {
+        raw_ordered_transport_parameters: Some(vec![
+            RawQuicTransportParameter::initial_source_connection_id(),
+            RawQuicTransportParameter {
+                id: 0x01,
+                value: vec![25],
+            },
+            RawQuicTransportParameter::original_destination_connection_id(),
+            RawQuicTransportParameter::retry_source_connection_id(),
+        ]),
+        ..QuicTransportParams::chrome()
+    };
+
+    let decoded = decode_transport_parameters(&encode_server_transport_parameters(
+        &params,
+        &ConnectionId::from_static(b"client-dcid"),
+        &ConnectionId::from_static(b"server-scid"),
+        Some(&ConnectionId::from_static(b"retry-scid")),
+    ))
+    .unwrap();
+
+    assert_eq!(
+        decoded,
+        vec![
+            TransportParameter::InitialSourceConnectionId(Bytes::from_static(b"server-scid")),
+            TransportParameter::MaxIdleTimeout(25),
+            TransportParameter::OriginalDestinationConnectionId(Bytes::from_static(
+                b"client-dcid",
+            )),
+            TransportParameter::RetrySourceConnectionId(Bytes::from_static(b"retry-scid")),
+        ]
+    );
 }
