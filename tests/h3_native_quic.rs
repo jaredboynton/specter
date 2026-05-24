@@ -13,7 +13,7 @@ use specter::transport::h3::quic::{
     protect_short_header_packet, recover_packet_number, retry_integrity_tag_v1,
     seal_packet_payload, split_long_header_datagram, validate_retry_integrity_tag_v1, ConnectionId,
     LongHeaderPacket, LongHeaderType, QuicAckRange, QuicAckTracker, QuicCryptoAssembler, QuicFrame,
-    QuicLossDetector, QuicPathValidator, ShortHeaderPacket, TransportParameter,
+    QuicEcnMark, QuicLossDetector, QuicPathValidator, ShortHeaderPacket, TransportParameter,
 };
 use std::time::{Duration, Instant};
 
@@ -753,6 +753,48 @@ fn native_quic_ack_tracker_ignores_duplicate_packets() {
             ranges: vec![],
         }
     );
+}
+
+#[test]
+fn native_quic_ack_tracker_generates_ack_ecn_for_observed_marks() {
+    let mut tracker = QuicAckTracker::default();
+    tracker.observe_ecn(1, QuicEcnMark::Ect0);
+    tracker.observe_ecn(2, QuicEcnMark::Ect1);
+    tracker.observe_ecn(3, QuicEcnMark::Ce);
+
+    let frame = tracker.to_ack_frame(7).unwrap();
+
+    assert_eq!(
+        frame,
+        QuicFrame::AckEcn {
+            largest_acknowledged: 3,
+            ack_delay: 7,
+            first_ack_range: 2,
+            ranges: vec![],
+            ect0_count: 1,
+            ect1_count: 1,
+            ce_count: 1,
+        }
+    );
+}
+
+#[test]
+fn native_quic_ack_tracker_does_not_double_count_duplicate_ecn_marks() {
+    let mut tracker = QuicAckTracker::default();
+    tracker.observe_ecn(5, QuicEcnMark::Ce);
+    tracker.observe_ecn(5, QuicEcnMark::Ce);
+
+    let frame = tracker.to_ack_frame(0).unwrap();
+
+    assert!(matches!(
+        frame,
+        QuicFrame::AckEcn {
+            ect0_count: 0,
+            ect1_count: 0,
+            ce_count: 1,
+            ..
+        }
+    ));
 }
 
 #[test]
