@@ -151,6 +151,50 @@ fn native_h3_driver_schedules_lost_application_stream_retransmits() {
 }
 
 #[test]
+fn native_h3_driver_retains_connection_close_for_draining_replay() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let driver_fields = driver
+        .split("struct NativeH3Driver")
+        .nth(1)
+        .expect("driver must have NativeH3Driver")
+        .split("struct NativeDriverStreamingResponseState")
+        .next()
+        .expect("driver field section");
+    let send_connection_close = driver
+        .split("async fn send_connection_close")
+        .nth(1)
+        .expect("driver must have send_connection_close")
+        .split("async fn send_receive_flow_control_updates")
+        .next()
+        .expect("send_connection_close section");
+    let process_datagram = driver
+        .split("async fn process_datagram")
+        .nth(1)
+        .expect("driver must have process_datagram")
+        .split("fn apply_h3_event")
+        .next()
+        .expect("process_datagram section");
+
+    assert!(
+        driver_fields.contains("closing_connection_close_packet: Option<Bytes>"),
+        "native H3 driver must retain the protected CONNECTION_CLOSE packet for drain replays"
+    );
+    assert!(
+        send_connection_close.contains("self.closing_connection_close_packet = Some(close_packet.clone())"),
+        "send_connection_close must remember the protected close packet before entering drain"
+    );
+    assert!(
+        send_connection_close.contains("self.is_draining"),
+        "send_connection_close must put the public handle into draining state"
+    );
+    assert!(
+        process_datagram.contains("replay_connection_close().await?"),
+        "draining native H3 driver must replay CONNECTION_CLOSE on inbound peer packets instead of processing them"
+    );
+}
+
+#[test]
 fn native_h3_driver_requeues_flow_control_blocked_new_stream_commands() {
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");

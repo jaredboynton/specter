@@ -1,7 +1,7 @@
 use bytes::Bytes;
+use specter::fingerprint::tls::NativeH3TlsFeatureStatus;
 use specter::fingerprint::{
-    CertCompression, Http3Fingerprint, NativeH3TlsFeatureStatus, RawQuicTransportParameter,
-    TlsFingerprint,
+    CertCompression, Http3Fingerprint, RawQuicTransportParameter, TlsFingerprint,
 };
 use specter::transport::h3::quic::{
     decode_frames, decode_long_header, decode_transport_parameters, derive_initial_key_material,

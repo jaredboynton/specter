@@ -1,6 +1,6 @@
+use specter::fingerprint::tls::NativeH3TlsFeatureStatus;
 use specter::fingerprint::{
-    FingerprintProfile, H3Settings, Http3Fingerprint, NativeH3TlsFeatureStatus,
-    QuicTransportParams, TlsFingerprint,
+    FingerprintProfile, H3Settings, Http3Fingerprint, QuicTransportParams, TlsFingerprint,
 };
 use specter::{Client, H3Backend, H3Client};
 
