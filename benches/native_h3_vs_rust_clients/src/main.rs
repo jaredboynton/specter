@@ -2370,7 +2370,14 @@ fn measure_quiche_direct_rfc9220_tunnel_once(url: &str) -> anyhow::Result<Adapte
         }
     }
 
-    anyhow::bail!("quiche RFC 9220 tunnel timed out after {:?}", ADAPTER_TIMEOUT)
+    anyhow::bail!(
+        "quiche RFC 9220 tunnel timed out after {:?}; h3_ready={} req_sent={} stream_id={:?} echoed_bytes={}",
+        ADAPTER_TIMEOUT,
+        h3_conn.is_some(),
+        req_sent,
+        stream_id,
+        echoed.len()
+    )
 }
 
 async fn measure_tokio_quiche_rfc9220_tunnel(
