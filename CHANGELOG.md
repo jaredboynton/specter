@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Python/Node DNS cache controls**: Bindings expose `hickory_dns(bool)`, `dns_cache_ttl(seconds)`, and `http_tls_early_data(bool)`.
 
 ### Changed
+- **Removed `url` crate dependency**: Requests now use an internal RFC 3986 URL helper backed by `http::Uri`. Non-ASCII hostnames no longer auto-punycode; pass pre-encoded forms explicitly.
 - **DNS cache default**: Resolver results are cached for 300 s by default. Pass `.hickory_dns(false)` (Rust) or `hickory_dns=False` (Python/Node) to restore per-request resolution.
 
 ### Fixed

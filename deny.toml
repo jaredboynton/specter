@@ -27,6 +27,18 @@ yanked = "deny"
 [bans]
 # Don't allow multiple versions of the same crate
 multiple-versions = "warn"
+deny = [
+    { name = "url" },
+    { name = "idna" },
+    { name = "idna_adapter" },
+    { name = "icu_collections" },
+    { name = "icu_locale_core" },
+    { name = "icu_normalizer" },
+    { name = "icu_normalizer_data" },
+    { name = "icu_properties" },
+    { name = "icu_properties_data" },
+    { name = "icu_provider" },
+]
 
 # Check for sources
 [sources]
