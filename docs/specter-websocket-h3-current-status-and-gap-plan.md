@@ -15,7 +15,7 @@ This file is the current cross-protocol capability and gap plan for requests, st
 | H1 RFC6455 WebSocket / WSS | Local and live proof exists. | One WebSocket message stream per TCP/TLS connection; scale by pooling/sharding connections. | RFC6455 mask/cache behavior, TLS fingerprinting, frame write/read policy. | `docs/benchmarks/websocket-vs-fastwebsockets/2026-05-24-final.json`, `docs/benchmarks/codex-ws-streaming/n50-postfix.json` | Public frame/streaming reader-writer APIs, split contract, cork/writev policy, permessage-deflate if needed. |
 | H2 requests/streaming | Production proof exists against reqwest. | Yes, stream multiplexing over one TCP/TLS connection. | Custom H2 stack controls pseudo-header order, HPACK, SETTINGS, flow-control cadence, priority behavior, TLS. | `docs/benchmarks/2026-05-24-streaming/` | Add raw `h2`/`hyper` comparator rows if transport-overhead isolation is needed. |
 | H2 WebSocket (RFC8441) | Implemented as raw byte tunnel. | Yes, Extended CONNECT stream multiplexing when peer enables `SETTINGS_ENABLE_CONNECT_PROTOCOL`. | Custom H2 behavior plus tunnel pacing/backpressure. | README/API docs and RFC8441 tests. | Higher-level ergonomics if callers need RFC6455 framing over the tunnel. |
-| H3 HTTP | Native runtime proof exists. | Yes, QUIC stream multiplexing. | Native QUIC/H3 controls ACK cadence, transport params, H3 settings, QPACK, flow control, scheduling, packet sizing, TLS/0-RTT policy. | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json` | Browser ACK parity, capture presets. |
+| H3 HTTP | Native runtime proof exists. | Yes, QUIC stream multiplexing. | Native QUIC/H3 controls ACK cadence, transport params, H3 settings, QPACK, flow control, scheduling, packet sizing, TLS/0-RTT policy. | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json` | Capture presets. |
 | H3 WebSocket (RFC9220) | Implemented as raw byte tunnel. | Yes, Extended CONNECT over H3/QUIC streams. | Native QUIC/H3 controls plus byte-bounded tunnel backpressure, public tunnel capacity snapshots, and fair tunnel/response scheduling. | Same artifact has echo/close/mixed rows and the full-suite superiority gate. | Connection-amortized comparator parity and unified cross-protocol capacity policy if callers need it. |
 | QUIC transport baselines | Measured comparator-only rows exist. | QUIC stream multiplexing, but not HTTP/H3. | Lower-layer transport behavior only. | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-quic-transport-local.json` and `2026-05-24-s2n-quic-transport-local.json` | Not an H3 production gap; keep out of H3 gates. |
 
@@ -38,7 +38,6 @@ This file is the current cross-protocol capability and gap plan for requests, st
 
 | Priority | Gap | Scope | Next action |
 |---|---|---|---|
-| P2 | Browser ACK parity | H3 fingerprinting and performance. | Capture Chrome/Firefox ACK thresholds and delays by version and compare with `ack_eliciting_threshold` / `max_ack_delay_ms`. |
 | P2 | TLS/H3 capture presets | H3 fingerprinting. | Add capture-derived raw transport-parameter presets and explicit extension-list ordering where possible beyond BoringSSL permutation policy. |
 | P2 | Cross-protocol capacity policy | Requests, streaming, WebSockets, tunnels. | Native H3/RFC9220 capacity snapshots exist; design unified max-pending policies across H1/H2/H3 only where callers need one shared control surface. |
 | P3 | WebSocket ergonomics | H1 RFC6455 and RFC8441/RFC9220 wrappers. | Add frame-level receive, streaming reader/writer, split contracts, cork/writev policy, prepared-message/broadcast APIs, and optional permessage-deflate only if product use cases require them. |
@@ -62,6 +61,7 @@ This file is the current cross-protocol capability and gap plan for requests, st
 | Driver anti-amplification gating | Native H3 driver records path receive bytes, promotes validated migrated paths, and budget-checks outbound sends to unvalidated paths. |
 | RFC9002 recovery/PTO core | Per-space recovery, RTT/PTO, CRYPTO retransmission, app retransmission, and server wake paths are implemented. |
 | Recovery soak/backoff validation | Repeated PTO backoff/reset, packet/time-threshold loss, persistent congestion collapse, early timer-poll no-op behavior, Initial/Handshake CRYPTO PTO retransmission, and client/server app-space STREAM retransmission are covered by recovery and handshake regression tests. |
+| Browser ACK parity | Chrome H3 uses ACK decimation threshold 10 with `max_ack_delay_ms = 25`; Firefox H3 uses ACK-after-2 with `max_ack_delay_ms = 20`. Native client/server/mock/same-fixture ACK paths consume these fingerprint values; benchmark-only ACK decimation remains scoped to benchmark fixtures. |
 | Close drain | Bounded `CONNECTION_CLOSE` replay/suppression exists for client, mock server, and same-fixture server. |
 | Key update | Native QUIC 1-RTT key update is implemented with previous-key retention and ACK gating. |
 | TLS session resumption / 0-RTT | `NativeH3SessionCache`, session replay, status reporting, and opt-in safe first-request 0-RTT policy are wired. |
@@ -83,6 +83,5 @@ This file is the current cross-protocol capability and gap plan for requests, st
 
 ## Recommended Next Work
 
-1. Capture browser ACK behavior and map it to Specter's fingerprint knobs.
-2. Add capture-derived H3/TLS presets where backend control is sufficient.
-3. Decide whether unified cross-protocol capacity policy and WebSocket ergonomics are product requirements before adding more API surface.
+1. Add capture-derived H3/TLS presets where backend control is sufficient.
+2. Decide whether unified cross-protocol capacity policy and WebSocket ergonomics are product requirements before adding more API surface.

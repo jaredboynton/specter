@@ -25,7 +25,6 @@ This is the current native H3 gap ledger. It is intentionally not a change log.
 
 | Priority | Gap | Current state | Next proof needed |
 |---|---|---|---|
-| P2 | Browser ACK parity | Threshold + `max_ack_delay_ms` timer paths exist for client/server/fixture, including tuned benchmark profile support. | Capture Chrome/Firefox QUIC ACK thresholds/delays by version and compare against Specter defaults and `ack_eliciting_threshold = 128`. |
 | P2 | TLS/H3 capture presets | Certificate compression, deterministic-vs-browser-permuted extension policy, raw ordered transport parameters, session replay, and 0-RTT controls exist. | Capture-derived raw transport-parameter presets and explicit extension-list ordering beyond BoringSSL permutation policy. |
 | P2 | Cross-protocol capacity policy | Native H3 streaming bodies and RFC9220 tunnels expose public capacity snapshots; internal byte-bounded H3 body/tunnel flow control and fair send scheduling exist. | Unified H1/H2/H3 capacity knobs and policy docs where API consumers need one cross-protocol control surface. |
 
@@ -47,6 +46,7 @@ Keep these under regression coverage; do not relist them as active gaps.
 | Driver anti-amplification gating | Native H3 driver records received bytes per path, promotes validated migrated paths, and routes outbound sends through RFC9000 § 8.1 budget checks for unvalidated paths. |
 | RFC9002 recovery/PTO core | Per-space RTT/PTO/loss state, congestion response, CRYPTO PTO retransmission, app-space PTO, and mock/same-fixture server wake paths are implemented. |
 | Recovery soak/backoff validation | Repeated PTO backoff/reset, packet/time-threshold loss, persistent congestion collapse, early timer-poll no-op behavior, Initial/Handshake CRYPTO PTO retransmission, and client/server app-space STREAM retransmission are covered by recovery and handshake regression tests. |
+| Browser ACK parity | Chrome H3 uses ACK decimation threshold 10 with `max_ack_delay_ms = 25`; Firefox H3 uses Neqo-style ACK-after-2 behavior with `max_ack_delay_ms = 20`. Client/server/mock/same-fixture ACK timer paths consume the fingerprint values, and benchmark-only `ack_eliciting_threshold = 128` remains local to benchmark fixtures. |
 | Close drain | Client, mock-server, and same-fixture server retain/replay protected `CONNECTION_CLOSE` packets during bounded drain windows and suppress non-close sends after draining. |
 | Key update | 1-RTT key update has traffic-secret/key-phase rotation, previous-key retention, and local-update ACK gating. |
 | ACK_ECN and ECN marking | ACK_ECN encode/decode, counter validation, CE growth tracking, congestion response, socket receive ECN reporting, and fingerprint-controlled outbound ECN marking are implemented. |
@@ -90,9 +90,8 @@ Unsupported RFC9220 capability-audit rows remain explicit non-comparators: `h3_q
 
 ## Next Execution Order
 
-1. Capture browser ACK behavior and calibrate native ACK thresholds/timers against Chrome/Firefox versions.
-2. Add capture-derived TLS/H3 presets for raw transport parameters and extension ordering where BoringSSL allows control.
-3. Design unified H1/H2/H3 capacity knobs only if API consumers need one cross-protocol control surface.
+1. Add capture-derived TLS/H3 presets for raw transport parameters and extension ordering where BoringSSL allows control.
+2. Design unified H1/H2/H3 capacity knobs only if API consumers need one cross-protocol control surface.
 
 ## Validation Commands
 

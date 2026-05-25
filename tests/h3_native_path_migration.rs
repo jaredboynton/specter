@@ -86,7 +86,7 @@ fn native_client_path_set_marks_validated_after_handshake_validation() {
         .open_client_h3_event_packet_from(response.packet.as_ref(), migrated_peer)
         .expect("server validates migrated peer");
 
-    assert!(client.is_client_path_address_validated(&migrated_peer));
+    assert!(server.is_server_path_address_validated(&migrated_peer));
     assert!(path_set.mark_validated(migrated_peer));
     assert!(path_set.promote_to_primary(migrated_peer));
     assert!(path_set.may_send_to(migrated_peer, 1_000_000));
