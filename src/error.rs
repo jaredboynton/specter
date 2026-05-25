@@ -110,6 +110,7 @@ pub enum Error {
 
 impl Error {
     /// Create an HTTP status error.
+    #[cold]
     pub fn http_status(status: u16, message: impl Into<String>) -> Self {
         Self::HttpStatus {
             status,
@@ -118,36 +119,43 @@ impl Error {
     }
 
     /// Create a missing field error.
+    #[cold]
     pub fn missing(field: impl Into<String>) -> Self {
         Self::Missing(field.into())
     }
 
     /// Create an IO error with custom message.
+    #[cold]
     pub fn io(message: impl Into<String>) -> Self {
         Self::Io(io::Error::other(message.into()))
     }
 
     /// Create an HTTP protocol error.
+    #[cold]
     pub fn http_protocol(message: impl Into<String>) -> Self {
         Self::HttpProtocol(message.into())
     }
 
     /// Create a connection error.
+    #[cold]
     pub fn connection(message: impl Into<String>) -> Self {
         Self::Connection(message.into())
     }
 
     /// Create a timeout error.
+    #[cold]
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::Timeout(message.into())
     }
 
     /// Create a TLS error.
+    #[cold]
     pub fn tls(message: impl Into<String>) -> Self {
         Self::Tls(message.into())
     }
 
     /// Create a QUIC error.
+    #[cold]
     pub fn quic(message: impl Into<String>) -> Self {
         Self::Quic(message.into())
     }
