@@ -2319,7 +2319,8 @@ impl ClientBuilder {
     /// Apply one protocol-neutral capacity policy across H1, H2, H3, and H3 tunnels.
     pub fn capacity_policy(mut self, policy: CapacityPolicy) -> Self {
         self.h1_max_connections_per_origin = policy.max_pending_per_origin;
-        self.h2_transport_config.max_concurrent_streams_per_connection =
+        self.h2_transport_config
+            .max_concurrent_streams_per_connection =
             Some(policy.max_pending_per_origin.min(u32::MAX as usize) as u32);
         self.h2_transport_config.streaming_body_buffer_slots =
             policy.streaming_body_buffer_slots.max(1);
