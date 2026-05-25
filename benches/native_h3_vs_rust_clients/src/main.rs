@@ -2831,17 +2831,58 @@ fn measure_quiche_direct_rfc9220_tunnel_mixed_once(
             if !reqs_sent {
                 let opened_tunnel_stream_id =
                     http3.send_request(&mut conn, &tunnel_headers, false)?;
-                let written = http3.send_body(
-                    &mut conn,
-                    opened_tunnel_stream_id,
-                    tunnel_payload.as_ref(),
-                    true,
-                )?;
-                if written != tunnel_payload.len() {
+                let mut payload_offset = 0usize;
+                while payload_offset < tunnel_payload.len() && Instant::now() < deadline {
+                    let chunk_end = payload_offset
+                        .saturating_add(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE)
+                        .min(tunnel_payload.len());
+                    let fin = chunk_end == tunnel_payload.len();
+                    match http3.send_body(
+                        &mut conn,
+                        opened_tunnel_stream_id,
+                        &tunnel_payload.as_ref()[payload_offset..chunk_end],
+                        fin,
+                    ) {
+                        Ok(0) | Err(quiche::h3::Error::Done) => {
+                            flush_quiche_packets(&socket, &mut conn, &mut out)?;
+                            loop {
+                                match socket.recv_from(&mut recv_buf) {
+                                    Ok((len, from)) => {
+                                        let recv_info = quiche::RecvInfo {
+                                            to: local_addr,
+                                            from,
+                                        };
+                                        if let Err(err) = conn.recv(&mut recv_buf[..len], recv_info)
+                                        {
+                                            if err != quiche::Error::Done {
+                                                return Err(anyhow::anyhow!(
+                                                    "quiche RFC 9220 mixed recv while sending tunnel body failed: {err:?}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                                    Err(err) => return Err(err.into()),
+                                }
+                            }
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Ok(written) => {
+                            payload_offset = payload_offset.saturating_add(written);
+                            flush_quiche_packets(&socket, &mut conn, &mut out)?;
+                        }
+                        Err(err) => {
+                            return Err(anyhow::anyhow!(
+                                "quiche RFC 9220 mixed tunnel body send failed: {err:?}"
+                            ));
+                        }
+                    }
+                }
+                if payload_offset != tunnel_payload.len() {
                     anyhow::bail!(
                         "quiche RFC 9220 mixed partial tunnel write: expected {}, wrote {}",
                         tunnel_payload.len(),
-                        written
+                        payload_offset
                     );
                 }
                 let opened_stream_id = http3.send_request(&mut conn, &stream_headers, true)?;
