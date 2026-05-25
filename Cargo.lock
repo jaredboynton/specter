@@ -1648,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "specters"
-version = "4.0.3"
+version = "4.1.0"
 dependencies = [
  "atomic-waker",
  "base64",
