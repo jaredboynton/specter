@@ -19,10 +19,12 @@ bssl_targets=(
     "x86_64-pc-windows-msvc"
 )
 
-if grep -q "RUSTC_WRAPPER=sccache" "$PROJECT_ROOT/.github/workflows/node-release.yml"; then
-    echo "Node Release must not set RUSTC_WRAPPER=sccache; napi build runs cargo metadata and fails under sccache when CARGO_INCREMENTAL is set." >&2
-    exit 1
-fi
+for guarded_workflow in node-release.yml python-release.yml; do
+    if grep -q "RUSTC_WRAPPER=sccache" "$PROJECT_ROOT/.github/workflows/$guarded_workflow"; then
+        echo "$guarded_workflow must not set RUSTC_WRAPPER=sccache; napi build / maturin invoke cargo metadata which fails under sccache when CARGO_INCREMENTAL is set." >&2
+        exit 1
+    fi
+done
 
 version_from_cargo_toml() {
     local manifest="$1"
