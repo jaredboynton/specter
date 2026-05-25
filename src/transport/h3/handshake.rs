@@ -1425,7 +1425,7 @@ impl NativeQuicServerHandshake {
         if self.close_state.is_draining() || !self.handshake_status().early_data_accepted() {
             return Ok(Vec::new());
         }
-        let Some(client_early_data_keys) = self.client_early_data_keys.as_ref() else {
+        let Some(client_early_data_keys) = self.client_early_data_keys.clone() else {
             return Ok(Vec::new());
         };
 
@@ -1436,7 +1436,7 @@ impl NativeQuicServerHandshake {
             }
             let now = Instant::now();
             let opened = open_long_header_packet(
-                client_early_data_keys,
+                &client_early_data_keys,
                 &packet.packet,
                 packet.packet_number_offset,
                 self.next_client_application_packet_number,

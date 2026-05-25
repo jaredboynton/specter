@@ -534,13 +534,8 @@ impl H3Client {
             return Ok(None);
         }
 
-        let request = NativeH3ZeroRttRequest::new(
-            &self.http3_fingerprint,
-            method,
-            uri,
-            headers,
-            body,
-        )?;
+        let request =
+            NativeH3ZeroRttRequest::new(&self.http3_fingerprint, method, uri, headers, body)?;
         if request.payload.len() > entry.max_early_data as usize {
             return Ok(None);
         }
@@ -793,8 +788,7 @@ fn response_from_stream_response(stream_response: StreamResponse) -> Response {
 }
 
 fn is_zero_rtt_safe_request(method: &str, body: Option<&bytes::Bytes>) -> bool {
-    matches!(method, "GET" | "HEAD" | "OPTIONS")
-        && body.is_none_or(|body| body.is_empty())
+    matches!(method, "GET" | "HEAD" | "OPTIONS") && body.is_none_or(|body| body.is_empty())
 }
 
 fn is_idempotent_method(method: &str) -> bool {
