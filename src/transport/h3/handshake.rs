@@ -4133,8 +4133,18 @@ impl NativeQuicHandshake {
                 )?,
                 QuicFrame::PathResponse(data) => {
                     if let Some(remote_address) = remote_address {
-                        self.client_path_validator
-                            .on_path_response_from(remote_address, *data);
+                        if self
+                            .client_path_validator
+                            .on_path_response_from(remote_address, *data)
+                        {
+                            if let Some(connection_id) = self
+                                .client_path_validator
+                                .migration_connection_id(&remote_address)
+                                .cloned()
+                            {
+                                self.destination_cid = connection_id;
+                            }
+                        }
                     } else {
                         self.client_path_validator.on_path_response(*data);
                     }
