@@ -1039,20 +1039,24 @@ impl DriverPendingTunnelOutbound {
 }
 
 fn fail_pending_command_with_quic_message(command: DriverCommand, message: String) {
+    fail_pending_command(command, Error::Quic(message));
+}
+
+fn fail_pending_command(command: DriverCommand, error: Error) {
     match command {
         DriverCommand::SendRequest { response_tx, .. } => {
-            let _ = response_tx.send(Err(Error::Quic(message)));
+            let _ = response_tx.send(Err(error));
         }
         DriverCommand::SendStreamingRequest {
             headers_tx,
             body_shared,
             ..
         } => {
-            let _ = headers_tx.send(Err(Error::Quic(message.clone())));
-            let _ = body_shared.fail(Error::Quic(message));
+            let _ = headers_tx.send(Err(error.clone()));
+            let _ = body_shared.fail(error);
         }
         DriverCommand::OpenWebSocketTunnel { response_tx, .. } => {
-            let _ = response_tx.send(Err(Error::Quic(message)));
+            let _ = response_tx.send(Err(error));
         }
     }
 }
@@ -1075,22 +1079,34 @@ impl NativeH3Driver {
     fn fail_all_with_quic_message(&mut self, message: String) {
         self.is_draining
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.fail_inflight_requests(Error::Quic(message));
+    }
+
+    fn fail_inflight_requests(&mut self, error: Error) {
         for (_, response_tx) in self.pending_responses.drain() {
-            let _ = response_tx.send(Err(Error::Quic(message.clone())));
+            let _ = response_tx.send(Err(error.clone()));
         }
         for (_, mut stream) in self.pending_streaming_responses.drain() {
             if let Some(headers_tx) = stream.headers_tx.take() {
-                let _ = headers_tx.send(Err(Error::Quic(message.clone())));
+                let _ = headers_tx.send(Err(error.clone()));
             } else {
-                let _ = stream.body_shared.fail(Error::Quic(message.clone()));
+                let _ = stream.body_shared.fail(error.clone());
             }
         }
         for (_, mut tunnel) in self.pending_tunnels.drain() {
-            tunnel.fail(Error::Quic(message.clone()));
+            tunnel.fail(error.clone());
         }
         for command in self.pending_commands.drain(..) {
-            fail_pending_command_with_quic_message(command, message.clone());
+            fail_pending_command(command, error.clone());
         }
+    }
+
+    fn enter_goaway_draining(&mut self) {
+        self.is_draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.fail_inflight_requests(Error::HttpProtocol(
+            "HTTP/3 GOAWAY received".into(),
+        ));
     }
 
     async fn drive_loop(&mut self) -> Result<()> {
