@@ -7,6 +7,7 @@
 //!
 //! Supports automatic HTTP/3 upgrade via Alt-Svc header caching.
 
+use crate::url::Url;
 use base64::Engine;
 use bytes::Bytes;
 use http::{Method, Uri};
@@ -18,7 +19,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::time::timeout as tokio_timeout;
-use crate::url::Url;
 
 use crate::cookie::CookieJar;
 use crate::error::{Error, Result};
@@ -29,19 +29,17 @@ use crate::pool::multiplexer::{ConnectionPool, PoolKey};
 use crate::request::{IntoUrl, RedirectPolicy, Request, RequestBody};
 use crate::response::{Body, Response};
 use crate::timeouts::Timeouts;
-use crate::transport::connector::{
-    AlpnMode, BoringConnector, EarlyDataOutcome, MaybeHttpsStream,
-};
+use crate::transport::connector::{AlpnMode, BoringConnector, EarlyDataOutcome, MaybeHttpsStream};
 use crate::transport::dns::{DnsConfig, Resolve};
 use crate::transport::h1::{h1_request_body_kind, H1Connection, H1StreamingOptions};
-use crate::transport::is_zero_rtt_safe_request;
-use crate::transport::session::SessionCache;
-use crate::transport::tcp::TcpFingerprint;
 use crate::transport::h2::{
     H2BodyTimeouts, H2Connection, H2DirectBody, H2DirectReuseHook, H2PooledConnection,
     H2TransportConfig, H2Tunnel, PseudoHeaderOrder, RawH2Connection,
 };
 use crate::transport::h3::{H3Backend, H3Client, H3TransportConfig, H3Tunnel};
+use crate::transport::is_zero_rtt_safe_request;
+use crate::transport::session::SessionCache;
+use crate::transport::tcp::TcpFingerprint;
 use crate::version::HttpVersion;
 use crate::websocket::{WebSocketBuilder, WebSocketClientParts};
 
@@ -116,7 +114,7 @@ struct H2DirectResponseRequest {
     conn: RawH2Connection<MaybeHttpsStream>,
     method: Method,
     uri: Uri,
-    headers: Vec<(String, String)>,
+    headers: Headers,
     body_timeouts: H2BodyTimeouts,
     pool_key: PoolKey,
     ttfb_timeout: Option<Duration>,
@@ -753,7 +751,9 @@ impl<'a> RequestBuilder<'a> {
                         }
                         _ => encoded,
                     };
-                    url.set_query(Some(&merged));
+                    if let Err(err) = url.set_query(Some(&merged)) {
+                        self.set_error(err.into());
+                    }
                 }
             }
             Err(err) => self.set_error(err.into()),
@@ -1032,7 +1032,7 @@ impl<'a> RequestBuilder<'a> {
             }
             let connector = client.connector_for_uri(&uri);
             let method = request.method.clone();
-            let headers = request.headers.to_vec();
+            let headers = request.headers.clone();
             let body = request.body;
             let use_early_data = client.http_tls_early_data
                 && uri.scheme_str() == Some("https")
@@ -1086,7 +1086,7 @@ impl<'a> RequestBuilder<'a> {
             let send_fut = conn.send_request_streaming(
                 method,
                 &uri,
-                headers,
+                &headers,
                 body,
                 H1StreamingOptions {
                     on_reusable,
@@ -1253,7 +1253,7 @@ impl<'a> RequestBuilder<'a> {
                     .send_h2_direct_streaming_response(
                         request.method.clone(),
                         &uri,
-                        request.headers.to_vec(),
+                        request.headers.clone(),
                         &pool_key,
                         &timeouts,
                         body_timeouts,
@@ -1728,11 +1728,12 @@ impl Client {
             // Send request - retry with new connection if pooled connection fails
             let result = loop {
                 let stream_for_request = stream;
+                let body_bytes = body_bytes.clone();
                 let fut = Self::do_send_http1(
                     stream_for_request,
                     request.method.clone(),
                     &uri,
-                    headers_vec.clone(),
+                    request.headers.clone(),
                     body_bytes.clone(),
                 );
 
@@ -1949,7 +1950,9 @@ impl Client {
         } = request;
         let fut = async move {
             let mut conn = conn;
-            let stream_id = conn.send_headers_raw(&method, &uri, &headers, true).await?;
+            let stream_id = conn
+                .send_headers_raw(&method, &uri, &headers.to_vec(), true)
+                .await?;
             let (status, headers, end_stream) = conn
                 .read_response_headers_with_end_stream(stream_id)
                 .await?;
@@ -2000,7 +2003,7 @@ impl Client {
         &self,
         method: Method,
         uri: &Uri,
-        headers: Vec<(String, String)>,
+        headers: Headers,
         pool_key: &PoolKey,
         timeouts: &Timeouts,
         body_timeouts: H2BodyTimeouts,
@@ -2046,11 +2049,11 @@ impl Client {
         stream: MaybeHttpsStream,
         method: Method,
         uri: &Uri,
-        headers: Vec<(String, String)>,
+        headers: Headers,
         body: Option<Bytes>,
     ) -> Result<(Response, MaybeHttpsStream)> {
         let mut conn = H1Connection::new(stream);
-        let response = conn.send_request(method, uri, headers, body).await?;
+        let response = conn.send_request(method, uri, &headers, body).await?;
         let stream = conn.into_inner();
         Ok((response, stream))
     }

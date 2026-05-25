@@ -608,10 +608,9 @@ impl H1Connection {
                         .await?;
                 }
                 body => {
-                    self.stream
-                        .write_all(&request_bytes)
-                        .await
-                        .map_err(|e| Error::HttpProtocol(format!("Failed to write request: {}", e)))?;
+                    self.stream.write_all(&request_bytes).await.map_err(|e| {
+                        Error::HttpProtocol(format!("Failed to write request: {}", e))
+                    })?;
                     self.write_request_body(body).await?;
                 }
             }
@@ -674,7 +673,7 @@ impl H1Connection {
         let mut request = Vec::with_capacity(1024);
 
         // Validate header names and values per RFC 9110
-        for (name, value) in headers {
+        for (name, value) in headers.iter() {
             validate_header_name(name)?;
             validate_header_value(value)?;
         }
@@ -725,7 +724,7 @@ impl H1Connection {
 
         // User-provided headers (preserving order)
         let mut has_connection_header = false;
-        for (name, value) in headers {
+        for (name, value) in headers.iter() {
             // Skip Host header if user provided one (we already added it)
             if name.eq_ignore_ascii_case("host") {
                 continue;
@@ -865,9 +864,7 @@ impl H1Connection {
 
         if chunk.len() <= CHUNKED_COALESCE_COPY_LIMIT {
             self.chunked_write_scratch.clear();
-            if self.chunked_write_scratch.capacity()
-                < prefix_bytes.len() + chunk.len() + 2
-            {
+            if self.chunked_write_scratch.capacity() < prefix_bytes.len() + chunk.len() + 2 {
                 self.chunked_write_scratch
                     .reserve(prefix_bytes.len() + chunk.len() + 2);
             }
@@ -888,28 +885,24 @@ impl H1Connection {
 
         match &mut self.stream {
             MaybeHttpsStream::Http(tcp) => {
-                write_tcp_vectored_all(tcp, prefix_bytes, chunk, b"\r\n").await.map_err(|e| {
-                    Error::HttpProtocol(format!(
-                        "Failed to write large chunked request body frame: {}",
-                        e
-                    ))
-                })
-            }
-            MaybeHttpsStream::Https(_) => {
-                self.stream
-                    .write_all(prefix_bytes)
+                write_tcp_vectored_all(tcp, prefix_bytes, chunk, b"\r\n")
                     .await
                     .map_err(|e| {
                         Error::HttpProtocol(format!(
-                            "Failed to write chunked request body header: {}",
+                            "Failed to write large chunked request body frame: {}",
                             e
                         ))
-                    })?;
-                self.stream.write_all(chunk).await.map_err(|e| {
+                    })
+            }
+            MaybeHttpsStream::Https(_) => {
+                self.stream.write_all(prefix_bytes).await.map_err(|e| {
                     Error::HttpProtocol(format!(
-                        "Failed to write chunked request body data: {}",
+                        "Failed to write chunked request body header: {}",
                         e
                     ))
+                })?;
+                self.stream.write_all(chunk).await.map_err(|e| {
+                    Error::HttpProtocol(format!("Failed to write chunked request body data: {}", e))
                 })?;
                 self.stream.write_all(b"\r\n").await.map_err(|e| {
                     Error::HttpProtocol(format!(
