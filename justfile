@@ -345,6 +345,28 @@ test-changed base="main":
     echo "Running selected nextest filter: $FILTER"
     cargo nextest run --all-features --locked -E "$FILTER"
 
+# Run a single integration-test binary (prunes compile + run to that crate only)
+# Usage: just test-one h1_streaming
+#        just test-one h1_streaming pooling_smoke   # inner test-name substring filter
+[group('test')]
+test-one binary filter="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [[ "$(uname -m)" == "arm64" ]]; then
+        TARGET="aarch64-apple-darwin"
+    else
+        TARGET="x86_64-apple-darwin"
+    fi
+
+    . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
+
+    if [[ -z "{{ filter }}" ]]; then
+        cargo nextest run --all-features --locked -E 'binary(={{ binary }})'
+    else
+        cargo nextest run --all-features --locked -E 'binary(={{ binary }}) and test(~{{ filter }})'
+    fi
+
 # Run tests with cargo test (if nextest not available)
 [group('test')]
 test-cargo:
