@@ -327,8 +327,9 @@ fn encode_request_stream_with_options(
 
 pub fn build_websocket_connect_headers(
     uri: &http::Uri,
-    headers: &Headers,
+    headers: impl Into<Headers>,
 ) -> Result<Vec<H3Header>> {
+    let headers = headers.into();
     let scheme = uri.scheme_str().ok_or_else(|| {
         Error::WebSocketUnsupported("RFC 9220 requires an https URI internally".into())
     })?;
@@ -392,8 +393,9 @@ pub fn build_websocket_connect_headers(
 pub fn build_request_headers(
     method: &http::Method,
     uri: &http::Uri,
-    headers: &Headers,
+    headers: impl Into<Headers>,
 ) -> Result<Vec<H3Header>> {
+    let headers = headers.into();
     let scheme = uri.scheme_str().unwrap_or("https");
     let authority = uri
         .authority()

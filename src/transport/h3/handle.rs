@@ -128,17 +128,18 @@ impl H3Handle {
         &self,
         method: http::Method,
         uri: &http::Uri,
-        headers: &Headers,
+        headers: impl Into<Headers>,
         body: Option<Bytes>,
     ) -> Result<Response> {
         // Allocate a oneshot channel for the response
         let (response_tx, response_rx) = oneshot::channel();
+        let headers = headers.into();
 
         // Send command to driver
         let command = DriverCommand::SendRequest {
             method,
             uri: uri.clone(),
-            headers: headers.clone(),
+            headers,
             body,
             response_tx,
         };
@@ -169,7 +170,7 @@ impl H3Handle {
         &self,
         method: http::Method,
         uri: &http::Uri,
-        headers: &Headers,
+        headers: impl Into<Headers>,
         body: RequestBody,
     ) -> Result<Response> {
         self.send_streaming_request(method, uri, headers, body, H3BodyTimeouts::default())
@@ -183,11 +184,12 @@ impl H3Handle {
         &self,
         method: http::Method,
         uri: &http::Uri,
-        headers: &Headers,
+        headers: impl Into<Headers>,
         body: RequestBody,
         body_timeouts: H3BodyTimeouts,
     ) -> Result<Response> {
         let (headers_tx, headers_rx) = oneshot::channel();
+        let headers = headers.into();
         let body_shared = H3BodyShared::new_with_capacity(
             self.body_progress_notify.clone(),
             self.transport_config.streaming_body_buffer_slots,
@@ -197,7 +199,7 @@ impl H3Handle {
             .send(DriverCommand::SendStreamingRequest {
                 method,
                 uri: uri.clone(),
-                headers: headers.clone(),
+                headers,
                 body,
                 headers_tx,
                 body_shared: body_shared.clone(),
@@ -221,14 +223,15 @@ impl H3Handle {
     pub async fn open_websocket_tunnel(
         &self,
         uri: http::Uri,
-        headers: &Headers,
+        headers: impl Into<Headers>,
     ) -> Result<H3Tunnel> {
         let (response_tx, response_rx) = oneshot::channel();
+        let headers = headers.into();
 
         self.command_tx
             .send(DriverCommand::OpenWebSocketTunnel {
                 uri,
-                headers: headers.clone(),
+                headers,
                 response_tx,
             })
             .await

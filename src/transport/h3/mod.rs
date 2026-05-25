@@ -370,9 +370,10 @@ impl H3Client {
         &self,
         url: &str,
         method: &str,
-        headers: &Headers,
+        headers: impl Into<Headers>,
         body: Option<Vec<u8>>,
     ) -> Result<Response> {
+        let headers = headers.into();
         let is_idempotent = is_idempotent_method(method);
         let body_bytes = body.map(bytes::Bytes::from);
         let uri: http::Uri = url
@@ -387,7 +388,7 @@ impl H3Client {
                 url,
                 method_http.clone(),
                 uri.clone(),
-                headers,
+                &headers,
                 body_bytes.clone(),
             )
             .await?
@@ -397,7 +398,7 @@ impl H3Client {
 
         let (mut handle, tried_pooled, key) = self.resolve_handle_for_request(url).await?;
         let res = handle
-            .send_request(method_http.clone(), &uri, headers, body_bytes.clone())
+            .send_request(method_http.clone(), &uri, &headers, body_bytes.clone())
             .await;
 
         match res {
@@ -409,7 +410,7 @@ impl H3Client {
                 self.evict_pool_entry(&key).await;
                 handle = self.pooled_handle(url).await?;
                 handle
-                    .send_request(method_http, &uri, headers, body_bytes)
+                    .send_request(method_http, &uri, &headers, body_bytes)
                     .await
             }
             other => other,
@@ -421,7 +422,7 @@ impl H3Client {
         &self,
         url: &str,
         method: &str,
-        headers: &Headers,
+        headers: impl Into<Headers>,
         body: RequestBody,
     ) -> Result<Response> {
         self.send_streaming_with_timeouts(url, method, headers, body, H3BodyTimeouts::default())
@@ -433,10 +434,11 @@ impl H3Client {
         &self,
         url: &str,
         method: &str,
-        headers: &Headers,
+        headers: impl Into<Headers>,
         body: RequestBody,
         body_timeouts: H3BodyTimeouts,
     ) -> Result<Response> {
+        let headers = headers.into();
         let is_idempotent = is_idempotent_method(method);
         let (mut handle, tried_pooled, key) = self.resolve_handle_for_request(url).await?;
 
@@ -452,7 +454,7 @@ impl H3Client {
             Some(body.clone())
         };
         let res = handle
-            .send_streaming_request(method_http.clone(), &uri, headers, body, body_timeouts)
+            .send_streaming_request(method_http.clone(), &uri, &headers, body, body_timeouts)
             .await;
 
         match res {
@@ -467,7 +469,7 @@ impl H3Client {
                     .send_streaming_request(
                         method_http,
                         &uri,
-                        headers,
+                        &headers,
                         retry_body.expect("checked retry body"),
                         body_timeouts,
                     )
@@ -478,7 +480,11 @@ impl H3Client {
     }
 
     /// Open a WebSocket-over-HTTP/3 tunnel using RFC 9220 Extended CONNECT.
-    pub async fn open_websocket_tunnel(&self, url: &str, headers: &Headers) -> Result<H3Tunnel> {
+    pub async fn open_websocket_tunnel(
+        &self,
+        url: &str,
+        headers: impl Into<Headers>,
+    ) -> Result<H3Tunnel> {
         let (handle, _, _) = self.resolve_handle_for_request(url).await?;
         let uri: http::Uri = url
             .parse()
