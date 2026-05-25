@@ -276,6 +276,34 @@ impl QuicPathValidator {
         Ok(QuicFrame::PathChallenge(data))
     }
 
+    pub fn path_challenge_for_peer_address(
+        &mut self,
+        remote_address: SocketAddr,
+        data: [u8; 8],
+    ) -> Result<QuicFrame> {
+        if self.pending.contains_key(&data) {
+            return Err(Error::Quic(
+                "native QUIC path challenge data is already pending".into(),
+            ));
+        }
+
+        self.pending.insert(
+            data,
+            QuicPendingPathValidation {
+                remote_address: Some(remote_address),
+                connection_id_sequence: Some(0),
+            },
+        );
+        self.paths.insert(
+            remote_address,
+            QuicPathState {
+                connection_id_sequence: 0,
+                validated: false,
+            },
+        );
+        Ok(QuicFrame::PathChallenge(data))
+    }
+
     pub fn on_path_response(&mut self, data: [u8; 8]) -> bool {
         let Some(pending) = self.pending.remove(&data) else {
             return false;

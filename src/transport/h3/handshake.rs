@@ -800,6 +800,7 @@ pub struct NativeQuicServerHandshake {
     server_application_recovery_lost_packets: Vec<u64>,
     server_initial_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     server_handshake_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
+    server_path_validator: QuicPathValidator,
     recovery: RecoveryState,
     ack_delay_exponent: u64,
     next_client_initial_packet_number: u64,
@@ -871,6 +872,7 @@ impl NativeQuicServerHandshake {
             server_application_recovery_lost_packets: Vec::new(),
             server_initial_sent_crypto: BTreeMap::new(),
             server_handshake_sent_crypto: BTreeMap::new(),
+            server_path_validator: QuicPathValidator::default(),
             next_client_initial_packet_number: 0,
             next_client_handshake_packet_number: 0,
             next_client_application_packet_number: 0,
@@ -961,6 +963,7 @@ impl NativeQuicServerHandshake {
             server_application_recovery_lost_packets: Vec::new(),
             server_initial_sent_crypto: BTreeMap::new(),
             server_handshake_sent_crypto: BTreeMap::new(),
+            server_path_validator: QuicPathValidator::default(),
             next_client_initial_packet_number: 0,
             next_client_handshake_packet_number: 0,
             next_client_application_packet_number: 0,
@@ -1019,6 +1022,7 @@ impl NativeQuicServerHandshake {
             server_application_recovery_lost_packets: Vec::new(),
             server_initial_sent_crypto: BTreeMap::new(),
             server_handshake_sent_crypto: BTreeMap::new(),
+            server_path_validator: QuicPathValidator::default(),
             next_client_initial_packet_number: 0,
             next_client_handshake_packet_number: 0,
             next_client_application_packet_number: 0,
@@ -1760,12 +1764,25 @@ impl NativeQuicServerHandshake {
             return Ok(Vec::new());
         }
         let frames = self.open_client_application_packet(packet)?;
-        self.client_h3_events_from_frames(frames)
+        self.client_h3_events_from_frames(frames, None)
+    }
+
+    pub fn open_client_h3_event_packet_from(
+        &mut self,
+        packet: &[u8],
+        remote_address: SocketAddr,
+    ) -> Result<Vec<ClientH3Event>> {
+        if self.close_state.is_draining() {
+            return Ok(Vec::new());
+        }
+        let frames = self.open_client_application_packet(packet)?;
+        self.client_h3_events_from_frames(frames, Some(remote_address))
     }
 
     fn client_h3_events_from_frames(
         &mut self,
         frames: Vec<QuicFrame>,
+        remote_address: Option<SocketAddr>,
     ) -> Result<Vec<ClientH3Event>> {
         let mut events = Vec::new();
         for frame in frames {
@@ -1827,6 +1844,14 @@ impl NativeQuicServerHandshake {
                     });
                 }
                 QuicFrame::PathChallenge(data) => events.push(ClientH3Event::PathChallenge(data)),
+                QuicFrame::PathResponse(data) => {
+                    if let Some(remote_address) = remote_address {
+                        self.server_path_validator
+                            .on_path_response_from(remote_address, data);
+                    } else {
+                        self.server_path_validator.on_path_response(data);
+                    }
+                }
                 QuicFrame::Padding
                 | QuicFrame::Ping
                 | QuicFrame::Ack { .. }
@@ -1840,7 +1865,6 @@ impl NativeQuicServerHandshake {
                 | QuicFrame::StreamsBlocked { .. }
                 | QuicFrame::NewConnectionId { .. }
                 | QuicFrame::RetireConnectionId { .. }
-                | QuicFrame::PathResponse(_)
                 | QuicFrame::HandshakeDone => {}
             }
         }
@@ -2006,6 +2030,29 @@ impl NativeQuicServerHandshake {
             connection_id: Bytes::copy_from_slice(connection_id.as_bytes()),
             stateless_reset_token,
         })
+    }
+
+    pub fn build_server_path_response_packet(
+        &mut self,
+        data: [u8; 8],
+    ) -> Result<ServerApplicationControlPacket> {
+        self.build_server_application_control_packet(QuicFrame::PathResponse(data))
+    }
+
+    pub fn build_server_path_challenge_packet_for_address(
+        &mut self,
+        remote_address: SocketAddr,
+        data: [u8; 8],
+    ) -> Result<ServerApplicationControlPacket> {
+        let frame = self
+            .server_path_validator
+            .path_challenge_for_peer_address(remote_address, data)?;
+        self.build_server_application_control_packet(frame)
+    }
+
+    pub fn is_server_path_address_validated(&self, remote_address: &SocketAddr) -> bool {
+        self.server_path_validator
+            .is_address_validated(remote_address)
     }
 
     pub fn build_server_h3_raw_stream_packet(
@@ -4334,7 +4381,6 @@ impl NativeQuicHandshake {
                 | QuicFrame::StreamsBlocked { .. }
                 | QuicFrame::NewConnectionId { .. }
                 | QuicFrame::RetireConnectionId { .. }
-                | QuicFrame::PathResponse(_)
                 | QuicFrame::HandshakeDone => {}
             }
         }
