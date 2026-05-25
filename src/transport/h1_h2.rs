@@ -42,6 +42,58 @@ use crate::websocket::{WebSocketBuilder, WebSocketClientParts};
 
 type H2DirectPool = Arc<StdMutex<HashMap<PoolKey, Vec<RawH2Connection<MaybeHttpsStream>>>>>;
 
+/// Protocol-neutral client capacity policy.
+///
+/// This is a convenience layer over the protocol-specific controls: H1 active
+/// connection slots, H2 local stream slots, H2/H3 streaming body queue slots,
+/// and H3 RFC 9220 tunnel byte budgets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacityPolicy {
+    pub max_pending_per_origin: usize,
+    pub streaming_body_buffer_slots: usize,
+    pub h3_tunnel_outbound_byte_budget: usize,
+    pub h3_tunnel_inbound_byte_budget: usize,
+}
+
+impl CapacityPolicy {
+    pub fn bounded(max_pending_per_origin: usize) -> Self {
+        let normalized = max_pending_per_origin.max(1);
+        Self {
+            max_pending_per_origin: normalized,
+            streaming_body_buffer_slots: normalized,
+            h3_tunnel_outbound_byte_budget: H3TransportConfig::default()
+                .tunnel_outbound_byte_budget,
+            h3_tunnel_inbound_byte_budget: H3TransportConfig::default().tunnel_inbound_byte_budget,
+        }
+    }
+
+    pub fn with_streaming_body_buffer_slots(mut self, slots: usize) -> Self {
+        self.streaming_body_buffer_slots = slots.max(1);
+        self
+    }
+
+    pub fn with_h3_tunnel_byte_budget(mut self, bytes: usize) -> Self {
+        let bytes = bytes
+            .max(crate::transport::h3::MIN_H3_TUNNEL_OUTBOUND_BYTE_BUDGET)
+            .max(crate::transport::h3::MIN_H3_TUNNEL_INBOUND_BYTE_BUDGET);
+        self.h3_tunnel_outbound_byte_budget = bytes;
+        self.h3_tunnel_inbound_byte_budget = bytes;
+        self
+    }
+
+    pub fn with_h3_tunnel_outbound_byte_budget(mut self, bytes: usize) -> Self {
+        self.h3_tunnel_outbound_byte_budget =
+            bytes.max(crate::transport::h3::MIN_H3_TUNNEL_OUTBOUND_BYTE_BUDGET);
+        self
+    }
+
+    pub fn with_h3_tunnel_inbound_byte_budget(mut self, bytes: usize) -> Self {
+        self.h3_tunnel_inbound_byte_budget =
+            bytes.max(crate::transport::h3::MIN_H3_TUNNEL_INBOUND_BYTE_BUDGET);
+        self
+    }
+}
+
 struct H2DirectStart {
     conn: RawH2Connection<MaybeHttpsStream>,
     stream_id: u32,
@@ -310,6 +362,16 @@ impl Client {
     /// Bounded in-flight response DATA slots per streaming H3 body.
     pub fn h3_streaming_body_buffer_slots(&self) -> usize {
         self.h3_client.streaming_body_buffer_slots()
+    }
+
+    /// Per RFC 9220 H3 tunnel outbound byte budget.
+    pub fn h3_tunnel_outbound_byte_budget(&self) -> usize {
+        self.h3_client.tunnel_outbound_byte_budget()
+    }
+
+    /// Per RFC 9220 H3 tunnel inbound byte budget.
+    pub fn h3_tunnel_inbound_byte_budget(&self) -> usize {
+        self.h3_client.tunnel_inbound_byte_budget()
     }
 
     async fn acquire_h1_connection_slot(
@@ -2254,6 +2316,24 @@ impl ClientBuilder {
         self.h2_streaming_body_buffer_slots(slots)
     }
 
+    /// Apply one protocol-neutral capacity policy across H1, H2, H3, and H3 tunnels.
+    pub fn capacity_policy(mut self, policy: CapacityPolicy) -> Self {
+        self.h1_max_connections_per_origin = policy.max_pending_per_origin;
+        self.h2_transport_config.max_concurrent_streams_per_connection =
+            Some(policy.max_pending_per_origin.min(u32::MAX as usize) as u32);
+        self.h2_transport_config.streaming_body_buffer_slots =
+            policy.streaming_body_buffer_slots.max(1);
+        self.h3_transport_config.streaming_body_buffer_slots =
+            policy.streaming_body_buffer_slots.max(1);
+        self.h3_transport_config.tunnel_outbound_byte_budget = policy
+            .h3_tunnel_outbound_byte_budget
+            .max(crate::transport::h3::MIN_H3_TUNNEL_OUTBOUND_BYTE_BUDGET);
+        self.h3_transport_config.tunnel_inbound_byte_budget = policy
+            .h3_tunnel_inbound_byte_budget
+            .max(crate::transport::h3::MIN_H3_TUNNEL_INBOUND_BYTE_BUDGET);
+        self
+    }
+
     /// Enable or disable the exclusive direct-read HTTP/2 streaming-response
     /// path for body-less requests.
     ///
@@ -2353,6 +2433,20 @@ impl ClientBuilder {
     /// Alias for [`ClientBuilder::h3_streaming_body_buffer_slots`].
     pub fn h3_body_buffer_slots(self, slots: usize) -> Self {
         self.h3_streaming_body_buffer_slots(slots)
+    }
+
+    /// Set the per-tunnel outbound byte budget for RFC 9220 H3 tunnels.
+    pub fn h3_tunnel_outbound_byte_budget(mut self, bytes: usize) -> Self {
+        self.h3_transport_config.tunnel_outbound_byte_budget =
+            bytes.max(crate::transport::h3::MIN_H3_TUNNEL_OUTBOUND_BYTE_BUDGET);
+        self
+    }
+
+    /// Set the per-tunnel inbound byte budget for RFC 9220 H3 tunnels.
+    pub fn h3_tunnel_inbound_byte_budget(mut self, bytes: usize) -> Self {
+        self.h3_transport_config.tunnel_inbound_byte_budget =
+            bytes.max(crate::transport::h3::MIN_H3_TUNNEL_INBOUND_BYTE_BUDGET);
+        self
     }
 
     /// Select the HTTP/3 runtime backend.

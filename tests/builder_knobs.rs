@@ -3,7 +3,7 @@
 //! affect runtime behavior end-to-end via `Client::builder()`.
 
 use specter::transport::dns::{Resolve, ResolveFuture};
-use specter::{Client, RequestBody};
+use specter::{CapacityPolicy, Client, RequestBody};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -338,6 +338,61 @@ fn client_builder_exposes_h3_streaming_body_buffer_slots() {
         client.h3_client().streaming_body_buffer_slots(),
         3,
         "ClientBuilder must propagate the H3 body slot cap into H3Client"
+    );
+}
+
+#[test]
+fn client_builder_applies_shared_capacity_policy_across_h1_h2_h3() {
+    let tunnel_budget = 128 * 1024;
+    let client = Client::builder()
+        .capacity_policy(CapacityPolicy::bounded(7).with_h3_tunnel_byte_budget(tunnel_budget))
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        client.h1_max_connections_per_origin(),
+        7,
+        "shared policy must bound active H1 connection slots per origin"
+    );
+    assert_eq!(
+        client.h2_max_concurrent_streams_per_connection(),
+        Some(7),
+        "shared policy must bound pending H2 work through stream slots"
+    );
+    assert_eq!(
+        client.h2_streaming_body_buffer_slots(),
+        7,
+        "shared policy must bound H2 streaming body queue capacity"
+    );
+    assert_eq!(
+        client.h3_streaming_body_buffer_slots(),
+        7,
+        "shared policy must bound H3 streaming body queue capacity"
+    );
+    assert_eq!(
+        client.h3_client().streaming_body_buffer_slots(),
+        7,
+        "shared policy must propagate the H3 queue cap into H3Client"
+    );
+    assert_eq!(
+        client.h3_tunnel_outbound_byte_budget(),
+        tunnel_budget,
+        "shared policy must propagate the RFC9220 outbound byte budget"
+    );
+    assert_eq!(
+        client.h3_tunnel_inbound_byte_budget(),
+        tunnel_budget,
+        "shared policy must propagate the RFC9220 inbound byte budget"
+    );
+    assert_eq!(
+        client.h3_client().tunnel_outbound_byte_budget(),
+        tunnel_budget,
+        "shared policy must propagate H3 tunnel outbound budget into H3Client"
+    );
+    assert_eq!(
+        client.h3_client().tunnel_inbound_byte_budget(),
+        tunnel_budget,
+        "shared policy must propagate H3 tunnel inbound budget into H3Client"
     );
 }
 
