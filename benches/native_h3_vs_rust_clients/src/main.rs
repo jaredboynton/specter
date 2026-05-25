@@ -2052,10 +2052,10 @@ impl LocalNativeH3Connection {
             {
                 let flight = self.handshake.process_client_initial(packet)?;
                 if !flight.datagram.is_empty() {
-                    self.send_packet(flight.datagram, peer).await?;
+                    self.send_packet_to(flight.datagram, peer).await?;
                 }
                 if let Some(packet) = self.handshake.build_server_initial_ack_packet()? {
-                    self.send_packet(packet.packet, peer).await?;
+                    self.send_packet_to(packet.packet, peer).await?;
                 }
             }
             if packets
@@ -2064,14 +2064,26 @@ impl LocalNativeH3Connection {
             {
                 self.handshake.process_client_handshake(packet)?;
                 if let Some(packet) = self.handshake.build_server_handshake_ack_packet()? {
-                    self.send_packet(packet.packet, peer).await?;
+                    self.send_packet_to(packet.packet, peer).await?;
                 }
                 self.send_settings_if_ready().await?;
             }
             return Ok(());
         }
 
-        let events = self.handshake.open_client_h3_event_packet(packet)?;
+        if peer != self.peer && !self.handshake.is_server_path_address_validated(&peer) {
+            let challenge = self.next_server_path_challenge.to_be_bytes();
+            self.next_server_path_challenge = self.next_server_path_challenge.saturating_add(1);
+            let packet = self
+                .handshake
+                .build_server_path_challenge_packet_for_address(peer, challenge)?;
+            self.send_packet_to(packet.packet, peer).await?;
+        }
+
+        let events = self.handshake.open_client_h3_event_packet_from(packet, peer)?;
+        if self.handshake.is_server_path_address_validated(&peer) {
+            self.peer = peer;
+        }
         if self.handshake.close_state().is_draining() {
             return Ok(());
         }
@@ -2084,22 +2096,28 @@ impl LocalNativeH3Connection {
                 self.fingerprint.transport.ack_delay_exponent,
             )?
         {
-            self.send_packet(packet.packet, peer).await?;
+            self.send_packet_to(packet.packet, peer).await?;
         }
         for packet in self
             .handshake
             .build_server_receive_flow_control_update_packets()?
         {
-            self.send_packet(packet.packet, peer).await?;
+            self.send_packet_to(packet.packet, peer).await?;
         }
         let retransmits = self
             .handshake
             .retransmit_lost_server_application_stream_packets()?;
         for packet in retransmits {
-            self.send_packet(packet.packet, peer).await?;
+            self.send_packet_to(packet.packet, peer).await?;
         }
         for event in events {
-            self.apply_client_event(event).await?;
+            match event {
+                specter::transport::h3::handshake::ClientH3Event::PathChallenge(data) => {
+                    let packet = self.handshake.build_server_path_response_packet(data)?;
+                    self.send_packet_to(packet.packet, peer).await?;
+                }
+                event => self.apply_client_event(event).await?,
+            }
         }
         Ok(())
     }
@@ -2132,7 +2150,7 @@ impl LocalNativeH3Connection {
                     .handshake
                     .retransmit_pto_server_application_stream_packets(now, pto)?
                 {
-                    self.send_packet(packet.packet, self.peer).await?;
+                    self.send_packet_to(packet.packet, self.peer).await?;
                 }
             }
             LossDetectionOutcome::Loss {
@@ -2143,7 +2161,7 @@ impl LocalNativeH3Connection {
                     .handshake
                     .retransmit_lost_server_application_stream_packets()?;
                 for packet in retransmits {
-                    self.send_packet(packet.packet, self.peer).await?;
+                    self.send_packet_to(packet.packet, self.peer).await?;
                 }
             }
             LossDetectionOutcome::Pto { .. }
@@ -2161,7 +2179,7 @@ impl LocalNativeH3Connection {
                 self.fingerprint.transport.ack_delay_exponent,
             )?
         {
-            self.send_packet(packet.packet, self.peer).await?;
+            self.send_packet_to(packet.packet, self.peer).await?;
         }
         Ok(())
     }
@@ -2173,7 +2191,7 @@ impl LocalNativeH3Connection {
         if !self.handshake_done_sent {
             let packet = self.handshake.build_server_handshake_done_packet()?;
             self.handshake_done_sent = true;
-            self.send_packet(packet.packet, self.peer).await?;
+            self.send_packet_to(packet.packet, self.peer).await?;
         }
         if !self.new_connection_id_sent {
             let packet = self.handshake.build_server_new_connection_id_packet(
@@ -2183,7 +2201,7 @@ impl LocalNativeH3Connection {
                 local_native_h3_stateless_reset_token(&self.server_migration_cid, 1),
             )?;
             self.new_connection_id_sent = true;
-            self.send_packet(packet.packet, self.peer).await?;
+            self.send_packet_to(packet.packet, self.peer).await?;
         }
         if self.settings_sent {
             return Ok(());
@@ -2192,7 +2210,7 @@ impl LocalNativeH3Connection {
             .handshake
             .build_server_h3_settings_packet(&self.fingerprint)?;
         self.settings_sent = true;
-        self.send_packet(packet.packet, self.peer).await
+        self.send_packet_to(packet.packet, self.peer).await
     }
 
     async fn apply_client_event(
@@ -2329,7 +2347,7 @@ impl LocalNativeH3Connection {
         let packet = self
             .handshake
             .build_server_h3_response_packet(stream_id, headers, body, fin)?;
-        self.send_packet(packet.packet, self.peer).await
+        self.send_packet_to(packet.packet, self.peer).await
     }
 
     async fn send_response_data(&mut self, response: LocalNativeH3Response) -> anyhow::Result<()> {
@@ -2348,12 +2366,12 @@ impl LocalNativeH3Connection {
                 Bytes::copy_from_slice(chunk),
                 fin,
             )?;
-            self.send_packet(packet.packet, self.peer).await?;
+            self.send_packet_to(packet.packet, self.peer).await?;
         }
         Ok(())
     }
 
-    async fn send_packet(&self, packet: Bytes, peer: SocketAddr) -> anyhow::Result<()> {
+    async fn send_packet_to(&self, packet: Bytes, peer: SocketAddr) -> anyhow::Result<()> {
         self.socket.send_to(packet.as_ref(), peer).await?;
         Ok(())
     }
