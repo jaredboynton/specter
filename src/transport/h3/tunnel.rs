@@ -509,6 +509,28 @@ mod tests {
         assert_eq!(credit.available_send_permits(), budget);
     }
 
+    #[test]
+    fn capacity_snapshot_reports_tunnel_backpressure_budgets() {
+        let budget = 16 * 1024;
+        let (tunnel, _outbound_rx, credit) = make_tunnel(budget);
+        let send_permit = credit
+            .send_semaphore
+            .clone()
+            .try_acquire_many_owned(4 * 1024)
+            .expect("reserve outbound permits");
+        std::mem::forget(send_permit);
+        assert!(credit.try_reserve_inbound_bytes(2 * 1024));
+
+        let capacity = tunnel.capacity();
+
+        assert_eq!(capacity.outbound_budget, budget);
+        assert_eq!(capacity.outbound_available_bytes, 12 * 1024);
+        assert_eq!(capacity.outbound_pending_bytes, 4 * 1024);
+        assert_eq!(capacity.inbound_budget, budget);
+        assert_eq!(capacity.inbound_available_bytes, 14 * 1024);
+        assert_eq!(capacity.inbound_pending_bytes, 2 * 1024);
+    }
+
     #[tokio::test]
     async fn recv_event_releases_encoded_data_frame_credit() {
         let (_outbound_tx, outbound_rx) = mpsc::unbounded_channel();

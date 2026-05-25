@@ -337,6 +337,29 @@ mod tests {
     }
 
     #[test]
+    fn h3_body_capacity_snapshot_reports_buffer_pressure() {
+        let shared = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 3);
+        assert!(matches!(
+            shared.push(Ok(Bytes::from_static(b"one"))),
+            H3BodyPush::Accepted
+        ));
+        assert!(matches!(
+            shared.push(Ok(Bytes::from_static(b"two-two"))),
+            H3BodyPush::Accepted
+        ));
+
+        let body = H3Body::new(shared.clone(), H3BodyTimeouts::default());
+        let capacity = body.capacity();
+
+        assert_eq!(capacity.buffer_capacity, 3);
+        assert_eq!(capacity.buffered_chunks, 2);
+        assert_eq!(capacity.available_slots, 1);
+        assert_eq!(capacity.buffered_bytes, 10);
+        assert!(!capacity.closed);
+        assert!(!capacity.ended);
+    }
+
+    #[test]
     fn h3_body_reports_released_recv_bytes_when_consumer_takes_data() {
         struct NoopWake;
 
