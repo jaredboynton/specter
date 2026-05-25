@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.1] - 2026-05-25
+
+### Fixed
+- **Release CI stability**: Made public HTTP/3 example checks optional for remote UDP/CDN variance while keeping HTTP/1.1 and HTTP/2 example failures release-blocking, and kept protocol example output visible in CI logs.
+
+
 ## [4.1.0] - 2026-05-25
 
 ### Added
