@@ -75,6 +75,7 @@ const CLIENT_INITIAL_PACKET_NUMBER: u64 = 0;
 const CLIENT_INITIAL_PACKET_NUMBER_LEN: usize = 4;
 const MIN_CLIENT_INITIAL_DATAGRAM_LEN: usize = 1200;
 const AES_GCM_TAG_LEN: usize = 16;
+const SSL_ERROR_EARLY_DATA_REJECTED: c_int = 15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedClientInitial {
@@ -915,7 +916,7 @@ impl NativeQuicTlsSession {
         unsafe {
             let ret = ffi::SSL_do_handshake(self.ssl.as_ptr());
             let err = ffi::SSL_get_error(self.ssl.as_ptr(), ret);
-            if ret != 1 && err != ffi::SSL_ERROR_WANT_READ {
+            if ret != 1 && err != ffi::SSL_ERROR_WANT_READ && err != SSL_ERROR_EARLY_DATA_REJECTED {
                 return Err(Error::Tls(format!("{context} failed with SSL error {err}")));
             }
             Ok(())
