@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use bytes::{Bytes, BytesMut};
 
 use crate::error::{Error, Result};
-use crate::headers::Headers;
 use crate::fingerprint::{Http3Fingerprint, QuicTransportParams, TlsFingerprint};
+use crate::headers::Headers;
 use crate::transport::h3::native;
 use crate::transport::h3::path::{match_local_connection_id, QuicConnectionIdInventory};
 use crate::transport::h3::quic::{

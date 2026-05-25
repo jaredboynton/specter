@@ -3,10 +3,10 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::{Error, Result};
-use crate::headers::Headers;
 use crate::fingerprint::{
     H3Settings, Http3Fingerprint, QpackHeaderBlockStrategy, QpackStringEncodingStrategy,
 };
+use crate::headers::Headers;
 use crate::transport::h2::hpack_impl::{
     huffman_decode_bytes, huffman_encode_bytes, huffman_encode_if_smaller_bytes,
 };
@@ -411,7 +411,9 @@ pub fn build_request_headers(
         let lower = if name.iter().all(|b| b.is_ascii_lowercase()) {
             String::from_utf8_lossy(name).into_owned()
         } else {
-            name.iter().map(|b| b.to_ascii_lowercase() as char).collect()
+            name.iter()
+                .map(|b| b.to_ascii_lowercase() as char)
+                .collect()
         };
         if name.first() != Some(&b':')
             && lower != "connection"

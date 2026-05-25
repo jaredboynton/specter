@@ -526,10 +526,7 @@ impl<'a> WebSocketH2Builder<'a> {
             let pool = self.client.h2_pool.read().await;
             pool.get(&pool_key).cloned()
         } {
-            match conn
-                .open_websocket_tunnel(uri.clone(), &headers)
-                .await
-            {
+            match conn.open_websocket_tunnel(uri.clone(), &headers).await {
                 Ok(tunnel) => return Ok(tunnel),
                 Err(err) => {
                     tracing::debug!("Pooled RFC 8441 tunnel open failed, reconnecting: {}", err);
@@ -1950,9 +1947,7 @@ impl Client {
         } = request;
         let fut = async move {
             let mut conn = conn;
-            let stream_id = conn
-                .send_headers_raw(&method, &uri, &headers, true)
-                .await?;
+            let stream_id = conn.send_headers_raw(&method, &uri, &headers, true).await?;
             let (status, headers, end_stream) = conn
                 .read_response_headers_with_end_stream(stream_id)
                 .await?;

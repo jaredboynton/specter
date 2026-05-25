@@ -294,11 +294,7 @@ impl H2PooledConnection {
     }
 
     /// Open an RFC 8441 WebSocket tunnel on this pooled HTTP/2 connection.
-    pub async fn open_websocket_tunnel(
-        &self,
-        uri: Uri,
-        headers: &Headers,
-    ) -> Result<H2Tunnel> {
+    pub async fn open_websocket_tunnel(&self, uri: Uri, headers: &Headers) -> Result<H2Tunnel> {
         self.handle.open_websocket_tunnel(uri, headers).await
     }
 

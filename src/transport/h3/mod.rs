@@ -489,11 +489,7 @@ impl H3Client {
     }
 
     /// Open a WebSocket-over-HTTP/3 tunnel using RFC 9220 Extended CONNECT.
-    pub async fn open_websocket_tunnel(
-        &self,
-        url: &str,
-        headers: &Headers,
-    ) -> Result<H3Tunnel> {
+    pub async fn open_websocket_tunnel(&self, url: &str, headers: &Headers) -> Result<H3Tunnel> {
         let (handle, _, _) = self.resolve_handle_for_request(url).await?;
         let uri: http::Uri = url
             .parse()

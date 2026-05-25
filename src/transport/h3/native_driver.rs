@@ -324,28 +324,18 @@ pub struct NativeH3PendingResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeH3StreamingResponseEvent {
-    Headers {
-        status: u16,
-        headers: Headers,
-    },
+    Headers { status: u16, headers: Headers },
     Data(Bytes),
     Finished,
-    GoAway {
-        id: u64,
-    },
+    GoAway { id: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeH3TunnelEvent {
-    Open {
-        status: u16,
-        headers: Headers,
-    },
+    Open { status: u16, headers: Headers },
     Data(Bytes),
     Finished,
-    GoAway {
-        id: u64,
-    },
+    GoAway { id: u64 },
 }
 
 #[derive(Debug, Default)]
