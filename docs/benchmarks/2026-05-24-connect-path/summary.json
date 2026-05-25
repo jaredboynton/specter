@@ -1,0 +1,42 @@
+{
+  "date": "2026-05-24",
+  "suite": "connect-path-performance-fixes",
+  "source": "local integration validation",
+  "workloads": [
+    {
+      "name": "warm-reconnect-ttfb",
+      "validates": "C1 TLS session cache and SslConnector reuse",
+      "coverage": "tests/tls_session_resumption.rs::second_connect_resumes_tls13_session_ticket",
+      "result": {
+        "first_handshake_session_reused": false,
+        "second_handshake_session_reused": true
+      }
+    },
+    {
+      "name": "v6-blackhole-connect-latency",
+      "validates": "C2 Happy Eyeballs v6/v4 stagger",
+      "coverage": "tests/connect_path_perf.rs::happy_eyeballs_prefers_reachable_ipv4_over_blackholed_ipv6",
+      "result": {
+        "resolver_order": [
+          "2001:db8::1:443",
+          "127.0.0.1:<bound>"
+        ],
+        "happy_eyeballs_delay_ms": 50,
+        "assertion": "connect completes under 400 ms"
+      }
+    },
+    {
+      "name": "dns-warm-cache-latency",
+      "validates": "C3 DNS cache default",
+      "coverage": "tests/builder_knobs.rs::custom_dns_resolver_is_cached_by_default",
+      "result": {
+        "request_count": 3,
+        "resolver_call_count": 1
+      }
+    }
+  ],
+  "verification": {
+    "command": "just test",
+    "result": "858 passed, 2 skipped"
+  }
+}
