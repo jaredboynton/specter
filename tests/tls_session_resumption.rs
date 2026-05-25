@@ -7,16 +7,22 @@
 mod helpers;
 
 use boring::ssl::{SslOptions, SslSessionCacheMode, SslVersion};
+use boring_sys::SSL_CTX;
 use helpers::tls::generate_cert_bundle;
-use specter::transport::connector::BoringConnector;
+use specter::transport::connector::{BoringConnector, EarlyDataOutcome};
 use specter::transport::dns::{DnsConfig, Resolve, ResolveFuture};
 use specter::transport::session::SessionCache;
+use std::ffi::c_int;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+
+extern "C" {
+    fn SSL_CTX_set_early_data_enabled(ctx: *mut SSL_CTX, enabled: c_int);
+}
 
 struct StaticResolver {
     addrs: Vec<SocketAddr>,
@@ -33,6 +39,14 @@ impl Resolve for StaticResolver {
 /// writes a single `PING` byte string after the handshake completes so that the
 /// client surfaces the NewSessionTicket via its `set_new_session_callback`.
 async fn spawn_tls13_ticket_server() -> (SocketAddr, Vec<u8>, oneshot::Sender<()>) {
+    spawn_tls13_server(false).await
+}
+
+async fn spawn_tls13_ticket_server_with_early_data() -> (SocketAddr, Vec<u8>, oneshot::Sender<()>) {
+    spawn_tls13_server(true).await
+}
+
+async fn spawn_tls13_server(enable_early_data: bool) -> (SocketAddr, Vec<u8>, oneshot::Sender<()>) {
     let (mut builder, ca_pem) = generate_cert_bundle();
     builder
         .set_min_proto_version(Some(SslVersion::TLS1_3))
@@ -41,9 +55,12 @@ async fn spawn_tls13_ticket_server() -> (SocketAddr, Vec<u8>, oneshot::Sender<()
         .set_max_proto_version(Some(SslVersion::TLS1_3))
         .expect("max version");
     builder.set_session_cache_mode(SslSessionCacheMode::SERVER);
-    // BoringSSL issues TLS 1.3 NewSessionTicket automatically after the handshake;
-    // ensure stateful tickets are not disabled.
     builder.clear_options(SslOptions::NO_TICKET);
+    if enable_early_data {
+        unsafe {
+            SSL_CTX_set_early_data_enabled(builder.as_ptr() as *mut SSL_CTX, 1);
+        }
+    }
     let acceptor = Arc::new(builder.build());
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -128,6 +145,60 @@ async fn second_connect_resumes_tls13_session_ticket() {
     assert!(
         second.session_reused(),
         "second handshake must resume the cached TLS 1.3 ticket"
+    );
+
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn early_data_session_marked_zero_rtt_capable_when_server_enables_it() {
+    let (addr, ca_pem, shutdown) = spawn_tls13_ticket_server_with_early_data().await;
+    let shared_cache = Arc::new(SessionCache::new());
+    let resolver = Arc::new(StaticResolver { addrs: vec![addr] });
+    let connector = BoringConnector::new()
+        .with_root_certificates(vec![ca_pem])
+        .with_shared_session_cache(shared_cache.clone())
+        .with_early_data(true)
+        .with_dns_config(
+            DnsConfig::new()
+                .with_resolver(resolver)
+                .with_cache_enabled(false),
+        );
+    let uri: http::Uri = format!("https://127.0.0.1:{}/", addr.port())
+        .parse()
+        .unwrap();
+
+    let mut first = connector.connect(&uri).await.expect("first handshake");
+    let mut buf = [0u8; 8];
+    let _ = tokio::time::timeout(Duration::from_secs(2), first.read(&mut buf)).await;
+    drop(first);
+
+    let key = specter::transport::session::SessionCacheKey::new("127.0.0.1", addr.port());
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !shared_cache.supports_zero_rtt(&key) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        shared_cache.supports_zero_rtt(&key),
+        "TLS session ticket must advertise early-data capability when the server enables 0-RTT"
+    );
+
+    // A second dial with idempotent early-data bytes should not fail; the
+    // BoringSSL stack reports `Accepted` or `Rejected` based on server policy
+    // (either is a valid integration result — what we must not see is `NotAttempted`
+    // when the cached ticket is zero-rtt-capable and the flag is on).
+    let (_stream, outcome) = connector
+        .connect_with_alpn_and_early_data(
+            &uri,
+            specter::transport::connector::AlpnMode::Default,
+            Some(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+        )
+        .await
+        .expect("second dial with early data");
+    assert!(
+        matches!(outcome, EarlyDataOutcome::Accepted | EarlyDataOutcome::Rejected { .. }),
+        "expected an early-data Accepted/Rejected outcome, got {:?}",
+        outcome
     );
 
     let _ = shutdown.send(());
