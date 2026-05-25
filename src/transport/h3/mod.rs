@@ -370,7 +370,6 @@ impl H3Client {
         headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
     ) -> Result<Response> {
-        eprintln!("h3 send_request method={method}");
         let is_idempotent = is_idempotent_method(method);
         let body_bytes = body.map(bytes::Bytes::from);
         let uri: http::Uri = url
@@ -515,14 +514,11 @@ impl H3Client {
         body: Option<bytes::Bytes>,
     ) -> Result<Option<Response>> {
         if !is_zero_rtt_safe_request(method.as_str(), body.as_ref()) {
-            eprintln!("skip unsafe");
             return Ok(None);
         }
-        eprintln!("zero-rtt safe");
 
         let key = self.pool_key(url)?;
         if self.cached_hot_handle(url).is_some() {
-            eprintln!("skip hot");
             return Ok(None);
         }
         if let Some(handle) = self.pool.read().await.get(&key) {
@@ -533,21 +529,17 @@ impl H3Client {
 
         let session_cache_key = self.session_cache_key(&key);
         let Some(entry) = self.session_cache.get(&session_cache_key) else {
-            eprintln!("skip no entry {:?}", session_cache_key);
             return Ok(None);
         };
         if !entry.supports_zero_rtt() {
-            eprintln!("skip unsupported max={}", entry.max_early_data);
             return Ok(None);
         }
 
         let request =
             NativeH3ZeroRttRequest::new(&self.http3_fingerprint, method, uri, headers, body)?;
         if request.payload.len() > entry.max_early_data as usize {
-            eprintln!("skip too large {} > {}", request.payload.len(), entry.max_early_data);
             return Ok(None);
         }
-        eprintln!("zero-rtt attempting payload={}", request.payload.len());
 
         let origin = key.origin_key();
         let _ticket = self.dispatcher.acquire(origin).await;
@@ -597,6 +589,7 @@ impl H3Client {
         self.store_hot_handle(url, &hot_key, &handle);
 
         let Some(response_rx) = result.zero_rtt_response_rx else {
+            eprintln!("zero-rtt no pending response status={:?}", handle.native_handshake_status());
             return Ok(None);
         };
         let stream_response = response_rx
