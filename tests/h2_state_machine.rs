@@ -172,9 +172,21 @@ async fn test_server_initiated_stream_even_id() {
                 .await
                 .unwrap();
 
-            // Client should send GOAWAY or RST_STREAM
-            let result = timeout(Duration::from_secs(1), conn.read_frame()).await;
-            if let Ok(Ok((_, frame_type, _, _, _))) = result {
+            let result = timeout(Duration::from_secs(1), async {
+                loop {
+                    match conn.read_frame().await {
+                        Ok((_, frame_type, _, _, _)) if matches!(frame_type, 0x03 | 0x07) => {
+                            return Ok(frame_type);
+                        }
+                        Ok((_, frame_type, _, _, _)) if matches!(frame_type, 0x02 | 0x04 | 0x08) => {
+                            tracing::info!("Skipping benign frame type {}", frame_type);
+                        }
+                        other => return other.map(|(_, frame_type, _, _, _)| frame_type),
+                    }
+                }
+            })
+            .await;
+            if let Ok(Ok(frame_type)) = result {
                 tracing::info!("Received frame type {}", frame_type);
                 assert!(
                     frame_type == 0x03 || frame_type == 0x07,

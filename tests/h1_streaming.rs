@@ -267,9 +267,13 @@ impl ChunkedFixture {
                     "/fixed" => {
                         stream
                             .write_all(
-                                b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: keep-alive\r\n\r\none-two-three",
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: keep-alive\r\n\r\none-",
                             )
                             .unwrap();
+                        stream.flush().unwrap();
+                        let _ = first_chunk_sent_tx.send(());
+                        let _ = continue_after_first_rx.recv_timeout(Duration::from_secs(5));
+                        stream.write_all(b"two-three").unwrap();
                         stream.flush().unwrap();
                     }
                     _ => {
@@ -367,7 +371,7 @@ async fn h1_high_level_send_streaming_dispatches_to_h1() {
 
 #[tokio::test]
 async fn h1_streams_fixed_content_length_incrementally() {
-    let fixture = H1Fixture::start().await;
+    let mut fixture = ChunkedFixture::start();
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let mut response = client
         .get(fixture.endpoint("/fixed"))
@@ -375,6 +379,8 @@ async fn h1_streams_fixed_content_length_incrementally() {
         .send_streaming()
         .await
         .unwrap();
+
+    fixture.wait_for_first_chunk();
 
     let first = timeout(Duration::from_millis(80), response.body_mut().frame())
         .await
@@ -384,6 +390,7 @@ async fn h1_streams_fixed_content_length_incrementally() {
         .into_data()
         .unwrap();
     assert_eq!(first, Bytes::from_static(b"one-"));
+    fixture.allow_completion();
     let mut body = first.to_vec();
     while let Some(frame) = response.body_mut().frame().await {
         let chunk = frame.unwrap().into_data().unwrap();
