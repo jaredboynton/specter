@@ -3653,12 +3653,19 @@ fn native_h3_client_pmtu_probe_packet_promotes_size_only_after_ack() {
     assert!(probe.packet.len() > 1200);
     assert!(probe.packet.len() <= 1280);
     assert_eq!(handshake.client_pmtu_current_size(), 1200);
-    assert_eq!(handshake.client_pmtu_pending_probe_size(), Some(probe.packet.len()));
+    assert_eq!(
+        handshake.client_pmtu_pending_probe_size(),
+        Some(probe.packet.len())
+    );
     let opened_probe =
         open_short_header_packet(&client_keys, &probe.packet, b"server-dcid".len(), 0).unwrap();
     let probe_frames = decode_frames(&opened_probe.payload).unwrap();
-    assert!(probe_frames.iter().any(|frame| matches!(frame, QuicFrame::Ping)));
-    assert!(probe_frames.iter().any(|frame| matches!(frame, QuicFrame::Padding)));
+    assert!(probe_frames
+        .iter()
+        .any(|frame| matches!(frame, QuicFrame::Ping)));
+    assert!(probe_frames
+        .iter()
+        .any(|frame| matches!(frame, QuicFrame::Padding)));
 
     let ack = protect_short_header_packet(
         &server_keys,
@@ -3674,7 +3681,10 @@ fn native_h3_client_pmtu_probe_packet_promotes_size_only_after_ack() {
         }),
     )
     .unwrap();
-    assert!(handshake.open_server_h3_event_packet(&ack).unwrap().is_empty());
+    assert!(handshake
+        .open_server_h3_event_packet(&ack)
+        .unwrap()
+        .is_empty());
     assert_eq!(handshake.client_pmtu_current_size(), probe.packet.len());
     assert_eq!(handshake.client_pmtu_pending_probe_size(), None);
 }

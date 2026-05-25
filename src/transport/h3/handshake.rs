@@ -3919,7 +3919,9 @@ impl NativeQuicHandshake {
         &mut self,
         frame: QuicFrame,
     ) -> Result<ClientApplicationControlPacket> {
-        self.build_client_application_payload_packet(padded_short_header_payload(encode_frame(&frame)))
+        self.build_client_application_payload_packet(padded_short_header_payload(encode_frame(
+            &frame,
+        )))
     }
 
     fn build_client_application_probe_packet(

@@ -267,7 +267,10 @@ impl QuicPmtuProbePolicy {
         if probe.packet_number != packet_number {
             return false;
         }
-        self.max_size = self.max_size.min(probe.size.saturating_sub(1)).max(self.current_size);
+        self.max_size = self
+            .max_size
+            .min(probe.size.saturating_sub(1))
+            .max(self.current_size);
         self.pending_probe = None;
         true
     }

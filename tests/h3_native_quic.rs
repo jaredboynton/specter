@@ -14,8 +14,7 @@ use specter::transport::h3::quic::{
     seal_packet_payload, split_long_header_datagram, validate_retry_integrity_tag_v1, ConnectionId,
     LongHeaderPacket, LongHeaderType, QuicAckRange, QuicAckTracker, QuicCryptoAssembler,
     QuicEcnMark, QuicFrame, QuicLossDetector, QuicPathValidator, QuicPmtuProbePolicy,
-    ShortHeaderPacket,
-    TransportParameter,
+    ShortHeaderPacket, TransportParameter,
 };
 use std::time::{Duration, Instant};
 
@@ -244,7 +243,9 @@ fn native_quic_pmtu_probe_policy_promotes_only_acked_probe() {
     assert_eq!(policy.current_size(), first_probe_size);
     assert_eq!(policy.pending_probe_size(), None);
 
-    let second_probe_size = policy.next_probe_size().expect("second probe should be scheduled");
+    let second_probe_size = policy
+        .next_probe_size()
+        .expect("second probe should be scheduled");
     assert!(second_probe_size > first_probe_size);
     policy.on_probe_sent(9, second_probe_size, now + Duration::from_millis(1));
     assert!(policy.on_probe_lost(9));
