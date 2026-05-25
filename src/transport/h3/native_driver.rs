@@ -678,14 +678,15 @@ pub fn spawn_native_h3_driver(
     session_cache: NativeH3SessionCache,
     session_cache_key: NativeH3SessionCacheKey,
     pending_zero_rtt_response: Option<NativeH3PendingResponse>,
+    native_handshake_report_override: Option<NativeH3HandshakeReport>,
 ) -> Result<H3Handle> {
     let (command_tx, command_rx) = mpsc::channel(32);
     let is_draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let body_progress_notify = Arc::new(Notify::new());
-    let native_handshake_report = NativeH3HandshakeReport {
+    let native_handshake_report = native_handshake_report_override.unwrap_or(NativeH3HandshakeReport {
         status: handshake.handshake_status(),
         early_data_reason: handshake.early_data_reason(),
-    };
+    });
     let mut state = NativeH3DriverState::default();
     let mut pending_responses = HashMap::new();
     if let Some(pending) = pending_zero_rtt_response {
