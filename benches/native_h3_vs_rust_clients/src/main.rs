@@ -588,7 +588,7 @@ fn row_context(competitor_id: &str) -> Option<RowContext> {
                 LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES
                     + LOCAL_FIXTURE_CHUNK_SIZE * LOCAL_FIXTURE_CHUNK_COUNT,
             ),
-            notes: Some("Measures a delayed-reader RFC9220 tunnel while a same-origin H3 streaming response completes."),
+            notes: Some("Measures a delayed-reader RFC9220 tunnel while a same-origin H3 streaming response completes. TTFT is captured when send_streaming() resolves on response HEADERS, matching quiche's H3 Headers event recording."),
         }),
         "quiche_direct_rfc9220_tunnel" | "tokio_quiche_rfc9220_tunnel" => Some(RowContext {
             protocol: "h3_rfc9220",
@@ -612,7 +612,7 @@ fn row_context(competitor_id: &str) -> Option<RowContext> {
                     LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES
                         + LOCAL_FIXTURE_CHUNK_SIZE * LOCAL_FIXTURE_CHUNK_COUNT,
                 ),
-                notes: Some("RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes."),
+                notes: Some("RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes. TTFT is captured on the H3 Headers event so suite gate is metric-symmetric with specter_native_rfc9220_tunnel_mixed."),
             })
         }
         "h3_quinn_rfc9220_tunnel" => Some(RowContext {
