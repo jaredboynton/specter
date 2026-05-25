@@ -22,12 +22,90 @@ use specter::transport::h3::quic::{
     LongHeaderType, QuicFrame,
 };
 use specter::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
-use specter::transport::h3::tls::{QuicEncryptionLevel, QuicSecretDirection, QuicTlsSecret};
+use specter::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
+use specter::transport::h3::tls::{
+    NativeH3HandshakeStatus, NativeQuicTlsSession, QuicEncryptionLevel, QuicSecretDirection,
+    QuicTlsSecret,
+};
 use specter::{DnsConfig, H3Backend, H3Client};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 mod helpers;
-use helpers::mock_h3_server::{MockEvent, MockH3Server};
+use helpers::mock_h3_server::{MockEvent, MockH3Server, TEST_RESUMPTION_TICKET_KEYS};
+
+fn capture_mock_server_session_ticket(fingerprint: &Http3Fingerprint) -> Bytes {
+    let mut client = NativeQuicTlsSession::client_with_tls_fingerprint(
+        "127.0.0.1",
+        fingerprint,
+        None,
+        false,
+    )
+    .expect("native H3 client TLS session");
+    let (cert_pem, key_pem) = helpers::tls::cached_cert_and_key_pem();
+    let mut server = NativeQuicTlsSession::server_with_ticket_keys(
+        fingerprint,
+        &cert_pem,
+        &key_pem,
+        &TEST_RESUMPTION_TICKET_KEYS,
+    )
+    .expect("native H3 server TLS session");
+
+    let client_initial = client.take_crypto(QuicEncryptionLevel::Initial);
+    server
+        .provide_crypto(QuicEncryptionLevel::Initial, &client_initial)
+        .expect("server processes ClientHello");
+    let server_initial = server.take_crypto(QuicEncryptionLevel::Initial);
+    if !server_initial.is_empty() {
+        client
+            .provide_crypto(QuicEncryptionLevel::Initial, &server_initial)
+            .expect("client processes ServerHello");
+    }
+    let server_handshake = server.take_crypto(QuicEncryptionLevel::Handshake);
+    if !server_handshake.is_empty() {
+        client
+            .provide_crypto(QuicEncryptionLevel::Handshake, &server_handshake)
+            .expect("client processes server handshake");
+    }
+    let client_handshake = client.take_crypto(QuicEncryptionLevel::Handshake);
+    if !client_handshake.is_empty() {
+        server
+            .provide_crypto(QuicEncryptionLevel::Handshake, &client_handshake)
+            .expect("server processes client Finished");
+    }
+    let server_app = server.take_crypto(QuicEncryptionLevel::Application);
+    if !server_app.is_empty() {
+        client
+            .provide_crypto(QuicEncryptionLevel::Application, &server_app)
+            .expect("client processes NewSessionTicket");
+    }
+
+    client
+        .take_session_tickets()
+        .into_iter()
+        .next()
+        .expect("mock server must issue a session ticket")
+        .der
+}
+
+fn native_h3_cache_key_for_mock_host(host: &str, fingerprint: &Http3Fingerprint) -> NativeH3SessionCacheKey {
+    let mut hasher = DefaultHasher::new();
+    false.hash(&mut hasher);
+    0usize.hash(&mut hasher);
+    let root_store = format!("platform=false;roots={:016x}", hasher.finish());
+
+    NativeH3SessionCacheKey::new(
+        host,
+        fingerprint.alpn_protocols.clone(),
+        false,
+        Some(format!(
+            "tls=default;h3={};{}",
+            fingerprint.pool_key_string(),
+            root_store
+        )),
+    )
+}
 
 fn version_negotiation_packet(
     destination_cid: &ConnectionId,
@@ -3015,6 +3093,60 @@ async fn native_h3_backend_completes_get_against_mock_h3_server() {
     assert_eq!(
         response.body_mut().collect_to_bytes().await.unwrap(),
         b"native-h3-ok".as_slice()
+    );
+}
+
+#[tokio::test]
+async fn native_h3_backend_replays_rejected_zero_rtt_get_and_reports_status() {
+    let fingerprint = Http3Fingerprint::default();
+    let ticket = capture_mock_server_session_ticket(&fingerprint);
+    let cache = NativeH3SessionCache::new();
+    cache.insert(
+        native_h3_cache_key_for_mock_host("127.0.0.1", &fingerprint),
+        ticket,
+        u32::MAX,
+        None,
+    );
+
+    let server = MockH3Server::new_with_session_resumption().await.unwrap();
+    let url = server.url();
+    server.start(|conn| async move {
+        let stream_id = loop {
+            match conn.read_event().await {
+                Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                Some(_) => continue,
+                None => return,
+            }
+        };
+        conn.send_response_headers(stream_id, vec![(":status", "200")], false)
+            .await;
+        conn.send_response_data(stream_id, b"zero-rtt-replayed", true)
+            .await;
+    });
+
+    let client = H3Client::new()
+        .with_h3_backend(H3Backend::Native)
+        .with_native_session_cache(cache)
+        .with_max_idle_timeout(500)
+        .danger_accept_invalid_certs(true);
+
+    let mut response = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.send_request(&url, "GET", vec![], None),
+    )
+    .await
+    .expect("native H3 0-RTT GET should not hang")
+    .expect("native H3 0-RTT GET should replay over 1-RTT when rejected");
+
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        response.body_mut().collect_to_bytes().await.unwrap(),
+        b"zero-rtt-replayed".as_slice()
+    );
+    assert_eq!(
+        client.last_native_handshake_status(),
+        NativeH3HandshakeStatus::EarlyRejected,
+        "client-level status must propagate the TLS 0-RTT rejection that triggered replay"
     );
 }
 
