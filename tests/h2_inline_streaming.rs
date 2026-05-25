@@ -457,6 +457,7 @@ async fn large_streaming_body_avoids_driver_backpressure_stalls() {
 
     let (acceptor, ca_cert) = build_acceptor();
     let server = MockH2Server::new().await.unwrap();
+    let server_port = server.port();
 
     server.start_tls(acceptor, move |conn: MockH2Connection| async move {
         conn.read_preface().await.unwrap();
@@ -502,7 +503,7 @@ async fn large_streaming_body_avoids_driver_backpressure_stalls() {
 
     let fp = specter::fingerprint::tls::TlsFingerprint::chrome_142();
     let connector = BoringConnector::with_fingerprint(fp).with_root_certificates(vec![ca_cert]);
-    let uri: http::Uri = format!("https://127.0.0.1:{}/stream", server.port())
+    let uri: http::Uri = format!("https://127.0.0.1:{server_port}/stream")
         .parse()
         .unwrap();
 
