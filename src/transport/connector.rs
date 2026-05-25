@@ -509,9 +509,8 @@ impl BoringConnector {
                 .ex_data(*connect_host_index())
                 .map(|ConnectHost(h)| h.clone())
                 .or_else(|| {
-                    ssl.servername(NameType::HOST_NAME).map(|s| {
-                        s.trim_end_matches('.').to_ascii_lowercase()
-                    })
+                    ssl.servername(NameType::HOST_NAME)
+                        .map(|s| s.trim_end_matches('.').to_ascii_lowercase())
                 })
                 .unwrap_or_default();
             let port = ssl
@@ -1014,55 +1013,50 @@ where
     let mut state: Option<boring::ssl::MidHandshakeSslStream<AsyncStreamBridge<S>>> = Some(mid);
     let mut early_offset = 0usize;
 
-    poll_fn(|cx| {
-        loop {
-            let mut current = state.take().expect("handshake state taken twice");
-            current.get_mut().set_waker(Some(cx));
+    poll_fn(|cx| loop {
+        let mut current = state.take().expect("handshake state taken twice");
+        current.get_mut().set_waker(Some(cx));
 
-            if early_offset < early_data.len()
-                && unsafe { SSL_in_early_data(current.ssl().as_ptr()) != 0 }
-            {
-                match write_tls_early_data(
-                    current.ssl_mut(),
-                    &early_data[early_offset..],
-                ) {
-                    Ok(written) => early_offset += written,
-                    Err(err) => {
-                        current.get_mut().set_waker(None);
-                        return Poll::Ready(Err(err));
-                    }
+        if early_offset < early_data.len()
+            && unsafe { SSL_in_early_data(current.ssl().as_ptr()) != 0 }
+        {
+            match write_tls_early_data(current.ssl_mut(), &early_data[early_offset..]) {
+                Ok(written) => early_offset += written,
+                Err(err) => {
+                    current.get_mut().set_waker(None);
+                    return Poll::Ready(Err(err));
                 }
             }
+        }
 
-            match current.handshake() {
-                Ok(mut stream) => {
-                    stream.get_mut().set_waker(None);
-                    let ssl = stream.ssl();
-                    let outcome = if unsafe { SSL_early_data_accepted(ssl.as_ptr()) != 0 } {
-                        EarlyDataOutcome::Accepted
-                    } else {
-                        EarlyDataOutcome::Rejected {
-                            reason: unsafe { SSL_get_early_data_reason(ssl.as_ptr()) },
-                        }
-                    };
-                    return Poll::Ready(Ok((wrap_tokio_ssl_stream(stream), outcome)));
-                }
-                Err(SslHandshakeError::WouldBlock(mut pending)) => {
-                    pending.get_mut().set_waker(None);
-                    state = Some(pending);
-                    return Poll::Pending;
-                }
-                Err(SslHandshakeError::SetupFailure(err)) => {
-                    return Poll::Ready(Err(Error::Tls(format!(
-                        "TLS handshake setup failed: {err}"
-                    ))));
-                }
-                Err(SslHandshakeError::Failure(err)) => {
-                    return Poll::Ready(Err(Error::Tls(format!(
-                        "TLS handshake failed: {}",
-                        err.error()
-                    ))));
-                }
+        match current.handshake() {
+            Ok(mut stream) => {
+                stream.get_mut().set_waker(None);
+                let ssl = stream.ssl();
+                let outcome = if unsafe { SSL_early_data_accepted(ssl.as_ptr()) != 0 } {
+                    EarlyDataOutcome::Accepted
+                } else {
+                    EarlyDataOutcome::Rejected {
+                        reason: unsafe { SSL_get_early_data_reason(ssl.as_ptr()) },
+                    }
+                };
+                return Poll::Ready(Ok((wrap_tokio_ssl_stream(stream), outcome)));
+            }
+            Err(SslHandshakeError::WouldBlock(mut pending)) => {
+                pending.get_mut().set_waker(None);
+                state = Some(pending);
+                return Poll::Pending;
+            }
+            Err(SslHandshakeError::SetupFailure(err)) => {
+                return Poll::Ready(Err(Error::Tls(format!(
+                    "TLS handshake setup failed: {err}"
+                ))));
+            }
+            Err(SslHandshakeError::Failure(err)) => {
+                return Poll::Ready(Err(Error::Tls(format!(
+                    "TLS handshake failed: {}",
+                    err.error()
+                ))));
             }
         }
     })
@@ -1085,9 +1079,7 @@ fn write_tls_early_data(ssl: &mut boring::ssl::SslRef, data: &[u8]) -> Result<us
             return Ok(written as usize);
         }
         let code = boring_sys::SSL_get_error(ssl.as_ptr(), written);
-        if code == boring_sys::SSL_ERROR_WANT_READ
-            || code == boring_sys::SSL_ERROR_WANT_WRITE
-        {
+        if code == boring_sys::SSL_ERROR_WANT_READ || code == boring_sys::SSL_ERROR_WANT_WRITE {
             return Ok(0);
         }
         Err(Error::Tls(format!(
