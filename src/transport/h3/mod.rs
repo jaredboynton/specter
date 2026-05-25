@@ -589,7 +589,6 @@ impl H3Client {
         self.store_hot_handle(url, &hot_key, &handle);
 
         let Some(response_rx) = result.zero_rtt_response_rx else {
-            eprintln!("zero-rtt no pending response status={:?}", handle.native_handshake_status());
             return Ok(None);
         };
         let stream_response = response_rx
