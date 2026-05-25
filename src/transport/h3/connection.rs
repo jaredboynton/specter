@@ -8,8 +8,8 @@ use tokio::sync::oneshot;
 
 use crate::error::{Error, Result};
 use crate::fingerprint::{Http3Fingerprint, QuicTransportParams, TlsFingerprint};
-use crate::transport::dns::DnsConfig;
 use crate::headers::Headers;
+use crate::transport::dns::DnsConfig;
 use crate::transport::h3::command::StreamResponse;
 use crate::transport::h3::handle::{H3Handle, NativeH3HandshakeReport};
 use crate::transport::h3::handshake::NativeQuicHandshake;
@@ -22,7 +22,6 @@ use crate::transport::h3::udp_ecn::{enable_udp_ecn_receive, recv_from_with_ecn};
 use crate::transport::h3::H3TransportConfig;
 
 use crate::transport::h3::native_driver::{spawn_native_h3_driver, NativeH3PendingResponse};
-use crate::headers::Headers;
 use bytes::Bytes;
 use getrandom::fill as getrandom_fill;
 
