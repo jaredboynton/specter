@@ -167,6 +167,22 @@ async fn handle_h1_connection(mut stream: TcpStream, logs: Arc<Mutex<Vec<H1Log>>
                     .unwrap();
                 stream.flush().await.unwrap();
             }
+            "/json" => {
+                let body = br#"{"ok":true,"protocol":"h1"}"#;
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                stream.write_all(&body[..12]).await.unwrap();
+                stream.write_all(&body[12..]).await.unwrap();
+                stream.flush().await.unwrap();
+            }
             "/redirect-start" => {
                 stream
                     .write_all(
@@ -225,6 +241,146 @@ async fn collect_body(mut response: specter::Response) -> Result<Vec<u8>, Error>
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+#[tokio::test]
+async fn send_response_helpers_are_buffered_for_h1_h2_h3() {
+    {
+        let fixture = H1Fixture::start().await;
+        let client = Client::builder().prefer_http2(false).build().unwrap();
+        let response = client
+            .get(fixture.endpoint("/json"))
+            .version(HttpVersion::Http1_1)
+            .send()
+            .await
+            .unwrap();
+
+        assert!(!response.body().is_streaming());
+        assert_eq!(response.text().unwrap(), r#"{"ok":true,"protocol":"h1"}"#);
+        let value: serde_json::Value = response.json().unwrap();
+        assert_eq!(value["protocol"], "h1");
+    }
+
+    {
+        let (mut builder, ca_cert) = generate_cert_bundle();
+        builder.set_alpn_select_callback(|_, client_protos| {
+            boring::ssl::select_next_proto(b"\x02h2", client_protos)
+                .ok_or(boring::ssl::AlpnError::NOACK)
+        });
+        let acceptor = builder.build();
+        let server = MockH2Server::new().await.unwrap();
+        let url = server.url_tls();
+        server.start_tls(acceptor, |conn: MockH2Connection| async move {
+            conn.read_preface().await.unwrap();
+            let mut settings_sent = false;
+            let mut encoder = Encoder::new();
+            loop {
+                let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
+                    Ok(Ok(frame)) => frame,
+                    _ => break,
+                };
+                let (_len, frame_type, flags, stream_id, _payload) = frame;
+                match frame_type {
+                    0x04 if flags & 0x01 == 0 && !settings_sent => {
+                        conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                            .await
+                            .unwrap();
+                        conn.send_settings_ack().await.unwrap();
+                        settings_sent = true;
+                    }
+                    0x01 => {
+                        let headers = encoder.encode(&[
+                            (b":status".as_slice(), b"200".as_slice()),
+                            (b"content-type".as_slice(), b"application/json".as_slice()),
+                        ]);
+                        conn.send_headers(stream_id, &headers, false, true)
+                            .await
+                            .unwrap();
+                        conn.send_data(stream_id, br#"{"ok":true,"#, false).await.unwrap();
+                        conn.send_data(stream_id, br#""protocol":"h2"}"#, true).await.unwrap();
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let client = Client::builder()
+            .add_root_certificate(ca_cert)
+            .prefer_http2(true)
+            .build()
+            .unwrap();
+        let response = timeout(
+            Duration::from_secs(5),
+            client.get(format!("{}/json", url)).send(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(!response.body().is_streaming());
+        assert_eq!(response.text().unwrap(), r#"{"ok":true,"protocol":"h2"}"#);
+        let value: serde_json::Value = response.json().unwrap();
+        assert_eq!(value["protocol"], "h2");
+    }
+
+    {
+        let server = MockH3Server::new().await.unwrap();
+        let url = server.url();
+        server.start(|conn| async move {
+            let stream_id = loop {
+                match conn.read_event().await {
+                    Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                    Some(_) => continue,
+                    None => return,
+                }
+            };
+            conn.send_response_headers(
+                stream_id,
+                vec![(":status", "200"), ("content-type", "application/json")],
+                false,
+            )
+            .await;
+            conn.send_response_data(stream_id, br#"{"ok":true,"#, false).await;
+            conn.send_response_data(stream_id, br#""protocol":"h3"}"#, true).await;
+        });
+        let client = Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+        let response = timeout(
+            Duration::from_secs(5),
+            client.get(&url).version(HttpVersion::Http3).send(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(!response.body().is_streaming());
+        assert_eq!(response.text().unwrap(), r#"{"ok":true,"protocol":"h3"}"#);
+        let value: serde_json::Value = response.json().unwrap();
+        assert_eq!(value["protocol"], "h3");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_send_future_is_spawnable_on_multithreaded_tokio() {
+    let fixture = H1Fixture::start().await;
+    let client = Client::builder().prefer_http2(false).build().unwrap();
+    let url = fixture.endpoint("/json");
+
+    fn assert_send<T: Send>(_: T) {}
+    assert_send(client.get(url.clone()).send());
+
+    let handle = tokio::spawn(async move {
+        let response = client
+            .get(url)
+            .version(HttpVersion::Http1_1)
+            .send()
+            .await
+            .unwrap();
+        response.text().unwrap()
+    });
+
+    assert_eq!(handle.await.unwrap(), r#"{"ok":true,"protocol":"h1"}"#);
 }
 
 #[tokio::test]

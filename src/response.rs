@@ -470,6 +470,14 @@ impl Response {
         self
     }
 
+    pub(crate) async fn into_buffered(mut self) -> Result<Self> {
+        if self.body.is_streaming() {
+            let bytes = self.body.collect_to_bytes().await?;
+            self.body = Body::from_bytes(bytes);
+        }
+        Ok(self)
+    }
+
     pub fn http_version(&self) -> &str {
         &self.http_version
     }

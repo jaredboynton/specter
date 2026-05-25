@@ -927,15 +927,9 @@ impl<'a> RequestBuilder<'a> {
             timeouts.total = Some(total);
         }
 
-        if let Some(jar) = &client.cookie_store {
-            if !request.headers.contains("cookie") {
-                if let Some(cookie_header) =
-                    jar.read().await.build_cookie_header(request.url.as_str())
-                {
-                    request.headers.insert("Cookie", cookie_header);
-                }
-            }
-        }
+        client
+            .apply_cookie_header_for_url(request.url.as_str().to_string(), &mut request.headers)
+            .await;
 
         let version = request.version.unwrap_or(client.default_version);
 
@@ -980,11 +974,10 @@ impl<'a> RequestBuilder<'a> {
             let request_url = request.url.clone();
             let response = response.with_url(request_url.clone());
 
-            if let Some(jar) = &client.cookie_store {
-                jar.write()
-                    .await
-                    .store_from_headers(response.headers(), request_url.as_str());
-            }
+            let response_headers = response.headers().clone();
+            client
+                .store_cookies_from_headers(response_headers, request_url.as_str().to_string())
+                .await;
 
             if let Some(enc) = response.content_encoding() {
                 let enc_lc = enc.to_lowercase();
@@ -1099,11 +1092,10 @@ impl<'a> RequestBuilder<'a> {
                 send_fut.await?
             };
 
-            if let Some(jar) = &client.cookie_store {
-                jar.write()
-                    .await
-                    .store_from_headers(response.headers(), request_url.as_str());
-            }
+            let response_headers = response.headers().clone();
+            client
+                .store_cookies_from_headers(response_headers, request_url.as_str().to_string())
+                .await;
             let response = response.with_url(request_url);
             reject_compressed_streaming(&response)?;
             return Ok(response);
@@ -1161,11 +1153,13 @@ impl<'a> RequestBuilder<'a> {
                 match res {
                     Ok(response) => {
                         let response = response.with_url(request_url.clone());
-                        if let Some(jar) = &client.cookie_store {
-                            jar.write()
-                                .await
-                                .store_from_headers(response.headers(), request_url.as_str());
-                        }
+                        let response_headers = response.headers().clone();
+                        client
+                            .store_cookies_from_headers(
+                                response_headers,
+                                request_url.as_str().to_string(),
+                            )
+                            .await;
                         response
                     }
                     Err(e) => {
@@ -1236,11 +1230,13 @@ impl<'a> RequestBuilder<'a> {
                         };
 
                         let response = response.with_url(request_url.clone());
-                        if let Some(jar) = &client.cookie_store {
-                            jar.write()
-                                .await
-                                .store_from_headers(response.headers(), request_url.as_str());
-                        }
+                        let response_headers = response.headers().clone();
+                        client
+                            .store_cookies_from_headers(
+                                response_headers,
+                                request_url.as_str().to_string(),
+                            )
+                            .await;
                         response
                     }
                 }
@@ -1257,11 +1253,10 @@ impl<'a> RequestBuilder<'a> {
                     .await?;
 
                 let response = response.with_url(request_url.clone());
-                if let Some(jar) = &client.cookie_store {
-                    jar.write()
-                        .await
-                        .store_from_headers(response.headers(), request_url.as_str());
-                }
+                let response_headers = response.headers().clone();
+                client
+                    .store_cookies_from_headers(response_headers, request_url.as_str().to_string())
+                    .await;
                 response
             } else {
                 let connector = client.connector_for_uri(&uri);
@@ -1322,11 +1317,10 @@ impl<'a> RequestBuilder<'a> {
                 };
 
                 let response = response.with_url(request_url.clone());
-                if let Some(jar) = &client.cookie_store {
-                    jar.write()
-                        .await
-                        .store_from_headers(response.headers(), request_url.as_str());
-                }
+                let response_headers = response.headers().clone();
+                client
+                    .store_cookies_from_headers(response_headers, request_url.as_str().to_string())
+                    .await;
                 response
             }
         };
@@ -1362,12 +1356,20 @@ async fn drain_streaming_body(body: &mut Body) -> Result<()> {
 impl Client {
     /// Execute a built request with client policy (redirects, cookies, etc.).
     pub async fn execute(&self, mut request: Request) -> Result<Response> {
+        if request.body.is_streaming() {
+            return Err(Error::HttpProtocol(
+                "streaming request bodies require send_streaming()".into(),
+            ));
+        }
+
         let policy = self.redirect_policy.clone();
         let mut redirects = 0u32;
 
         loop {
             let mut headers = request.headers.clone();
-            let cookie_injected = self.apply_cookie_header(&request, &mut headers).await;
+            let cookie_injected = self
+                .apply_cookie_header_for_url(request.url.as_str().to_string(), &mut headers)
+                .await;
             request.headers = headers;
 
             let mut timeouts = self.timeouts.clone();
@@ -1375,16 +1377,22 @@ impl Client {
                 timeouts.total = Some(total);
             }
 
-            let response = self.execute_once(&request, &timeouts).await?;
+            let response = self
+                .execute_once(request.clone(), &timeouts)
+                .await?
+                .into_buffered()
+                .await?;
 
-            self.store_cookies(&response, &request.url).await;
+            let response_headers = response.headers().clone();
+            self.store_cookies_from_headers(response_headers, request.url.as_str().to_string())
+                .await;
 
             if matches!(policy, RedirectPolicy::None) || !response.is_redirect() {
                 return Ok(response);
             }
 
             let location = match response.redirect_url() {
-                Some(value) => value,
+                Some(value) => value.to_string(),
                 None => return Ok(response),
             };
 
@@ -1394,7 +1402,7 @@ impl Client {
                 }
             }
 
-            let next_url = request.url.join(location).map_err(Error::from)?;
+            let next_url = request.url.join(&location).map_err(Error::from)?;
             let mut next_request = self.redirect_request(&request, &response, next_url)?;
 
             if cookie_injected {
@@ -1406,20 +1414,20 @@ impl Client {
         }
     }
 
-    async fn execute_once(&self, request: &Request, timeouts: &Timeouts) -> Result<Response> {
+    async fn execute_once(&self, request: Request, timeouts: &Timeouts) -> Result<Response> {
         let version = request.version.unwrap_or(self.default_version);
 
         // HTTP/3 only - go directly to H3
         if matches!(version, HttpVersion::Http3Only) {
             return self
-                .send_h3_for_url(request, request.url.clone(), timeouts)
+                .send_h3_for_url(request.clone(), request.url.clone(), timeouts)
                 .await;
         }
 
         // HTTP/3 preferred - try H3 first, fall back to H1/H2
         if matches!(version, HttpVersion::Http3) {
             match self
-                .send_h3_for_url(request, request.url.clone(), timeouts)
+                .send_h3_for_url(request.clone(), request.url.clone(), timeouts)
                 .await
             {
                 Ok(response) => return Ok(response),
@@ -1449,7 +1457,7 @@ impl Client {
                 let _ = h3_url.set_port(Some(alt_svc.port));
 
                 match self
-                    .send_h3_for_url(request, h3_url.clone(), timeouts)
+                    .send_h3_for_url(request.clone(), h3_url.clone(), timeouts)
                     .await
                 {
                     Ok(response) => return Ok(response.with_url(h3_url)),
@@ -1467,7 +1475,7 @@ impl Client {
 
     async fn send_h3_for_url(
         &self,
-        request: &Request,
+        request: Request,
         url: Url,
         timeouts: &Timeouts,
     ) -> Result<Response> {
@@ -1498,7 +1506,7 @@ impl Client {
 
     async fn send_h1_h2(
         &self,
-        request: &Request,
+        request: Request,
         version: HttpVersion,
         timeouts: &Timeouts,
     ) -> Result<Response> {
@@ -1834,25 +1842,25 @@ impl Client {
         })
     }
 
-    async fn apply_cookie_header(&self, request: &Request, headers: &mut Headers) -> bool {
-        if let Some(jar) = &self.cookie_store {
-            if !headers.contains("cookie") {
-                if let Some(cookie_header) =
-                    jar.read().await.build_cookie_header(request.url.as_str())
-                {
-                    headers.insert("Cookie", cookie_header);
-                    return true;
-                }
-            }
+    async fn apply_cookie_header_for_url(&self, request_url: String, headers: &mut Headers) -> bool {
+        let Some(jar) = &self.cookie_store else {
+            return false;
+        };
+        if headers.contains("cookie") {
+            return false;
+        }
+
+        let cookie_header = jar.read().await.build_cookie_header(&request_url);
+        if let Some(cookie_header) = cookie_header {
+            headers.insert("Cookie", cookie_header);
+            return true;
         }
         false
     }
 
-    async fn store_cookies(&self, response: &Response, url: &Url) {
+    async fn store_cookies_from_headers(&self, headers: Headers, request_url: String) {
         if let Some(jar) = &self.cookie_store {
-            jar.write()
-                .await
-                .store_from_headers(response.headers(), url.as_str());
+            jar.write().await.store_from_headers(&headers, &request_url);
         }
     }
 

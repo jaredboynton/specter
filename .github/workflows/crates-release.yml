@@ -87,7 +87,17 @@ jobs:
           ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml x86_64-unknown-linux-gnu
 
       - name: Publish
-        run: cargo publish --locked
+        run: |
+          set -euo pipefail
+          publish_log="$(mktemp)"
+          if cargo publish --locked 2>&1 | tee "$publish_log"; then
+            exit 0
+          fi
+          if grep -Eiq 'already (uploaded|exists)|crate version .*already' "$publish_log"; then
+            echo "crate version is already published; treating as success"
+            exit 0
+          fi
+          exit 1
         env:
           BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/x86_64-unknown-linux-gnu/build
           BORING_BSSL_INCLUDE_PATH: ${{ github.workspace }}/lib/boringssl/include

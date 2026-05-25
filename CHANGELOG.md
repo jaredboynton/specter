@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.6] - 2026-05-25
+
+### Fixed
+- Restored the non-streaming `send()` contract by buffering transport streaming bodies before returning, so `Response::text()`, `bytes()`, and `json()` work for normal H1/H2/H3 requests.
+- Made default request futures spawnable on multithreaded Tokio runtimes by avoiding non-`Sync` request/response borrows across awaits.
+
 ## [4.1.5] - 2026-05-25
 
 ### Fixed
