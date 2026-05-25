@@ -50,30 +50,31 @@ Remaining deferred work:
 
 - These anchors record the pre-implementation snapshot used by the subagents; see the implementation update above for the current state.
 - `just test` ran `cargo nextest run --all-features` from `justfile:160`.
-- `just test-cargo` runs `cargo test --all-features` from `justfile:176`.
-- `just check` runs `fmt-check`, `clippy`, then `test` sequentially at `justfile:211`.
-- `.config/nextest.toml:1` defines only minimal default/CI/pre-push profiles; there are no test groups or overrides yet.
-- `.config/nextest.toml:3` uses `test-threads = "num-cpus"`.
-- `.config/nextest.toml:22` currently has CI `fail-fast = true`.
-- `.config/nextest.toml:31` has pre-push `fail-fast = false`.
-- `.github/workflows/ci.yml:27` and `.github/workflows/ci.yml:30` already add sccache and Cargo registry/git cache to the macOS test job.
-- `.github/workflows/ci.yml:41`, `.github/workflows/ci.yml:54`, and `.github/workflows/ci.yml:63` run fmt, nextest, and examples sequentially in one job.
-- `.github/workflows/ci.yml:73` and `.github/workflows/ci.yml:106` define Linux and Windows build matrix jobs without equivalent Rust cache/sccache setup.
-- `Cargo.toml:105` and `Cargo.toml:112` already tune `dev` and `test` debug info, but there is no separate `fast-test` profile.
-- `scripts/install-boringssl-prebuilt.sh:42` already uses `cargo metadata --locked`.
-- `scripts/install-boringssl-prebuilt.sh:58` verifies SHA256 checksums.
-- `scripts/install-boringssl-prebuilt.sh:142` exports `BORING_BSSL_PATH` for CI.
-- `scripts/lib-bssl-env.sh:41` resolves repo-local BoringSSL paths after env/user-wide prebuilts.
+- `just test-cargo` ran `cargo test --all-features` from `justfile:176`.
+- `just check` ran `fmt-check`, `clippy`, then `test` sequentially at `justfile:211`.
+- `.config/nextest.toml:1` defined only minimal default/CI/pre-push profiles; there were no test groups or overrides yet.
+- `.config/nextest.toml:3` used `test-threads = "num-cpus"`.
+- `.config/nextest.toml:22` had CI `fail-fast = true`.
+- `.config/nextest.toml:31` had pre-push `fail-fast = false`.
+- `.github/workflows/ci.yml:27` and `.github/workflows/ci.yml:30` already added sccache and Cargo registry/git cache to the macOS test job.
+- `.github/workflows/ci.yml:41`, `.github/workflows/ci.yml:54`, and `.github/workflows/ci.yml:63` ran fmt, nextest, and examples sequentially in one job.
+- `.github/workflows/ci.yml:73` and `.github/workflows/ci.yml:106` defined Linux and Windows build matrix jobs without equivalent Rust cache/sccache setup.
+- `Cargo.toml:105` and `Cargo.toml:112` already tuned `dev` and `test` debug info, but there was no separate `fast-test` profile.
+- `scripts/install-boringssl-prebuilt.sh:42` already used `cargo metadata --locked`.
+- `scripts/install-boringssl-prebuilt.sh:58` verified SHA256 checksums.
+- `scripts/install-boringssl-prebuilt.sh:142` exported `BORING_BSSL_PATH` for CI.
+- `scripts/lib-bssl-env.sh:41` resolved repo-local BoringSSL paths after env/user-wide prebuilts.
 
 ## Corrected Kimi Plan Claims
 
-- The overall optimization opportunity is real: current tests contain many fixed waits/timeouts, and shared nextest/CI controls are minimal.
-- `tests/h1_pooling.rs` is not just four startup sleeps; current mapped sleeps are at `tests/h1_pooling.rs:23`, `tests/h1_pooling.rs:54`, `tests/h1_pooling.rs:69`, `tests/h1_pooling.rs:87`, `tests/h1_pooling.rs:188`, and `tests/h1_pooling.rs:226`. Only the first few are startup-style waits.
-- `tests/h3_streaming_pool.rs` currently has 13 mapped settle sleeps, not 15.
-- `tests/validation_h2_streaming.rs` currently has 22 `timeout(Duration::from_secs(3), conn.read_frame())` guards, not roughly 30.
-- “CI/build has no caching in most matrix jobs” is overstated: the macOS CI test job has sccache and Cargo registry/git cache, but Linux/Windows build jobs and release workflows still lack equivalent Rust caching.
-- “Current CI config uses `fail-fast = false`” is stale: CI currently has `fail-fast = true` at `.config/nextest.toml:22`; pre-push has `false`.
-- “No `--locked` usage exists” is stale repo-wide; helper scripts use locked metadata and some scripts use locked cargo runs, but GitHub workflow cargo commands mostly still omit `--locked`.
+- These were the pre-implementation corrections used to scope the work.
+- The overall optimization opportunity was real: tests contained many fixed waits/timeouts, and shared nextest/CI controls were minimal.
+- `tests/h1_pooling.rs` was not just four startup sleeps; mapped sleeps were at `tests/h1_pooling.rs:23`, `tests/h1_pooling.rs:54`, `tests/h1_pooling.rs:69`, `tests/h1_pooling.rs:87`, `tests/h1_pooling.rs:188`, and `tests/h1_pooling.rs:226`. Only the first few were startup-style waits.
+- `tests/h3_streaming_pool.rs` had 13 mapped settle sleeps, not 15.
+- `tests/validation_h2_streaming.rs` had 22 `timeout(Duration::from_secs(3), conn.read_frame())` guards, not roughly 30.
+- “CI/build has no caching in most matrix jobs” was overstated: the macOS CI test job already had sccache and Cargo registry/git cache, but Linux/Windows build jobs and release workflows still lacked equivalent Rust caching.
+- “Current CI config uses `fail-fast = false`” was stale: CI had `fail-fast = true` at `.config/nextest.toml:22`; pre-push had `false`.
+- “No `--locked` usage exists” was stale repo-wide; helper scripts already used locked metadata and some scripts used locked cargo runs, but GitHub workflow cargo commands mostly still omitted `--locked`.
 
 ## Hotspot Map
 
@@ -260,13 +261,12 @@ Implementation rule:
 
 ## CI And Build Plan
 
-### Current State
+### Implemented State
 
-- The macOS test job already uses `CARGO_INCREMENTAL=0`, sccache, and Cargo registry/git cache at `.github/workflows/ci.yml:11`, `.github/workflows/ci.yml:27`, and `.github/workflows/ci.yml:30`.
-- Linux and Windows build jobs start at `.github/workflows/ci.yml:73` and `.github/workflows/ci.yml:106` and lack equivalent Rust cache/sccache setup.
-- Node release uses setup-node/npm cache, but cargo-invoking build jobs around `.github/workflows/node-release.yml:50` and `.github/workflows/node-release.yml:56` do not add Rust cache/sccache.
-- Python release cargo work happens through maturin at `.github/workflows/python-release.yml:32`, `.github/workflows/python-release.yml:50`, and `.github/workflows/python-release.yml:84` without Rust cache/sccache.
-- BoringSSL install steps run in CI at `.github/workflows/ci.yml:43`, `.github/workflows/ci.yml:96`, `.github/workflows/ci.yml:132`, `.github/workflows/node-release.yml:56`, `.github/workflows/node-release.yml:128`, `.github/workflows/python-release.yml:26`, and `.github/workflows/python-release.yml:68`.
+- The macOS test job keeps `CARGO_INCREMENTAL=0`, sccache, Rust cache, and BoringSSL cache coverage.
+- Linux and Windows build jobs now use sccache, Rust cache, and target-specific BoringSSL cache coverage.
+- Node release and Python release cargo-heavy jobs now use sccache/Rust cache; wheel/develop cargo invocations use `--locked` where supported.
+- BoringSSL install steps remain the source of truth and checksum verification remains intact.
 
 ### Design Guidance
 
@@ -553,20 +553,20 @@ Stop conditions:
 
 | ID | Priority | Axis | Scope | Files | Status | Validation |
 | --- | --- | --- | --- | --- | --- | --- |
-| T1 | P0 | waits | Replace 5-second connection holds | `tests/error_handling.rs`, `tests/streaming_public_api.rs`, `tests/h1_streaming.rs` | unclaimed | targeted binaries, repeated |
-| T2 | P0 | waits | Remove proven H1 startup sleeps | `tests/h1_rfc_compliance.rs`, `tests/h1_pooling.rs`, `tests/error_handling.rs` | unclaimed | targeted H1/error binaries |
-| T3 | P1 | waits | Remove compression sleeps | `tests/compression.rs` | unclaimed | `binary(=compression)`, repeated |
-| T4 | P1 | waits | Replace cache wall-clock sleep | `tests/rfc9111_caching.rs` | unclaimed | `binary(=rfc9111_caching)` |
-| T5 | P1 | waits | Centralize H2 streaming timeouts | `tests/validation_h2_streaming.rs` | unclaimed | H2 validation binary, repeated |
-| T6 | P1 | waits | Replace H3 settle sleeps | `tests/h3_streaming_pool.rs`, `tests/h3_streaming_correctness.rs` | unclaimed | H3 binaries plus affected transport suites |
-| T7 | P0 | nextest | Add groups/profile tuning | `.config/nextest.toml` | unclaimed | list filters, profile run |
-| T8 | P0 | selective | Add `just test-changed` | `justfile`, maybe `scripts/` | unclaimed | test-only and source-change scenarios |
-| T9 | P0 | CI | Add missing Rust cache/sccache | `.github/workflows/*.yml` | unclaimed | cold/warm CI comparison |
-| T10 | P1 | CI | Cache BoringSSL prebuilts safely | `.github/workflows/*.yml` | unclaimed | target-specific cache proof |
-| T11 | P1 | CI | Split lint/test/examples | `.github/workflows/ci.yml` | unclaimed | full CI run |
-| T12 | P1 | CI | Add nextest archive sharding | `.github/workflows/ci.yml` | unclaimed | shard coverage equals full list |
-| T13 | P1 | build | Evaluate/add `fast-test` profile | `Cargo.toml`, maybe `justfile` | unclaimed | before/after compile timing |
-| T14 | P2 | docs | Add AGENTS conventions | `AGENTS.md` | blocked until commands exist | review against actual behavior |
+| T1 | P0 | waits | Replace 5-second connection holds | `tests/error_handling.rs`, `tests/streaming_public_api.rs`, `tests/h1_streaming.rs` | closed | targeted suite passed |
+| T2 | P0 | waits | Remove proven H1 startup sleeps | `tests/h1_rfc_compliance.rs`, `tests/h1_pooling.rs`, `tests/error_handling.rs` | closed | targeted suite passed |
+| T3 | P1 | waits | Remove compression sleeps | `tests/compression.rs` | closed | targeted suite passed |
+| T4 | P1 | waits | Replace cache wall-clock sleep | `tests/rfc9111_caching.rs`, `src/cache.rs` | closed | `binary(=rfc9111_caching)` passed |
+| T5 | P1 | waits | Centralize H2 streaming timeouts | `tests/validation_h2_streaming.rs` | deferred | not implemented |
+| T6 | P1 | waits | Replace H3 settle sleeps | `tests/h3_streaming_pool.rs`, `tests/h3_streaming_correctness.rs` | deferred | not implemented |
+| T7 | P0 | nextest | Add groups/profile tuning | `.config/nextest.toml` | closed | filter/list validation and targeted suite passed |
+| T8 | P0 | selective | Add `just test-changed` | `justfile` | closed | `just --list`, filter validation |
+| T9 | P0 | CI | Add missing Rust cache/sccache | `.github/workflows/*.yml` | closed | YAML parse passed |
+| T10 | P1 | CI | Cache BoringSSL prebuilts safely | `.github/workflows/*.yml` | closed | YAML parse passed |
+| T11 | P1 | CI | Split lint/test/examples | `.github/workflows/ci.yml` | deferred | not implemented |
+| T12 | P1 | CI | Add nextest archive sharding | `.github/workflows/ci.yml` | deferred | not implemented |
+| T13 | P1 | build | Evaluate/add `fast-test` profile | `Cargo.toml` | closed | `--cargo-profile fast-test` smoke passed |
+| T14 | P2 | docs | Add AGENTS conventions | `AGENTS.md` | closed | reviewed against actual commands |
 
 ## Coordination Rules
 
