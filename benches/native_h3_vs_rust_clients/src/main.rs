@@ -49,7 +49,7 @@ struct Artifact {
     rows: Vec<BenchmarkRow>,
     fixture_events: Vec<FixtureEvent>,
     superiority_gate: SuperiorityGate,
-    rfc9220_tunnel_superiority_gate: Rfc9220TunnelSuperiorityGate,
+    rfc9220_full_suite_superiority_gate: Rfc9220TunnelSuperiorityGate,
 }
 
 #[derive(Debug, Serialize)]
@@ -869,21 +869,44 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
     }
 }
 
-fn required_rfc9220_tunnel_clients() -> Vec<&'static str> {
-    vec![
-        "specter_native_rfc9220_tunnel",
-        "quiche_direct_rfc9220_tunnel",
-        "tokio_quiche_rfc9220_tunnel",
+fn rfc9220_tunnel_workloads() -> [(&'static str, &'static str, &'static str); 3] {
+    [
+        (
+            "specter_native_rfc9220_tunnel",
+            "quiche_direct_rfc9220_tunnel",
+            "tokio_quiche_rfc9220_tunnel",
+        ),
+        (
+            "specter_native_rfc9220_tunnel_close",
+            "quiche_direct_rfc9220_tunnel_close",
+            "tokio_quiche_rfc9220_tunnel_close",
+        ),
+        (
+            "specter_native_rfc9220_tunnel_mixed",
+            "quiche_direct_rfc9220_tunnel_mixed",
+            "tokio_quiche_rfc9220_tunnel_mixed",
+        ),
     ]
+}
+
+fn required_rfc9220_tunnel_clients() -> Vec<&'static str> {
+    rfc9220_tunnel_workloads()
+        .into_iter()
+        .flat_map(|(specter, quiche, tokio_quiche)| [specter, quiche, tokio_quiche])
+        .collect()
+}
+
+fn specter_beats_rfc9220_tunnel_comparator(
+    specter: MeasuredMetrics,
+    competitor: MeasuredMetrics,
+) -> bool {
+    specter.p50_ttft_ns < competitor.p50_ttft_ns
+        && specter.p95_ttft_ns < competitor.p95_ttft_ns
+        && specter.bytes_per_sec > competitor.bytes_per_sec
 }
 
 fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperiorityGate {
     let required_rfc9220_tunnel_clients = required_rfc9220_tunnel_clients();
-    let comparator_clients = required_rfc9220_tunnel_clients
-        .iter()
-        .copied()
-        .filter(|id| *id != "specter_native_rfc9220_tunnel")
-        .collect::<Vec<_>>();
     let missing_required_rfc9220_tunnel_rows = required_rfc9220_tunnel_clients
         .iter()
         .copied()
@@ -920,33 +943,41 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
         Vec::new()
     };
 
-    let specter_metrics = measured_metrics_with_min_sample_count(
-        rows,
-        "specter_native_rfc9220_tunnel",
-        RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
-    );
-    let comparator_metrics = comparator_clients
-        .iter()
-        .filter_map(|id| {
-            measured_metrics_with_min_sample_count(rows, id, RFC9220_TUNNEL_MIN_SAMPLE_COUNT)
-        })
-        .collect::<Vec<_>>();
+    let mut comparator_metrics = Vec::new();
+    let mut specter_beats_all_required = true;
+    for (specter_id, quiche_id, tokio_quiche_id) in rfc9220_tunnel_workloads() {
+        let Some(specter_metrics) = measured_metrics_with_min_sample_count(
+            rows,
+            specter_id,
+            RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
+        ) else {
+            specter_beats_all_required = false;
+            continue;
+        };
+        for comparator_id in [quiche_id, tokio_quiche_id] {
+            let Some(competitor_metrics) = measured_metrics_with_min_sample_count(
+                rows,
+                comparator_id,
+                RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
+            ) else {
+                specter_beats_all_required = false;
+                continue;
+            };
+            comparator_metrics.push(competitor_metrics);
+            if !specter_beats_rfc9220_tunnel_comparator(specter_metrics, competitor_metrics) {
+                specter_beats_all_required = false;
+            }
+        }
+    }
     let fastest_non_specter_rfc9220_tunnel_client =
         fastest_by_p50_then_p95_then_throughput(&comparator_metrics);
 
     let missing_required_n100_rows = !missing_required_rfc9220_tunnel_rows.is_empty()
         || !under_sampled_required_rfc9220_tunnel_rows.is_empty();
     let missing_metrics = !missing_required_rfc9220_tunnel_metrics.is_empty();
-    let specter_beats_all_required = specter_metrics.is_some_and(|specter| {
-        comparator_metrics.iter().all(|competitor| {
-            specter.p50_ttft_ns < competitor.p50_ttft_ns
-                && specter.p95_ttft_ns < competitor.p95_ttft_ns
-                && specter.bytes_per_sec > competitor.bytes_per_sec
-        })
-    });
     let pass = !missing_required_n100_rows
         && !missing_metrics
-        && comparator_metrics.len() == comparator_clients.len()
+        && comparator_metrics.len() == required_rfc9220_tunnel_clients.len() - rfc9220_tunnel_workloads().len()
         && specter_beats_all_required;
 
     Rfc9220TunnelSuperiorityGate {
@@ -959,13 +990,13 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
         },
         pass,
         reason: if pass {
-            "specter_native_rfc9220_tunnel_is_faster_than_required_rfc9220_tunnel_competitors"
+            "specter_native_rfc9220_tunnel_suite_is_faster_than_required_rfc9220_tunnel_competitors"
         } else if missing_required_n100_rows {
             "no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows"
         } else if missing_metrics {
             "missing_required_rfc9220_tunnel_performance_metrics"
         } else {
-            "specter_native_rfc9220_tunnel_not_faster_than_required_rfc9220_tunnel_competitors"
+            "specter_native_rfc9220_tunnel_suite_not_faster_than_required_rfc9220_tunnel_competitors"
         },
         fastest_non_specter_rfc9220_tunnel_client,
         no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows: true,
@@ -1066,7 +1097,7 @@ fn artifact_with_competitor_rows_and_fixture_events<S: AsRef<str>>(
         audited_at: "2026-05-24",
         competitors: competitor_specs(),
         superiority_gate: superiority_gate(&rows),
-        rfc9220_tunnel_superiority_gate: rfc9220_tunnel_superiority_gate(&rows),
+        rfc9220_full_suite_superiority_gate: rfc9220_tunnel_superiority_gate(&rows),
         rows,
         fixture_events,
     }
@@ -1077,7 +1108,7 @@ fn requirement_failed(args: &[String], artifact: &Artifact) -> bool {
         || (args
             .iter()
             .any(|arg| arg == "--require-rfc9220-tunnel-superiority")
-            && !artifact.rfc9220_tunnel_superiority_gate.pass)
+            && !artifact.rfc9220_full_suite_superiority_gate.pass)
 }
 
 fn option_value(args: &[String], name: &str) -> Option<String> {
@@ -1766,10 +1797,14 @@ async fn run_local_native_h3_fixture(
             let conn_id = first.destination_cid.as_bytes().to_vec();
             if !connections.contains_key(&conn_id) {
                 let (tx, rx) = tokio::sync::mpsc::channel(100);
-                let server_source_cid = local_native_h3_server_connection_id(next_connection_index);
+                let connection_index = next_connection_index;
+                let server_source_cid = local_native_h3_server_connection_id(connection_index);
+                let server_migration_cid =
+                    local_native_h3_server_migration_connection_id(connection_index, 1);
                 next_connection_index += 1;
                 connections.insert(conn_id.clone(), tx.clone());
                 connections.insert(server_source_cid.as_bytes().to_vec(), tx.clone());
+                connections.insert(server_migration_cid.as_bytes().to_vec(), tx.clone());
                 spawn_local_native_h3_connection(
                     socket.clone(),
                     peer,
@@ -1781,6 +1816,7 @@ async fn run_local_native_h3_fixture(
                     first.destination_cid.clone(),
                     first.source_cid.clone(),
                     server_source_cid,
+                    server_migration_cid,
                 );
                 let _ = tx.send(packet).await;
                 continue;
@@ -1819,6 +1855,7 @@ fn spawn_local_native_h3_connection(
     client_destination_cid: specter::transport::h3::quic::ConnectionId,
     client_source_cid: specter::transport::h3::quic::ConnectionId,
     server_source_cid: specter::transport::h3::quic::ConnectionId,
+    server_migration_cid: specter::transport::h3::quic::ConnectionId,
 ) {
     let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
     fingerprint.transport.initial_max_streams_bidi = LOCAL_FIXTURE_MAX_STREAMS;
@@ -1842,6 +1879,7 @@ fn spawn_local_native_h3_connection(
             handshake,
             fingerprint,
             handshake_done_sent: false,
+            new_connection_id_sent: false,
             settings_sent: false,
             rx,
             response_tx,
@@ -1849,6 +1887,7 @@ fn spawn_local_native_h3_connection(
             client,
             events,
             tunnel_streams: HashSet::new(),
+            server_migration_cid,
         }
         .run()
         .await;
@@ -1867,6 +1906,7 @@ struct LocalNativeH3Connection {
     handshake: specter::transport::h3::handshake::NativeQuicServerHandshake,
     fingerprint: specter::fingerprint::Http3Fingerprint,
     handshake_done_sent: bool,
+    new_connection_id_sent: bool,
     settings_sent: bool,
     rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     response_tx: tokio::sync::mpsc::Sender<LocalNativeH3Response>,
@@ -1874,6 +1914,7 @@ struct LocalNativeH3Connection {
     client: String,
     events: Arc<Mutex<Vec<FixtureEvent>>>,
     tunnel_streams: HashSet<u64>,
+    server_migration_cid: specter::transport::h3::quic::ConnectionId,
 }
 
 impl LocalNativeH3Connection {
@@ -2078,6 +2119,16 @@ impl LocalNativeH3Connection {
             self.handshake_done_sent = true;
             self.send_packet(packet.packet).await?;
         }
+        if !self.new_connection_id_sent {
+            let packet = self.handshake.build_server_new_connection_id_packet(
+                1,
+                0,
+                self.server_migration_cid.clone(),
+                local_native_h3_stateless_reset_token(&self.server_migration_cid, 1),
+            )?;
+            self.new_connection_id_sent = true;
+            self.send_packet(packet.packet).await?;
+        }
         if self.settings_sent {
             return Ok(());
         }
@@ -2276,6 +2327,29 @@ fn local_native_h3_server_connection_id(index: u64) -> specter::transport::h3::q
         "bench-h3-{index:08x}"
     )))
     .expect("local fixture server connection id must fit QUIC CID limits")
+}
+
+fn local_native_h3_server_migration_connection_id(
+    connection_index: u64,
+    sequence_number: u64,
+) -> specter::transport::h3::quic::ConnectionId {
+    specter::transport::h3::quic::ConnectionId::from_bytes(Bytes::from(format!(
+        "bench-m{connection_index:08x}-{sequence_number:02x}"
+    )))
+    .expect("local fixture migration connection id must fit QUIC CID limits")
+}
+
+fn local_native_h3_stateless_reset_token(
+    connection_id: &specter::transport::h3::quic::ConnectionId,
+    sequence_number: u64,
+) -> [u8; 16] {
+    let mut token = [0u8; 16];
+    let token_len = token.len();
+    for (index, byte) in connection_id.as_bytes().iter().enumerate() {
+        token[index % token_len] ^= *byte;
+    }
+    token[8..].copy_from_slice(&sequence_number.to_be_bytes());
+    token
 }
 
 fn describe_local_native_h3_datagram(packet: &[u8]) -> String {
@@ -2612,52 +2686,74 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
     let expected_tunnel_bytes =
         LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES;
     let start = Instant::now();
-    let mut tunnel =
-        tokio::time::timeout(adapter_timeout(), client.websocket_h3(tunnel_url).open())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("specter_native RFC 9220 mixed tunnel open timed out")
-            })??;
+    let client = client.clone();
+    let stream_url = stream_url.to_owned();
+    let tunnel_url = tunnel_url.to_owned();
 
-    for index in 0..LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES {
-        tunnel
-            .send_bytes(
-                payload.clone(),
-                index + 1 == LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES,
-            )
-            .await?;
-    }
+    let stream_task = {
+        let client = client.clone();
+        let stream_url = stream_url.clone();
+        async move {
+            measure_specter_native_http3_stream_with_client(&client, &stream_url, start).await
+        }
+    };
 
-    let (stream_first_byte_ns, stream_bytes) =
-        measure_specter_native_http3_stream_with_client(client, stream_url, start).await?;
+    let tunnel_task = {
+        let client = client.clone();
+        let payload = payload.clone();
+        async move {
+            let mut tunnel =
+                tokio::time::timeout(adapter_timeout(), client.websocket_h3(&tunnel_url).open())
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!("specter_native RFC 9220 mixed tunnel open timed out")
+                    })??;
 
-    tokio::time::sleep(Duration::from_millis(
-        LOCAL_FIXTURE_TUNNEL_SLOW_CONSUMER_DELAY_MS,
-    ))
-    .await;
-    let mut echoed = 0usize;
-    while echoed < expected_tunnel_bytes {
-        tokio::time::sleep(Duration::from_millis(
-            LOCAL_FIXTURE_TUNNEL_SLOW_READ_DELAY_MS,
-        ))
-        .await;
-        let chunk = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
-            .await
-            .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 mixed tunnel drain timed out"))?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "specter_native RFC 9220 mixed tunnel ended after {echoed} of {expected_tunnel_bytes} bytes"
-                )
-            })??;
-        echoed = echoed.saturating_add(chunk.len());
-    }
-    if echoed != expected_tunnel_bytes {
-        anyhow::bail!(
-            "specter_native RFC 9220 mixed tunnel echo length mismatch: expected {expected_tunnel_bytes}, got {echoed}"
-        );
-    }
+            for index in 0..LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES {
+                tunnel
+                    .send_bytes(
+                        payload.clone(),
+                        index + 1 == LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES,
+                    )
+                    .await?;
+            }
 
-    let _ = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes()).await;
+            let mut echoed = 0usize;
+            tokio::time::sleep(Duration::from_millis(
+                LOCAL_FIXTURE_TUNNEL_SLOW_CONSUMER_DELAY_MS,
+            ))
+            .await;
+            while echoed < expected_tunnel_bytes {
+                tokio::time::sleep(Duration::from_millis(
+                    LOCAL_FIXTURE_TUNNEL_SLOW_READ_DELAY_MS,
+                ))
+                .await;
+                let chunk = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!("specter_native RFC 9220 mixed tunnel drain timed out")
+                    })?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "specter_native RFC 9220 mixed tunnel ended after {echoed} of {expected_tunnel_bytes} bytes"
+                        )
+                    })??;
+                echoed = echoed.saturating_add(chunk.len());
+            }
+            if echoed != expected_tunnel_bytes {
+                anyhow::bail!(
+                    "specter_native RFC 9220 mixed tunnel echo length mismatch: expected {expected_tunnel_bytes}, got {echoed}"
+                );
+            }
+
+            let _ = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes()).await;
+            Ok::<_, anyhow::Error>(echoed)
+        }
+    };
+
+    let ((stream_first_byte_ns, stream_bytes), echoed) =
+        tokio::try_join!(stream_task, tunnel_task)?;
+
     Ok(AdapterSample::new(
         stream_first_byte_ns,
         start.elapsed().as_nanos() as f64,
@@ -2675,6 +2771,7 @@ async fn measure_specter_native_http3_stream_with_client(
         .version(specter::HttpVersion::Http3Only)
         .send_streaming()
         .await?;
+    let stream_first_byte_ns = start.elapsed().as_nanos() as f64;
     if !(200..300).contains(&response.status_code()) {
         anyhow::bail!(
             "specter_native mixed stream received non-success status {}",
@@ -2682,19 +2779,14 @@ async fn measure_specter_native_http3_stream_with_client(
         );
     }
 
-    let mut first_byte_ns = None;
     let mut bytes = 0u64;
     while let Some(chunk) = response.body_mut().chunk().await {
         let chunk = chunk?;
         if !chunk.is_empty() {
-            first_byte_ns.get_or_insert_with(|| start.elapsed().as_nanos() as f64);
             bytes = bytes.saturating_add(chunk.len() as u64);
         }
     }
-    Ok((
-        first_byte_ns.unwrap_or_else(|| start.elapsed().as_nanos() as f64),
-        bytes,
-    ))
+    Ok((stream_first_byte_ns, bytes))
 }
 
 async fn measure_quiche_direct_rfc9220_tunnel(
@@ -4899,7 +4991,44 @@ mod tests {
 
     #[test]
     fn rfc9220_tunnel_superiority_gate_passes_independently_from_http_gate() {
-        let measured_rows = vec![
+        let measured_rows = rfc9220_full_suite_passing_rows();
+        let artifact =
+            super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &measured_rows);
+        let artifact_json = serde_json::to_value(&artifact).unwrap();
+        let tunnel_gate = &artifact_json["rfc9220_full_suite_superiority_gate"];
+
+        assert_eq!(artifact.superiority_gate.status, "incomplete");
+        assert_eq!(
+            tunnel_gate["required_rfc9220_tunnel_clients"],
+            serde_json::json!([
+                "specter_native_rfc9220_tunnel",
+                "quiche_direct_rfc9220_tunnel",
+                "tokio_quiche_rfc9220_tunnel",
+                "specter_native_rfc9220_tunnel_close",
+                "quiche_direct_rfc9220_tunnel_close",
+                "tokio_quiche_rfc9220_tunnel_close",
+                "specter_native_rfc9220_tunnel_mixed",
+                "quiche_direct_rfc9220_tunnel_mixed",
+                "tokio_quiche_rfc9220_tunnel_mixed",
+            ])
+        );
+        assert_eq!(tunnel_gate["minimum_sample_count"], serde_json::json!(100));
+        assert_eq!(tunnel_gate["pass"], serde_json::json!(true));
+        assert_eq!(tunnel_gate["status"], serde_json::json!("pass"));
+        assert_eq!(
+            tunnel_gate["reason"],
+            serde_json::json!(
+                "specter_native_rfc9220_tunnel_suite_is_faster_than_required_rfc9220_tunnel_competitors"
+            )
+        );
+        assert_eq!(
+            tunnel_gate["fastest_non_specter_rfc9220_tunnel_client"],
+            serde_json::json!("quiche_direct_rfc9220_tunnel")
+        );
+    }
+
+    fn rfc9220_full_suite_passing_rows() -> Vec<super::BenchmarkRow> {
+        vec![
             super::BenchmarkRow {
                 competitor_id: "specter_native_rfc9220_tunnel".into(),
                 status: "measured_pass".into(),
@@ -4930,34 +5059,67 @@ mod tests {
                 sample_count: Some(100),
                 ..super::BenchmarkRow::default()
             },
-        ];
-        let artifact =
-            super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &measured_rows);
-        let artifact_json = serde_json::to_value(&artifact).unwrap();
-        let tunnel_gate = &artifact_json["rfc9220_tunnel_superiority_gate"];
-
-        assert_eq!(artifact.superiority_gate.status, "incomplete");
-        assert_eq!(
-            tunnel_gate["required_rfc9220_tunnel_clients"],
-            serde_json::json!([
-                "specter_native_rfc9220_tunnel",
-                "quiche_direct_rfc9220_tunnel",
-                "tokio_quiche_rfc9220_tunnel"
-            ])
-        );
-        assert_eq!(tunnel_gate["minimum_sample_count"], serde_json::json!(100));
-        assert_eq!(tunnel_gate["pass"], serde_json::json!(true));
-        assert_eq!(tunnel_gate["status"], serde_json::json!("pass"));
-        assert_eq!(
-            tunnel_gate["reason"],
-            serde_json::json!(
-                "specter_native_rfc9220_tunnel_is_faster_than_required_rfc9220_tunnel_competitors"
-            )
-        );
-        assert_eq!(
-            tunnel_gate["fastest_non_specter_rfc9220_tunnel_client"],
-            serde_json::json!("quiche_direct_rfc9220_tunnel")
-        );
+            super::BenchmarkRow {
+                competitor_id: "specter_native_rfc9220_tunnel_close".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(300_000.0),
+                p95_ttft_ns: Some(900_000.0),
+                bytes_per_sec: Some(2_000_000.0),
+                source: "specter_native_rfc9220_tunnel_close_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "quiche_direct_rfc9220_tunnel_close".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(2_900_000.0),
+                p95_ttft_ns: Some(4_200_000.0),
+                bytes_per_sec: Some(330_000.0),
+                source: "quiche_direct_rfc9220_tunnel_close_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "tokio_quiche_rfc9220_tunnel_close".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(3_300_000.0),
+                p95_ttft_ns: Some(3_600_000.0),
+                bytes_per_sec: Some(300_000.0),
+                source: "tokio_quiche_rfc9220_tunnel_close_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "specter_native_rfc9220_tunnel_mixed".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(2_000_000.0),
+                p95_ttft_ns: Some(3_000_000.0),
+                bytes_per_sec: Some(1_000_000.0),
+                source: "specter_native_rfc9220_tunnel_mixed_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "quiche_direct_rfc9220_tunnel_mixed".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(3_000_000.0),
+                p95_ttft_ns: Some(3_200_000.0),
+                bytes_per_sec: Some(660_000.0),
+                source: "quiche_direct_rfc9220_tunnel_mixed_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "tokio_quiche_rfc9220_tunnel_mixed".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(90_000_000.0),
+                p95_ttft_ns: Some(100_000_000.0),
+                bytes_per_sec: Some(960_000.0),
+                source: "tokio_quiche_rfc9220_tunnel_mixed_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+        ]
     }
 
     #[test]
@@ -4993,7 +5155,7 @@ mod tests {
         let artifact =
             super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &measured_rows);
         let tunnel_gate =
-            &serde_json::to_value(&artifact).unwrap()["rfc9220_tunnel_superiority_gate"];
+            &serde_json::to_value(&artifact).unwrap()["rfc9220_full_suite_superiority_gate"];
 
         assert_eq!(tunnel_gate["pass"], serde_json::json!(false));
         assert_eq!(tunnel_gate["status"], serde_json::json!("incomplete"));
@@ -5007,7 +5169,15 @@ mod tests {
         );
         assert_eq!(
             tunnel_gate["missing_required_rfc9220_tunnel_rows"],
-            serde_json::json!(["tokio_quiche_rfc9220_tunnel"])
+            serde_json::json!([
+                "tokio_quiche_rfc9220_tunnel",
+                "specter_native_rfc9220_tunnel_close",
+                "quiche_direct_rfc9220_tunnel_close",
+                "tokio_quiche_rfc9220_tunnel_close",
+                "specter_native_rfc9220_tunnel_mixed",
+                "quiche_direct_rfc9220_tunnel_mixed",
+                "tokio_quiche_rfc9220_tunnel_mixed",
+            ])
         );
     }
 
@@ -5206,6 +5376,25 @@ mod tests {
         assert_eq!(
             super::route_local_native_h3_connection_id(&packet, None, &registered),
             Some(b"srv-cid-bbb".to_vec())
+        );
+    }
+
+    #[test]
+    fn local_native_fixture_routes_short_header_by_post_handshake_migration_connection_id() {
+        let migration_cid = super::local_native_h3_server_migration_connection_id(7, 1);
+        let registered = vec![
+            super::local_native_h3_server_connection_id(7)
+                .as_bytes()
+                .to_vec(),
+            migration_cid.as_bytes().to_vec(),
+        ];
+        let mut packet = vec![0x40];
+        packet.extend_from_slice(migration_cid.as_bytes());
+        packet.extend_from_slice(b"encrypted-payload");
+
+        assert_eq!(
+            super::route_local_native_h3_connection_id(&packet, None, &registered),
+            Some(migration_cid.as_bytes().to_vec())
         );
     }
 
