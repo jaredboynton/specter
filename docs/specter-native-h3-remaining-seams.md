@@ -78,7 +78,7 @@ These rows are outside the H3 HTTP superiority gate and are tracked as tunnel-wo
 | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-n100-plus-close-comparators.json` | `quiche_direct_rfc9220_tunnel_close` | 30 | 2,982,375 | 4,280,083 | 332,230 |
 | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-n100-plus-close-comparators.json` | `tokio_quiche_rfc9220_tunnel_close` | 30 | 3,342,208 | 3,625,042 | 305,898 |
 | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-n100-plus-close-and-mixed-comparators.json` | `quiche_direct_rfc9220_tunnel_mixed` | 30 | 3,044,500 | 3,183,875 | 662,382 |
-| `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-n100-plus-close-and-mixed-comparators.json` | `tokio_quiche_rfc9220_tunnel_mixed` | 30 | 4,548,334 | 4,917,125 | 3,110,879 |
+| `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-n100-plus-close-and-mixed-comparators.json` | `tokio_quiche_rfc9220_tunnel_mixed` | 30 | 92,553,000 | 102,379,292 | 963,604 |
 | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-rfc9220-websocket-h3-agent3.json` | aggregate echo/close/mixed | 5 | see artifact | see artifact | see artifact |
 
 The low-level `quiche_direct_rfc9220_tunnel` and `tokio_quiche_rfc9220_tunnel` adapters now have measured n=100 echo rows, and `quiche_direct_rfc9220_tunnel_close` / `tokio_quiche_rfc9220_tunnel_close` plus `quiche_direct_rfc9220_tunnel_mixed` / `tokio_quiche_rfc9220_tunnel_mixed` have measured n=30 rows. `h3_quinn_rfc9220_tunnel`, `reqwest_h3_rfc9220_tunnel`, `tokio_tungstenite_rfc9220`, and `reqwest_rfc9220` remain unsupported capability-audit rows, not throughput comparators. Full-suite superiority remains unclaimed because the gate still covers echo only and the mixed workload needs optimization/evidence before a suite-wide claim.
@@ -184,9 +184,15 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 ## Remaining gaps
 
 - Native QUIC still needs broader recovery soak/backoff validation and full per-address path migration state: migration CID inventory/retire lifecycle, server-side migration lifecycle, and anti-amplification behavior. Basic PATH_CHALLENGE token handling and 1-RTT CID routing are no longer active gaps.
+- Inbound RFC9220 tunnel driver-to-handle channel is still item-bounded: `src/transport/h3/native_driver.rs::NativeDriverTunnelState` uses `mpsc::channel(32)` for `inbound_tx` / `inbound_rx` plus a `pending_inbound: VecDeque` overflow path and an `is_inbound_backpressured` heuristic. `H3TunnelCredit::released_recv_bytes` already feeds byte-credit accounting into MAX_STREAM_DATA, but the driver-to-handle channel itself does not yet bound on bytes; remaining work is to make the inbound channel byte-bounded (matching the outbound semaphore + unbounded mpsc shape) and cover it with the existing rfc9220_* slow-consumer / mixed integration tests.
 - Browser-capture ACK parity remains open for per-browser/version ACK behavior and the tuned `ack_eliciting_threshold = 128` benchmark profile.
 - RFC9220/WebSocket-over-H3 no longer lacks third-party mixed rows: low-level `quiche`/`tokio-quiche` slow-consumer mixed rows are measured at n=30 in `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-n100-plus-close-and-mixed-comparators.json`. Remaining work is full-suite gate expansion and mixed-workload optimization/evidence before claiming suite-wide superiority.
 - TLS/H3 fingerprint gaps remain: explicit extension-list ordering beyond BoringSSL permutation policy and capture-derived raw transport-parameter presets.
+
+## In-flight collisions and known noise
+
+- `tests/h3_native_handshake.rs` references `client_pmtu_current_size`, `client_pmtu_pending_probe_size`, and `client_path_migration_connection_id` on `NativeQuicHandshake`, but those accessors are not yet present in the current `src/transport/h3/handshake.rs` source; the PMTU / path-migration sibling agent's production patches have not landed yet, so this integration crate currently fails to compile. Do not patch from this doc pass; it will resolve when that sibling lands.
+- `transport::h3::session_cache::tests::expired_entries_are_evicted_on_lookup` is timing-flaky against a 50ms TTL with an 80ms sleep and was flagged by both the flow-control and key-update sibling workers as the lone failure in `just test`. Treat as a follow-up to harden test timing (e.g., raise the sleep margin or use a virtual clock), not as a real correctness gap in `NativeH3SessionCache`.
 
 ## Validation run
 
