@@ -6,8 +6,8 @@ test-threads = "num-cpus"
 failure-output = "immediate-final"
 success-output = "never"
 
-# Retry flaky tests once
-retries = 1
+# Fail loud in the inner loop; pass --retries 1 explicitly when chasing a flake
+retries = 0
 
 # Timeout settings
 slow-timeout = { period = "30s", terminate-after = 1 }

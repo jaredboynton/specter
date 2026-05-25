@@ -34,7 +34,7 @@ extern "C" {
     pub fn SSL_set_early_data_enabled(ssl: *mut SSL, enabled: c_int);
     pub fn SSL_in_early_data(ssl: *const SSL) -> c_int;
     pub fn SSL_early_data_accepted(ssl: *const SSL) -> c_int;
-    pub fn SSL_get_early_data_reason(ssl: *const SSL) -> c_int;
+    pub fn SSL_get_early_data_reason(ssl: *const SSL) -> u32;
     pub fn SSL_SESSION_early_data_capable(session: *const SSL_SESSION) -> c_int;
 }
 
@@ -599,10 +599,6 @@ impl BoringConnector {
         Ok((stream, EarlyDataOutcome::NotAttempted))
     }
 
-    fn configure_ssl(&self, _domain: &str, alpn_mode: AlpnMode) -> Result<SslConnector, Error> {
-        self.build_ssl_connector(alpn_mode)
-    }
-
     /// Access the shared TLS session cache (for tests and diagnostics).
     pub fn session_cache(&self) -> &Arc<SessionCache> {
         &self.session_cache
@@ -1012,7 +1008,7 @@ where
                     EarlyDataOutcome::Accepted
                 } else {
                     EarlyDataOutcome::Rejected {
-                        reason: unsafe { SSL_get_early_data_reason(ssl.as_ptr()) as u32 },
+                        reason: unsafe { SSL_get_early_data_reason(ssl.as_ptr()) },
                     }
                 };
                 return Ok((wrap_tokio_ssl_stream(stream), outcome));

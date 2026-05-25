@@ -109,6 +109,10 @@ incremental = true
 [profile.dev.package."*"]
 debug = 0
 
+[profile.dev.build-override]
+opt-level = 3
+codegen-units = 16
+
 [profile.test]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
@@ -117,16 +121,6 @@ incremental = true
 [profile.test.package."*"]
 debug = 0
 
-[profile.fast-test]
-inherits = "dev"
-debug = "line-tables-only"
-split-debuginfo = "unpacked"
-lto = false
-codegen-units = 256
-opt-level = 0
-debug-assertions = true
-overflow-checks = true
-incremental = true
-
-[profile.fast-test.package."*"]
-debug = 0
+[profile.test.build-override]
+opt-level = 3
+codegen-units = 16
