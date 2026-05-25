@@ -13,10 +13,11 @@ use crate::transport::h3::command::StreamResponse;
 use crate::transport::h3::handle::{H3Handle, NativeH3HandshakeReport};
 use crate::transport::h3::handshake::NativeQuicHandshake;
 use crate::transport::h3::native;
-use crate::transport::h3::quic::ConnectionId;
+use crate::transport::h3::quic::{ConnectionId, QuicEcnMark};
 use crate::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
 use crate::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
 use crate::transport::h3::tls::NativeH3HandshakeStatus;
+use crate::transport::h3::udp_ecn::{enable_udp_ecn_receive, recv_from_with_ecn};
 use crate::transport::h3::H3TransportConfig;
 
 use crate::transport::h3::native_driver::{spawn_native_h3_driver, NativeH3PendingResponse};
@@ -322,8 +323,12 @@ impl H3Connection {
                 .min(Duration::from_millis(25))
                 .min(remaining);
 
-            match tokio::time::timeout(recv_wait, socket.recv_from(&mut buf)).await {
-                Ok(Ok((len, from))) if from == peer_addr => {
+            match tokio::time::timeout(recv_wait, recv_from_with_ecn(socket.as_ref(), &mut buf))
+                .await
+            {
+                Ok(Ok(received)) if received.peer == peer_addr => {
+                    let len = received.len;
+                    let ecn_mark = received.ecn_mark;
                     if buf[..len].first().is_some_and(|first| first & 0x80 == 0) {
                         if handshake.is_application_ready() {
                             return Self::finish_native_connect(
@@ -332,7 +337,7 @@ impl H3Connection {
                                 socket,
                                 peer_addr,
                                 max_idle_timeout,
-                                Some(Bytes::copy_from_slice(&buf[..len])),
+                                Some((Bytes::copy_from_slice(&buf[..len]), ecn_mark)),
                                 transport_config,
                                 session_cache.clone(),
                                 session_cache_key.clone(),
@@ -342,7 +347,8 @@ impl H3Connection {
                         }
                         continue;
                     }
-                    let processed_packets = handshake.process_server_datagram(&buf[..len])?;
+                    let processed_packets =
+                        handshake.process_server_datagram_with_ecn(&buf[..len], ecn_mark)?;
                     if let Some(packet) = handshake.take_pending_client_initial() {
                         socket
                             .send_to(packet.packet.as_ref(), peer_addr)
@@ -409,7 +415,7 @@ impl H3Connection {
         socket: Arc<UdpSocket>,
         peer_addr: SocketAddr,
         max_idle_timeout: u64,
-        initial_datagram: Option<Bytes>,
+        initial_datagram: Option<(Bytes, Option<QuicEcnMark>)>,
         transport_config: H3TransportConfig,
         session_cache: NativeH3SessionCache,
         session_cache_key: NativeH3SessionCacheKey,
@@ -544,6 +550,7 @@ fn bind_socket2_udp_socket(
         .map_err(Error::Io)?;
     let _ = socket.set_recv_buffer_size(H3_UDP_SOCKET_BUFFER_BYTES);
     let _ = socket.set_send_buffer_size(H3_UDP_SOCKET_BUFFER_BYTES);
+    enable_udp_ecn_receive(&socket, local_addr).map_err(Error::Io)?;
     apply_udp_ecn_marking(&socket, local_addr, transport)?;
     socket.set_nonblocking(true).map_err(Error::Io)?;
     socket.bind(&local_addr.into()).map_err(Error::Io)?;
