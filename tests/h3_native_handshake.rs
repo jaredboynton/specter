@@ -3565,6 +3565,67 @@ fn native_h3_handshake_answers_path_challenge_with_path_response() {
 }
 
 #[test]
+fn native_h3_server_answers_path_challenge_with_path_response() {
+    let (_, mut client, mut server) = completed_native_server_handshake();
+    let challenge = *b"SRVPATH!";
+    let challenge_packet = client
+        .build_client_path_challenge_packet(challenge)
+        .expect("client path challenge");
+
+    let events = server
+        .open_client_h3_event_packet(challenge_packet.packet.as_ref())
+        .expect("server opens client path challenge");
+    assert_eq!(events, vec![ClientH3Event::PathChallenge(challenge)]);
+
+    let response = server
+        .build_server_path_response_packet(challenge)
+        .expect("server path response");
+    let client_events = client
+        .open_server_h3_event_packet(response.packet.as_ref())
+        .expect("client opens server path response");
+
+    assert!(
+        client_events.is_empty(),
+        "PATH_RESPONSE is transport validation state, not an H3 stream event"
+    );
+    assert!(client.is_client_path_challenge_validated(&challenge));
+}
+
+#[test]
+fn native_h3_server_path_migration_validates_only_matching_peer_address() {
+    let (_, mut client, mut server) = completed_native_server_handshake();
+    let migrated_peer = SocketAddr::from(([198, 51, 100, 77], 4433));
+    let wrong_peer = SocketAddr::from(([198, 51, 100, 78], 4433));
+    let challenge = *b"SRVMIGR!";
+
+    let challenge_packet = server
+        .build_server_path_challenge_packet_for_address(migrated_peer, challenge)
+        .expect("server path challenge for migrated peer");
+    assert!(!server.is_server_path_address_validated(&migrated_peer));
+
+    let client_events = client
+        .open_server_h3_event_packet(challenge_packet.packet.as_ref())
+        .expect("client opens server path challenge");
+    assert_eq!(client_events, vec![ServerH3Event::PathChallenge(challenge)]);
+    let response = client
+        .build_client_path_response_packet(challenge)
+        .expect("client path response");
+
+    server
+        .open_client_h3_event_packet_from(response.packet.as_ref(), wrong_peer)
+        .expect("wrong-peer response should parse but not validate migrated path");
+    assert!(
+        !server.is_server_path_address_validated(&migrated_peer),
+        "PATH_RESPONSE from the wrong peer address must not validate migration"
+    );
+
+    server
+        .open_client_h3_event_packet_from(response.packet.as_ref(), migrated_peer)
+        .expect("matching-peer response should validate migrated path");
+    assert!(server.is_server_path_address_validated(&migrated_peer));
+}
+
+#[test]
 fn native_h3_client_path_challenge_validates_only_matching_path_response() {
     let read_secret = Bytes::from_static(&[0x9a; 32]);
     let write_secret = Bytes::from_static(&[0x9b; 32]);
