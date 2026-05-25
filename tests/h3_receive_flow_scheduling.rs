@@ -531,6 +531,29 @@ fn native_h3_threads_socket_received_ecn_marks_into_ack_ecn_generation() {
 }
 
 #[test]
+fn native_h3_driver_schedules_pmtu_probes_after_handshake() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let drive_loop = driver
+        .split("async fn drive_loop")
+        .nth(1)
+        .expect("driver must have drive_loop")
+        .split("async fn send_preface")
+        .next()
+        .expect("drive_loop section");
+
+    assert!(
+        drive_loop.contains("send_client_pmtu_probe_if_available().await?"),
+        "native H3 driver must schedule PMTU probes once application keys are available"
+    );
+    assert!(
+        driver.contains("build_client_pmtu_probe_packet")
+            && driver.contains("client_pmtu_pending_probe_size"),
+        "native H3 driver must use the handshake PMTU policy rather than ad-hoc packet sizing"
+    );
+}
+
+#[test]
 fn native_h3_driver_propagates_tls_handshake_status_to_handle() {
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
