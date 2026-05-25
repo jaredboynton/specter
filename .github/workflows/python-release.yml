@@ -12,6 +12,11 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  SCCACHE_GHA_ENABLED: "true"
+
 jobs:
   macos:
     runs-on: macos-14
@@ -23,6 +28,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: python-macos-${{ matrix.target }}
+          cache-on-failure: true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            lib/boringssl/${{ matrix.target }}
+            lib/boringssl/include
+          key: boringssl-python-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'bindings/python/Cargo.toml') }}
       - name: Install prebuilt BoringSSL for ${{ matrix.target }}
         run: |
           set -euo pipefail
@@ -32,7 +49,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist -m bindings/python/Cargo.toml
+          args: --release --locked --out dist -m bindings/python/Cargo.toml
         env:
           # Use prebuilt BoringSSL from repo
           BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.target }}/build
@@ -47,6 +64,13 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: python-sdist
+          cache-on-failure: true
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist
@@ -65,6 +89,18 @@ jobs:
         with:
           python-version: '3.11'
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: python-test-aarch64-apple-darwin
+          cache-on-failure: true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            lib/boringssl/aarch64-apple-darwin
+            lib/boringssl/include
+          key: boringssl-python-aarch64-apple-darwin-${{ hashFiles('Cargo.lock', 'bindings/python/Cargo.toml') }}
       - name: Install prebuilt BoringSSL for aarch64-apple-darwin
         run: |
           set -euo pipefail
@@ -81,7 +117,7 @@ jobs:
       - name: Build and install (maturin develop)
         run: |
           . .venv/bin/activate
-          maturin develop --release -m bindings/python/Cargo.toml
+          maturin develop --release --locked -m bindings/python/Cargo.toml
         env:
           # Use prebuilt BoringSSL from repo
           BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/aarch64-apple-darwin/build

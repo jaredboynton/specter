@@ -80,7 +80,7 @@ zigbuild target="aarch64-unknown-linux-gnu":
     echo "  CC=$CC"
     echo "  BORING_BSSL_PATH=${BORING_BSSL_PATH:-<not set, building from source>}"
     
-    cargo zigbuild --release --target "$TARGET" --lib
+    cargo zigbuild --locked --release --target "$TARGET" --lib
 
     echo ""
     echo "Build complete for $TARGET"
@@ -99,7 +99,7 @@ build:
 
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 
-    cargo build --release
+    cargo build --locked --release
 
 # =============================================================================
 # SETUP
@@ -171,7 +171,85 @@ test:
 
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 
-    cargo nextest run --all-features
+    cargo nextest run --all-features --locked
+
+# Run tests selected from changed files; conservative fallback for shared code
+[group('test')]
+test-changed base="main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [[ "$(uname -m)" == "arm64" ]]; then
+        TARGET="aarch64-apple-darwin"
+    else
+        TARGET="x86_64-apple-darwin"
+    fi
+
+    . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
+
+    BASE_INPUT="{{ base }}"
+    if git rev-parse --verify "$BASE_INPUT" >/dev/null 2>&1; then
+        BASE_REF="$(git merge-base "$BASE_INPUT" HEAD)"
+    elif git rev-parse --verify "origin/$BASE_INPUT" >/dev/null 2>&1; then
+        BASE_REF="$(git merge-base "origin/$BASE_INPUT" HEAD)"
+    else
+        echo "Base '$BASE_INPUT' not found; running full test suite."
+        cargo nextest run --all-features --locked
+        exit 0
+    fi
+
+    CHANGED_FILE="$(mktemp)"
+    trap 'rm -f "$CHANGED_FILE"' EXIT
+    {
+        git diff --name-only "$BASE_REF" HEAD
+        git diff --name-only --cached
+        git diff --name-only
+        git ls-files --others --exclude-standard
+    } | sort -u > "$CHANGED_FILE"
+
+    if [[ ! -s "$CHANGED_FILE" ]]; then
+        echo "No changed files since $BASE_REF."
+        exit 0
+    fi
+
+    echo "Changed files:"
+    sed 's/^/  /' "$CHANGED_FILE"
+
+    if grep -Eq '^(Cargo\.toml|Cargo\.lock|src/|tests/helpers/|\.config/nextest\.toml|justfile|scripts/|\.github/workflows/)' "$CHANGED_FILE"; then
+        echo "Shared infrastructure changed; running full test suite."
+        cargo nextest run --all-features --locked
+        exit 0
+    fi
+
+    RUST_CHANGED="$(grep -E '\.rs$' "$CHANGED_FILE" || true)"
+    if [[ -z "$RUST_CHANGED" ]]; then
+        echo "No Rust files changed; skipping Rust tests."
+        exit 0
+    fi
+
+    FILTER=""
+    while IFS= read -r changed; do
+        if [[ "$changed" == tests/*.rs ]]; then
+            bin="$(basename "$changed" .rs)"
+            if [[ -n "$FILTER" ]]; then
+                FILTER="$FILTER | "
+            fi
+            FILTER="${FILTER}binary(=$bin)"
+        else
+            echo "Non-integration Rust file changed; running full test suite."
+            cargo nextest run --all-features --locked
+            exit 0
+        fi
+    done <<< "$RUST_CHANGED"
+
+    if [[ -z "$FILTER" ]]; then
+        echo "No matching integration-test binaries; running full test suite."
+        cargo nextest run --all-features --locked
+        exit 0
+    fi
+
+    echo "Running selected nextest filter: $FILTER"
+    cargo nextest run --all-features --locked -E "$FILTER"
 
 # Run tests with cargo test (if nextest not available)
 [group('test')]
@@ -187,7 +265,7 @@ test-cargo:
 
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 
-    cargo test --all-features
+    cargo test --all-features --locked
 
 # =============================================================================
 # QUALITY
@@ -196,7 +274,7 @@ test-cargo:
 # Run clippy linter
 [group('quality')]
 clippy:
-    cargo clippy --all-features -- -D warnings
+    cargo clippy --all-features --locked -- -D warnings
 
 # Check formatting
 [group('quality')]
@@ -211,8 +289,18 @@ fmt:
 # Run all quality checks
 [group('quality')]
 check:
-    just fmt-check
-    just clippy
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just fmt-check &
+    pid_fmt=$!
+    just clippy &
+    pid_clippy=$!
+    status=0
+    wait "$pid_fmt" || status=$?
+    wait "$pid_clippy" || status=$?
+    if [[ "$status" -ne 0 ]]; then
+        exit "$status"
+    fi
     just test
 
 # =============================================================================

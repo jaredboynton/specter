@@ -12,6 +12,11 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  SCCACHE_GHA_ENABLED: "true"
+
 jobs:
   build:
     strategy:
@@ -43,6 +48,14 @@ jobs:
         with:
           targets: ${{ matrix.settings.target }}
 
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: node-build-${{ matrix.settings.target }}
+          cache-on-failure: true
+
       - name: Install Linux cross-compilation tools
         if: contains(matrix.settings.target, 'unknown-linux')
         uses: taiki-e/install-action@v2
@@ -52,6 +65,13 @@ jobs:
       - name: Install Zig
         if: contains(matrix.settings.target, 'unknown-linux')
         run: brew install zig
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            lib/boringssl/${{ matrix.settings.target }}
+            lib/boringssl/include
+          key: boringssl-node-${{ matrix.settings.target }}-${{ hashFiles('Cargo.lock', 'bindings/node/Cargo.toml') }}
 
       - name: Install prebuilt BoringSSL for ${{ matrix.settings.target }}
         run: |
@@ -124,6 +144,21 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: node-test-aarch64-apple-darwin
+          cache-on-failure: true
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            lib/boringssl/aarch64-apple-darwin
+            lib/boringssl/include
+          key: boringssl-node-aarch64-apple-darwin-${{ hashFiles('Cargo.lock', 'bindings/node/Cargo.toml') }}
 
       - name: Install prebuilt BoringSSL for aarch64-apple-darwin
         run: |

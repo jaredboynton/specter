@@ -27,6 +27,11 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.9
       - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-test
+          cache-on-failure: true
+
       - uses: actions/cache@v4
         with:
           path: |
@@ -40,7 +45,7 @@ jobs:
 
       - run: cargo fmt -- --check
 
-      - name: Install prebuilt BoringSSL
+      - name: Resolve host target
         run: |
           set -euo pipefail
           if [[ "$(uname -m)" == "arm64" ]]; then
@@ -48,10 +53,20 @@ jobs:
           else
             TARGET=x86_64-apple-darwin
           fi
+          echo "TARGET=$TARGET" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: lib/boringssl
+          key: boringssl-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install prebuilt BoringSSL
+        run: |
+          set -euo pipefail
           chmod +x scripts/install-boringssl-prebuilt.sh
           ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml "$TARGET"
 
-      - run: cargo nextest run --all-features --profile ci
+      - run: cargo nextest run --all-features --profile ci --locked
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -67,8 +82,8 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
-            cargo run --example fingerprint_validation
-            cargo run --example protocol_test
+            cargo run --locked --example fingerprint_validation
+            cargo run --locked --example protocol_test
 
   build-linux:
     name: Build Linux (${{ matrix.target }})
@@ -86,12 +101,27 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-linux-${{ matrix.target }}
+          cache-on-failure: true
+
       - uses: taiki-e/install-action@v2
         with:
           tool: just,cargo-zigbuild
 
       - name: Install zig
         run: brew install zig
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            lib/boringssl/${{ matrix.target }}
+            lib/boringssl/include
+          key: boringssl-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Install prebuilt BoringSSL
         run: |
@@ -119,6 +149,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-windows-${{ matrix.target }}
+          cache-on-failure: true
+
       - name: Install LLVM
         run: brew install llvm
 
@@ -129,10 +167,17 @@ jobs:
         with:
           tool: cargo-xwin
 
+      - uses: actions/cache@v4
+        with:
+          path: |
+            lib/boringssl/${{ matrix.target }}
+            lib/boringssl/include
+          key: boringssl-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
       - name: Install prebuilt BoringSSL
         run: |
           chmod +x scripts/install-boringssl-prebuilt.sh
           ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml "${{ matrix.target }}"
 
       - name: Build
-        run: cargo xwin build --release --target ${{ matrix.target }} --lib
+        run: cargo xwin build --locked --release --target ${{ matrix.target }} --lib
