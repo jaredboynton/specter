@@ -716,6 +716,10 @@ pub fn spawn_native_h3_driver(
     native_handshake_report_override: Option<NativeH3HandshakeReport>,
 ) -> Result<H3Handle> {
     let (command_tx, command_rx) = mpsc::channel(32);
+    // RFC 9220 outbound tunnel DATA bypasses the control command channel
+    // so it cannot wedge a freshly-issued streaming request or new tunnel
+    // CONNECT behind a 40-message tunnel send burst.
+    let (tunnel_outbound_tx, tunnel_outbound_rx) = mpsc::channel::<(u64, H3TunnelOutbound)>(32);
     let is_draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let body_progress_notify = Arc::new(Notify::new());
     let native_handshake_report =
@@ -734,6 +738,8 @@ pub fn spawn_native_h3_driver(
     let driver = NativeH3Driver {
         command_tx: command_tx.clone(),
         command_rx,
+        tunnel_outbound_tx,
+        tunnel_outbound_rx,
         handshake,
         fingerprint,
         socket,
@@ -744,6 +750,7 @@ pub fn spawn_native_h3_driver(
         pending_streaming_responses: HashMap::new(),
         pending_tunnels: HashMap::new(),
         pending_commands: VecDeque::new(),
+        pending_control_packets: VecDeque::new(),
         send_scheduler: H3SendScheduler::default(),
         is_draining: is_draining.clone(),
         closing_connection_close_packet: None,
