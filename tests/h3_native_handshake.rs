@@ -3614,6 +3614,72 @@ fn native_h3_client_path_challenge_validates_only_matching_path_response() {
 }
 
 #[test]
+fn native_h3_client_pmtu_probe_packet_promotes_size_only_after_ack() {
+    let read_secret = Bytes::from_static(&[0x8c; 32]);
+    let write_secret = Bytes::from_static(&[0x8d; 32]);
+    let server_keys = derive_packet_key_material_from_secret(read_secret.clone()).unwrap();
+    let client_keys = derive_packet_key_material_from_secret(write_secret.clone()).unwrap();
+    let mut fingerprint = Http3Fingerprint::chrome();
+    fingerprint.transport.initial_datagram_size = 1200;
+    fingerprint.transport.max_send_udp_payload_size = 1280;
+    fingerprint.transport.max_recv_udp_payload_size = 1280;
+    let mut handshake = NativeQuicHandshake::client(
+        "example.com",
+        &fingerprint,
+        ConnectionId::from_static(b"server-dcid"),
+        ConnectionId::from_static(b"client-scid"),
+    )
+    .unwrap();
+    handshake
+        .install_tls_secrets(&[
+            QuicTlsSecret {
+                direction: QuicSecretDirection::Read,
+                level: QuicEncryptionLevel::Application,
+                secret: read_secret,
+            },
+            QuicTlsSecret {
+                direction: QuicSecretDirection::Write,
+                level: QuicEncryptionLevel::Application,
+                secret: write_secret,
+            },
+        ])
+        .unwrap();
+
+    assert_eq!(handshake.client_pmtu_current_size(), 1200);
+    let probe = handshake
+        .build_client_pmtu_probe_packet(Instant::now())
+        .unwrap()
+        .expect("first PMTU probe should be scheduled");
+    assert!(probe.packet.len() > 1200);
+    assert!(probe.packet.len() <= 1280);
+    assert_eq!(handshake.client_pmtu_current_size(), 1200);
+    assert_eq!(handshake.client_pmtu_pending_probe_size(), Some(probe.packet.len()));
+    let opened_probe =
+        open_short_header_packet(&client_keys, &probe.packet, b"server-dcid".len(), 0).unwrap();
+    let probe_frames = decode_frames(&opened_probe.payload).unwrap();
+    assert!(probe_frames.iter().any(|frame| matches!(frame, QuicFrame::Ping)));
+    assert!(probe_frames.iter().any(|frame| matches!(frame, QuicFrame::Padding)));
+
+    let ack = protect_short_header_packet(
+        &server_keys,
+        &ConnectionId::from_static(b"client-scid"),
+        0,
+        2,
+        false,
+        &encode_frame(&QuicFrame::Ack {
+            largest_acknowledged: probe.packet_number,
+            ack_delay: 0,
+            first_ack_range: 0,
+            ranges: Vec::new(),
+        }),
+    )
+    .unwrap();
+    assert!(handshake.open_server_h3_event_packet(&ack).unwrap().is_empty());
+    assert_eq!(handshake.client_pmtu_current_size(), probe.packet.len());
+    assert_eq!(handshake.client_pmtu_pending_probe_size(), None);
+}
+
+#[test]
 fn native_h3_handshake_packetizes_client_connection_close() {
     let write_secret = Bytes::from_static(&[0x96; 32]);
     let keys = derive_packet_key_material_from_secret(write_secret.clone()).unwrap();
