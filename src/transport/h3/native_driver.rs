@@ -2118,6 +2118,7 @@ impl NativeH3Driver {
             remote_address,
             ecn_mark,
         )?;
+        self.sync_path_set_with_handshake(remote_address);
         self.promote_peer_address_if_validated(remote_address);
         self.drain_session_tickets();
         if let Some(packet) = self
@@ -2160,7 +2161,14 @@ impl NativeH3Driver {
         Ok(())
     }
 
+    fn sync_path_set_with_handshake(&mut self, remote_address: SocketAddr) {
+        if self.handshake.is_client_path_address_validated(&remote_address) {
+            self.path_set.mark_validated(remote_address);
+        }
+    }
+
     fn promote_peer_address_if_validated(&mut self, remote_address: SocketAddr) {
+        self.sync_path_set_with_handshake(remote_address);
         if remote_address != self.peer_addr
             && self
                 .handshake
@@ -3238,6 +3246,11 @@ mod tests {
         assert!(driver
             .handshake
             .is_client_path_address_validated(&migrated_peer));
+        assert_eq!(
+            driver.path_set.primary().map(|path| path.peer_addr),
+            Some(migrated_peer)
+        );
+        assert!(driver.path_set.may_send_to(migrated_peer, 1_000_000));
     }
 
     #[tokio::test]
