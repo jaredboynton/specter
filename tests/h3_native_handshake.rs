@@ -3588,7 +3588,7 @@ fn native_h3_server_answers_path_challenge_with_path_response() {
         client_events.is_empty(),
         "PATH_RESPONSE is transport validation state, not an H3 stream event"
     );
-    assert!(client.is_client_path_challenge_validated(&challenge));
+    assert!(client.is_client_path_validated(&challenge));
 }
 
 #[test]
@@ -3626,6 +3626,83 @@ fn native_h3_server_path_migration_validates_only_matching_peer_address() {
         .open_client_h3_event_packet_from(response.packet.as_ref(), migrated_peer)
         .expect("matching-peer response should validate migrated path");
     assert!(server.is_server_path_address_validated(&migrated_peer));
+}
+
+#[test]
+fn native_h3_server_path_response_packet_meets_minimum_datagram_size() {
+    let (_, _, mut server) = completed_native_server_handshake();
+    let response = server
+        .build_server_path_response_packet(*b"PATHPAD!")
+        .expect("server path response");
+    assert!(
+        response.packet.len() >= 1200,
+        "PATH_RESPONSE must pad the UDP datagram to at least 1200 bytes"
+    );
+}
+
+#[test]
+fn native_h3_server_path_challenge_packet_meets_minimum_datagram_size() {
+    let (_, _, mut server) = completed_native_server_handshake();
+    let migrated_peer = SocketAddr::from(([198, 51, 100, 77], 4433));
+    let challenge = server
+        .build_server_path_challenge_packet_for_address(migrated_peer, *b"CHALPAD!")
+        .expect("server path challenge");
+    assert!(
+        challenge.packet.len() >= 1200,
+        "PATH_CHALLENGE must pad the UDP datagram to at least 1200 bytes"
+    );
+}
+
+#[test]
+fn native_h3_server_new_connection_id_registers_inventory_for_decrypt() {
+    let (_, mut client, mut server) = completed_native_server_handshake();
+    let migration_cid = ConnectionId::from_static(b"migrate-cid");
+    let packet = server
+        .build_server_new_connection_id_packet(1, 0, migration_cid.clone(), [0x11; 16])
+        .expect("server new connection id");
+    assert!(
+        server
+            .server_local_cids_for_routing()
+            .iter()
+            .any(|cid| cid.as_bytes() == migration_cid.as_bytes())
+    );
+
+    client
+        .open_server_h3_event_packet(packet.packet.as_ref())
+        .expect("client ingests server NEW_CONNECTION_ID");
+
+    let migrated_peer = SocketAddr::from(([127, 0, 0, 1], 9443));
+    let challenge_packet = client
+        .build_client_path_challenge_packet_for_address(migrated_peer, 1, *b"MIGRDCID")
+        .expect("client path challenge with migration cid");
+    let frames = server
+        .open_client_application_packet(challenge_packet.packet.as_ref())
+        .expect("server decrypts via registered migration cid");
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, QuicFrame::PathChallenge(_))),
+        "registered migration CID must decrypt inbound client 1-RTT packets"
+    );
+}
+
+#[test]
+fn native_h3_client_new_connection_id_registers_inventory() {
+    let (_, mut client, mut server) = completed_native_server_handshake();
+    let migration_cid = ConnectionId::from_static(b"cli-migrate");
+    let packet = client
+        .build_client_new_connection_id_packet(1, 0, migration_cid.clone(), [0x22; 16])
+        .expect("client new connection id");
+    let _ = server
+        .open_client_application_packet(packet.packet.as_ref())
+        .expect("server accepts client-issued NEW_CONNECTION_ID");
+    server
+        .server_promote_peer_cid(1)
+        .expect("server promotes peer migration cid");
+    assert_eq!(
+        server.server_outbound_peer_cid().as_bytes(),
+        migration_cid.as_bytes()
+    );
 }
 
 #[test]
