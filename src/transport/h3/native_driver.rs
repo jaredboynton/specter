@@ -1058,10 +1058,11 @@ impl NativeH3Driver {
                 .max(1200)
         ];
         loop {
-            if self.state.peer_settings_received() && !self.pending_commands.is_empty() {
-                self.process_pending_commands().await?;
-            }
-            let sent_scheduled_data = self.flush_scheduled_send_work().await?;
+            let sent_scheduled_data = if self.command_rx.is_empty() {
+                self.flush_scheduled_send_work().await?
+            } else {
+                false
+            };
             self.flush_tunnel_inbound();
             self.flush_streaming_responses();
             let released_credit = H3ReleasedReceiveCredit::new(
@@ -1121,7 +1122,6 @@ impl NativeH3Driver {
                     match command {
                         Some(command) => {
                             self.handle_command(command).await?;
-                            self.drain_ready_tunnel_data_commands();
                         }
                         None => {
                             self.send_connection_close(0x00, Bytes::from_static(b"Client shutdown"))
@@ -1679,21 +1679,6 @@ impl NativeH3Driver {
             }
         }
         Ok(())
-    }
-
-    fn drain_ready_tunnel_data_commands(&mut self) {
-        while let Ok(command) = self.command_rx.try_recv() {
-            match command {
-                DriverCommand::SendTunnelData {
-                    stream_id,
-                    outbound,
-                } => self.enqueue_tunnel_data(stream_id, outbound),
-                command => {
-                    self.pending_commands.push_back(command);
-                    break;
-                }
-            }
-        }
     }
 
     async fn queue_flow_control_blocked_command(&mut self, command: DriverCommand) -> Result<()> {
