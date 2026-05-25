@@ -16,6 +16,7 @@ use tracing;
 
 use crate::error::{Error, Result};
 use crate::fingerprint::http2::Http2Settings;
+use crate::headers::Headers;
 use crate::response::Response as SpecterResponse;
 
 use super::frame::{
@@ -398,7 +399,7 @@ where
     pub async fn open_extended_connect_websocket(
         &mut self,
         uri: &Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
     ) -> Result<u32> {
         let (stream_id, _end_stream) = self
             .open_extended_connect_websocket_with_end_stream(uri, headers)
@@ -410,7 +411,7 @@ where
     pub async fn open_extended_connect_websocket_with_end_stream(
         &mut self,
         uri: &Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
     ) -> Result<(u32, bool)> {
         self.ensure_enable_connect_protocol().await?;
 
@@ -491,7 +492,7 @@ where
         authority: &str,
         scheme: &str,
         path: &str,
-        headers: &[(String, String)],
+        headers: &Headers,
     ) -> Result<Bytes> {
         if authority.is_empty() {
             return Err(Error::HttpProtocol(
@@ -579,13 +580,13 @@ where
         &mut self,
         method: Method,
         uri: &Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: Option<Bytes>,
     ) -> Result<SpecterResponse> {
         // Construct http::Request
         let mut builder = http::Request::builder().method(method).uri(uri);
 
-        for (name, value) in headers {
+        for (name, value) in headers.iter() {
             builder = builder.header(name, value);
         }
 
@@ -649,7 +650,7 @@ where
         &mut self,
         method: &Method,
         uri: &Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         end_stream: bool,
     ) -> Result<u32> {
         let max_frame_size = self.peer_settings.max_frame_size as usize;
@@ -2082,7 +2083,7 @@ where
         &mut self,
         method: http::Method,
         uri: &http::Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: Option<Bytes>,
     ) -> Result<u32> {
         let max_frame_size = self.peer_settings.max_frame_size as usize;
