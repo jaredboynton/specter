@@ -1031,6 +1031,40 @@ impl From<Vec<(String, String)>> for Headers {
     }
 }
 
+impl From<&Headers> for Headers {
+    fn from(value: &Headers) -> Self {
+        value.clone()
+    }
+}
+
+impl From<&[(String, String)]> for Headers {
+    fn from(value: &[(String, String)]) -> Self {
+        let mut builder = HeadersBuilder::with_capacity(value.len(), value.len() * 32);
+        for (name, value) in value {
+            builder.push(name.as_bytes(), value.as_bytes());
+        }
+        builder.build()
+    }
+}
+
+impl<const N: usize> From<&[(String, String); N]> for Headers {
+    fn from(value: &[(String, String); N]) -> Self {
+        Headers::from(value.as_slice())
+    }
+}
+
+impl PartialEq<Vec<(String, String)>> for Headers {
+    fn eq(&self, other: &Vec<(String, String)>) -> bool {
+        self.to_vec() == *other
+    }
+}
+
+impl PartialEq<Headers> for Vec<(String, String)> {
+    fn eq(&self, other: &Headers) -> bool {
+        *self == other.to_vec()
+    }
+}
+
 impl From<Vec<(&'static str, &'static str)>> for Headers {
     fn from(value: Vec<(&'static str, &'static str)>) -> Self {
         Headers::from_static(value)
