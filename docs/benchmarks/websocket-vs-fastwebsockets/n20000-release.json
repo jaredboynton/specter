@@ -1,0 +1,38 @@
+{
+  "benchmark": "websocket_vs_fastwebsockets",
+  "fastwebsockets_version": "0.10.0",
+  "tokio_tungstenite_version": "0.24",
+  "workload": {
+    "protocol": "h1_rfc6455",
+    "messages": 20000,
+    "warmup_messages": 2000,
+    "payload_bytes": 1024,
+    "echo_server": "fastwebsockets::WebSocket<Role::Server>"
+  },
+  "rows": [
+    {
+      "client": "fastwebsockets",
+      "elapsed_ns": 398651083,
+      "messages_per_sec": 50169.18516686934,
+      "bytes_per_sec": 51373245.610874206
+    },
+    {
+      "client": "tokio-tungstenite",
+      "elapsed_ns": 387061541,
+      "messages_per_sec": 51671.36974737565,
+      "bytes_per_sec": 52911482.62131266
+    },
+    {
+      "client": "specter",
+      "elapsed_ns": 389713250,
+      "messages_per_sec": 51319.78448256506,
+      "bytes_per_sec": 52551459.31014662
+    }
+  ],
+  "comparison": {
+    "specter_vs_fastwebsockets_messages_per_sec_pct": 2.293438316505787,
+    "specter_vs_tungstenite_messages_per_sec_pct": -0.6804256719523936,
+    "pass_match_or_exceed": true,
+    "pass_tungstenite_match_or_exceed": false
+  }
+}
