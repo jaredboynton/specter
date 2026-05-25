@@ -791,7 +791,13 @@ fn response_from_stream_response(stream_response: StreamResponse) -> Response {
 }
 
 fn is_zero_rtt_safe_request(method: &str, body: Option<&bytes::Bytes>) -> bool {
-    matches!(method, "GET" | "HEAD" | "OPTIONS") && body.is_none_or(|body| body.is_empty())
+    match body {
+        None => crate::transport::is_zero_rtt_safe_request_parts(method, true),
+        Some(bytes) => {
+            let request_body = crate::request::RequestBody::from(bytes.clone());
+            crate::transport::is_zero_rtt_safe_request(method, &request_body)
+        }
+    }
 }
 
 fn is_idempotent_method(method: &str) -> bool {
