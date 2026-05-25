@@ -5,6 +5,10 @@ on:
     branches: [main, master]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -12,9 +16,9 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  test:
-    name: Test (macOS)
-    runs-on: macos-14
+  test-linux:
+    name: Test (Linux)
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +36,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ci-test
+          key: ci-test-linux
           cache-on-failure: true
 
       - uses: actions/cache@v4
@@ -40,7 +44,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - uses: taiki-e/install-action@v2
         with:
@@ -48,33 +52,23 @@ jobs:
 
       - run: cargo fmt -- --check
 
-      - name: Resolve host target
-        run: |
-          set -euo pipefail
-          if [[ "$(uname -m)" == "arm64" ]]; then
-            TARGET=aarch64-apple-darwin
-          else
-            TARGET=x86_64-apple-darwin
-          fi
-          echo "TARGET=$TARGET" >> "$GITHUB_ENV"
-
       - uses: actions/cache@v4
         with:
           path: lib/boringssl
-          key: boringssl-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: boringssl-x86_64-unknown-linux-gnu-${{ hashFiles('Cargo.lock') }}
 
       - name: Install prebuilt BoringSSL
         run: |
           set -euo pipefail
           chmod +x scripts/install-boringssl-prebuilt.sh
-          ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml "$TARGET"
+          ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml x86_64-unknown-linux-gnu
 
       - run: cargo nextest run --all-features --profile ci --locked
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: nextest-results
+          name: nextest-results-linux
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
 
@@ -88,14 +82,62 @@ jobs:
             cargo run --locked --example fingerprint_validation
             cargo run --locked --example protocol_test
 
+  test-macos:
+    name: Test (macOS smoke)
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-test-macos
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - uses: actions/cache@v4
+        with:
+          path: lib/boringssl
+          key: boringssl-aarch64-apple-darwin-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install prebuilt BoringSSL
+        run: |
+          set -euo pipefail
+          chmod +x scripts/install-boringssl-prebuilt.sh
+          ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml aarch64-apple-darwin
+
+      - name: Darwin smoke (transport-touching binaries + lib unit tests)
+        run: |
+          cargo nextest run --all-features --profile ci --locked \
+            -E 'kind(lib) | binary(/^(h1_|h2_|h3_|websocket_|streaming_|validation_|tls_|connect_|builder_)/)'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nextest-results-macos
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
   build-linux:
     name: Build Linux (${{ matrix.target }})
-    runs-on: macos-14
     strategy:
+      fail-fast: false
       matrix:
-        target:
-          - aarch64-unknown-linux-gnu
-          - x86_64-unknown-linux-gnu
+        include:
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -109,41 +151,41 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ci-linux-${{ matrix.target }}
+          key: ci-build-${{ matrix.target }}
           cache-on-failure: true
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just,cargo-zigbuild
-
-      - name: Install zig
-        run: brew install zig
 
       - uses: actions/cache@v4
         with:
           path: |
             lib/boringssl/${{ matrix.target }}
             lib/boringssl/include
-          key: boringssl-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          key: boringssl-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Install prebuilt BoringSSL
         run: |
+          set -euo pipefail
           chmod +x scripts/install-boringssl-prebuilt.sh
           ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml "${{ matrix.target }}"
 
       - name: Build
-        run: |
-          chmod +x scripts/zig-cc-* scripts/zig-cxx-*
-          just zigbuild ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }} --lib
 
   build-windows:
     name: Build Windows (${{ matrix.target }})
-    runs-on: macos-14
     strategy:
+      fail-fast: false
       matrix:
-        target:
-          - x86_64-pc-windows-msvc
-          - aarch64-pc-windows-msvc
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            run_test: true
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            run_test: false
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -157,30 +199,25 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ci-windows-${{ matrix.target }}
+          key: ci-build-${{ matrix.target }}
           cache-on-failure: true
-
-      - name: Install LLVM
-        run: brew install llvm
-
-      - name: Add LLVM to PATH
-        run: echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-xwin
 
       - uses: actions/cache@v4
         with:
           path: |
             lib/boringssl/${{ matrix.target }}
             lib/boringssl/include
-          key: boringssl-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          key: boringssl-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Install prebuilt BoringSSL
         run: |
+          set -euo pipefail
           chmod +x scripts/install-boringssl-prebuilt.sh
           ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml "${{ matrix.target }}"
 
       - name: Build
-        run: cargo xwin build --locked --release --target ${{ matrix.target }} --lib
+        run: cargo build --locked --release --target ${{ matrix.target }} --lib
+
+      - name: Smoke test (native arch only)
+        if: matrix.run_test
+        run: cargo test --lib --locked --target ${{ matrix.target }}
