@@ -545,9 +545,10 @@ impl H1Connection {
         &mut self,
         method: Method,
         uri: &Uri,
-        headers: &Headers,
+        headers: impl Into<Headers>,
         body: Option<Bytes>,
     ) -> Result<Response> {
+        let headers = headers.into();
         // Build and send the request
         let request_bytes = self.build_request(
             &method,
