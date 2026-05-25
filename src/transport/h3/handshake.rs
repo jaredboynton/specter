@@ -3714,11 +3714,12 @@ impl NativeQuicHandshake {
         &mut self,
         method: &http::Method,
         uri: &http::Uri,
-        headers: &Headers,
+        headers: impl Into<Headers>,
         body: Option<Bytes>,
     ) -> Result<ClientApplicationPacket> {
+        let headers = headers.into();
         let stream_id = self.next_client_bidirectional_stream_id;
-        let h3_headers = native::build_request_headers(method, uri, headers)?;
+        let h3_headers = native::build_request_headers(method, uri, &headers)?;
         let payload =
             native::encode_request_stream_with_fingerprint(&h3_headers, body, &self.fingerprint);
 
@@ -3736,10 +3737,11 @@ impl NativeQuicHandshake {
         stream_id: u64,
         method: &http::Method,
         uri: &http::Uri,
-        headers: &Headers,
+        headers: impl Into<Headers>,
         body: Option<Bytes>,
     ) -> Result<ClientApplicationPacket> {
-        let h3_headers = native::build_request_headers(method, uri, headers)?;
+        let headers = headers.into();
+        let h3_headers = native::build_request_headers(method, uri, &headers)?;
         let payload =
             native::encode_request_stream_with_fingerprint(&h3_headers, body, &self.fingerprint);
         let payload_len = payload.len() as u64;
@@ -3919,9 +3921,10 @@ impl NativeQuicHandshake {
         &mut self,
         method: &http::Method,
         uri: &http::Uri,
-        headers: &Headers,
+        headers: impl Into<Headers>,
         body: Option<Bytes>,
     ) -> Result<ClientApplicationPacket> {
+        let headers = headers.into();
         if self.client_application_keys.is_none() {
             return Err(Error::Quic(
                 "native application packet encryption is waiting for TLS application keys".into(),
@@ -3929,7 +3932,7 @@ impl NativeQuicHandshake {
         }
 
         let stream_id = self.next_client_bidirectional_stream_id;
-        let payload = self.encode_client_h3_request_payload(method, uri, headers, body)?;
+        let payload = self.encode_client_h3_request_payload(method, uri, &headers, body)?;
 
         let packet = self
             .build_client_application_stream_packet(stream_id, payload, true)?
@@ -3942,10 +3945,11 @@ impl NativeQuicHandshake {
         &mut self,
         method: &http::Method,
         uri: &http::Uri,
-        headers: &Headers,
+        headers: impl Into<Headers>,
         body: Option<Bytes>,
         fin: bool,
     ) -> Result<ClientApplicationPacket> {
+        let headers = headers.into();
         if self.client_application_keys.is_none() {
             return Err(Error::Quic(
                 "native application packet encryption is waiting for TLS application keys".into(),
@@ -3953,7 +3957,7 @@ impl NativeQuicHandshake {
         }
 
         let stream_id = self.next_client_bidirectional_stream_id;
-        let payload = self.encode_client_h3_request_payload(method, uri, headers, body)?;
+        let payload = self.encode_client_h3_request_payload(method, uri, &headers, body)?;
 
         let packet = self
             .build_client_application_stream_packet(stream_id, payload, fin)?
@@ -3988,8 +3992,9 @@ impl NativeQuicHandshake {
     pub fn build_client_h3_websocket_connect_packet(
         &mut self,
         uri: &http::Uri,
-        headers: &Headers,
+        headers: impl Into<Headers>,
     ) -> Result<ClientApplicationPacket> {
+        let headers = headers.into();
         if self.client_application_keys.is_none() {
             return Err(Error::Quic(
                 "native application packet encryption is waiting for TLS application keys".into(),
@@ -3997,7 +4002,7 @@ impl NativeQuicHandshake {
         }
 
         let stream_id = self.next_client_bidirectional_stream_id;
-        let h3_headers = native::build_websocket_connect_headers(uri, headers)?;
+        let h3_headers = native::build_websocket_connect_headers(uri, &headers)?;
         let payload =
             native::encode_request_stream_with_fingerprint(&h3_headers, None, &self.fingerprint);
 
