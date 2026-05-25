@@ -573,7 +573,6 @@ impl H3Client {
         {
             Ok(result) => result,
             Err(error) => {
-                eprintln!("temporary 0-RTT connect error: {error}");
                 tracing::debug!(
                     "H3: 0-RTT request path unavailable for {url}: {error}. Falling back to ordinary H3"
                 );

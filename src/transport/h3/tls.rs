@@ -46,6 +46,7 @@ unsafe extern "C" {
     fn SSL_early_data_accepted(ssl: *const ffi::SSL) -> c_int;
     fn SSL_session_reused(ssl: *const ffi::SSL) -> c_int;
     fn SSL_get_early_data_reason(ssl: *const ffi::SSL) -> u32;
+    fn SSL_reset_early_data_reject(ssl: *mut ffi::SSL);
     fn SSL_process_quic_post_handshake(ssl: *mut ffi::SSL) -> c_int;
     fn SSL_SESSION_early_data_capable(session: *const ffi::SSL_SESSION) -> c_int;
     fn SSL_SESSION_copy_without_early_data(session: *mut ffi::SSL_SESSION)
@@ -914,12 +915,18 @@ impl NativeQuicTlsSession {
 
     fn drive_handshake(&mut self, context: &str) -> Result<()> {
         unsafe {
-            let ret = ffi::SSL_do_handshake(self.ssl.as_ptr());
-            let err = ffi::SSL_get_error(self.ssl.as_ptr(), ret);
-            if ret != 1 && err != ffi::SSL_ERROR_WANT_READ && err != SSL_ERROR_EARLY_DATA_REJECTED {
+            loop {
+                let ret = ffi::SSL_do_handshake(self.ssl.as_ptr());
+                let err = ffi::SSL_get_error(self.ssl.as_ptr(), ret);
+                if ret == 1 || err == ffi::SSL_ERROR_WANT_READ {
+                    return Ok(());
+                }
+                if err == SSL_ERROR_EARLY_DATA_REJECTED {
+                    SSL_reset_early_data_reject(self.ssl.as_ptr());
+                    continue;
+                }
                 return Err(Error::Tls(format!("{context} failed with SSL error {err}")));
             }
-            Ok(())
         }
     }
 
