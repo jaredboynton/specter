@@ -794,8 +794,10 @@ fn native_h3_client_has_safe_zero_rtt_request_policy() {
         send_request.contains("try_send_request_with_zero_rtt"),
         "H3Client::send_request must attempt 0-RTT only for safe fresh-connection requests"
     );
+    let zero_rtt = std::fs::read_to_string("src/transport/zero_rtt.rs")
+        .expect("shared transport::zero_rtt source");
     assert!(
-        h3_client.contains("matches!(method, \"GET\" | \"HEAD\" | \"OPTIONS\")"),
+        zero_rtt.contains("matches!(method, \"GET\" | \"HEAD\" | \"OPTIONS\")"),
         "0-RTT policy must be stricter than pooled-retry idempotency and exclude unsafe PUT/DELETE replays"
     );
 }
