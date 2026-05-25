@@ -36,13 +36,9 @@ mod helpers;
 use helpers::mock_h3_server::{MockEvent, MockH3Server, TEST_RESUMPTION_TICKET_KEYS};
 
 fn capture_mock_server_session_ticket(fingerprint: &Http3Fingerprint) -> Bytes {
-    let mut client = NativeQuicTlsSession::client_with_tls_fingerprint(
-        "127.0.0.1",
-        fingerprint,
-        None,
-        false,
-    )
-    .expect("native H3 client TLS session");
+    let mut client =
+        NativeQuicTlsSession::client_with_tls_fingerprint("127.0.0.1", fingerprint, None, false)
+            .expect("native H3 client TLS session");
     let (cert_pem, key_pem) = helpers::tls::cached_cert_and_key_pem();
     let mut server = NativeQuicTlsSession::server_with_ticket_keys(
         fingerprint,
@@ -89,7 +85,10 @@ fn capture_mock_server_session_ticket(fingerprint: &Http3Fingerprint) -> Bytes {
         .der
 }
 
-fn native_h3_cache_key_for_mock_host(host: &str, fingerprint: &Http3Fingerprint) -> NativeH3SessionCacheKey {
+fn native_h3_cache_key_for_mock_host(
+    host: &str,
+    fingerprint: &Http3Fingerprint,
+) -> NativeH3SessionCacheKey {
     let mut hasher = DefaultHasher::new();
     false.hash(&mut hasher);
     0usize.hash(&mut hasher);
