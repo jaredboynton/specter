@@ -110,6 +110,8 @@ struct LocalFixtureMeasurements {
     fixture_events: Vec<FixtureEvent>,
 }
 
+const TOKIO_QUICHE_MIXED_SAMPLE_ATTEMPTS: usize = 5;
+
 #[derive(Debug, Serialize)]
 struct SuperiorityGate {
     status: &'static str,
@@ -1365,28 +1367,22 @@ async fn measure_local_native_fixture(
     for client in local_native_fixture_measurement_plan_for(selected_client)? {
         if client == "tokio_quiche_rfc9220_tunnel_mixed" {
             for _ in 0..warmups {
-                let fixture = LocalNativeH3Fixture::start(client).await?;
-                let tunnel_url = fixture.tunnel_url();
-                let _ = measure_tokio_quiche_rfc9220_tunnel_mixed_once(
-                    fixture.stream_url(),
-                    &tunnel_url,
+                let _ = measure_tokio_quiche_rfc9220_tunnel_mixed_once_with_isolated_fixture(
+                    client,
+                    &mut fixture_events,
                 )
                 .await?;
-                fixture_events.extend(fixture.events());
             }
 
             let mut measured = Vec::with_capacity(samples);
             for _ in 0..samples {
-                let fixture = LocalNativeH3Fixture::start(client).await?;
-                let tunnel_url = fixture.tunnel_url();
                 measured.push(
-                    measure_tokio_quiche_rfc9220_tunnel_mixed_once(
-                        fixture.stream_url(),
-                        &tunnel_url,
+                    measure_tokio_quiche_rfc9220_tunnel_mixed_once_with_isolated_fixture(
+                        client,
+                        &mut fixture_events,
                     )
                     .await?,
                 );
-                fixture_events.extend(fixture.events());
             }
             rows.push(tokio_quiche_rfc9220_tunnel_mixed_row_from_samples(
                 &measured,
@@ -1477,6 +1473,33 @@ async fn measure_local_native_fixture(
         rows,
         fixture_events,
     })
+}
+
+async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once_with_isolated_fixture(
+    client: &str,
+    fixture_events: &mut Vec<FixtureEvent>,
+) -> anyhow::Result<AdapterSample> {
+    let mut last_error = None;
+    for _ in 0..TOKIO_QUICHE_MIXED_SAMPLE_ATTEMPTS {
+        let fixture = LocalNativeH3Fixture::start(client).await?;
+        let tunnel_url = fixture.tunnel_url();
+        match measure_tokio_quiche_rfc9220_tunnel_mixed_once(fixture.stream_url(), &tunnel_url)
+            .await
+        {
+            Ok(sample) => {
+                fixture_events.extend(fixture.events());
+                return Ok(sample);
+            }
+            Err(error) => {
+                fixture_events.extend(fixture.events());
+                last_error = Some(error);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        anyhow::anyhow!("tokio_quiche RFC 9220 mixed sample failed without an error")
+    }))
 }
 
 struct LocalNativeH3Fixture {
@@ -3327,15 +3350,15 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
     .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 mixed body writer timed out"))?
     .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 mixed body writer dropped"))?;
 
-    for _ in 0..LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES {
-        send_tokio_quiche_outbound_frame(
-            &mut tunnel_sender,
-            OutboundFrame::Body(rfc9220_tunnel_payload(b'U'), false),
-            deadline,
-            "tokio_quiche RFC 9220 mixed tunnel",
-        )
-        .await?;
-    }
+    let expected_tunnel_bytes =
+        LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES;
+    send_tokio_quiche_outbound_frame(
+        &mut tunnel_sender,
+        OutboundFrame::Body(Bytes::from(vec![b'U'; expected_tunnel_bytes]), false),
+        deadline,
+        "tokio_quiche RFC 9220 mixed tunnel",
+    )
+    .await?;
     send_tokio_quiche_outbound_frame(
         &mut tunnel_sender,
         OutboundFrame::Body(Bytes::new(), true),
@@ -3441,8 +3464,6 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
         .ok_or_else(|| anyhow::anyhow!("tokio_quiche RFC 9220 mixed missing stream headers"))?;
     let tunnel_response_headers = tunnel_response_headers
         .ok_or_else(|| anyhow::anyhow!("tokio_quiche RFC 9220 mixed missing tunnel headers"))?;
-    let expected_tunnel_bytes =
-        LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES;
     let (stream_sample, tunnel_bytes) = tokio::join!(
         read_tokio_quiche_response_body(start, deadline, stream_response_headers),
         read_tokio_quiche_rfc9220_tunnel_mixed_slow(
