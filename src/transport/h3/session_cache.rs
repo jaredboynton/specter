@@ -140,7 +140,7 @@ impl NativeH3SessionCache {
         Self {
             inner: Arc::new(Mutex::new(NativeH3SessionCacheInner {
                 entries: HashMap::new(),
-                default_lifetime: default_lifetime.max(Duration::from_secs(1)),
+                default_lifetime,
                 max_entries: max_entries.max(1),
             })),
         }
