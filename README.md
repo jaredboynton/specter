@@ -256,7 +256,7 @@ Specter's native HTTP/3 path also has a local same-fixture comparator matrix aga
 | quiche direct | HTTP/3 client | 2.812 ms | 3.227 ms | 6.91 MiB/s |
 | tokio-quiche | HTTP/3 client | 3.483 ms | 4.198 ms | 6.20 MiB/s |
 
-That gate is explicitly for HTTP/3 request/response workloads. `quinn_transport` and `s2n_quic_transport` are separate QUIC transport-only evidence, not H3 HTTP comparator rows. Native QUIC production hardening remains active work for broader recovery soak/backoff validation, full per-address path migration, and browser ACK parity.
+That gate is explicitly for HTTP/3 request/response workloads. `quinn_transport` and `s2n_quic_transport` are separate QUIC transport-only evidence, not H3 HTTP comparator rows. Native QUIC production hardening remains active work for broader recovery soak/backoff validation and browser ACK parity.
 
 ### Local RFC 9220 WebSocket-over-H3 tunnel suite vs quiche / tokio-quiche
 

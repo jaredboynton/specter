@@ -100,9 +100,10 @@ impl MockH3Server {
         Fut: std::future::Future<Output = ()> + Send,
     {
         let mut buf = [0u8; 65535];
-        let connections = Arc::new(Mutex::new(
-            HashMap::<Vec<u8>, mpsc::Sender<(SocketAddr, Vec<u8>)>>::new(),
-        ));
+        let connections = Arc::new(Mutex::new(HashMap::<
+            Vec<u8>,
+            mpsc::Sender<(SocketAddr, Vec<u8>)>,
+        >::new()));
         let handler = Arc::new(handler);
         let socket = self.socket.clone();
         let enable_extended_connect = self.enable_extended_connect;
@@ -431,9 +432,7 @@ impl NativeMockH3Connection {
 
         self.path_runtime
             .process_inbound(remote, packet.len(), Instant::now());
-        if remote != self.path_runtime.primary_peer()
-            && self.path_runtime.is_new_address(remote)
-        {
+        if remote != self.path_runtime.primary_peer() && self.path_runtime.is_new_address(remote) {
             if self.fingerprint.transport.disable_active_migration {
                 let close = self
                     .handshake

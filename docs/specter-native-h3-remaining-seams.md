@@ -23,9 +23,7 @@ This is the current native H3 gap ledger. It is intentionally not a change log.
 
 ## Active Gaps
 
-| Priority | Gap | Current state | Next proof needed |
-|---|---|---|---|
-| P2 | Cross-protocol capacity policy | Native H3 streaming bodies and RFC9220 tunnels expose public capacity snapshots; internal byte-bounded H3 body/tunnel flow control and fair send scheduling exist. | Unified H1/H2/H3 capacity knobs and policy docs where API consumers need one cross-protocol control surface. |
+No active native H3 P0/P1/P2 gaps remain in this ledger.
 
 ## Closed Gaps / Regression Guards
 
@@ -41,7 +39,7 @@ Keep these under regression coverage; do not relist them as active gaps.
 | Retry and Version Negotiation | Retry integrity, Retry-driven Initial restart, VN-driven version selection/restart, loop guards, and no-overlap errors are implemented. |
 | PATH_CHALLENGE primitives | Client and server packetization, matching PATH_RESPONSE validation, and peer-address-bound migration validation are implemented. |
 | Post-handshake NEW_CONNECTION_ID | `NativeQuicServerHandshake::build_server_new_connection_id_packet` can issue migration CIDs after application keys, and the local same-fixture server advertises/registers a migration CID after HandshakeDone. |
-| Server-side path migration lifecycle | Server-side PATH_RESPONSE packetization, migrated-peer PATH_CHALLENGE issuance, peer-address-bound PATH_RESPONSE validation, and same-fixture peer promotion after validation are implemented. |
+| Server-side path migration lifecycle | Server CID inventory (local + peer), multi-CID inbound decrypt, padded PATH_CHALLENGE/PATH_RESPONSE, disabled-migration `CONNECTION_MIGRATION` close, client post-handshake NEW_CONNECTION_ID issuance, mock-server `QuicServerPathRuntime` promotion, and driver `QuicPathSet` validation sync are implemented with regression coverage in `tests/h3_native_path_migration.rs`, `tests/h3_native_handshake.rs`, and `src/transport/h3/path.rs::tests`. |
 | Driver anti-amplification gating | Native H3 driver records received bytes per path, promotes validated migrated paths, and routes outbound sends through RFC9000 § 8.1 budget checks for unvalidated paths. |
 | RFC9002 recovery/PTO core | Per-space RTT/PTO/loss state, congestion response, CRYPTO PTO retransmission, app-space PTO, and mock/same-fixture server wake paths are implemented. |
 | Recovery soak/backoff validation | Repeated PTO backoff/reset, packet/time-threshold loss, persistent congestion collapse, early timer-poll no-op behavior, Initial/Handshake CRYPTO PTO retransmission, and client/server app-space STREAM retransmission are covered by recovery and handshake regression tests. |
@@ -56,6 +54,7 @@ Keep these under regression coverage; do not relist them as active gaps.
 | H3 scheduling/fairness | Request-body/tunnel DATA class rotation, per-stream rotation, adaptive DATA budgets, and origin-fair slow-path dispatch are implemented. |
 | Flow control/backpressure | Streaming responses and RFC9220 tunnels release receive credit on public byte consumption; RFC9220 outbound sends use byte permits and release them on transmit. |
 | H3/RFC9220 capacity metrics | `Body::h3_capacity()` reports native H3 streaming body buffer pressure; `H3Tunnel::capacity()` reports RFC9220 inbound/outbound byte-budget pressure. |
+| Cross-protocol capacity policy | `CapacityPolicy` provides one public builder surface across H1 active connection slots, H2 local stream slots, H2/H3 streaming body queue slots, and H3 RFC9220 inbound/outbound tunnel byte budgets. |
 | RFC9220 comparator rows | Specter echo/close/mixed rows and low-level `quiche`/`tokio-quiche` echo/close/mixed rows are persisted at n=100. |
 | Transport-only adapters | `quinn_transport` and optional `s2n_quic_transport` have measured rows and are explicitly outside H3 superiority gates. |
 
@@ -89,7 +88,7 @@ Unsupported RFC9220 capability-audit rows remain explicit non-comparators: `h3_q
 
 ## Next Execution Order
 
-1. Design unified H1/H2/H3 capacity knobs only if API consumers need one cross-protocol control surface.
+No active native H3 P0/P1/P2 execution items remain in this ledger.
 
 ## Validation Commands
 

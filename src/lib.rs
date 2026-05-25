@@ -45,7 +45,9 @@ pub use websocket::{
 pub use transport::connector::{AlpnProtocol, BoringConnector, MaybeHttpsStream};
 pub use transport::dns::{DnsConfig, Resolve, ResolveFuture};
 pub use transport::h1::H1Connection;
-pub use transport::h1_h2::{Client, ClientBuilder, RequestBuilder, WebSocketH3Builder};
+pub use transport::h1_h2::{
+    CapacityPolicy, Client, ClientBuilder, RequestBuilder, WebSocketH3Builder,
+};
 pub use transport::h2::{H2ClientBuilder, H2Connection, H2PooledConnection, PseudoHeaderOrder};
 pub use transport::h3::{H3Backend, H3Client, H3TransportConfig, H3Tunnel, H3TunnelEvent};
 pub use transport::session::SessionCache;

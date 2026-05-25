@@ -2162,7 +2162,10 @@ impl NativeH3Driver {
     }
 
     fn sync_path_set_with_handshake(&mut self, remote_address: SocketAddr) {
-        if self.handshake.is_client_path_address_validated(&remote_address) {
+        if self
+            .handshake
+            .is_client_path_address_validated(&remote_address)
+        {
             self.path_set.mark_validated(remote_address);
         }
     }

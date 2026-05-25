@@ -3660,12 +3660,10 @@ fn native_h3_server_new_connection_id_registers_inventory_for_decrypt() {
     let packet = server
         .build_server_new_connection_id_packet(1, 0, migration_cid.clone(), [0x11; 16])
         .expect("server new connection id");
-    assert!(
-        server
-            .server_local_cids_for_routing()
-            .iter()
-            .any(|cid| cid.as_bytes() == migration_cid.as_bytes())
-    );
+    assert!(server
+        .server_local_cids_for_routing()
+        .iter()
+        .any(|cid| cid.as_bytes() == migration_cid.as_bytes()));
 
     client
         .open_server_h3_event_packet(packet.packet.as_ref())

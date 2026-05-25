@@ -881,11 +881,8 @@ impl NativeQuicServerHandshake {
         server_source_cid: ConnectionId,
     ) -> Result<Self> {
         let initial_keys = derive_initial_key_material(client_destination_cid.as_bytes())?;
-        let cid_inventory = new_server_cid_inventory(
-            fingerprint,
-            &server_source_cid,
-            &client_source_cid,
-        );
+        let cid_inventory =
+            new_server_cid_inventory(fingerprint, &server_source_cid, &client_source_cid);
         Ok(Self {
             tls: NativeQuicTlsSession::server_with_connection_ids(
                 fingerprint,
@@ -960,11 +957,8 @@ impl NativeQuicServerHandshake {
         ticket_keys: &[u8; crate::transport::h3::tls::NATIVE_H3_TICKET_KEY_LEN],
     ) -> Result<Self> {
         let initial_keys = derive_initial_key_material(client_destination_cid.as_bytes())?;
-        let cid_inventory = new_server_cid_inventory(
-            fingerprint,
-            &server_source_cid,
-            &client_source_cid,
-        );
+        let cid_inventory =
+            new_server_cid_inventory(fingerprint, &server_source_cid, &client_source_cid);
         Ok(Self {
             tls: NativeQuicTlsSession::server_with_connection_ids_and_ticket_keys(
                 fingerprint,
@@ -1042,11 +1036,8 @@ impl NativeQuicServerHandshake {
         transport_retry_source_cid: Option<ConnectionId>,
     ) -> Result<Self> {
         let initial_keys = derive_initial_key_material(client_destination_cid.as_bytes())?;
-        let cid_inventory = new_server_cid_inventory(
-            fingerprint,
-            &server_source_cid,
-            &client_source_cid,
-        );
+        let cid_inventory =
+            new_server_cid_inventory(fingerprint, &server_source_cid, &client_source_cid);
         Ok(Self {
             tls: NativeQuicTlsSession::server_with_transport_parameter_connection_ids(
                 fingerprint,
@@ -1584,12 +1575,10 @@ impl NativeQuicServerHandshake {
             ));
         };
         let now = Instant::now();
-        let destination_cid_len = match_local_connection_id(
-            packet,
-            self.cid_inventory.unretired_locals(),
-        )
-        .map(|(_, len)| len)
-        .unwrap_or_else(|| self.server_source_cid.as_bytes().len());
+        let destination_cid_len =
+            match_local_connection_id(packet, self.cid_inventory.unretired_locals())
+                .map(|(_, len)| len)
+                .unwrap_or_else(|| self.server_source_cid.as_bytes().len());
         let opened = try_open_one_rtt_packet(
             client_application_keys,
             self.client_application_next_keys.as_ref(),
@@ -4886,8 +4875,7 @@ impl NativeQuicHandshake {
         self.client_application_sent_streams.clear();
         self.client_application_recovery_lost_packets.clear();
         self.client_path_validator = QuicPathValidator::default();
-        self.client_cid_inventory =
-            new_client_cid_inventory(&self.fingerprint, &self.source_cid);
+        self.client_cid_inventory = new_client_cid_inventory(&self.fingerprint, &self.source_cid);
         self.client_pmtu_probe = QuicPmtuProbePolicy::from_transport(&self.fingerprint.transport);
         self.recovery = recovery_state_from_transport(&self.fingerprint.transport);
         self.next_client_initial_packet_number = 1;

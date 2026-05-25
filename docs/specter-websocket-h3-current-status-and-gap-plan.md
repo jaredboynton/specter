@@ -11,12 +11,12 @@ This file is the current cross-protocol capability and gap plan for requests, st
 
 | Surface | Status | Multiplexing | Fingerprinting/control | Proof | Active gaps |
 |---|---|---|---|---|---|
-| H1 requests/streaming | Production proof exists against reqwest. | No protocol multiplexing; use connection pooling. | Header order/casing, connection reuse, TLS fingerprinting, request pacing. | `docs/benchmarks/2026-05-24-streaming/` | Public capacity knobs can be unified with H2/H3. |
-| H1 RFC6455 WebSocket / WSS | Local and live proof exists. | One WebSocket message stream per TCP/TLS connection; scale by pooling/sharding connections. | RFC6455 mask/cache behavior, TLS fingerprinting, frame write/read policy. | `docs/benchmarks/websocket-vs-fastwebsockets/2026-05-24-final.json`, `docs/benchmarks/codex-ws-streaming/n50-postfix.json` | Public frame/streaming reader-writer APIs, split contract, cork/writev policy, permessage-deflate if needed. |
+| H1 requests/streaming | Production proof exists against reqwest. | No protocol multiplexing; use connection pooling. | Header order/casing, connection reuse, TLS fingerprinting, request pacing, and `CapacityPolicy` H1 slots. | `docs/benchmarks/2026-05-24-streaming/` | None active. |
+| H1 RFC6455 WebSocket / WSS | Local and live proof exists. | One WebSocket message stream per TCP/TLS connection; scale by pooling/sharding connections. | RFC6455 mask/cache behavior, TLS fingerprinting, frame write/read policy. | `docs/benchmarks/websocket-vs-fastwebsockets/2026-05-24-final.json`, `docs/benchmarks/codex-ws-streaming/n50-postfix.json` | Frame-level receive helpers, cork/writev policy, prepared-message/broadcast APIs, and permessage-deflate if needed. |
 | H2 requests/streaming | Production proof exists against reqwest. | Yes, stream multiplexing over one TCP/TLS connection. | Custom H2 stack controls pseudo-header order, HPACK, SETTINGS, flow-control cadence, priority behavior, TLS. | `docs/benchmarks/2026-05-24-streaming/` | Add raw `h2`/`hyper` comparator rows if transport-overhead isolation is needed. |
 | H2 WebSocket (RFC8441) | Implemented as raw byte tunnel. | Yes, Extended CONNECT stream multiplexing when peer enables `SETTINGS_ENABLE_CONNECT_PROTOCOL`. | Custom H2 behavior plus tunnel pacing/backpressure. | README/API docs and RFC8441 tests. | Higher-level ergonomics if callers need RFC6455 framing over the tunnel. |
-| H3 HTTP | Native runtime proof exists. | Yes, QUIC stream multiplexing. | Native QUIC/H3 controls ACK cadence, transport params, H3 settings, QPACK, flow control, scheduling, packet sizing, TLS/0-RTT policy. | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json` | Unified capacity policy if callers need it. |
-| H3 WebSocket (RFC9220) | Implemented as raw byte tunnel. | Yes, Extended CONNECT over H3/QUIC streams. | Native QUIC/H3 controls plus byte-bounded tunnel backpressure, public tunnel capacity snapshots, and fair tunnel/response scheduling. | Same artifact has echo/close/mixed rows and the full-suite superiority gate. | Connection-amortized comparator parity and unified cross-protocol capacity policy if callers need it. |
+| H3 HTTP | Native runtime proof exists. | Yes, QUIC stream multiplexing. | Native QUIC/H3 controls ACK cadence, transport params, H3 settings, QPACK, flow control, scheduling, packet sizing, TLS/0-RTT policy, and `CapacityPolicy` body slots. | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json` | None active. |
+| H3 WebSocket (RFC9220) | Implemented as raw byte tunnel. | Yes, Extended CONNECT over H3/QUIC streams. | Native QUIC/H3 controls plus byte-bounded tunnel backpressure, public tunnel capacity snapshots, fair tunnel/response scheduling, and `CapacityPolicy` tunnel budgets. | Same artifact has echo/close/mixed rows and the full-suite superiority gate. | Connection-amortized comparator parity only if future benchmark methodology requires it. |
 | QUIC transport baselines | Measured comparator-only rows exist. | QUIC stream multiplexing, but not HTTP/H3. | Lower-layer transport behavior only. | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-quic-transport-local.json` and `2026-05-24-s2n-quic-transport-local.json` | Not an H3 production gap; keep out of H3 gates. |
 
 ## Runtime / Comparator Boundary
@@ -38,8 +38,7 @@ This file is the current cross-protocol capability and gap plan for requests, st
 
 | Priority | Gap | Scope | Next action |
 |---|---|---|---|
-| P2 | Cross-protocol capacity policy | Requests, streaming, WebSockets, tunnels. | Native H3/RFC9220 capacity snapshots exist; design unified max-pending policies across H1/H2/H3 only where callers need one shared control surface. |
-| P3 | WebSocket ergonomics | H1 RFC6455 and RFC8441/RFC9220 wrappers. | Add frame-level receive, streaming reader/writer, split contracts, cork/writev policy, prepared-message/broadcast APIs, and optional permessage-deflate only if product use cases require them. |
+| P3 | WebSocket ergonomics | H1 RFC6455 and RFC8441/RFC9220 wrappers. | Add frame-level receive helpers, cork/writev policy, prepared-message/broadcast APIs, and optional permessage-deflate only if product use cases require them. |
 
 ## Not Active Gaps Anymore
 
@@ -70,6 +69,8 @@ This file is the current cross-protocol capability and gap plan for requests, st
 | RFC9220 backpressure | Outbound tunnel sends are byte-budgeted and inbound tunnel delivery is guarded by receive-side byte permits. |
 | H3 receive flow control | Public body/tunnel byte consumption drives absolute MAX_DATA/MAX_STREAM_DATA credit. |
 | H3/RFC9220 capacity metrics | `Body::h3_capacity()` reports native H3 streaming body buffer pressure; `H3Tunnel::capacity()` reports RFC9220 inbound/outbound byte-budget pressure. |
+| Cross-protocol capacity policy | `CapacityPolicy` applies one public builder policy across H1 active connection slots, H2 local stream slots, H2/H3 streaming body queue slots, and H3 RFC9220 inbound/outbound tunnel byte budgets. |
+| H1 WebSocket split contract | `WebSocket::split()` returns public `WebSocketReader` / `WebSocketWriter` halves so callers can read and write concurrently without wrapping the connection in a mutex. |
 
 ## Comparator / Proof Status
 
@@ -83,4 +84,4 @@ This file is the current cross-protocol capability and gap plan for requests, st
 
 ## Recommended Next Work
 
-1. Decide whether unified cross-protocol capacity policy and WebSocket ergonomics are product requirements before adding more API surface.
+1. Decide whether WebSocket ergonomics are product requirements before adding more API surface.

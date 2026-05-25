@@ -376,7 +376,9 @@ fn capture_ordered_transport_parameters(
         RawQuicTransportParameter::varint(TP_MAX_ACK_DELAY, params.max_ack_delay_ms),
     ];
     if params.disable_active_migration {
-        ordered.push(RawQuicTransportParameter::empty(TP_DISABLE_ACTIVE_MIGRATION));
+        ordered.push(RawQuicTransportParameter::empty(
+            TP_DISABLE_ACTIVE_MIGRATION,
+        ));
     }
     ordered.push(RawQuicTransportParameter::varint(
         TP_ACTIVE_CONNECTION_ID_LIMIT,

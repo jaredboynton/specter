@@ -1,5 +1,7 @@
 use specter::fingerprint::Http3Fingerprint;
-use specter::transport::h3::handshake::{NativeQuicHandshake, NativeQuicServerHandshake, ServerH3Event};
+use specter::transport::h3::handshake::{
+    NativeQuicHandshake, NativeQuicServerHandshake, ServerH3Event,
+};
 use specter::transport::h3::path::QuicPathSet;
 use specter::transport::h3::quic::ConnectionId;
 use std::net::SocketAddr;
