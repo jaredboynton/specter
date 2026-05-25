@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::headers::Headers;
+use crate::url::Url;
 use bytes::{Bytes, BytesMut};
 use http::StatusCode;
 use http_body::{Body as HttpBody, Frame, SizeHint};
@@ -10,7 +11,6 @@ use std::future::Future;
 use std::io::Read;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use crate::url::Url;
 
 /// Public response body implementing [`http_body::Body`].
 ///

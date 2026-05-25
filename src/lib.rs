@@ -15,13 +15,13 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // Core modules
 pub mod auth;
 pub mod cache;
-pub mod url;
 pub mod cookie;
 pub mod error;
 pub mod headers;
 pub mod request;
 pub mod response;
 pub mod timeouts;
+pub mod url;
 pub mod version;
 pub mod websocket;
 
@@ -42,9 +42,9 @@ pub use headers::Headers;
 pub use headers::HeadersBuilder;
 pub use headers::OrderedHeaders;
 pub use request::{IntoUrl, RedirectPolicy, Request, RequestBody, RequestBodyStream};
-pub use url::Url;
 pub use response::{Body, Response};
 pub use timeouts::{recv_with_idle_timeout, Timeouts};
+pub use url::Url;
 pub use version::HttpVersion;
 pub use websocket::{
     CloseCode, CloseFrame, Message, PreparedMessage, WebSocket, WebSocketBuilder, WebSocketConfig,

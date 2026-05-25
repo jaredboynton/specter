@@ -7,8 +7,8 @@ use std::fmt;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use chrono::{DateTime, TimeZone, Utc};
 use crate::url::Url;
+use chrono::{DateTime, TimeZone, Utc};
 
 use crate::error::{Error, Result};
 use crate::headers::Headers;

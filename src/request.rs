@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::headers::Headers;
+use crate::url::Url;
 use crate::version::HttpVersion;
 use bytes::Bytes;
 use futures_core::Stream;
@@ -9,7 +10,6 @@ use http::Method;
 use std::fmt;
 use std::pin::Pin;
 use std::time::Duration;
-use crate::url::Url;
 
 /// Convert common URL inputs into a `Url`.
 pub trait IntoUrl {

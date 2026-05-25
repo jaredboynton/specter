@@ -1052,12 +1052,7 @@ impl Headers {
         // `with_mut` takes a mutable borrow of self for the whole closure.
         let entries: Vec<(Bytes, Bytes)> = other
             .iter_bytes()
-            .map(|(name, value)| {
-                (
-                    Bytes::copy_from_slice(name),
-                    Bytes::copy_from_slice(value),
-                )
-            })
+            .map(|(name, value)| (Bytes::copy_from_slice(name), Bytes::copy_from_slice(value)))
             .collect();
         self.with_mut(|buf, spans| {
             for (name, value) in &entries {
