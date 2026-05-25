@@ -9,7 +9,7 @@ use http::Method;
 use std::fmt;
 use std::pin::Pin;
 use std::time::Duration;
-use url::Url;
+use crate::url::Url;
 
 /// Convert common URL inputs into a `Url`.
 pub trait IntoUrl {

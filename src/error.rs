@@ -34,7 +34,7 @@ pub enum Error {
 
     /// URL parsing error.
     #[error("URL parse error: {0}")]
-    UrlParse(#[from] url::ParseError),
+    UrlParse(String),
 
     /// JSON serialization/deserialization error.
     #[error("JSON error: {0}")]
@@ -150,5 +150,11 @@ impl Error {
     /// Create a QUIC error.
     pub fn quic(message: impl Into<String>) -> Self {
         Self::Quic(message.into())
+    }
+}
+
+impl From<crate::url::ParseError> for Error {
+    fn from(err: crate::url::ParseError) -> Self {
+        Self::UrlParse(err.to_string())
     }
 }

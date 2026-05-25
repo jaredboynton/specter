@@ -10,7 +10,7 @@ use std::future::Future;
 use std::io::Read;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use url::Url;
+use crate::url::Url;
 
 /// Public response body implementing [`http_body::Body`].
 ///
