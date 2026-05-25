@@ -26,8 +26,6 @@ async fn test_http11_basic_request() {
     let url = server.url();
     let _handle = server.start_with_request_limit(1);
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
 
@@ -43,8 +41,6 @@ async fn test_http11_connection_reuse() {
     let server = MockHttpServer::new().await.unwrap();
     let url = server.url();
     let _handle = server.start_with_request_limit(3);
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
 
@@ -78,8 +74,6 @@ async fn test_204_no_content_has_no_body() {
         let _ = stream.shutdown().await; // Signal EOF to client
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
 
@@ -106,8 +100,6 @@ async fn test_304_not_modified_has_no_body() {
         let _ = stream.shutdown().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
 
@@ -131,8 +123,6 @@ async fn test_chunked_transfer_encoding() {
         let _ = stream.write_all(response).await;
         let _ = stream.shutdown().await;
     });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
@@ -163,8 +153,6 @@ async fn test_chunked_case_insensitive() {
         let _ = stream.shutdown().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
 
@@ -193,8 +181,6 @@ async fn test_transfer_encoding_overrides_content_length() {
         let _ = stream.write_all(response).await;
         let _ = stream.shutdown().await;
     });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
@@ -225,8 +211,6 @@ async fn test_chunked_with_trailers() {
         let _ = stream.shutdown().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
 
@@ -253,8 +237,6 @@ async fn test_chunked_multiple_chunks() {
         let _ = stream.write_all(response).await;
         let _ = stream.shutdown().await;
     });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
@@ -284,8 +266,6 @@ async fn test_content_length_exact() {
         let _ = stream.shutdown().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
 
@@ -313,8 +293,6 @@ async fn test_content_length_zero() {
         let _ = stream.shutdown().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
 
@@ -340,8 +318,6 @@ async fn test_1xx_responses_skipped() {
         let _ = stream.write_all(response).await;
         let _ = stream.shutdown().await;
     });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
@@ -373,8 +349,6 @@ async fn test_close_delimited_body() {
         let _ = stream.write_all(response).await;
         let _ = stream.shutdown().await; // Signal EOF - this is what ends the body
     });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
     let resp = client.get(url.as_str()).send().await.unwrap();
