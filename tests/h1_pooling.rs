@@ -6,7 +6,7 @@ use std::sync::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tokio::time::{timeout, Duration};
 
 mod helpers;
@@ -58,11 +58,6 @@ async fn test_h1_connection_expiration() {
         .expect("Request 1 failed");
     assert_eq!(resp1.status().as_u16(), 200);
 
-    // Wait longer than connection pool idle timeout (30s default)
-    // For testing, we'll just verify the connection pool works
-    // In a real scenario, we'd need to configure a shorter timeout
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     // Request 2 - should still work (connection may or may not be reused depending on timing)
     let resp2 = client
         .get(url.as_str())
@@ -102,6 +97,7 @@ struct PoolLog {
 struct PoolFixture {
     url: String,
     logs: Arc<Mutex<Vec<PoolLog>>>,
+    abort_release: watch::Sender<bool>,
 }
 
 impl PoolFixture {
@@ -110,15 +106,21 @@ impl PoolFixture {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let logs = Arc::new(Mutex::new(Vec::new()));
         let next_id = Arc::new(AtomicUsize::new(1));
+        let (abort_release, abort_release_rx) = watch::channel(false);
         let logs_for_task = logs.clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let id = next_id.fetch_add(1, Ordering::SeqCst);
                 let logs = logs_for_task.clone();
-                tokio::spawn(handle_pool_connection(id, stream, logs));
+                let abort_release = abort_release_rx.clone();
+                tokio::spawn(handle_pool_connection(id, stream, logs, abort_release));
             }
         });
-        Self { url, logs }
+        Self {
+            url,
+            logs,
+            abort_release,
+        }
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -128,9 +130,18 @@ impl PoolFixture {
     async fn logs(&self) -> Vec<PoolLog> {
         self.logs.lock().await.clone()
     }
+
+    fn release_abort_tail(&self) {
+        let _ = self.abort_release.send(true);
+    }
 }
 
-async fn handle_pool_connection(id: usize, mut stream: TcpStream, logs: Arc<Mutex<Vec<PoolLog>>>) {
+async fn handle_pool_connection(
+    id: usize,
+    mut stream: TcpStream,
+    logs: Arc<Mutex<Vec<PoolLog>>>,
+    mut abort_release: watch::Receiver<bool>,
+) {
     let mut buffer = Vec::new();
     loop {
         let mut read_buf = [0u8; 1024];
@@ -178,7 +189,11 @@ async fn handle_pool_connection(id: usize, mut stream: TcpStream, logs: Arc<Mute
                     .await
                     .unwrap();
                 stream.flush().await.unwrap();
-                tokio::time::sleep(Duration::from_millis(150)).await;
+                while !*abort_release.borrow_and_update() {
+                    if abort_release.changed().await.is_err() {
+                        return;
+                    }
+                }
                 let _ = stream.write_all(b"-second").await;
                 let _ = stream.flush().await;
             }
@@ -216,7 +231,6 @@ async fn h1_reuses_connection_after_stream_drain() {
         .await
         .unwrap();
     assert_eq!(drain(response).await, b"hello");
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     let response = client
         .get(fixture.endpoint("/ok"))
@@ -291,6 +305,7 @@ async fn h1_discards_connection_after_aborted_stream() {
         Bytes::from_static(b"first")
     );
     drop(response);
+    fixture.release_abort_tail();
 
     let response = client
         .get(fixture.endpoint("/ok"))
