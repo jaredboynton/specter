@@ -494,6 +494,43 @@ fn native_h3_driver_decays_send_window_on_ack_ecn_congestion() {
 }
 
 #[test]
+fn native_h3_threads_socket_received_ecn_marks_into_ack_ecn_generation() {
+    let connection =
+        std::fs::read_to_string("src/transport/h3/connection.rs").expect("connection source");
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let handshake =
+        std::fs::read_to_string("src/transport/h3/handshake.rs").expect("handshake source");
+    let udp_ecn = std::fs::read_to_string("src/transport/h3/udp_ecn.rs")
+        .expect("native UDP ECN helper source");
+
+    assert!(
+        connection.contains("enable_udp_ecn_receive")
+            && connection.contains("recv_from_with_ecn")
+            && connection.contains("process_server_datagram_with_ecn"),
+        "native H3 connection setup must enable socket-level ECN receive metadata and pass marks into handshake ACK tracking"
+    );
+    assert!(
+        driver.contains("recv_from_with_ecn")
+            && driver.contains("open_server_h3_event_packet_with_ecn"),
+        "native H3 driver must keep ECN marks attached to application datagrams after the handshake"
+    );
+    assert!(
+        handshake.contains("observe_packet_with_ecn")
+            && handshake.contains("observe_ecn_at")
+            && handshake.contains("QuicEcnMark"),
+        "native QUIC handshake must feed received ECN marks into QuicAckTracker so ACK_ECN counters are generated"
+    );
+    assert!(
+        udp_ecn.contains("set_recv_tos_v4")
+            && udp_ecn.contains("set_recv_tclass_v6")
+            && udp_ecn.contains("IP_TOS")
+            && udp_ecn.contains("IPV6_TCLASS"),
+        "native UDP sockets must request and parse IPv4/IPv6 traffic-class ancillary data"
+    );
+}
+
+#[test]
 fn native_h3_driver_propagates_tls_handshake_status_to_handle() {
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
