@@ -2,7 +2,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::time::timeout as tokio_timeout;
 use url::Url;
 
@@ -31,6 +31,28 @@ pub struct WebSocket {
     mask_rng: MaskRng,
     close_sent: bool,
     close_received: bool,
+}
+
+#[derive(Debug)]
+pub struct WebSocketReader {
+    stream: ReadHalf<MaybeHttpsStream>,
+    url: Url,
+    read_buffer: BytesMut,
+    frame_config: FrameConfig,
+    read_timeout: Option<Duration>,
+    decoder: FrameDecoder,
+    close_received: bool,
+}
+
+#[derive(Debug)]
+pub struct WebSocketWriter {
+    stream: WriteHalf<MaybeHttpsStream>,
+    url: Url,
+    write_buffer: BytesMut,
+    frame_config: FrameConfig,
+    write_timeout: Option<Duration>,
+    mask_rng: MaskRng,
+    close_sent: bool,
 }
 
 impl WebSocket {
@@ -69,6 +91,29 @@ impl WebSocket {
 
     pub fn protocol(&self) -> Option<&str> {
         self.protocol.as_deref()
+    }
+
+    pub fn split(self) -> (WebSocketReader, WebSocketWriter) {
+        let (read_stream, write_stream) = tokio::io::split(self.stream);
+        let reader = WebSocketReader {
+            stream: read_stream,
+            url: self.url.clone(),
+            read_buffer: self.read_buffer,
+            frame_config: self.frame_config,
+            read_timeout: self.read_timeout,
+            decoder: self.decoder,
+            close_received: self.close_received,
+        };
+        let writer = WebSocketWriter {
+            stream: write_stream,
+            url: self.url,
+            write_buffer: self.write_buffer,
+            frame_config: self.frame_config,
+            write_timeout: self.write_timeout,
+            mask_rng: self.mask_rng,
+            close_sent: self.close_sent,
+        };
+        (reader, writer)
     }
 
     pub async fn send(&mut self, msg: Message) -> WebSocketResult<()> {
@@ -240,5 +285,134 @@ impl WebSocket {
         };
 
         result.map_err(|error| WebSocketError::io(url, error))
+    }
+}
+
+impl WebSocketReader {
+    pub async fn next(&mut self) -> WebSocketResult<Option<Message>> {
+        loop {
+            let frame = decode_frame(&self.url, &mut self.read_buffer, self.frame_config)?;
+            if let Some(frame) = frame {
+                let message = self
+                    .decoder
+                    .decode_message(&self.url, frame, self.frame_config)?;
+                match message {
+                    Some(Message::Close(_)) => {
+                        self.close_received = true;
+                        return Ok(None);
+                    }
+                    Some(other) => return Ok(Some(other)),
+                    None => {}
+                }
+            } else {
+                self.read_buffer.reserve(READ_CHUNK_SIZE);
+                let n = WebSocket::io_with_timeout(
+                    &self.url,
+                    self.read_timeout,
+                    "read",
+                    self.stream.read_buf(&mut self.read_buffer),
+                )
+                .await?;
+                if n == 0 {
+                    return if self.close_received {
+                        Ok(None)
+                    } else {
+                        Err(WebSocketError::connection_closed(&self.url))
+                    };
+                }
+            }
+        }
+    }
+}
+
+impl WebSocketWriter {
+    pub async fn send(&mut self, msg: Message) -> WebSocketResult<()> {
+        if self.close_sent && !matches!(msg, Message::Close(_)) {
+            return Err(WebSocketError::protocol(
+                &self.url,
+                "cannot send data after close frame",
+            ));
+        }
+
+        match msg {
+            Message::Text(text) => self.write_frame(OpCode::Text, text.as_bytes()).await,
+            Message::Binary(bytes) => self.write_frame(OpCode::Binary, &bytes).await,
+            Message::Ping(bytes) => self.write_control(OpCode::Ping, &bytes).await,
+            Message::Pong(bytes) => self.write_control(OpCode::Pong, &bytes).await,
+            Message::Close(frame) => self.close(frame).await,
+        }
+    }
+
+    pub async fn send_text(&mut self, text: impl Into<String>) -> WebSocketResult<()> {
+        self.send(Message::Text(text.into())).await
+    }
+
+    pub async fn send_binary(&mut self, bytes: impl Into<Bytes>) -> WebSocketResult<()> {
+        self.send(Message::Binary(bytes.into())).await
+    }
+
+    pub async fn send_ping(&mut self, bytes: impl Into<Bytes>) -> WebSocketResult<()> {
+        self.send(Message::Ping(bytes.into())).await
+    }
+
+    pub async fn send_pong(&mut self, bytes: impl Into<Bytes>) -> WebSocketResult<()> {
+        self.send(Message::Pong(bytes.into())).await
+    }
+
+    pub async fn close(&mut self, frame: Option<CloseFrame>) -> WebSocketResult<()> {
+        if !self.close_sent {
+            self.send_close_raw(frame).await?;
+        }
+        Ok(())
+    }
+
+    async fn write_frame(&mut self, opcode: OpCode, payload: &[u8]) -> WebSocketResult<()> {
+        if payload.len() > self.frame_config.max_frame_size {
+            return Err(WebSocketError::limit_exceeded(
+                &self.url,
+                format!("frame exceeds {} bytes", self.frame_config.max_frame_size),
+            ));
+        }
+        if matches!(opcode, OpCode::Text | OpCode::Binary)
+            && payload.len() > self.frame_config.max_message_size
+        {
+            return Err(WebSocketError::limit_exceeded(
+                &self.url,
+                format!(
+                    "message exceeds {} bytes",
+                    self.frame_config.max_message_size
+                ),
+            ));
+        }
+        encode_frame_into(opcode, payload, &mut self.mask_rng, &mut self.write_buffer);
+        WebSocket::io_with_timeout(
+            &self.url,
+            self.write_timeout,
+            "write",
+            self.stream.write_all(&self.write_buffer),
+        )
+        .await
+    }
+
+    async fn write_control(&mut self, opcode: OpCode, payload: &[u8]) -> WebSocketResult<()> {
+        if payload.len() > 125 {
+            return Err(WebSocketError::protocol(
+                &self.url,
+                "control frame payload exceeds 125 bytes",
+            ));
+        }
+        self.write_frame(opcode, payload).await?;
+        WebSocket::io_with_timeout(&self.url, self.write_timeout, "flush", self.stream.flush())
+            .await
+    }
+
+    async fn send_close_raw(&mut self, frame: Option<CloseFrame>) -> WebSocketResult<()> {
+        let payload = match frame {
+            Some(frame) => frame.encode(&self.url)?,
+            None => Vec::new(),
+        };
+        self.write_control(OpCode::Close, &payload).await?;
+        self.close_sent = true;
+        Ok(())
     }
 }

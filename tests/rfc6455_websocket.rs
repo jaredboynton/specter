@@ -60,6 +60,41 @@ async fn incoming_ping_writes_matching_pong_if_auto_pong_is_supported() {
 }
 
 #[tokio::test]
+async fn split_reader_and_writer_operate_independently() {
+    let server = MockWsServer::new().await.unwrap();
+    let url = server.ws_url("/split");
+    let handle = server.start_once(WsResponse {
+        first_frame: Some(mock_ws_server::server_text_frame("ready")),
+        ..WsResponse::default()
+    });
+
+    let ws = Client::new()
+        .unwrap()
+        .websocket(url)
+        .connect()
+        .await
+        .expect("websocket handshake should succeed");
+    let (mut reader, mut writer) = ws.split();
+
+    writer
+        .send_text("from split writer")
+        .await
+        .expect("split writer sends text");
+    let message = reader
+        .next()
+        .await
+        .expect("split reader receives")
+        .expect("message available");
+
+    assert!(matches!(message, Message::Text(text) if text == "ready"));
+    let exchange = handle.await.unwrap();
+    let frame = exchange.client_frame.expect("server captured client frame");
+    assert_eq!(frame.opcode, 0x1);
+    assert!(frame.masked);
+    assert_eq!(frame.payload, b"from split writer");
+}
+
+#[tokio::test]
 async fn fragmented_text_is_reassembled_and_validated_as_one_message() {
     let frame = [
         server_frame_with_fin(false, 0x1, b"he"),
