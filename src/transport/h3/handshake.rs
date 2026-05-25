@@ -305,6 +305,7 @@ struct OneRttOpenedPacket {
     outcome: OneRttOpenOutcome,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_open_one_rtt_packet(
     current: &QuicPacketKeyMaterial,
     next: Option<&QuicPacketKeyMaterial>,
@@ -1025,6 +1026,7 @@ impl NativeQuicServerHandshake {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_transport_parameter_connection_ids(
         fingerprint: &Http3Fingerprint,
         cert_pem: &[u8],
@@ -4973,6 +4975,7 @@ fn is_version_negotiation_datagram(datagram: &[u8]) -> bool {
         && u32::from_be_bytes([datagram[1], datagram[2], datagram[3], datagram[4]]) == 0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_client_initial_packet_with_token_and_version(
     fingerprint: &Http3Fingerprint,
     crypto_data: Bytes,

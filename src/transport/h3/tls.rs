@@ -634,6 +634,7 @@ impl NativeQuicTlsSession {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_client(
         server_name: &str,
         fingerprint: &Http3Fingerprint,

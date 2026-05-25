@@ -430,10 +430,11 @@ pub fn match_local_connection_id<'a>(
     let mut best: Option<(ConnectionId, usize)> = None;
     for entry in locals {
         let cid = entry.connection_id.as_bytes();
-        if packet.len() >= 1 + cid.len() && packet[1..1 + cid.len()] == cid[..] {
-            if best.as_ref().map_or(true, |(_, len)| cid.len() > *len) {
-                best = Some((entry.connection_id.clone(), cid.len()));
-            }
+        if packet.len() > cid.len()
+            && packet[1..1 + cid.len()] == cid[..]
+            && best.as_ref().is_none_or(|(_, len)| cid.len() > *len)
+        {
+            best = Some((entry.connection_id.clone(), cid.len()));
         }
     }
     best

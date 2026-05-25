@@ -699,6 +699,7 @@ impl NativeH3DriverState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_native_h3_driver(
     handshake: NativeQuicHandshake,
     fingerprint: Http3Fingerprint,
@@ -1380,7 +1381,7 @@ impl NativeH3Driver {
                     // and stop replaying. Short-header (application) packets
                     // are the only ones that can carry CONNECTION_CLOSE here.
                     if self.handshake.close_state().is_closing()
-                        && buf.get(0).copied().is_some_and(|first| first & 0x80 == 0)
+                        && buf.first().is_some_and(|first| first & 0x80 == 0)
                     {
                         let _ = self.handshake.open_server_h3_event_packet(&buf[..len]);
                     }

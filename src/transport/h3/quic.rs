@@ -230,7 +230,7 @@ impl QuicPathValidator {
         self.pending.retain(|_, pending| {
             pending
                 .connection_id_sequence
-                .map_or(true, |sequence| sequence >= retire_prior_to)
+                .is_none_or(|sequence| sequence >= retire_prior_to)
         });
         self.connection_ids.insert(sequence_number, entry);
         Ok(())

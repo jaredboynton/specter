@@ -26,7 +26,7 @@ use bytes::Bytes;
 use getrandom::fill as getrandom_fill;
 
 const MAX_CONNECTION_ID_LEN: usize = 20;
-const H3_UDP_SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+const H3_UDP_SOCKET_BUFFER_BYTES: usize = 7 * 1024 * 1024;
 
 pub struct H3Connection;
 
@@ -549,13 +549,69 @@ fn bind_socket2_udp_socket(
     };
     let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
         .map_err(Error::Io)?;
-    let _ = socket.set_recv_buffer_size(H3_UDP_SOCKET_BUFFER_BYTES);
-    let _ = socket.set_send_buffer_size(H3_UDP_SOCKET_BUFFER_BYTES);
+    apply_udp_socket_buffer(
+        &socket,
+        "receive",
+        H3_UDP_SOCKET_BUFFER_BYTES,
+        socket2::Socket::set_recv_buffer_size,
+        socket2::Socket::recv_buffer_size,
+    );
+    apply_udp_socket_buffer(
+        &socket,
+        "send",
+        H3_UDP_SOCKET_BUFFER_BYTES,
+        socket2::Socket::set_send_buffer_size,
+        socket2::Socket::send_buffer_size,
+    );
     enable_udp_ecn_receive(&socket, local_addr).map_err(Error::Io)?;
     apply_udp_ecn_marking(&socket, local_addr, transport)?;
     socket.set_nonblocking(true).map_err(Error::Io)?;
     socket.bind(&local_addr.into()).map_err(Error::Io)?;
     Ok(socket)
+}
+
+fn apply_udp_socket_buffer(
+    socket: &socket2::Socket,
+    kind: &'static str,
+    requested_bytes: usize,
+    set_buffer_size: impl FnOnce(&socket2::Socket, usize) -> std::io::Result<()>,
+    buffer_size: impl FnOnce(&socket2::Socket) -> std::io::Result<usize>,
+) {
+    if let Err(error) = set_buffer_size(socket, requested_bytes) {
+        tracing::warn!(
+            buffer_kind = kind,
+            requested_bytes,
+            error = %error,
+            "failed to set native H3 UDP socket buffer; throughput may be capped; raise net.core.rmem_max/net.core.wmem_max on Linux if needed"
+        );
+        return;
+    }
+
+    match buffer_size(socket) {
+        Ok(applied_bytes)
+            if should_warn_about_udp_socket_buffer(applied_bytes, requested_bytes) =>
+        {
+            tracing::warn!(
+                buffer_kind = kind,
+                requested_bytes,
+                applied_bytes,
+                "native H3 UDP socket buffer below requested size; throughput may be capped; raise net.core.rmem_max/net.core.wmem_max on Linux if needed"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                buffer_kind = kind,
+                requested_bytes,
+                error = %error,
+                "failed to read native H3 UDP socket buffer size; throughput may be capped"
+            );
+        }
+    }
+}
+
+fn should_warn_about_udp_socket_buffer(applied_bytes: usize, requested_bytes: usize) -> bool {
+    applied_bytes < requested_bytes
 }
 
 fn apply_udp_ecn_marking(
@@ -596,6 +652,27 @@ fn parse_url(url: &str) -> Result<(String, u16, String)> {
 mod tests {
     use super::*;
     use crate::fingerprint::http3::{QuicEcnCodepoint, QuicTransportParams};
+
+    #[test]
+    fn native_h3_udp_socket_buffer_target_is_seven_mib() {
+        assert_eq!(H3_UDP_SOCKET_BUFFER_BYTES, 7 * 1024 * 1024);
+    }
+
+    #[test]
+    fn native_h3_udp_socket_warns_when_applied_buffer_is_below_requested() {
+        assert!(should_warn_about_udp_socket_buffer(
+            6 * 1024 * 1024,
+            7 * 1024 * 1024
+        ));
+        assert!(!should_warn_about_udp_socket_buffer(
+            7 * 1024 * 1024,
+            7 * 1024 * 1024
+        ));
+        assert!(!should_warn_about_udp_socket_buffer(
+            14 * 1024 * 1024,
+            7 * 1024 * 1024
+        ));
+    }
 
     #[test]
     fn native_h3_udp_socket_leaves_ipv4_ecn_unmarked_by_default() {
