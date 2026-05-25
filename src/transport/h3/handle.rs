@@ -211,7 +211,7 @@ impl H3Handle {
 
         Ok(Response::with_body(
             status,
-            Headers::from(headers),
+            headers,
             Body::from_h3(H3Body::new(body_shared, body_timeouts)),
             "HTTP/3".to_string(),
         ))

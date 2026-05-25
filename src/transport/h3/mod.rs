@@ -387,7 +387,7 @@ impl H3Client {
                 url,
                 method_http.clone(),
                 uri.clone(),
-                headers.clone(),
+                headers,
                 body_bytes.clone(),
             )
             .await?
@@ -397,12 +397,7 @@ impl H3Client {
 
         let (mut handle, tried_pooled, key) = self.resolve_handle_for_request(url).await?;
         let res = handle
-            .send_request(
-                method_http.clone(),
-                &uri,
-                headers.clone(),
-                body_bytes.clone(),
-            )
+            .send_request(method_http.clone(), &uri, headers, body_bytes.clone())
             .await;
 
         match res {
@@ -457,13 +452,7 @@ impl H3Client {
             Some(body.clone())
         };
         let res = handle
-            .send_streaming_request(
-                method_http.clone(),
-                &uri,
-                headers.clone(),
-                body,
-                body_timeouts,
-            )
+            .send_streaming_request(method_http.clone(), &uri, headers, body, body_timeouts)
             .await;
 
         match res {

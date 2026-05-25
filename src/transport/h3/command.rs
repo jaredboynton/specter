@@ -9,7 +9,7 @@ use crate::request::RequestBody;
 use crate::transport::h3::body::H3BodyShared;
 use crate::transport::h3::H3Tunnel;
 
-pub type StreamingHeadersResult = Result<(u16, Vec<(String, String)>)>;
+pub type StreamingHeadersResult = Result<(u16, Headers)>;
 
 /// Command sent from handle to driver.
 ///

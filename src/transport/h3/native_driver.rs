@@ -535,7 +535,7 @@ impl NativeH3DriverState {
         state.opened = true;
         streaming_events.push(NativeH3StreamingResponseEvent::Headers {
             status,
-            headers: response_headers,
+            headers: Headers::from(response_headers),
         });
         Ok(())
     }
@@ -622,7 +622,7 @@ impl NativeH3DriverState {
             state.opened = true;
             tunnel_events.push(NativeH3TunnelEvent::Open {
                 status,
-                headers: state.headers.clone(),
+                headers: Headers::from(state.headers.clone()),
             });
             return Ok(());
         }
