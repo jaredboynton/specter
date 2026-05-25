@@ -443,3 +443,114 @@ async fn inline_path_handles_dropped_receiver() {
         .unwrap();
     assert_eq!(resp2.status().as_u16(), 200);
 }
+
+#[tokio::test]
+async fn large_streaming_body_avoids_driver_backpressure_stalls() {
+    use http::Method;
+    use specter::fingerprint::http2::Http2Settings;
+    use specter::transport::connector::BoringConnector;
+    use specter::transport::h2::{H2BodyTimeouts, H2Connection, H2PooledConnection, PseudoHeaderOrder};
+    use specter::RequestBody;
+
+    const BODY_LEN: usize = 6 * 1024 * 1024;
+    const CHUNK_SIZE: usize = 16 * 1024;
+
+    let (acceptor, ca_cert) = build_acceptor();
+    let server = MockH2Server::new().await.unwrap();
+
+    server.start_tls(acceptor, move |conn: MockH2Connection| async move {
+        conn.read_preface().await.unwrap();
+        let mut settings_sent = false;
+        let mut encoder = specter::transport::h2::hpack_impl::Encoder::new();
+        let mut request_stream_id: Option<u32> = None;
+
+        loop {
+            let frame = match timeout(Duration::from_secs(10), conn.read_frame()).await {
+                Ok(Ok(f)) => f,
+                _ => break,
+            };
+            let (_len, frame_type, flags, stream_id, _payload) = frame;
+            match frame_type {
+                0x04 if flags & 0x01 == 0 && !settings_sent => {
+                    conn.send_settings(&[(0x01, 4096), (0x03, 100), (0x04, 65535)])
+                        .await
+                        .unwrap();
+                    conn.send_settings_ack().await.unwrap();
+                    settings_sent = true;
+                }
+                0x01 => {
+                    request_stream_id = Some(stream_id);
+                    let response_headers =
+                        encoder.encode(&[(b":status".as_slice(), b"200".as_slice())]);
+                    conn.send_headers(stream_id, &response_headers, false, false)
+                        .await
+                        .unwrap();
+                    let mut sent = 0usize;
+                    while sent < BODY_LEN {
+                        let take = (BODY_LEN - sent).min(CHUNK_SIZE);
+                        let chunk = vec![0xABu8; take];
+                        sent += take;
+                        let end = sent >= BODY_LEN;
+                        conn.send_data(stream_id, &chunk, end).await.unwrap();
+                    }
+                }
+                0x03 if Some(stream_id) == request_stream_id => break,
+                _ => {}
+            }
+        }
+    });
+
+    let fp = specter::fingerprint::tls::TlsFingerprint::chrome_142();
+    let connector = BoringConnector::with_fingerprint(fp).with_root_certificates(vec![ca_cert]);
+    let uri: http::Uri = format!("https://127.0.0.1:{}/stream", server.port())
+        .parse()
+        .unwrap();
+
+    let stream = timeout(DEFAULT_TIMEOUT, connector.connect(&uri))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stream.is_h2());
+
+    let h2_conn = timeout(
+        DEFAULT_TIMEOUT,
+        H2Connection::connect(stream, Http2Settings::default(), PseudoHeaderOrder::Chrome),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let pooled = H2PooledConnection::new(h2_conn);
+
+    let mut response = timeout(
+        DEFAULT_TIMEOUT,
+        pooled.send_streaming_request(
+            Method::GET,
+            &uri,
+            vec![],
+            RequestBody::Empty,
+            H2BodyTimeouts::default(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+
+    let mut received = 0usize;
+    while let Some(frame) = timeout(DEFAULT_TIMEOUT, response.body_mut().frame())
+        .await
+        .transpose()
+        .unwrap()
+    {
+        if let Ok(data) = frame.into_data() {
+            received += data.len();
+        }
+    }
+
+    assert_eq!(received, BODY_LEN);
+    assert_eq!(
+        pooled.backpressure_stall_count(),
+        0,
+        "6 MiB stream should not hit 1 ms backpressure stalls at default slot capacity"
+    );
+}

@@ -132,6 +132,7 @@ async fn custom_dns_resolver_is_invoked_for_each_new_connection() {
     let client = Client::builder()
         .prefer_http2(false)
         .pool_max_idle_per_host(0)
+        .hickory_dns(false)
         .dns_resolver(resolver)
         .build()
         .unwrap();
@@ -148,6 +149,37 @@ async fn custom_dns_resolver_is_invoked_for_each_new_connection() {
         calls.load(Ordering::SeqCst) >= 3,
         "custom resolver should have been invoked at least once per request when pooling is disabled, got {}",
         calls.load(Ordering::SeqCst)
+    );
+}
+
+#[tokio::test]
+async fn custom_dns_resolver_is_cached_by_default() {
+    let fixture = H1Fixture::start().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let resolver = Arc::new(StaticResolver {
+        target: fixture.addr,
+        calls: calls.clone(),
+    });
+
+    let client = Client::builder()
+        .prefer_http2(false)
+        .pool_max_idle_per_host(0)
+        .dns_resolver(resolver)
+        .build()
+        .unwrap();
+
+    let host = "specter-cached-resolver.test";
+    let url = format!("http://{}:{}/hello", host, fixture.addr.port());
+
+    for _ in 0..3 {
+        let response = client.get(url.as_str()).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+    }
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "custom resolver should be cached by default across requests to the same host"
     );
 }
 
