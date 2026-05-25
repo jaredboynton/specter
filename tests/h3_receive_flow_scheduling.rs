@@ -14,12 +14,12 @@ fn native_h3_driver_defers_receive_credit_while_streaming_bodies_are_backpressur
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
     let process_datagram = driver
-        .split("async fn process_datagram")
+        .split("async fn process_datagram_from")
         .nth(1)
-        .expect("driver must have process_datagram")
-        .split("fn apply_h3_event")
+        .expect("driver must have process_datagram_from")
+        .split("fn sync_path_set_with_handshake")
         .next()
-        .expect("process_datagram section");
+        .expect("process_datagram_from section");
     let event_index = process_datagram
         .find("for event in events")
         .expect("process_datagram must apply H3 events");
@@ -215,12 +215,12 @@ fn native_h3_driver_retains_connection_close_for_draining_replay() {
         .next()
         .expect("send_connection_close section");
     let process_datagram = driver
-        .split("async fn process_datagram")
+        .split("async fn process_datagram_from")
         .nth(1)
-        .expect("driver must have process_datagram")
-        .split("fn apply_h3_event")
+        .expect("driver must have process_datagram_from")
+        .split("fn sync_path_set_with_handshake")
         .next()
-        .expect("process_datagram section");
+        .expect("process_datagram_from section");
     let drive_loop = driver
         .split("async fn drive_loop")
         .nth(1)
@@ -350,7 +350,7 @@ fn native_h3_driver_keeps_tunnel_data_off_control_command_queue() {
         .split("async fn handle_command")
         .nth(1)
         .expect("native H3 driver command handler")
-        .split("async fn queue_flow_control_blocked_command")
+        .split("async fn queue_flow_control_blocked_command(&mut self")
         .next()
         .expect("native H3 command handler section");
 
@@ -368,7 +368,7 @@ fn native_h3_driver_keeps_tunnel_data_off_control_command_queue() {
         "driver select loop must drain tunnel DATA from the dedicated channel"
     );
     assert!(
-        tunnel_event.contains("tunnel_outbound_tx.send((stream_id, outbound))"),
+        tunnel_event.contains(".send((stream_id, outbound))"),
         "public tunnel writer must forward DATA through the dedicated tunnel outbound channel"
     );
     assert!(
@@ -443,18 +443,38 @@ fn native_h3_driver_serves_control_frames_ahead_of_in_flight_tunnel_data() {
         "flush_pending_control_packet_once must pop a queued control packet and emit it to the peer"
     );
 
-    for command in [
-        "DriverCommand::SendRequest",
-        "DriverCommand::SendStreamingRequest",
-        "DriverCommand::OpenWebSocketTunnel",
+    let handle_command = driver
+        .split("async fn handle_command")
+        .nth(1)
+        .expect("native H3 driver command handler")
+        .split("async fn queue_flow_control_blocked_command(&mut self")
+        .next()
+        .expect("native H3 command handler section");
+
+    for (command, next_delim) in [
+        (
+            "DriverCommand::SendRequest",
+            "DriverCommand::SendStreamingRequest",
+        ),
+        (
+            "DriverCommand::SendStreamingRequest",
+            "DriverCommand::OpenWebSocketTunnel",
+        ),
+        (
+            "DriverCommand::OpenWebSocketTunnel",
+            "\n        }\n        Ok(())",
+        ),
     ] {
-        let arm = driver
-            .split(command)
+        let arm_section = handle_command
+            .splitn(2, command)
             .nth(1)
-            .unwrap_or_else(|| panic!("handle_command must include arm for {command}"));
-        let arm_section = arm.split("DriverCommand::").next().unwrap_or(arm);
+            .unwrap_or_else(|| panic!("handle_command must include arm for {command}"))
+            .split(next_delim)
+            .next()
+            .expect("command arm section");
         assert!(
-            arm_section.contains("pending_control_packets.push_back"),
+            arm_section.contains("pending_control_packets")
+                && arm_section.contains("push_back((packet.stream_id, packet.packet))"),
             "{command} arm must queue its HEADERS packet on pending_control_packets instead of \
              sending synchronously"
         );
@@ -507,7 +527,7 @@ fn native_h3_driver_routes_tunnel_outbound_off_command_channel() {
         .next()
         .expect("apply_tunnel_event section");
     assert!(
-        apply_tunnel.contains("tunnel_outbound_tx.send((stream_id, outbound))"),
+        apply_tunnel.contains(".send((stream_id, outbound))"),
         "per-tunnel forwarder must push outbound DATA onto tunnel_outbound_tx, not command_tx"
     );
     assert!(
@@ -708,7 +728,7 @@ fn native_h3_threads_socket_received_ecn_marks_into_ack_ecn_generation() {
     );
     assert!(
         driver.contains("recv_from_with_ecn")
-            && driver.contains("open_server_h3_event_packet_with_ecn"),
+            && driver.contains("open_server_h3_event_packet_from_with_ecn"),
         "native H3 driver must keep ECN marks attached to application datagrams after the handshake"
     );
     assert!(
@@ -965,7 +985,7 @@ fn native_h3_fixture_suppresses_sends_after_peer_connection_close() {
 
     for (name, source) in [("mock", mock_server), ("same-fixture", fixture)] {
         let process_datagram = source
-            .split("let events = self.handshake.open_client_h3_event_packet(packet)?;")
+            .split("open_client_h3_event_packet_from")
             .nth(1)
             .expect("server process_datagram must open client H3 events")
             .split("build_server_application_ack_packet_after_or_delay")
