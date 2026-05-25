@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.7] - 2026-05-25
+
+### Fixed
+
+- Normalize host-only URLs with query strings to slash-prefixed origin-form request targets across HTTP/1.1, HTTP/2, and HTTP/3.
+
 ## [4.1.6] - 2026-05-25
 
 ### Fixed

@@ -697,7 +697,7 @@ impl H1Connection {
             request.push(b'*');
         } else {
             // origin-form: /path?query
-            let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+            let path = crate::transport::origin_form_path(uri);
             request.extend_from_slice(path.as_bytes());
         }
         request.extend_from_slice(b" HTTP/1.1\r\n");
@@ -1818,6 +1818,23 @@ mod tests {
         );
         assert_eq!(find_header_value(&headers, "Content-Length"), Some("100"));
         assert_eq!(find_header_value(&headers, "missing"), None);
+    }
+
+    #[test]
+    fn host_only_uri_with_query_uses_slash_origin_form() {
+        let uri: Uri = "http://127.0.0.1:18743?client_version=26.506.31421"
+            .parse()
+            .unwrap();
+        let request = H1Connection::build_request_bytes(
+            &Method::GET,
+            &uri,
+            &Headers::new(),
+            H1RequestBodyKind::None,
+        )
+        .unwrap();
+        let request = String::from_utf8(request).unwrap();
+
+        assert!(request.starts_with("GET /?client_version=26.506.31421 HTTP/1.1\r\n"));
     }
 
     // ========================================================================

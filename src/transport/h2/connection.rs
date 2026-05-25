@@ -418,11 +418,11 @@ where
 
         let scheme = uri.scheme_str().unwrap_or("https");
         let authority = uri.authority().map(|a| a.as_str()).unwrap_or("");
-        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+        let path = crate::transport::origin_form_path(uri);
         let headers = headers.into();
 
         let header_block =
-            Self::encode_extended_connect_websocket_headers(authority, scheme, path, &headers)?;
+            Self::encode_extended_connect_websocket_headers(authority, scheme, &path, &headers)?;
         if header_block.is_empty() {
             return Err(Error::HttpProtocol(
                 "PROTOCOL_ERROR: HEADERS frame header block cannot be empty".into(),

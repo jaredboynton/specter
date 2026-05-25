@@ -343,13 +343,13 @@ pub fn build_websocket_connect_headers(
         .authority()
         .ok_or_else(|| Error::HttpProtocol("RFC 9220 CONNECT requires :authority".into()))?
         .as_str();
-    let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let path = crate::transport::origin_form_path(&uri);
 
     let mut h3_headers = vec![
         H3Header::new(":method", "CONNECT"),
         H3Header::new(":protocol", "websocket"),
         H3Header::new(":scheme", scheme),
-        H3Header::new(":path", path),
+        H3Header::new(":path", path.as_ref()),
         H3Header::new(":authority", authority),
     ];
 
@@ -402,13 +402,13 @@ pub fn build_request_headers(
         .map(|authority| authority.as_str())
         .or_else(|| uri.host())
         .unwrap_or("");
-    let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let path = crate::transport::origin_form_path(&uri);
 
     let mut h3_headers = vec![
         H3Header::new(":method", method.as_str()),
         H3Header::new(":scheme", scheme),
         H3Header::new(":authority", authority),
-        H3Header::new(":path", path),
+        H3Header::new(":path", path.as_ref()),
     ];
 
     for (name, value) in headers.iter_bytes() {

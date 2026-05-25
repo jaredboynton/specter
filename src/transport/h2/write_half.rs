@@ -97,7 +97,7 @@ where
 
         let scheme = uri.scheme_str().unwrap_or("https");
         let authority = uri.authority().map(|a| a.as_str()).unwrap_or("localhost");
-        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+        let path = crate::transport::origin_form_path(uri);
 
         if method.as_str().is_empty() {
             return Err(Error::HttpProtocol(
@@ -123,7 +123,7 @@ where
         let header_block =
             guard
                 .encoder
-                .encode_request(method.as_str(), scheme, authority, path, headers);
+                .encode_request(method.as_str(), scheme, authority, &path, headers);
 
         if header_block.is_empty() {
             return Err(Error::HttpProtocol(
@@ -335,7 +335,7 @@ where
 
         let scheme = uri.scheme_str().unwrap_or("https");
         let authority = uri.authority().map(|a| a.as_str()).unwrap_or("localhost");
-        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+        let path = crate::transport::origin_form_path(uri);
 
         if method.as_str().is_empty() {
             return Err(Error::HttpProtocol(
@@ -361,7 +361,7 @@ where
         let header_block =
             guard
                 .encoder
-                .encode_request(method.as_str(), scheme, authority, path, headers);
+                .encode_request(method.as_str(), scheme, authority, &path, headers);
 
         if header_block.is_empty() {
             return Err(Error::HttpProtocol(
