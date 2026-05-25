@@ -318,7 +318,7 @@ impl H2Handle {
         self.command_tx
             .send(DriverCommand::OpenWebSocketTunnel {
                 uri,
-                headers,
+                headers: headers.to_vec(),
                 response_tx,
             })
             .await

@@ -56,7 +56,7 @@ pub enum DriverCommand {
     /// Open an RFC 8441 WebSocket tunnel on a pooled HTTP/2 stream.
     OpenWebSocketTunnel {
         uri: Uri,
-        headers: Headers,
+        headers: Vec<(String, String)>,
         response_tx: oneshot::Sender<Result<H2Tunnel>>,
     },
     /// Queue outbound DATA for an open RFC 8441 tunnel.
@@ -962,7 +962,7 @@ where
     async fn handle_open_websocket_tunnel(
         &mut self,
         uri: Uri,
-        headers: Headers,
+        headers: Vec<(String, String)>,
         response_tx: oneshot::Sender<Result<H2Tunnel>>,
     ) -> Result<()> {
         if !self.has_available_stream_slot() {
@@ -982,9 +982,10 @@ where
     async fn open_websocket_tunnel_internal(
         &mut self,
         uri: Uri,
-        headers: Headers,
+        headers: Vec<(String, String)>,
         response_tx: oneshot::Sender<Result<H2Tunnel>>,
     ) -> Result<()> {
+        let headers = Headers::from(headers);
         match self
             .connection
             .open_extended_connect_websocket_with_end_stream(&uri, &headers)
