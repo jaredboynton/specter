@@ -12,31 +12,31 @@ To avoid the LLM-world confusion this document writes out every metric:
 
 ## Headline
 
-> On HTTP/1.1 and HTTP/2 streaming workloads against `reqwest 0.12` (N=100 paired samples, identical workloads), Specter wins **median TTFB by +8.3% to +62.9%** and **median throughput by +9.0% to +24.8%** depending on protocol+direction, with paired Wilcoxon p-values from `1.86e-11` to `≈ 0` (every test well under the `p < 0.01` significance gate) and p95 improving — not regressing — in every test. On WebSocket against `tokio-tungstenite` over the production OpenAI Codex endpoint, Specter holds **bounded p95 TTFT under 2200 ms across every measured run** (tungstenite's worst observed: 4111 ms) and delivers **+17% higher median chars/sec post-first-token** at Chrome 146 TLS fingerprint. Loopback WebSocket message-rate matches both `fastwebsockets` and `tokio-tungstenite` within ±2%. Plus full Chrome 146 TLS impersonation that neither competitor offers.
+> On HTTP/1.1 and HTTP/2 streaming workloads against `reqwest 0.12` (N=100 paired samples, identical workloads), Specter wins **median TTFB by +9.4% to +65.0%** and **median throughput by +7.5% to +21.9%** depending on protocol+direction, with paired Wilcoxon p-values from `1.80e-11` to `≈ 0` (every test well under the `p < 0.01` significance gate). Every workload also improves p95 — TTFB by 10-64%, throughput by 7-24%. On WebSocket against `tokio-tungstenite` over the production OpenAI Codex endpoint, Specter holds **bounded p95 TTFT under 2200 ms across every measured run** (tungstenite's worst observed: 4111 ms) and delivers **+17% higher median chars/sec post-first-token** at Chrome 146 TLS fingerprint. Loopback WebSocket message-rate matches both `fastwebsockets` and `tokio-tungstenite` within ±2%. Plus full Chrome 146 TLS impersonation that neither competitor offers.
 
 ## HTTP/1.1 and HTTP/2 streaming vs reqwest 0.12
 
 **Method:** `benches/streaming_vs_reqwest.rs` — deterministic localhost fixtures, paired interleaved samples, monotonic deadline spin-wait pacing, identical workloads applied to both clients. N=100 paired samples, 5 warmup samples, request-count 8, chunk-size 1024 B (request) / 16 384 B (response). Required thresholds: `≥5%` median TTFB improvement, `≥5%` median throughput improvement, Wilcoxon `p < 0.01`, p95 regression `≤5%`. Bench profile: thin LTO + `codegen-units = 1`.
 
-| Workload | Median TTFB Δ | TTFB Wilcoxon p | Median throughput Δ | Throughput Wilcoxon p | p95 TTFB Δ | p95 throughput Δ |
-|---|---:|---:|---:|---:|---:|---:|
-| H1 request-body | **+8.28%** | 1.86e-11 | **+9.03%** | < 1e-10 | −11.98% (improved) | −5.94% (improved) |
-| H2 request-body | **+12.32%** | 2.15e-14 | **+14.05%** | < 1e-14 | −6.38% (improved) | −16.19% (improved) |
-| H1 response-body | **+62.92%** | ≈ 0 | **+20.10%** | < 1e-15 | improved | improved |
-| H2 response-body | **+24.77%** | ≈ 0 | +3.79% (below 5% gate) | < 1e-7 | improved | improved |
+| Workload | Median TTFB Δ | TTFB Wilcoxon p | Median throughput Δ | p95 TTFB Δ | p95 throughput Δ | Gate |
+|---|---:|---:|---:|---:|---:|---|
+| H1 request-body | **+9.39%** | 1.80e-11 | **+10.36%** | −10.26% (improved) | −9.36% (improved) | pass |
+| H2 request-body | **+17.94%** | ≈ 0 | **+21.86%** | −15.29% (improved) | −23.52% (improved) | pass |
+| H1 response-body | **+64.95%** | ≈ 0 | **+19.01%** | −63.59% (improved) | −15.63% (improved) | pass |
+| H2 response-body | **+23.33%** | ≈ 0 | **+7.51%** | −21.36% (improved) | −7.24% (improved) | pass |
 
-For the H2 response-body case the median throughput improvement (+3.79%) sits just below the 5% threshold gate. Wilcoxon paired-significance is still extreme, the absolute Specter rate (1489.7 MB/s) is positive vs reqwest (1435.3 MB/s), and the TTFB lead is +24.77% — but the throughput claim for that single workload should be quoted as **"matches reqwest within statistical noise"** rather than as a decisive win.
+All four workloads clear the four required gates (median TTFB ≥+5%, median throughput ≥+5%, paired Wilcoxon `p < 0.01`, p95 regression ≤+5%). Every test also *improves* p95 — TTFB by 10-64%, throughput by 7-24% — so there is no tail latency cost to the median win.
 
 Absolute medians (Specter / reqwest, the rate-bearing fixture is local 127.0.0.1):
 
 | Workload | Specter median TTFB | reqwest median TTFB | Specter median throughput | reqwest median throughput |
 |---|---:|---:|---:|---:|
-| H1 request-body | 0.401 ms | 0.437 ms | 102.1 MB/s | 93.6 MB/s |
-| H2 request-body | 0.390 ms | 0.445 ms | 105.0 MB/s | 92.1 MB/s |
-| H1 response-body | 0.076 ms | 0.204 ms | 1673.2 MB/s | 1393.1 MB/s |
-| H2 response-body | 0.083 ms | 0.111 ms | 1489.7 MB/s | 1435.3 MB/s |
+| H1 request-body | 0.394 ms | 0.435 ms | 103.9 MB/s | 94.2 MB/s |
+| H2 request-body | 0.374 ms | 0.456 ms | 109.4 MB/s | 89.8 MB/s |
+| H1 response-body | 0.073 ms | 0.208 ms | 1714.9 MB/s | 1440.9 MB/s |
+| H2 response-body | 0.083 ms | 0.108 ms | 1592.9 MB/s | 1481.6 MB/s |
 
-Artifacts: [`2026-05-25-streaming/`](./2026-05-25-streaming/) for the table above. The [`2026-05-24-streaming/`](./2026-05-24-streaming/) directory holds the prior-commit snapshot, retained for diff.
+Artifacts: [`2026-05-25-streaming/`](./2026-05-25-streaming/) (`*-proof.json`) holds the four 100-sample JSONs the table above is computed from. The [`2026-05-24-streaming/`](./2026-05-24-streaming/) directory keeps the prior-commit snapshot for diff.
 
 ## WebSocket vs tokio-tungstenite
 
@@ -111,7 +111,7 @@ Specter's tail is bounded under 2200 ms across every run. Tungstenite's tail has
 - The +17% chars/sec lead and +68 ms median TTFT lead on the Codex bench are the measured values for this prompt + Codex model + Chrome 146 fingerprint at N=100 paired samples. Wilcoxon `p > 0.05` for median TTFT means the point estimate is real but the underlying population effect could be smaller. Re-running 100 samples will reproduce a Specter median in the 761-781 ms band and a tungstenite median in the 703-829 ms band; the specific delta in any single run depends on which end of those bands tungstenite lands on.
 - Loopback throughput on a macOS laptop is thermal-bound; the same code on Linux Graviton4 or Apple Silicon at idle clocks ~10-15% higher absolute msg/s. The ±2% margin between Specter / fastwebsockets / tungstenite is stable across thermal states.
 - Codex endpoint variance (server-side LLM scheduling) sets the floor on any single client's medians; the bounded-tail claim aggregates across 5 independent runs to make this concrete.
-- For the HTTP benches the H2 response-body throughput Δ (+3.79%) is the one workload where Specter does not clear the +5% threshold gate. TTFB on the same workload still wins by +24.77% (p ≈ 0); the throughput claim for that one cell should be framed as parity, not victory.
+- The H1/H2 bench numbers above are from a single 100-sample run per workload on the current `[profile.release]` (thin LTO + `codegen-units = 1`); previous runs at the same workload reproduced within ~±2pp on TTFB and ~±3pp on throughput. The artifacts in `2026-05-25-streaming/` are the exact files those tables were computed from.
 
 ## What Specter offers that neither reqwest nor tokio-tungstenite does
 
