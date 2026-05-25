@@ -1040,7 +1040,6 @@ fn fail_pending_command_with_quic_message(command: DriverCommand, message: Strin
         DriverCommand::OpenWebSocketTunnel { response_tx, .. } => {
             let _ = response_tx.send(Err(Error::Quic(message)));
         }
-        DriverCommand::SendTunnelData { .. } => {}
     }
 }
 

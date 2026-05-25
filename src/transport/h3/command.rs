@@ -6,11 +6,16 @@ use tokio::sync::oneshot;
 use crate::error::Result;
 use crate::request::RequestBody;
 use crate::transport::h3::body::H3BodyShared;
-use crate::transport::h3::{H3Tunnel, H3TunnelOutbound};
+use crate::transport::h3::H3Tunnel;
 
 pub type StreamingHeadersResult = Result<(u16, Vec<(String, String)>)>;
 
 /// Command sent from handle to driver.
+///
+/// Tunnel-data DATA frames do not flow through this control channel;
+/// they take a dedicated mpsc owned by the driver so a freshly issued
+/// streaming-request or tunnel-open is never queued behind a burst of
+/// in-flight RFC 9220 tunnel writes.
 #[derive(Debug)]
 pub enum DriverCommand {
     /// Send a request and get response via oneshot.
@@ -36,11 +41,6 @@ pub enum DriverCommand {
         uri: http::Uri,
         headers: Vec<(String, String)>,
         response_tx: oneshot::Sender<Result<H3Tunnel>>,
-    },
-    /// Queue outbound DATA for an open RFC 9220 tunnel.
-    SendTunnelData {
-        stream_id: u64,
-        outbound: H3TunnelOutbound,
     },
 }
 
