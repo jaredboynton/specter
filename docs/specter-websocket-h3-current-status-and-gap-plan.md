@@ -13,7 +13,7 @@ Specter now has credible proof for the H1/H2, RFC6455, and local same-fixture na
 - **Live Codex WSS vs tokio-tungstenite:** persisted n=50 artifact passes all samples and shows better Specter p95 tail, but median TTFT remains within/noisy against tungstenite.
 - **Native H3 HTTP comparator:** isolated comparator crate now has a release-grade n=30 proof at `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-full-local-n30-plus-rfc9220-comparators.json` with real rows for `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest_h3`; optional transport-only `quinn_transport`/`s2n_quic_transport` rows are measured separately and fixture packet errors now carry stable `category`/`fatal` fields if they reappear.
 - **RFC9220 WebSocket-over-H3:** correctness/API exists as a raw byte tunnel. The same-fixture proof now includes Specter local rows for echo, client DATA+FIN/server FIN, a slow-consumer tunnel plus concurrent H3 streaming workload, measured low-level `quiche`/`tokio-quiche` raw tunnel echo rows, measured n=30 low-level `quiche`/`tokio-quiche` close/FIN rows, and a persisted n=100 sample artifact with a passing dedicated echo tunnel superiority gate. A full tunnel-suite superiority claim still waits on third-party slow-consumer mixed comparator rows and gate expansion.
-- **Native QUIC production readiness:** still not production-complete; PTO send-time tracking, ACK-driven RTT/PTO estimator updates, client Initial/Handshake plus server Initial/Handshake CRYPTO PTO retransmission, client application-space PTO timer/retransmit, server application ACK-driven recovery plus mock/same-fixture PTO STREAM retransmit wake, event-level peer-close draining, bounded client/server CONNECTION_CLOSE replay/suppression, 1-RTT key-update handling, ACK_ECN frame/counter validation and CE-driven congestion response, Retry/VN client-handshake handling, client PATH_CHALLENGE/PATH_RESPONSE token lifecycle, PMTU probe policy/packetization, H3Client-level native session-cache wiring, TLS session replay, 0-RTT accept/reject status reporting, safe first-request 0-RTT send/replay policy, fingerprint-controlled outbound ECN socket marking, ACK_ECN generation from observed receive marks, and socket-level ECN receive reporting into the ACK tracker exist, but broader recovery soak/backoff policy validation and per-address path migration remain gaps.
+- **Native QUIC production readiness:** still not production-complete; PTO send-time tracking, ACK-driven RTT/PTO estimator updates, client Initial/Handshake plus server Initial/Handshake CRYPTO PTO retransmission, client application-space PTO timer/retransmit, server application ACK-driven recovery plus mock/same-fixture PTO STREAM retransmit wake, event-level peer-close draining, bounded client/server CONNECTION_CLOSE replay/suppression, 1-RTT key-update handling, ACK_ECN frame/counter validation and CE-driven congestion response, Retry/VN client-handshake handling, required CID transport-parameter emission, server/client 1-RTT CID routing, client PATH_CHALLENGE/PATH_RESPONSE token lifecycle, PMTU probe policy/packetization, H3Client-level native session-cache wiring, TLS session replay, 0-RTT accept/reject status reporting, safe first-request 0-RTT send/replay policy, fingerprint-controlled outbound ECN socket marking, ACK_ECN generation from observed receive marks, and socket-level ECN receive reporting into the ACK tracker exist, but broader recovery soak/backoff policy validation and full per-address migration state remain gaps.
 
 ## Direct answers captured during audit
 
@@ -125,6 +125,7 @@ Specter status:
 - Application-space PTO is no longer client-only or driver-dark: native H3 marks handshake completion for application recovery, feeds application ACKs into `RecoveryState`, treats the loss-detection deadline as pending driver work, wakes on that timer, and retransmits unacked client STREAM packets on application PTO.
 - Server application-space recovery and fixture wake are no longer absent: native H3 records server response STREAM packets in `RecoveryState`, retires them on client ACKs, carries recovery-detected losses into retransmit selection, and the mock/same-fixture servers wake on loss-detection deadlines to retransmit lost or PTO-expired server STREAM packets with fresh packet numbers.
 - Client path validation is no longer just a helper: native QUIC can packetize PATH_CHALLENGE and validate matching PATH_RESPONSE tokens; full migration/per-address state remains open.
+- Required QUIC connection-ID handling is no longer an active blocker: native server transport parameters now include the required original-destination, initial-source, and retry-source CID fields, and server/client 1-RTT packet routing uses the right CIDs. Remaining CID work is the migration-specific inventory/retire lifecycle.
 - Retry/VN is no longer only packet parsing: the native client handshake now drives Retry-driven Initial restart (validate QUIC v1 integrity, swap DCID to the Retry SCID, regenerate Initial keys, replay CRYPTO from offset zero with the Retry token), VN-driven Initial restart (RFC9000 § 6.1–6.3 supported-version selection via `set_supported_versions`, regenerated source connection ID, full per-attempt state reset, `version_negotiation_failed` error on no overlap), RFC9000 § 17.2.5.1/.2 and § 6.1–6.3 loop guards (single Retry per attempt, late Retry discard once Initial/Handshake is observed, single VN response, VN listing the issued version discarded), and validates server CID transport parameters after Retry.
 - H3 scheduling is no longer FIFO-only: the native driver has request-body/tunnel class rotation, stream rotation, RTT/loss/BDP-aware adaptive DATA budgets, and H3Client slow-path admission now acquires origin-fair dispatcher tickets before fresh connects.
 - RFC9220 tunnel backpressure is no longer item-count-only in either direction: public sends acquire an outbound byte budget, driver-to-handle inbound DATA delivery reserves receive byte credit, extra DATA queues when the byte budget is exhausted, and permits are released when DATA is emitted or publicly read. Slow-consumer mixed RFC9220 coverage remains green after the outbound change, and focused inbound tests prove tiny chunks no longer monopolize 32 item slots while oversized chunks consume the receive budget.
@@ -141,13 +142,12 @@ Specter status:
 
 ### P1
 
-1. **Path validation/migration:** client PATH_CHALLENGE packetization and matching PATH_RESPONSE validation exist, but CID inventory, per-address migration/path state, server-side lifecycle, and anti-amplification behavior remain incomplete.
+1. **Full path migration/per-address state:** client PATH_CHALLENGE packetization, matching PATH_RESPONSE validation, required transport-parameter CIDs, and 1-RTT CID routing exist; migration-specific CID inventory/retire lifecycle, per-address path state, server-side migration lifecycle, and anti-amplification behavior remain incomplete.
 
 ### P2
 
-1. **Path validation/migration hardening:** client PATH_CHALLENGE/PATH_RESPONSE token lifecycle and PMTU probe policy/packetization exist; per-address migration state, CID inventory, server-side lifecycle, and anti-amplification behavior remain incomplete.
-2. **Browser ACK parity:** threshold+timer support and ACK Delay encoding now have focused test coverage; browser/version capture parity for the tuned threshold remains open.
-3. **Fingerprinting capture gaps:** capture-derived raw transport-parameter presets and explicit extension-list ordering beyond BoringSSL permutation policy remain open.
+1. **Browser ACK parity:** threshold+timer support and ACK Delay encoding now have focused test coverage; browser/version capture parity for the tuned threshold remains open.
+2. **Fingerprinting capture gaps:** capture-derived raw transport-parameter presets and explicit extension-list ordering beyond BoringSSL permutation policy remain open.
 
 ## Recommended next execution plan
 
@@ -175,8 +175,8 @@ Specter status:
 
 6. **Close native QUIC production gaps**
    - Continue from landed PTO send-time tracking, client/server CRYPTO PTO retransmission, client application PTO, server application recovery core, mock/same-fixture wake integration, and bounded close-drain replay toward broader recovery soak/backoff validation.
-   - Keep Retry/version negotiation, close-drain replay, and key update under regression coverage while finishing path migration.
-   - Finish per-address path migration and browser capture parity after the recovery/state-machine core is stable.
+   - Keep Retry/version negotiation, CID routing, close-drain replay, and key update under regression coverage while finishing path migration.
+   - Finish migration-specific per-address path state/CID inventory and browser capture parity after the recovery/state-machine core is stable.
 
 ## Current proof artifacts
 

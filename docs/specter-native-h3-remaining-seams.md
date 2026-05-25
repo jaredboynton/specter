@@ -1,6 +1,6 @@
 # Specter Native H3 / WebSocket Performance Gap Update
 
-Date: 2026-05-24
+Date: 2026-05-25
 Repo: `/Users/jaredboynton/__devlocal/specter`
 
 ## Current status
@@ -10,7 +10,7 @@ Repo: `/Users/jaredboynton/__devlocal/specter`
 - `reqwest_h3` now works against the local native fixture by using a preconfigured rustls/quinn config pinned to `TLS13_AES_128_GCM_SHA256` and `h3` ALPN.
 - Native QUIC ACK state now clears pending ACKs after send without forgetting ACK ranges, preventing the ACK storm that caused repeated streaming requests to hang.
 - Native QUIC frame codec now round-trips RFC9000 ACK_ECN frames (`0x03`), validates ACK_ECN counters, records CE growth, applies ACK_ECN ranges like ordinary ACK ranges, feeds CE growth into congestion response, generates ACK_ECN counters from socket-observed ECT(0)/ECT(1)/CE receive marks, and can apply fingerprint-controlled outbound ECT(0)/ECT(1) socket marking.
-- Native QUIC now has send-time tracking, ACK-driven RTT/PTO estimator updates, client Initial/Handshake plus server Initial/Handshake CRYPTO PTO retransmission, client application-space driver PTO timer/retransmit, mock-server and same-fixture server application loss-detection wake/retransmit, server application ACK-driven recovery state, event-level peer close draining, bounded client/server `CONNECTION_CLOSE` drain replay/suppression, Retry/VN client-handshake handling, and client PATH_CHALLENGE/PATH_RESPONSE token lifecycle coverage.
+- Native QUIC now has send-time tracking, ACK-driven RTT/PTO estimator updates, client Initial/Handshake plus server Initial/Handshake CRYPTO PTO retransmission, client application-space driver PTO timer/retransmit, mock-server and same-fixture server application loss-detection wake/retransmit, server application ACK-driven recovery state, event-level peer close draining, bounded client/server `CONNECTION_CLOSE` drain replay/suppression, Retry/VN client-handshake handling, required CID transport-parameter emission, server/client 1-RTT CID routing, and client PATH_CHALLENGE/PATH_RESPONSE token lifecycle coverage.
 - Native H3 now exposes a reusable `H3Handle` path for low-overhead repeated requests and a same-URL hot handle cache for the higher-level `H3Client` path.
 - Native H3 TLS now advertises certificate compression from the TLS fingerprint, controls deterministic-vs-browser-permuted extension behavior, emits raw ordered QUIC transport parameters with dynamic connection-ID placeholders when configured, wires session-ticket capture/replay through `NativeH3SessionCache`, H3Client cache injection/access, H3 connection establishment, driver-side ticket drain, and H3Handle/H3Client-level status reporting, proves ordinary resumption suppresses 0-RTT CRYPTO unless policy opts in, and gates first-request 0-RTT send/replay to replay-capable GET/HEAD/OPTIONS requests.
 - Native H3 scheduling now has in-connection request-body/tunnel DATA rotation, RTT/loss/BDP-aware adaptive send-window growth, and H3Client slow-path dispatch wired through the pool-level origin-fair dispatcher.
@@ -157,6 +157,7 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 - Native QUIC ACK_ECN frame encode/decode, counter validation, CE growth tracking, loss-detector ACK range handling, CE-driven congestion response, ACK_ECN generation from socket-observed ECT(0)/ECT(1)/CE receive marks, socket-level receive ECN reporting into the tracker, fingerprint-controlled outbound ECT(0)/ECT(1) UDP socket marking, and PMTU probe policy/packetization are implemented.
 - Client PMTU probing now has a `QuicPmtuProbePolicy`, driver-sent PING+PADDING probes, ACK-only promotion of current datagram size, and loss-driven search-ceiling reduction; remaining path work is full migration/per-address state.
 - Version Negotiation and Retry packet parsing, QUIC v1 Retry integrity validation, full client Retry/VN handshake integration (Retry-driven Initial restart with new DCID-derived keys and token attachment, VN-driven restart with regenerated SCID and chosen version, RFC9000 § 17.2.5.1/.2 and § 6.1–6.3 loop guards, `version_negotiation_failed` error on no overlap), and client PATH_CHALLENGE/PATH_RESPONSE token lifecycle handling are implemented; remaining work is full per-address path migration state.
+- Required QUIC connection-ID handling is implemented for the native fixture path: server transport parameters include original-destination, initial-source, and retry-source CID fields, and server/client 1-RTT packet routing uses the expected CIDs. Remaining CID work is migration-specific inventory/retire lifecycle rather than basic 1-RTT routing.
 - QUIC send-time tracking, ACK-driven RTT/PTO estimator updates, client Initial/Handshake CRYPTO PTO retransmission, server Initial/Handshake CRYPTO PTO retransmission, client application-space PTO timer/retransmit, server application ACK-driven recovery and PTO STREAM retransmit core, mock/same-fixture server application loss-detection wake integration, event-level peer close draining, and bounded client/server `CONNECTION_CLOSE` replay/suppression are implemented; remaining recovery work is broader recovery soak/backoff validation.
 - Client/server same-fixture ACK decimation now has a `max_ack_delay_ms` timer path; remaining ACK work is browser-capture parity for tuned thresholds.
 - The latest full same-fixture proof emits no fixture packet-error events, and fixture events now serialize stable `category`/`fatal` fields; keep this as a regression guard, not an active cleanup gap.
@@ -173,7 +174,7 @@ Gate result: `pass` / `specter_native_is_faster_than_required_h3_competitors`.
 
 ## Remaining gaps
 
-- Native QUIC still needs broader recovery soak/backoff validation and path migration/validation beyond the client token lifecycle.
+- Native QUIC still needs broader recovery soak/backoff validation and full per-address path migration state: migration CID inventory/retire lifecycle, server-side migration lifecycle, and anti-amplification behavior. Basic PATH_CHALLENGE token handling and 1-RTT CID routing are no longer active gaps.
 - Browser-capture ACK parity remains open for per-browser/version ACK behavior and the tuned `ack_eliciting_threshold = 128` benchmark profile.
 - RFC9220/WebSocket-over-H3 still lacks third-party slow-consumer mixed comparator rows for a full tunnel-suite superiority claim, even though Specter echo/close/mixed, low-level `quiche`/`tokio-quiche` raw tunnel echo rows, and low-level `quiche`/`tokio-quiche` close/FIN rows are now measured and the dedicated echo tunnel gate passes.
 - TLS/H3 fingerprint gaps remain: explicit extension-list ordering beyond BoringSSL permutation policy and capture-derived raw transport-parameter presets.
