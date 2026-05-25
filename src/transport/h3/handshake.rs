@@ -4205,7 +4205,9 @@ impl NativeQuicHandshake {
             return Ok(Vec::new());
         }
         let mut events = Vec::new();
-        for frame in self.open_server_application_packet_with_path(packet, remote_address, ecn_mark)? {
+        for frame in
+            self.open_server_application_packet_with_path(packet, remote_address, ecn_mark)?
+        {
             match frame {
                 QuicFrame::Stream {
                     stream_id,
