@@ -807,25 +807,20 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
                 })
         })
         .collect::<Vec<_>>();
-    let missing_required_rfc9220_tunnel_metrics =
-        if missing_required_rfc9220_tunnel_rows.is_empty()
-            && under_sampled_required_rfc9220_tunnel_rows.is_empty()
-        {
-            required_rfc9220_tunnel_clients
-                .iter()
-                .copied()
-                .filter(|id| {
-                    measured_metrics_with_min_sample_count(
-                        rows,
-                        id,
-                        RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
-                    )
+    let missing_required_rfc9220_tunnel_metrics = if missing_required_rfc9220_tunnel_rows.is_empty()
+        && under_sampled_required_rfc9220_tunnel_rows.is_empty()
+    {
+        required_rfc9220_tunnel_clients
+            .iter()
+            .copied()
+            .filter(|id| {
+                measured_metrics_with_min_sample_count(rows, id, RFC9220_TUNNEL_MIN_SAMPLE_COUNT)
                     .is_none()
-                })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
 
     let specter_metrics = measured_metrics_with_min_sample_count(
         rows,
@@ -4069,7 +4064,8 @@ mod tests {
         ];
         let artifact =
             super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &measured_rows);
-        let tunnel_gate = &serde_json::to_value(&artifact).unwrap()["rfc9220_tunnel_superiority_gate"];
+        let tunnel_gate =
+            &serde_json::to_value(&artifact).unwrap()["rfc9220_tunnel_superiority_gate"];
 
         assert_eq!(tunnel_gate["pass"], serde_json::json!(false));
         assert_eq!(tunnel_gate["status"], serde_json::json!("incomplete"));
