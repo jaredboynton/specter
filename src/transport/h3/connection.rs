@@ -10,12 +10,13 @@ use crate::error::{Error, Result};
 use crate::fingerprint::{Http3Fingerprint, QuicTransportParams, TlsFingerprint};
 use crate::transport::dns::DnsConfig;
 use crate::transport::h3::command::StreamResponse;
-use crate::transport::h3::handle::H3Handle;
+use crate::transport::h3::handle::{H3Handle, NativeH3HandshakeReport};
 use crate::transport::h3::handshake::NativeQuicHandshake;
 use crate::transport::h3::native;
 use crate::transport::h3::quic::ConnectionId;
 use crate::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
 use crate::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
+use crate::transport::h3::tls::NativeH3HandshakeStatus;
 use crate::transport::h3::H3TransportConfig;
 
 use crate::transport::h3::native_driver::{spawn_native_h3_driver, NativeH3PendingResponse};
@@ -416,6 +417,7 @@ impl H3Connection {
     ) -> Result<H3ConnectResult> {
         let mut zero_rtt_response_rx = None;
         let mut pending_zero_rtt_response = None;
+        let mut native_handshake_report_override = None;
         if let Some(pending) = pending_zero_rtt {
             let status = handshake.handshake_status();
             if !status.early_data_accepted() {
@@ -434,6 +436,10 @@ impl H3Connection {
                     .send_to(packet.packet.as_ref(), peer_addr)
                     .await
                     .map_err(Error::Io)?;
+                native_handshake_report_override = Some(NativeH3HandshakeReport {
+                    status: NativeH3HandshakeStatus::EarlyRejected,
+                    early_data_reason: handshake.early_data_reason(),
+                });
             }
             let (response_tx, response_rx) = oneshot::channel();
             pending_zero_rtt_response = Some(NativeH3PendingResponse {
@@ -454,6 +460,7 @@ impl H3Connection {
             session_cache,
             session_cache_key,
             pending_zero_rtt_response,
+            native_handshake_report_override,
         )?;
 
         Ok(H3ConnectResult {
