@@ -142,7 +142,7 @@ Specter status:
 
 ### P1
 
-1. **Full path migration/per-address state:** client PATH_CHALLENGE packetization, matching PATH_RESPONSE validation, required transport-parameter CIDs, and 1-RTT CID routing exist; migration-specific CID inventory/retire lifecycle, per-address path state, server-side migration lifecycle, and anti-amplification behavior remain incomplete.
+1. **Full path migration driver integration:** client PATH_CHALLENGE packetization, matching PATH_RESPONSE validation, required transport-parameter CIDs, and 1-RTT CID routing exist; the new `src/transport/h3/path.rs` module now provides primitive coverage for RFC9000 § 5.1 connection-ID inventory (locally issued and peer-issued CIDs with sequence numbers, `active_connection_id_limit` enforcement, NEW_CONNECTION_ID / RETIRE_CONNECTION_ID processing), RFC9000 § 8.1 per-path anti-amplification 3x send-budget accounting, and RFC9000 § 9 per-address path state (Primary/Probing/Validating/Validated/Abandoned). Driver-level integration (issuing NEW_CONNECTION_ID after handshake completion, switching the active peer CID on path promotion, gating outbound packet builders on the anti-amplification budget, server-side migration lifecycle) is the remaining work.
 
 ### P2
 
