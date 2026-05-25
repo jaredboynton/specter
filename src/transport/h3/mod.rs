@@ -8,6 +8,7 @@ mod handle;
 pub mod handshake;
 pub mod native;
 pub mod native_driver;
+pub mod path;
 pub mod quic;
 pub mod recovery;
 pub mod session_cache;

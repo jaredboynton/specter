@@ -91,6 +91,11 @@ impl ConnectionId {
         Self(Bytes::from_static(bytes))
     }
 
+    pub fn from_slice(bytes: &[u8]) -> Self {
+        Self::from_bytes(Bytes::copy_from_slice(bytes))
+            .expect("QUIC connection id slice must fit QUIC CID limits")
+    }
+
     pub fn from_bytes(bytes: Bytes) -> Result<Self> {
         if bytes.len() > MAX_CID_LEN {
             return Err(Error::HttpProtocol(
