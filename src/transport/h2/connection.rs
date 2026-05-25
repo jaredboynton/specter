@@ -43,6 +43,14 @@ const DEFAULT_READ_BUFFER_CAPACITY: usize =
 /// When receive window drops below this, send WINDOW_UPDATE.
 const WINDOW_UPDATE_THRESHOLD: i32 = 16384;
 
+/// Minimum accumulated released bytes before the driver emits a stream
+/// WINDOW_UPDATE (matches the floor used by body/tunnel release notify).
+pub(crate) const MIN_STREAM_WINDOW_UPDATE_STEP: usize = 32 * 1024;
+
+/// Maximum accumulated released bytes before the driver emits a stream
+/// WINDOW_UPDATE (matches `MAX_RELEASE_NOTIFY_BYTES` in body/tunnel).
+pub(crate) const MAX_STREAM_WINDOW_UPDATE_STEP: usize = 512 * 1024;
+
 /// Stream states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamState {
@@ -1125,6 +1133,14 @@ where
     /// updates after the window drops below the refresh threshold.
     pub fn flow_control_refresh_increment(&self) -> u32 {
         DEFAULT_INITIAL_WINDOW_SIZE
+    }
+
+    /// Accumulated released-bytes threshold before the driver sends a stream
+    /// WINDOW_UPDATE. Scales with our locally configured initial window so
+    /// body-side release notify cadence and driver emission stay aligned.
+    pub fn stream_window_update_step(&self) -> usize {
+        ((self.settings.initial_window_size as usize) / 4)
+            .clamp(MIN_STREAM_WINDOW_UPDATE_STEP, MAX_STREAM_WINDOW_UPDATE_STEP)
     }
 
     /// Clone of the shared write-side owner. Inline streaming callers use

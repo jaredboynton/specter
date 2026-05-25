@@ -29,9 +29,14 @@ use crate::pool::multiplexer::{ConnectionPool, PoolKey};
 use crate::request::{IntoUrl, RedirectPolicy, Request, RequestBody};
 use crate::response::{Body, Response};
 use crate::timeouts::Timeouts;
-use crate::transport::connector::{BoringConnector, MaybeHttpsStream};
+use crate::transport::connector::{
+    AlpnMode, BoringConnector, EarlyDataOutcome, MaybeHttpsStream,
+};
 use crate::transport::dns::{DnsConfig, Resolve};
-use crate::transport::h1::{H1Connection, H1StreamingOptions};
+use crate::transport::h1::{h1_request_body_kind, H1Connection, H1StreamingOptions};
+use crate::transport::is_zero_rtt_safe_request;
+use crate::transport::session::SessionCache;
+use crate::transport::tcp::TcpFingerprint;
 use crate::transport::h2::{
     H2BodyTimeouts, H2Connection, H2DirectBody, H2DirectReuseHook, H2PooledConnection,
     H2TransportConfig, H2Tunnel, PseudoHeaderOrder, RawH2Connection,
@@ -58,15 +63,20 @@ pub struct CapacityPolicy {
 impl CapacityPolicy {
     pub fn bounded(max_pending_per_origin: usize) -> Self {
         let normalized = max_pending_per_origin.max(1);
+        let default_slots = H2TransportConfig::default().streaming_body_buffer_slots;
         Self {
             max_pending_per_origin: normalized,
-            streaming_body_buffer_slots: normalized,
+            streaming_body_buffer_slots: normalized.max(default_slots),
             h3_tunnel_outbound_byte_budget: H3TransportConfig::default()
                 .tunnel_outbound_byte_budget,
             h3_tunnel_inbound_byte_budget: H3TransportConfig::default().tunnel_inbound_byte_budget,
         }
     }
 
+    /// Override the per-stream H2/H3 response body queue depth.
+    ///
+    /// Values below 16 may reintroduce intermittent 1 ms backpressure stalls
+    /// under bursty server DATA frames. The default is 32.
     pub fn with_streaming_body_buffer_slots(mut self, slots: usize) -> Self {
         self.streaming_body_buffer_slots = slots.max(1);
         self
@@ -162,6 +172,8 @@ pub struct Client {
     cookie_store: Option<Arc<RwLock<CookieJar>>>,
     /// Fingerprint profile
     fingerprint: FingerprintProfile,
+    /// Enable TLS 1.3 0-RTT early data for eligible H1 requests.
+    http_tls_early_data: bool,
     /// Counter incremented every time an H1, H2, or H3 request resolves to
     /// an existing healthy pooled connection (rather than dialing a new
     /// one). Cloned `Client` instances share this counter via `Arc`.
@@ -215,6 +227,7 @@ pub struct ClientBuilder {
     tcp_keepalive: Option<Duration>,
     tcp_keepalive_interval: Option<Duration>,
     tcp_keepalive_retries: Option<u32>,
+    tcp_fingerprint: Option<TcpFingerprint>,
     prefer_http2: bool,
     h3_upgrade_enabled: bool,
     http2_prior_knowledge: bool,
@@ -231,6 +244,8 @@ pub struct ClientBuilder {
     redirect_policy: RedirectPolicy,
     /// Optional cookie store
     cookie_store: Option<Arc<RwLock<CookieJar>>>,
+    /// Enable TLS 1.3 0-RTT early data for eligible H1 requests.
+    http_tls_early_data: bool,
 }
 
 impl Client {
@@ -357,6 +372,16 @@ impl Client {
     /// Bounded in-flight response DATA slots per streaming H2 body.
     pub fn h2_streaming_body_buffer_slots(&self) -> usize {
         self.h2_transport_config.streaming_body_buffer_slots
+    }
+
+    /// Periodic HTTP/2 PING interval on pooled connections.
+    pub fn http2_keep_alive_interval(&self) -> Option<Duration> {
+        self.h2_transport_config.keep_alive_interval
+    }
+
+    /// Whether HTTP/2 keepalive PINGs fire while no streams are active.
+    pub fn http2_keep_alive_while_idle(&self) -> bool {
+        self.h2_transport_config.keep_alive_while_idle
     }
 
     /// Bounded in-flight response DATA slots per streaming H3 body.
@@ -1006,16 +1031,50 @@ impl<'a> RequestBuilder<'a> {
                 client.pool_reuse_counter.fetch_add(1, Ordering::Relaxed);
             }
             let connector = client.connector_for_uri(&uri);
-            let connect_fut = connector.connect_h1_only(&uri);
-            let stream = if let Some(stream) = pooled_h1_stream {
-                stream
-            } else if let Some(connect_timeout) = timeouts.connect {
-                tokio_timeout(connect_timeout, connect_fut)
-                    .await
-                    .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+            let method = request.method.clone();
+            let headers = request.headers.to_vec();
+            let body = request.body;
+            let use_early_data = client.http_tls_early_data
+                && uri.scheme_str() == Some("https")
+                && is_zero_rtt_safe_request(method.as_str(), &body);
+
+            let (stream, early_outcome) = if let Some(stream) = pooled_h1_stream {
+                (stream, EarlyDataOutcome::NotAttempted)
             } else {
-                connect_fut.await?
+                let connect_result = if use_early_data {
+                    let body_kind = h1_request_body_kind(&body);
+                    let request_head =
+                        H1Connection::build_request_bytes(&method, &uri, &headers, body_kind)?;
+                    let connect_fut = connector.connect_with_alpn_and_early_data(
+                        &uri,
+                        AlpnMode::Http1Only,
+                        Some(&request_head),
+                    );
+                    if let Some(connect_timeout) = timeouts.connect {
+                        tokio_timeout(connect_timeout, connect_fut)
+                            .await
+                            .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+                    } else {
+                        connect_fut.await?
+                    }
+                } else {
+                    let connect_fut = connector.connect_h1_only(&uri);
+                    let stream = if let Some(connect_timeout) = timeouts.connect {
+                        tokio_timeout(connect_timeout, connect_fut)
+                            .await
+                            .map_err(|_| Error::ConnectTimeout(connect_timeout))??
+                    } else {
+                        connect_fut.await?
+                    };
+                    (stream, EarlyDataOutcome::NotAttempted)
+                };
+                connect_result
             };
+
+            let request_head_sent = matches!(
+                early_outcome,
+                EarlyDataOutcome::Accepted | EarlyDataOutcome::Rejected { .. }
+            );
 
             let h1_pool = client.h1_pool.clone();
             let pool_key_for_reuse = pool_key.clone();
@@ -1024,9 +1083,6 @@ impl<'a> RequestBuilder<'a> {
                 let _ = h1_pool.try_put_h1(pool_key_for_reuse, stream);
             });
             let conn = H1Connection::new(stream);
-            let method = request.method.clone();
-            let headers = request.headers.to_vec();
-            let body = request.body;
             let send_fut = conn.send_request_streaming(
                 method,
                 &uri,
@@ -1036,6 +1092,7 @@ impl<'a> RequestBuilder<'a> {
                     on_reusable,
                     read_idle_timeout: timeouts.read_idle,
                     total_timeout: timeouts.total,
+                    request_head_sent,
                 },
             );
             let response = if let Some(ttfb_timeout) = timeouts.ttfb {
@@ -2048,6 +2105,7 @@ impl ClientBuilder {
             tcp_keepalive: None,
             tcp_keepalive_interval: None,
             tcp_keepalive_retries: None,
+            tcp_fingerprint: None,
             prefer_http2: true, // HTTP/2 preferred by default (falls back to HTTP/1.1 if not supported)
             h3_upgrade_enabled: true, // Enable by default
             http2_prior_knowledge: false,
@@ -2058,6 +2116,7 @@ impl ClientBuilder {
             default_headers: Headers::new(),
             redirect_policy: RedirectPolicy::None,
             cookie_store: None,
+            http_tls_early_data: false,
         }
     }
 
@@ -2182,8 +2241,7 @@ impl ClientBuilder {
 
     /// Enable Specter's built-in cached async DNS resolver.
     ///
-    /// This is a reqwest-compatible API name. Specter implements this without
-    /// pulling in Hickory by caching Tokio resolver results for a short TTL.
+    /// Enabled by default. Pass `false` to resolve on every connection attempt.
     pub fn hickory_dns(mut self, enable: bool) -> Self {
         self.dns_config = self.dns_config.with_cache_enabled(enable);
         self
@@ -2238,6 +2296,17 @@ impl ClientBuilder {
     /// Set TCP keepalive retry count.
     pub fn tcp_keepalive_retries(mut self, retries: Option<u32>) -> Self {
         self.tcp_keepalive_retries = retries;
+        self
+    }
+
+    /// Set `TCP_NOTSENT_LOWAT` on new TCP connections (Linux and macOS only).
+    ///
+    /// Applies to all new connections; does not retroactively affect pooled
+    /// connections. See [`TcpFingerprint::tcp_notsent_lowat`] for recommended values.
+    pub fn with_tcp_notsent_lowat(mut self, bytes: u32) -> Self {
+        let mut fp = self.tcp_fingerprint.take().unwrap_or_default();
+        fp.tcp_notsent_lowat = Some(bytes);
+        self.tcp_fingerprint = Some(fp);
         self
     }
 
@@ -2567,12 +2636,21 @@ impl ClientBuilder {
         self
     }
 
+    /// Enable TLS 1.3 0-RTT early data for eligible idempotent H1 requests.
+    pub fn http_tls_early_data(mut self, enabled: bool) -> Self {
+        self.http_tls_early_data = enabled;
+        self
+    }
+
     /// Build the client.
     pub fn build(self) -> Result<Client> {
+        let session_cache = Arc::new(SessionCache::new());
         // Create connector with TLS fingerprint
         let tls_fingerprint = self.fingerprint.tls_fingerprint();
         let root_certs = self.root_certs.clone();
         let mut connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
+            .with_shared_session_cache(session_cache.clone())
+            .with_early_data(self.http_tls_early_data)
             .with_root_certificates(self.root_certs.clone())
             .with_platform_roots(self.use_platform_roots)
             .with_dns_config(self.dns_config.clone())
@@ -2580,13 +2658,19 @@ impl ClientBuilder {
             .tcp_keepalive_interval(self.tcp_keepalive_interval)
             .tcp_keepalive_retries(self.tcp_keepalive_retries);
 
+        if let Some(tcp_fp) = &self.tcp_fingerprint {
+            connector = connector.with_tcp_fingerprint(tcp_fp.clone());
+        }
+
         // Apply global danger_accept_invalid_certs if set
         if self.danger_accept_invalid_certs {
             connector = connector.danger_accept_invalid_certs(true);
         }
 
         // Create insecure connector for localhost (always skips TLS verification)
-        let insecure_connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
+        let mut insecure_connector = BoringConnector::with_fingerprint(tls_fingerprint.clone())
+            .with_shared_session_cache(session_cache)
+            .with_early_data(self.http_tls_early_data)
             .with_root_certificates(self.root_certs.clone())
             .with_platform_roots(self.use_platform_roots)
             .with_dns_config(self.dns_config.clone())
@@ -2594,6 +2678,10 @@ impl ClientBuilder {
             .tcp_keepalive_interval(self.tcp_keepalive_interval)
             .tcp_keepalive_retries(self.tcp_keepalive_retries)
             .danger_accept_invalid_certs(true);
+
+        if let Some(tcp_fp) = &self.tcp_fingerprint {
+            insecure_connector = insecure_connector.with_tcp_fingerprint(tcp_fp.clone());
+        }
 
         // Create H3 client with same TLS fingerprint
         let h3_fingerprint = self
@@ -2620,6 +2708,12 @@ impl ClientBuilder {
         let pseudo_order = self
             .pseudo_order
             .unwrap_or_else(|| self.fingerprint.http2_pseudo_order());
+
+        let mut h2_transport_config = self.h2_transport_config.clone();
+        if h2_transport_config.keep_alive_interval.is_none() {
+            h2_transport_config.keep_alive_interval = http2_settings.ping_interval;
+            h2_transport_config.keep_alive_while_idle = true;
+        }
 
         // Determine default version
         let default_version = if self.prefer_http2 {
@@ -2657,7 +2751,7 @@ impl ClientBuilder {
             pseudo_order,
             default_version,
             timeouts: self.timeouts,
-            h2_transport_config: self.h2_transport_config.clone(),
+            h2_transport_config,
             h2_direct_streaming_responses: self.h2_direct_streaming_responses,
             h3_upgrade_enabled: self.h3_upgrade_enabled,
             http2_prior_knowledge: self.http2_prior_knowledge,
@@ -2667,6 +2761,7 @@ impl ClientBuilder {
             redirect_policy: self.redirect_policy,
             cookie_store: self.cookie_store,
             fingerprint: self.fingerprint,
+            http_tls_early_data: self.http_tls_early_data,
             pool_reuse_counter,
         })
     }

@@ -54,7 +54,13 @@ pub struct H2BodyCapacity {
 /// is a safety bound on the number of distinct chunks queued between the
 /// driver and the consumer, which removes the per-chunk lock-step round-trip
 /// the original single-slot design imposed.
-pub(crate) const DEFAULT_H2_BODY_SLOT_CAPACITY: usize = 5;
+///
+/// Per-slot overhead is ~32 B (`Option<Result<Bytes, Error>>` in the SPSC ring).
+/// Buffered payload is still bounded by the stream receive window (65535 with
+/// stock SETTINGS, up to 6 MiB with the Chrome-fingerprint initial window).
+pub const DEFAULT_H2_BODY_SLOT_CAPACITY: usize = 32;
+/// Typical number of small DATA chunks coalesced into one consumer poll yield.
+const H2_BODY_COALESCE_HINT: usize = 5;
 const H2_BODY_CHUNK_COALESCE_LIMIT: usize = 16 * 1024;
 const H2_DIRECT_DEFER_FLOW_BYTES: usize = 1024 * 1024;
 const MIN_RELEASE_NOTIFY_BYTES: usize = 8 * 1024;
@@ -476,7 +482,7 @@ impl H2Body {
                                 total_len += bytes.len();
                                 extra
                                     .get_or_insert_with(|| {
-                                        Vec::with_capacity(DEFAULT_H2_BODY_SLOT_CAPACITY)
+                                        Vec::with_capacity(H2_BODY_COALESCE_HINT)
                                     })
                                     .push(bytes);
                             }

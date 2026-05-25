@@ -8,7 +8,7 @@ use bytes::{Bytes, BytesMut};
 use http::{Method, Uri};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Poll, Wake, Waker};
 use std::time::{Duration, Instant};
@@ -29,7 +29,6 @@ use crate::transport::h2::frame::{flags, ErrorCode, FrameHeader, FrameType};
 use crate::transport::h2::tunnel::{H2Tunnel, H2TunnelCredit, H2TunnelEvent, H2TunnelOutbound};
 use crate::transport::h2::H2TransportConfig;
 
-const STREAM_WINDOW_UPDATE_MIN_INCREMENT: usize = 32 * 1024;
 const FAST_PATH_COMMAND_CHECK_INTERVAL: usize = 8;
 const FAST_PATH_BODY_QUEUE_YIELD_FRAME_BUDGET: usize = 2;
 
@@ -353,6 +352,9 @@ pub struct H2Driver<S> {
     /// producers become ready after returning Pending.
     body_progress_notify: Arc<Notify>,
     request_body_waker: Waker,
+    /// Incremented when the driver sleeps 1 ms while streaming body work is
+    /// pending (body queue full or request-body producer not ready).
+    backpressure_stall_count: Arc<AtomicU64>,
 }
 
 impl<S> H2Driver<S>
@@ -366,6 +368,7 @@ where
         command_rx: mpsc::Receiver<DriverCommand>,
         goaway_received: Arc<AtomicBool>,
         config: H2TransportConfig,
+        backpressure_stall_count: Arc<AtomicU64>,
     ) -> Self {
         let (_, inline_register_rx) = mpsc::unbounded_channel();
         let body_progress_notify = Arc::new(Notify::new());
@@ -379,6 +382,7 @@ where
             Arc::new(AtomicUsize::new(0)),
             Arc::new(AtomicBool::new(false)),
             body_progress_notify,
+            backpressure_stall_count,
         )
     }
 
@@ -396,6 +400,7 @@ where
         inline_active: Arc<AtomicUsize>,
         inline_eligible: Arc<AtomicBool>,
         body_progress_notify: Arc<Notify>,
+        backpressure_stall_count: Arc<AtomicU64>,
     ) -> Self {
         let request_body_waker = Waker::from(Arc::new(NotifyWake(body_progress_notify.clone())));
         Self {
@@ -413,6 +418,7 @@ where
             inline_eligible,
             body_progress_notify,
             request_body_waker,
+            backpressure_stall_count,
         }
     }
 
@@ -518,7 +524,13 @@ where
                     } else {
                         std::future::pending::<()>().await;
                     }
-                } => {}
+                } => {
+                    if retry_streaming_backpressure {
+                        self.backpressure_stall_count
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::debug!("H2 driver streaming backpressure stall");
+                    }
+                }
 
                 _ = self.body_progress_notify.notified() => {}
             }
@@ -1394,11 +1406,11 @@ where
             }
 
             let refresh_threshold = self.connection.flow_control_refresh_threshold();
+            let window_update_step = self.connection.stream_window_update_step();
             let increment = self.streams.get_mut(&stream_id).and_then(|stream| {
                 stream.pending_recv_window_update =
                     stream.pending_recv_window_update.saturating_add(released);
-                let should_update = stream.pending_recv_window_update
-                    >= STREAM_WINDOW_UPDATE_MIN_INCREMENT
+                let should_update = stream.pending_recv_window_update >= window_update_step
                     || stream.recv_window < refresh_threshold;
                 if should_update {
                     let increment = stream.pending_recv_window_update.min(u32::MAX as usize);
@@ -1445,11 +1457,11 @@ where
             }
 
             let refresh_threshold = self.connection.flow_control_refresh_threshold();
+            let window_update_step = self.connection.stream_window_update_step();
             let increment = self.tunnels.get_mut(&stream_id).and_then(|tunnel| {
                 tunnel.pending_recv_window_update =
                     tunnel.pending_recv_window_update.saturating_add(released);
-                let should_update = tunnel.pending_recv_window_update
-                    >= STREAM_WINDOW_UPDATE_MIN_INCREMENT
+                let should_update = tunnel.pending_recv_window_update >= window_update_step
                     || tunnel.recv_window < refresh_threshold;
                 if should_update {
                     let increment = tunnel.pending_recv_window_update.min(u32::MAX as usize);

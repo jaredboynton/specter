@@ -209,6 +209,7 @@ impl H2PooledConnection {
         let inline_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let inline_eligible = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let body_progress_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let backpressure_stall_count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         let write_half = conn.inner.write_half_arc();
         let peer_max_frame_size = conn.inner.peer_max_frame_size_arc();
@@ -235,6 +236,7 @@ impl H2PooledConnection {
             inline_active,
             inline_eligible,
             body_progress_notify,
+            backpressure_stall_count.clone(),
         );
 
         // Spawn driver task
@@ -244,13 +246,24 @@ impl H2PooledConnection {
             }
         });
 
-        let handle = H2Handle::with_inline(command_tx, goaway_received, inline_state, config);
+        let handle = H2Handle::with_inline(
+            command_tx,
+            goaway_received,
+            inline_state,
+            config,
+            backpressure_stall_count,
+        );
         Self { handle }
     }
 
     /// Check if the connection is alive (the driver is still running and hasn't received GOAWAY)
     pub fn is_alive(&self) -> bool {
         self.handle.is_alive()
+    }
+
+    /// Number of times the driver slept 1 ms while streaming body work was pending.
+    pub fn backpressure_stall_count(&self) -> u64 {
+        self.handle.backpressure_stall_count()
     }
 
     /// Send a request using this pooled connection.

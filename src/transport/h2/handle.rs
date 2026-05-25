@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 use http::{Method, Uri};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::WriteHalf;
 use tokio::sync::{mpsc, oneshot};
@@ -54,24 +54,32 @@ pub struct H2Handle {
     /// no shared write half exists.
     inline: Option<Arc<H2InlineState>>,
     transport_config: H2TransportConfig,
+    backpressure_stall_count: Arc<AtomicU64>,
 }
 
 impl H2Handle {
     /// Create a new handle with a command channel to the driver
     pub fn new(command_tx: mpsc::Sender<DriverCommand>, goaway_received: Arc<AtomicBool>) -> Self {
-        Self::new_with_config(command_tx, goaway_received, H2TransportConfig::default())
+        Self::new_with_config(
+            command_tx,
+            goaway_received,
+            H2TransportConfig::default(),
+            Arc::new(AtomicU64::new(0)),
+        )
     }
 
     pub(crate) fn new_with_config(
         command_tx: mpsc::Sender<DriverCommand>,
         goaway_received: Arc<AtomicBool>,
         transport_config: H2TransportConfig,
+        backpressure_stall_count: Arc<AtomicU64>,
     ) -> Self {
         Self {
             command_tx,
             goaway_received,
             inline: None,
             transport_config: transport_config.normalized(),
+            backpressure_stall_count,
         }
     }
 
@@ -80,12 +88,14 @@ impl H2Handle {
         goaway_received: Arc<AtomicBool>,
         inline: Arc<H2InlineState>,
         transport_config: H2TransportConfig,
+        backpressure_stall_count: Arc<AtomicU64>,
     ) -> Self {
         Self {
             command_tx,
             goaway_received,
             inline: Some(inline),
             transport_config: transport_config.normalized(),
+            backpressure_stall_count,
         }
     }
 
@@ -97,6 +107,12 @@ impl H2Handle {
     /// Bounded in-flight response DATA slots per streaming H2 body.
     pub fn streaming_body_buffer_slots(&self) -> usize {
         self.transport_config.streaming_body_buffer_slots
+    }
+
+    /// Number of times the driver slept 1 ms while streaming body work was
+    /// pending. Useful for diagnosing bursty-server backpressure stalls.
+    pub fn backpressure_stall_count(&self) -> u64 {
+        self.backpressure_stall_count.load(Ordering::Relaxed)
     }
 
     /// Send an HTTP/2 request and receive the response.
