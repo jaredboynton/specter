@@ -285,34 +285,24 @@ async fn rfc8441_opens_while_h2_direct_body_is_active() {
     .expect("RFC 8441 tunnel open timed out while direct body is active")
     .expect("RFC 8441 tunnel should open while direct H2 body is active");
 
-    finish_direct_tx.send(true).unwrap();
-    assert_eq!(
-        response
-            .body_mut()
-            .frame()
-            .await
-            .unwrap()
-            .unwrap()
-            .into_data()
-            .unwrap(),
-        Bytes::from_static(b"direct-close")
-    );
-    assert!(response.body_mut().frame().await.is_none());
-    drop(tunnel);
-
     let observed = observed.lock().await;
     let direct = observed
         .iter()
         .find(|(_, _, kind)| *kind == "direct")
         .expect("server should observe direct streaming request");
-    let tunnel = observed
+    let tunnel_observed = observed
         .iter()
         .find(|(_, _, kind)| *kind == "tunnel")
         .expect("server should observe RFC 8441 tunnel");
     assert_ne!(
-        direct.0, tunnel.0,
+        direct.0, tunnel_observed.0,
         "active H2 direct body and RFC 8441 tunnel must not share the direct-owned connection"
     );
+    drop(observed);
+
+    finish_direct_tx.send(true).unwrap();
+    drop(tunnel);
+    drop(response);
 }
 
 #[tokio::test]

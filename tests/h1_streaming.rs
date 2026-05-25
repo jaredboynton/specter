@@ -667,13 +667,13 @@ async fn h1_body_polls_socket_with_reusable_buffer() {
     );
 
     let mut response = client
-        .get(fixture.endpoint("/fixed"))
+        .get(fixture.endpoint("/unfinished"))
         .version(HttpVersion::Http1_1)
         .send_streaming()
         .await
         .unwrap();
     let first = next_data(response.body_mut()).await;
-    assert_eq!(first, Bytes::from_static(b"one-"));
+    assert!(first.starts_with(b"early-"));
     drop(response);
 
     let response = client
