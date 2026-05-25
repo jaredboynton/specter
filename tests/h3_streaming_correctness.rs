@@ -2,10 +2,18 @@ use bytes::Bytes;
 use specter::transport::h3::H3Client;
 use specter::{Client, Error, HttpVersion, RequestBody};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 
 mod helpers;
 use helpers::mock_h3_server::{MockEvent, MockH3Server};
+
+async fn wait_for_test_signal(signal: &Notify, context: &str) {
+    tokio::time::timeout(Duration::from_secs(1), signal.notified())
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {context}"));
+}
 
 #[tokio::test]
 async fn h3_response_body_is_poll_based() {
@@ -13,21 +21,26 @@ async fn h3_response_body_is_poll_based() {
 
     let server = MockH3Server::new().await.unwrap();
     let url = server.url();
+    let first_chunk_read = Arc::new(Notify::new());
+    let first_chunk_read_for_server = Arc::clone(&first_chunk_read);
 
-    server.start(|conn| async move {
-        let stream_id = loop {
-            match conn.read_event().await {
-                Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
-                Some(_) => continue,
-                None => return,
-            }
-        };
+    server.start(move |conn| {
+        let first_chunk_read = Arc::clone(&first_chunk_read_for_server);
+        async move {
+            let stream_id = loop {
+                match conn.read_event().await {
+                    Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                    Some(_) => continue,
+                    None => return,
+                }
+            };
 
-        conn.send_response_headers(stream_id, vec![(":status", "200")], false)
-            .await;
-        conn.send_response_data(stream_id, b"poll", false).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        conn.send_response_data(stream_id, b"-body", true).await;
+            conn.send_response_headers(stream_id, vec![(":status", "200")], false)
+                .await;
+            conn.send_response_data(stream_id, b"poll", false).await;
+            wait_for_test_signal(&first_chunk_read, "client to read first H3 body chunk").await;
+            conn.send_response_data(stream_id, b"-body", true).await;
+        }
     });
 
     let client = H3Client::new().danger_accept_invalid_certs(true);
@@ -47,6 +60,7 @@ async fn h3_response_body_is_poll_based() {
         .into_data()
         .unwrap();
     assert_eq!(first, Bytes::from_static(b"poll"));
+    first_chunk_read.notify_one();
     let second = response
         .body_mut()
         .frame()
@@ -94,8 +108,6 @@ async fn h3_response_body_delivers_error_after_buffered_data() {
         .send_streaming(&url, "GET", vec![], RequestBody::Empty)
         .await
         .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(25)).await;
 
     let first = response
         .body_mut()
@@ -170,22 +182,30 @@ async fn h3_dropped_response_body_cancels_stream() {
 async fn h3_streaming_returns_headers_before_body_completion() {
     let server = MockH3Server::new().await.unwrap();
     let url = server.url();
+    let headers_received = Arc::new(Notify::new());
+    let first_chunk_read = Arc::new(Notify::new());
+    let headers_received_for_server = Arc::clone(&headers_received);
+    let first_chunk_read_for_server = Arc::clone(&first_chunk_read);
 
-    server.start(|conn| async move {
-        let stream_id = loop {
-            match conn.read_event().await {
-                Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
-                Some(_) => continue,
-                None => return,
-            }
-        };
+    server.start(move |conn| {
+        let headers_received = Arc::clone(&headers_received_for_server);
+        let first_chunk_read = Arc::clone(&first_chunk_read_for_server);
+        async move {
+            let stream_id = loop {
+                match conn.read_event().await {
+                    Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                    Some(_) => continue,
+                    None => return,
+                }
+            };
 
-        conn.send_response_headers(stream_id, vec![(":status", "200")], false)
-            .await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        conn.send_response_data(stream_id, b"one", false).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        conn.send_response_data(stream_id, b"two", true).await;
+            conn.send_response_headers(stream_id, vec![(":status", "200")], false)
+                .await;
+            wait_for_test_signal(&headers_received, "client to receive H3 response headers").await;
+            conn.send_response_data(stream_id, b"one", false).await;
+            wait_for_test_signal(&first_chunk_read, "client to read first H3 body chunk").await;
+            conn.send_response_data(stream_id, b"two", true).await;
+        }
     });
 
     let client = H3Client::new().danger_accept_invalid_certs(true);
@@ -199,6 +219,7 @@ async fn h3_streaming_returns_headers_before_body_completion() {
 
     assert_eq!(response.status(), 200);
     assert!(response.body().is_streaming());
+    headers_received.notify_one();
 
     let first = response
         .body_mut()
@@ -209,6 +230,7 @@ async fn h3_streaming_returns_headers_before_body_completion() {
         .into_data()
         .unwrap();
     assert_eq!(first, Bytes::from_static(b"one"));
+    first_chunk_read.notify_one();
     let second = response
         .body_mut()
         .frame()
@@ -225,23 +247,31 @@ async fn h3_streaming_returns_headers_before_body_completion() {
 async fn h3_streaming_delivers_incremental_ordered_data() {
     let server = MockH3Server::new().await.unwrap();
     let url = server.url();
+    let first_chunk_read = Arc::new(Notify::new());
+    let second_chunk_read = Arc::new(Notify::new());
+    let first_chunk_read_for_server = Arc::clone(&first_chunk_read);
+    let second_chunk_read_for_server = Arc::clone(&second_chunk_read);
 
-    server.start(|conn| async move {
-        let stream_id = loop {
-            match conn.read_event().await {
-                Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
-                Some(_) => continue,
-                None => return,
-            }
-        };
+    server.start(move |conn| {
+        let first_chunk_read = Arc::clone(&first_chunk_read_for_server);
+        let second_chunk_read = Arc::clone(&second_chunk_read_for_server);
+        async move {
+            let stream_id = loop {
+                match conn.read_event().await {
+                    Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                    Some(_) => continue,
+                    None => return,
+                }
+            };
 
-        conn.send_response_headers(stream_id, vec![(":status", "200")], false)
-            .await;
-        conn.send_response_data(stream_id, b"chunk-a", false).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        conn.send_response_data(stream_id, b"chunk-b", false).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        conn.send_response_data(stream_id, b"chunk-c", true).await;
+            conn.send_response_headers(stream_id, vec![(":status", "200")], false)
+                .await;
+            conn.send_response_data(stream_id, b"chunk-a", false).await;
+            wait_for_test_signal(&first_chunk_read, "client to read first H3 body chunk").await;
+            conn.send_response_data(stream_id, b"chunk-b", false).await;
+            wait_for_test_signal(&second_chunk_read, "client to read second H3 body chunk").await;
+            conn.send_response_data(stream_id, b"chunk-c", true).await;
+        }
     });
 
     let client = H3Client::new().danger_accept_invalid_certs(true);
@@ -258,6 +288,7 @@ async fn h3_streaming_delivers_incremental_ordered_data() {
         .into_data()
         .unwrap();
     assert_eq!(first, Bytes::from_static(b"chunk-a"));
+    first_chunk_read.notify_one();
 
     let second = response
         .body_mut()
@@ -267,6 +298,7 @@ async fn h3_streaming_delivers_incremental_ordered_data() {
         .unwrap()
         .into_data()
         .unwrap();
+    second_chunk_read.notify_one();
     let third = response
         .body_mut()
         .frame()
@@ -381,7 +413,6 @@ async fn h3_streaming_fin_clean_eof_and_reuse() {
     );
     assert!(second_response.body_mut().frame().await.is_none());
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count.load(Ordering::SeqCst), 1);
 }
 
@@ -500,7 +531,6 @@ async fn h3_streaming_does_not_duplicate_partial_non_idempotent_requests() {
 
     // It should fail and NOT retry (which means connection count should be 1, and we should get an error)
     assert!(res.is_err());
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count.load(Ordering::SeqCst), 1);
 }
 
@@ -548,7 +578,7 @@ async fn h3_streaming_preserves_timeouts_and_cookies() {
                 "/timeout" => {
                     conn.send_response_headers(stream_id, vec![(":status", "200")], false)
                         .await;
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    std::future::pending::<()>().await;
                 }
                 other => panic!("unexpected path {other}"),
             }

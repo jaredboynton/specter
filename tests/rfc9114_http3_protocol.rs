@@ -24,14 +24,9 @@ async fn test_h3_clean_shutdown() {
         |conn: helpers::mock_h3_server::MockH3Connection| async move {
             tracing::info!("Mock Server: Connection accepted");
 
-            // The mock H3 server sends SETTINGS as part of connection setup.
-
-            // Wait for handshake/settings exchange to settle
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(conn.wait_application_ready(Duration::from_secs(1)).await);
 
             conn.close_connection(true, 0, b"clean shutdown").await;
-            // Wait for flush
-            tokio::time::sleep(Duration::from_millis(100)).await;
         },
     );
 
@@ -65,8 +60,7 @@ async fn test_h3_malformed_frame() {
 
     server.start(
         |conn: helpers::mock_h3_server::MockH3Connection| async move {
-            // Wait for handshake
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(conn.wait_application_ready(Duration::from_secs(1)).await);
 
             // Send DATA frame on Control Stream (Stream ID 3)
             // Control Stream ID is 3 (Server Uni).
@@ -79,8 +73,6 @@ async fn test_h3_malformed_frame() {
             let control_stream_id = 3;
             let payload = b"bad";
             conn.send_frame(control_stream_id, 0, payload).await;
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
         },
     );
 

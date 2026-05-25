@@ -3,10 +3,15 @@ use specter::pool::multiplexer::{OriginFairQueue, PoolKey};
 use specter::transport::h3::{H3Backend, H3Client};
 use specter::{FingerprintProfile, PseudoHeaderOrder, RequestBody};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 
 mod helpers;
 use helpers::mock_h3_server::{MockEvent, MockH3Server};
+
+const H3_IDLE_TIMEOUT_MS: u64 = 100;
+const H3_IDLE_TIMEOUT: Duration = Duration::from_millis(H3_IDLE_TIMEOUT_MS);
 
 #[test]
 fn h3_pool_origin_fair_queue_rotates_fingerprint_variants_by_origin() {
@@ -94,7 +99,6 @@ async fn h3_client_reuses_pooled_connection_for_same_authority() {
         b"ok"
     );
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count.load(Ordering::SeqCst), 1);
 }
 
@@ -160,7 +164,6 @@ async fn h3_pool_reuses_live_same_key_connection() {
     );
     assert!(response2.body_mut().frame().await.is_none());
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count.load(Ordering::SeqCst), 1);
 }
 
@@ -210,7 +213,6 @@ async fn h3_client_exposes_reusable_handle_for_streaming_requests() {
         assert!(response.body_mut().frame().await.is_none());
     }
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count.load(Ordering::SeqCst), 1);
 }
 
@@ -340,7 +342,6 @@ async fn h3_pool_separates_authority_and_fingerprint_keys() {
         bytes::Bytes::from_static(b"ok2")
     );
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count1.load(Ordering::SeqCst), 1);
     assert_eq!(connection_count2.load(Ordering::SeqCst), 1);
 }
@@ -407,7 +408,6 @@ async fn h3_pool_concurrent_streams_are_isolated() {
         );
     }
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count.load(Ordering::SeqCst), 1);
 }
 
@@ -432,10 +432,9 @@ async fn h3_pool_reconnects_after_idle_timeout() {
         }
     });
 
-    // Configure the client with a very short idle timeout
     let client = H3Client::new()
         .danger_accept_invalid_certs(true)
-        .with_max_idle_timeout(100); // 100 milliseconds idle timeout
+        .with_max_idle_timeout(H3_IDLE_TIMEOUT_MS);
 
     let mut response1 = client
         .send_streaming(&url, "GET", vec![], RequestBody::Empty)
@@ -454,8 +453,9 @@ async fn h3_pool_reconnects_after_idle_timeout() {
         bytes::Bytes::from_static(b"chunk")
     );
 
-    // Wait for the idle timeout to kick in on client/server
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(response1.body_mut().frame().await.is_none());
+
+    tokio::time::sleep_until(tokio::time::Instant::now() + H3_IDLE_TIMEOUT * 2).await;
 
     let mut response2 = client
         .send_streaming(&url, "GET", vec![], RequestBody::Empty)
@@ -474,7 +474,6 @@ async fn h3_pool_reconnects_after_idle_timeout() {
         bytes::Bytes::from_static(b"chunk")
     );
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count.load(Ordering::SeqCst), 2);
 }
 
@@ -483,10 +482,13 @@ async fn h3_pool_evicts_closed_or_draining_connections() {
     let server = MockH3Server::new().await.unwrap();
     let connection_count = server.connection_count();
     let url = server.url();
+    let first_stream_drained = Arc::new(Notify::new());
 
     let connection_count_clone = connection_count.clone();
+    let first_stream_drained_for_server = first_stream_drained.clone();
     server.start(move |conn| {
         let connection_count = connection_count_clone.clone();
+        let first_stream_drained = first_stream_drained_for_server.clone();
         async move {
             let is_first = connection_count.load(Ordering::SeqCst) <= 1;
 
@@ -503,8 +505,9 @@ async fn h3_pool_evicts_closed_or_draining_connections() {
                     .await;
                 conn.send_response_data(stream_id1, b"first", true).await;
 
-                // Wait a tiny bit then send GOAWAY
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::timeout(Duration::from_secs(1), first_stream_drained.notified())
+                    .await
+                    .expect("client should drain first stream before GOAWAY");
                 conn.send_goaway(8).await; // Stream IDs lower than 8 are ok, higher are rejected/GOAWAY
             } else {
                 // Second stream (on the new connection)
@@ -541,6 +544,8 @@ async fn h3_pool_evicts_closed_or_draining_connections() {
             .unwrap(),
         bytes::Bytes::from_static(b"first")
     );
+    assert!(resp1.body_mut().frame().await.is_none());
+    first_stream_drained.notify_one();
 
     tokio::time::timeout(Duration::from_secs(1), async {
         while !first_handle.is_draining() {
@@ -570,7 +575,6 @@ async fn h3_pool_evicts_closed_or_draining_connections() {
         bytes::Bytes::from_static(b"second")
     );
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count.load(Ordering::SeqCst), 2);
 }
 
@@ -579,10 +583,13 @@ async fn native_h3_pool_evicts_draining_connection_after_goaway() {
     let server = MockH3Server::new().await.unwrap();
     let connection_count = server.connection_count();
     let url = server.url();
+    let first_stream_drained = Arc::new(Notify::new());
 
     let connection_count_clone = connection_count.clone();
+    let first_stream_drained_for_server = first_stream_drained.clone();
     server.start(move |conn| {
         let connection_count = connection_count_clone.clone();
+        let first_stream_drained = first_stream_drained_for_server.clone();
         async move {
             let is_first = connection_count.load(Ordering::SeqCst) <= 1;
 
@@ -598,7 +605,9 @@ async fn native_h3_pool_evicts_draining_connection_after_goaway() {
                     .await;
                 conn.send_response_data(stream_id1, b"first", true).await;
 
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::timeout(Duration::from_secs(1), first_stream_drained.notified())
+                    .await
+                    .expect("client should drain first native stream before GOAWAY");
                 conn.send_goaway(8).await;
             } else {
                 let stream_id2 = loop {
@@ -618,6 +627,7 @@ async fn native_h3_pool_evicts_draining_connection_after_goaway() {
     let client = H3Client::new()
         .danger_accept_invalid_certs(true)
         .with_h3_backend(H3Backend::Native);
+    let first_handle = client.handle(&url).await.unwrap();
 
     let mut resp1 = client
         .send_streaming(&url, "GET", vec![], RequestBody::Empty)
@@ -635,8 +645,16 @@ async fn native_h3_pool_evicts_draining_connection_after_goaway() {
             .unwrap(),
         bytes::Bytes::from_static(b"first")
     );
+    assert!(resp1.body_mut().frame().await.is_none());
+    first_stream_drained.notify_one();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !first_handle.is_draining() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first native H3 handle should observe GOAWAY and enter draining");
 
     let mut resp2 = tokio::time::timeout(
         Duration::from_secs(1),
@@ -658,7 +676,6 @@ async fn native_h3_pool_evicts_draining_connection_after_goaway() {
         bytes::Bytes::from_static(b"second")
     );
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connection_count.load(Ordering::SeqCst), 2);
 }
 
@@ -666,22 +683,29 @@ async fn native_h3_pool_evicts_draining_connection_after_goaway() {
 async fn native_h3_streaming_response_reset_wakes_body_with_error() {
     let server = MockH3Server::new().await.unwrap();
     let url = server.url();
+    let first_data_seen = Arc::new(Notify::new());
 
-    server.start(|conn| async move {
-        let stream_id = loop {
-            match conn.read_event().await {
-                Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
-                Some(_) => continue,
-                None => return,
-            }
-        };
+    let first_data_seen_for_server = first_data_seen.clone();
+    server.start(move |conn| {
+        let first_data_seen = first_data_seen_for_server.clone();
+        async move {
+            let stream_id = loop {
+                match conn.read_event().await {
+                    Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                    Some(_) => continue,
+                    None => return,
+                }
+            };
 
-        conn.send_response_headers(stream_id, vec![(":status", "200")], false)
-            .await;
-        conn.send_response_data(stream_id, b"before-reset", false)
-            .await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        conn.reset_stream(stream_id, 0x010c).await;
+            conn.send_response_headers(stream_id, vec![(":status", "200")], false)
+                .await;
+            conn.send_response_data(stream_id, b"before-reset", false)
+                .await;
+            tokio::time::timeout(Duration::from_secs(1), first_data_seen.notified())
+                .await
+                .expect("client should observe first DATA before reset");
+            conn.reset_stream(stream_id, 0x010c).await;
+        }
     });
 
     let client = H3Client::new()
@@ -704,6 +728,7 @@ async fn native_h3_streaming_response_reset_wakes_body_with_error() {
             .unwrap(),
         bytes::Bytes::from_static(b"before-reset")
     );
+    first_data_seen.notify_one();
 
     let reset = tokio::time::timeout(Duration::from_secs(1), response.body_mut().frame())
         .await
@@ -732,30 +757,34 @@ async fn native_h3_dropped_response_body_sends_stream_cancel() {
         conn.send_response_headers(first_stream_id, vec![(":status", "200")], false)
             .await;
 
-        let cancel_seen = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut pending_second_stream_id = None;
+        let cancel_code = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                let Some(stats) = conn.stats().await else {
-                    panic!("mock connection closed before stats");
-                };
-                if stats.stopped_stream_count_remote > 0 || stats.reset_stream_count_remote > 0 {
-                    break stats;
+                match conn.read_event().await {
+                    Some(MockEvent::Reset {
+                        stream_id,
+                        code,
+                    }) if stream_id == first_stream_id => break code,
+                    Some(MockEvent::Headers { stream_id, .. }) => {
+                        pending_second_stream_id = Some(stream_id);
+                    }
+                    Some(_) => continue,
+                    None => panic!("mock connection closed before native cancel"),
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .expect("dropped native response body should cancel the stream");
-        assert!(
-            cancel_seen.stopped_stream_count_remote > 0
-                || cancel_seen.reset_stream_count_remote > 0,
-            "server did not observe native STOP_SENDING or RESET_STREAM: {cancel_seen:?}"
-        );
+        assert_eq!(cancel_code, 0x010c);
 
-        let second_stream_id = loop {
-            match conn.read_event().await {
-                Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
-                Some(_) => continue,
-                None => return,
+        let second_stream_id = match pending_second_stream_id {
+            Some(stream_id) => stream_id,
+            None => loop {
+                match conn.read_event().await {
+                    Some(MockEvent::Headers { stream_id, .. }) => break stream_id,
+                    Some(_) => continue,
+                    None => return,
+                }
             }
         };
         conn.send_response_headers(second_stream_id, vec![(":status", "200")], false)
