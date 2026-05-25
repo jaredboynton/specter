@@ -185,6 +185,94 @@ impl QuicPathValidator {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuicPmtuProbe {
+    pub packet_number: u64,
+    pub size: usize,
+    pub sent_at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuicPmtuProbePolicy {
+    current_size: usize,
+    max_size: usize,
+    pending_probe: Option<QuicPmtuProbe>,
+}
+
+impl QuicPmtuProbePolicy {
+    pub fn new(base_size: usize, max_size: usize) -> Self {
+        let current_size = base_size.max(1200);
+        let max_size = max_size.max(current_size);
+        Self {
+            current_size,
+            max_size,
+            pending_probe: None,
+        }
+    }
+
+    pub fn from_transport(params: &QuicTransportParams) -> Self {
+        Self::new(
+            params.initial_datagram_size,
+            params
+                .max_send_udp_payload_size
+                .min(params.max_recv_udp_payload_size),
+        )
+    }
+
+    pub fn current_size(&self) -> usize {
+        self.current_size
+    }
+
+    pub fn max_size(&self) -> usize {
+        self.max_size
+    }
+
+    pub fn pending_probe_size(&self) -> Option<usize> {
+        self.pending_probe.map(|probe| probe.size)
+    }
+
+    pub fn next_probe_size(&self) -> Option<usize> {
+        if self.pending_probe.is_some() || self.current_size >= self.max_size {
+            return None;
+        }
+        let remaining = self.max_size - self.current_size;
+        let step = (remaining / 2).max(32).min(remaining);
+        Some(self.current_size + step)
+    }
+
+    pub fn on_probe_sent(&mut self, packet_number: u64, size: usize, sent_at: Instant) {
+        self.pending_probe = Some(QuicPmtuProbe {
+            packet_number,
+            size: size.min(self.max_size).max(self.current_size),
+            sent_at,
+        });
+    }
+
+    pub fn on_probe_acked(&mut self, packet_number: u64) -> bool {
+        let Some(probe) = self.pending_probe else {
+            return false;
+        };
+        if probe.packet_number != packet_number {
+            return false;
+        }
+        self.current_size = self.current_size.max(probe.size).min(self.max_size);
+        self.pending_probe = None;
+        true
+    }
+
+    pub fn on_probe_lost(&mut self, packet_number: u64) -> bool {
+        let Some(probe) = self.pending_probe else {
+            return false;
+        };
+        if probe.packet_number != packet_number {
+            return false;
+        }
+        self.max_size = self.max_size.min(probe.size.saturating_sub(1)).max(self.current_size);
+        self.pending_probe = None;
+        true
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShortHeaderPacket {
     pub destination_cid: ConnectionId,

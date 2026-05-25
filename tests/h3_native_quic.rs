@@ -13,7 +13,8 @@ use specter::transport::h3::quic::{
     protect_short_header_packet, recover_packet_number, retry_integrity_tag_v1,
     seal_packet_payload, split_long_header_datagram, validate_retry_integrity_tag_v1, ConnectionId,
     LongHeaderPacket, LongHeaderType, QuicAckRange, QuicAckTracker, QuicCryptoAssembler,
-    QuicEcnMark, QuicFrame, QuicLossDetector, QuicPathValidator, ShortHeaderPacket,
+    QuicEcnMark, QuicFrame, QuicLossDetector, QuicPathValidator, QuicPmtuProbePolicy,
+    ShortHeaderPacket,
     TransportParameter,
 };
 use std::time::{Duration, Instant};
@@ -220,6 +221,40 @@ fn native_quic_path_validator_only_accepts_matching_path_response() {
     assert!(validator.is_validated(&challenge));
     assert_eq!(validator.pending_count(), 0);
     assert!(!validator.on_path_response(challenge));
+}
+
+#[test]
+fn native_quic_pmtu_probe_policy_promotes_only_acked_probe() {
+    let now = Instant::now();
+    let mut policy = QuicPmtuProbePolicy::new(1200, 1400);
+
+    assert_eq!(policy.current_size(), 1200);
+    assert_eq!(policy.max_size(), 1400);
+    let first_probe_size = policy.next_probe_size().expect("probe should be scheduled");
+    assert!(first_probe_size > policy.current_size());
+    assert!(first_probe_size <= policy.max_size());
+
+    policy.on_probe_sent(7, first_probe_size, now);
+    assert_eq!(policy.pending_probe_size(), Some(first_probe_size));
+    assert!(policy.next_probe_size().is_none());
+    assert!(!policy.on_probe_acked(8));
+    assert_eq!(policy.current_size(), 1200);
+
+    assert!(policy.on_probe_acked(7));
+    assert_eq!(policy.current_size(), first_probe_size);
+    assert_eq!(policy.pending_probe_size(), None);
+
+    let second_probe_size = policy.next_probe_size().expect("second probe should be scheduled");
+    assert!(second_probe_size > first_probe_size);
+    policy.on_probe_sent(9, second_probe_size, now + Duration::from_millis(1));
+    assert!(policy.on_probe_lost(9));
+    assert_eq!(policy.current_size(), first_probe_size);
+    assert_eq!(policy.max_size(), second_probe_size - 1);
+    let retry_size = policy
+        .next_probe_size()
+        .expect("loss should keep searching below the failed size");
+    assert!(retry_size > first_probe_size);
+    assert!(retry_size < second_probe_size);
 }
 
 #[test]
