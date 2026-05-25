@@ -76,6 +76,57 @@ print(match.group(1))
 PY
 }
 
+pyproject_version() {
+    python3 - "$PROJECT_ROOT/bindings/python/pyproject.toml" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as fh:
+    print(tomllib.load(fh)["project"]["version"])
+PY
+}
+
+python_init_version() {
+    python3 - "$PROJECT_ROOT/bindings/python/python/specter/__init__.py" <<'PY'
+import ast
+import sys
+
+source = ast.parse(open(sys.argv[1], encoding="utf-8").read(), filename=sys.argv[1])
+for node in source.body:
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "__version__":
+                print(ast.literal_eval(node.value))
+                raise SystemExit(0)
+raise SystemExit("__version__ not found in bindings/python/python/specter/__init__.py")
+PY
+}
+
+check_node_package_lock_versions() {
+    local expected="$1"
+    python3 - "$PROJECT_ROOT/bindings/node/package-lock.json" "$expected" <<'PY'
+import json
+import sys
+
+package_lock = sys.argv[1]
+expected = sys.argv[2]
+with open(package_lock, encoding="utf-8") as fh:
+    data = json.load(fh)
+
+checks = [
+    ("version", data.get("version")),
+    ('packages[""].version', data.get("packages", {}).get("", {}).get("version")),
+]
+optional = data.get("packages", {}).get("", {}).get("optionalDependencies", {})
+for name in ("specters-darwin-arm64", "specters-darwin-x64", "specters-linux-arm64-gnu", "specters-linux-x64-gnu"):
+    checks.append((f'packages[""].optionalDependencies.{name}', optional.get(name)))
+
+for source, actual in checks:
+    if actual != expected:
+        raise SystemExit(f"Version mismatch in bindings/node/package-lock.json {source}: expected {expected}, got {actual}")
+PY
+}
+
 expect_version() {
     local actual="$1"
     local expected="$2"
@@ -121,7 +172,15 @@ root_version="$(version_from_cargo_toml "$PROJECT_ROOT/Cargo.toml")"
 expect_version "$(version_from_cargo_toml "$PROJECT_ROOT/bindings/node/Cargo.toml")" "$root_version" "bindings/node/Cargo.toml"
 expect_version "$(version_from_cargo_toml "$PROJECT_ROOT/bindings/python/Cargo.toml")" "$root_version" "bindings/python/Cargo.toml"
 expect_version "$(version_from_package_json "$PROJECT_ROOT/bindings/node/package.json")" "$root_version" "bindings/node/package.json"
+expect_version "$(version_from_package_json "$PROJECT_ROOT/bindings/node/package-lock.json")" "$root_version" "bindings/node/package-lock.json"
 expect_version "$(node_index_version)" "$root_version" "bindings/node/index.js"
+expect_version "$(pyproject_version)" "$root_version" "bindings/python/pyproject.toml"
+expect_version "$(python_init_version)" "$root_version" "bindings/python/python/specter/__init__.py"
+check_node_package_lock_versions "$root_version"
+
+if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+    expect_version "${GITHUB_REF#refs/tags/v}" "$root_version" "GITHUB_REF tag"
+fi
 
 for package_json in "$PROJECT_ROOT"/bindings/node/npm/*/package.json; do
     expect_version "$(version_from_package_json "$package_json")" "$root_version" "${package_json#$PROJECT_ROOT/}"

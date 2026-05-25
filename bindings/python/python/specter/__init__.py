@@ -88,7 +88,7 @@ from .specter import (
     is_valid_close_code,
 )
 
-__version__ = "3.0.0"
+__version__ = "4.1.2"
 __all__ = [
     "Client",
     "ClientBuilder",

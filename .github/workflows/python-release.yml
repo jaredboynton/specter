@@ -7,7 +7,6 @@ on:
     paths:
       - 'bindings/python/**'
       - '.github/workflows/python-release.yml'
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,6 +23,7 @@ jobs:
   preflight:
     name: Release lockfile preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +36,7 @@ jobs:
   macos:
     needs: preflight
     runs-on: macos-14
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +81,7 @@ jobs:
 
   linux:
     needs: preflight
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -137,6 +139,7 @@ jobs:
   sdist:
     needs: preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -158,6 +161,7 @@ jobs:
     name: Test wheel (macOS)
     needs: preflight
     runs-on: macos-14
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -202,6 +206,7 @@ jobs:
   test-linux:
     name: Test wheel (Linux ${{ matrix.target }})
     needs: linux
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -236,8 +241,9 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [macos, linux, sdist, test, test-linux]
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     permissions:
       id-token: write
     steps:

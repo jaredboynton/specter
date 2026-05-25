@@ -81,6 +81,12 @@ function createHttpFixture() {
       }
     });
   });
+  const sockets = new Set();
+
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -88,7 +94,15 @@ function createHttpFixture() {
       const { port } = server.address();
       resolve({
         baseUrl: `http://127.0.0.1:${port}`,
-        close: () => new Promise((done) => server.close(done))
+        close: () => new Promise((done) => {
+          if (typeof server.closeAllConnections === 'function') {
+            server.closeAllConnections();
+          }
+          for (const socket of sockets) {
+            socket.destroy();
+          }
+          server.close(done);
+        })
       });
     });
   });

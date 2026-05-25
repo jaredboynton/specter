@@ -7,7 +7,6 @@ on:
     paths:
       - 'bindings/node/**'
       - '.github/workflows/node-release.yml'
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,6 +23,7 @@ jobs:
   preflight:
     name: Release lockfile preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +35,7 @@ jobs:
 
   build:
     needs: preflight
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -105,6 +106,7 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
           BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/${{ matrix.target }}/build
           BORING_BSSL_INCLUDE_PATH: ${{ github.workspace }}/lib/boringssl/include
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: gcc
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -116,6 +118,7 @@ jobs:
   test:
     name: Test bindings (macOS)
     needs: preflight
+    timeout-minutes: 20
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -165,11 +168,12 @@ jobs:
       - name: Test
         run: |
           cd bindings/node
-          npx jest --runInBand
+          npx jest --ci --runInBand --detectOpenHandles --openHandlesTimeout=1000 --forceExit
 
   test-linux:
     name: Test bindings (Linux ${{ matrix.target }})
     needs: build
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -217,13 +221,14 @@ jobs:
         working-directory: bindings/node
         env:
           NODE_ENV: test
-        run: npx jest --runInBand
+        run: npx jest --ci --runInBand --detectOpenHandles --openHandlesTimeout=1000 --forceExit
 
   publish:
     name: Publish to npm
     needs: [build, test, test-linux]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 15
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
       id-token: write
@@ -253,6 +258,18 @@ jobs:
           npm run create:npm-dirs
           npm run artifacts
           find npm -maxdepth 2 -type f | sort
+
+      - name: Verify staged npm packages
+        working-directory: bindings/node
+        run: |
+          set -euo pipefail
+          npm pack --dry-run
+          for package_json in npm/*/package.json; do
+            package_dir="$(dirname "$package_json")"
+            binary="$(node -p "require('./${package_json}').main")"
+            test -f "${package_dir}/${binary}"
+            (cd "$package_dir" && npm pack --dry-run)
+          done
 
       - name: Publish
         run: |
