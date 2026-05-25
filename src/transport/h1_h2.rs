@@ -61,10 +61,9 @@ pub struct CapacityPolicy {
 impl CapacityPolicy {
     pub fn bounded(max_pending_per_origin: usize) -> Self {
         let normalized = max_pending_per_origin.max(1);
-        let default_slots = H2TransportConfig::default().streaming_body_buffer_slots;
         Self {
             max_pending_per_origin: normalized,
-            streaming_body_buffer_slots: normalized.max(default_slots),
+            streaming_body_buffer_slots: normalized,
             h3_tunnel_outbound_byte_budget: H3TransportConfig::default()
                 .tunnel_outbound_byte_budget,
             h3_tunnel_inbound_byte_budget: H3TransportConfig::default().tunnel_inbound_byte_budget,
