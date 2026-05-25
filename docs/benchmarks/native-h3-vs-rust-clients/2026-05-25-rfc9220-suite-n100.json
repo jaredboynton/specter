@@ -392,27 +392,29 @@
     },
     {
       "competitor_id": "quinn_transport",
-      "status": "pending_adapter",
-      "p50_ttft_ns": null,
-      "p95_ttft_ns": null,
-      "bytes_per_sec": null,
-      "source": "native_h3_vs_rust_clients_harness",
+      "status": "measured_pass",
+      "p50_ttft_ns": 163959.0,
+      "p95_ttft_ns": 327500.0,
+      "bytes_per_sec": 4982163.465561768,
+      "source": "quinn_transport_adapter",
       "protocol": "quic",
       "workload": "bidirectional_echo_transport",
       "payload_bytes": 1024,
-      "notes": "QUIC transport-only echo baseline; not an H3 HTTP or RFC9220 comparator."
+      "notes": "Measured QUIC transport-only echo baseline; not an H3 HTTP or RFC9220 comparator.",
+      "sample_count": null
     },
     {
       "competitor_id": "s2n_quic_transport",
-      "status": "pending_adapter",
-      "p50_ttft_ns": null,
-      "p95_ttft_ns": null,
-      "bytes_per_sec": null,
-      "source": "native_h3_vs_rust_clients_harness",
+      "status": "measured_pass",
+      "p50_ttft_ns": 297584.0,
+      "p95_ttft_ns": 346042.0,
+      "bytes_per_sec": 3334688.0503537897,
+      "source": "s2n_quic_transport_adapter",
       "protocol": "quic",
       "workload": "bidirectional_echo_transport",
       "payload_bytes": 1024,
-      "notes": "QUIC transport-only echo baseline; not an H3 HTTP or RFC9220 comparator."
+      "notes": "Measured QUIC transport-only echo baseline; not an H3 HTTP or RFC9220 comparator.",
+      "sample_count": null
     }
   ],
   "fixture_events": [],

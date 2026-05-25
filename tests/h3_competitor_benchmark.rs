@@ -63,3 +63,36 @@ fn native_h3_competitor_benchmark_is_isolated_and_covers_known_fast_clients() {
         );
     }
 }
+
+#[test]
+fn current_native_h3_suite_artifact_keeps_transport_baselines_measured() {
+    let artifact = std::fs::read_to_string(
+        "docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json",
+    )
+    .expect("current native H3 suite artifact should exist");
+    let artifact: serde_json::Value =
+        serde_json::from_str(&artifact).expect("artifact should be valid JSON");
+    let rows = artifact["rows"]
+        .as_array()
+        .expect("artifact rows should be an array");
+
+    for (competitor_id, expected_source) in [
+        ("quinn_transport", "quinn_transport_adapter"),
+        ("s2n_quic_transport", "s2n_quic_transport_adapter"),
+    ] {
+        let row = rows
+            .iter()
+            .find(|row| row["competitor_id"] == competitor_id)
+            .unwrap_or_else(|| panic!("{competitor_id} row should exist"));
+        assert_eq!(row["status"], "measured_pass");
+        assert_eq!(row["source"], expected_source);
+        assert!(
+            row["p50_ttft_ns"].as_f64().is_some(),
+            "{competitor_id} must carry measured p50"
+        );
+        assert!(
+            row["bytes_per_sec"].as_f64().is_some(),
+            "{competitor_id} must carry measured throughput"
+        );
+    }
+}

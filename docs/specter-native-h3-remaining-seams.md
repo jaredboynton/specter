@@ -18,7 +18,7 @@ This is the current native H3 gap ledger. It is intentionally not a change log.
 |---|---|---|---|
 | Native H3 HTTP | Specter beats required Rust H3 HTTP comparator rows in local same-fixture runs. | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json` has `superiority_gate.pass = true`, required rows present, and zero fixture events. | Keep repeated/CI fixture runs treating fatal fixture events as blockers; ignored post-application packet-open noise is filtered before artifact emission. |
 | RFC9220 full tunnel suite | Specter beats low-level `quiche` and `tokio-quiche` on echo, close/FIN, and slow-consumer mixed rows at n=100. | Same artifact has `rfc9220_full_suite_superiority_gate.pass = true` for all nine required tunnel rows. | Specter adapters reuse one client across samples; low-level comparators open a fresh QUIC connection per sample. |
-| QUIC transport-only baselines | `quinn_transport` and optional `s2n_quic_transport` have measured echo adapters. | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-quic-transport-local.json`, `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-s2n-quic-transport-local.json`, and smoke artifacts. | They are not H3 rows and are outside H3 superiority gates. |
+| QUIC transport-only baselines | `quinn_transport` and optional `s2n_quic_transport` have measured echo adapters. | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json` contains measured non-gate transport rows; older standalone transport artifacts are retained as historical context. | They are not H3 rows and are outside H3 superiority gates. |
 | Runtime dependency boundary | Native H3/QUIC runtime is not shelled out to `quiche` or `h3-quinn`. | Runtime lives under `src/transport/h3/`; third-party H3 clients live in `benches/native_h3_vs_rust_clients/`. | BoringSSL remains the TLS backend; TLS fingerprinting is constrained by its ClientHello machinery where noted below. |
 
 ## Active Gaps
@@ -62,7 +62,7 @@ Keep these under regression coverage; do not relist them as active gaps.
 
 | Artifact | Purpose | Gate/sample note |
 |---|---|---|
-| `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json` | Current combined H3 HTTP + RFC9220 full-suite proof artifact. | H3 HTTP gate passes; RFC9220 full-suite gate passes; zero fixture events; all required tunnel rows are n=100. |
+| `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json` | Current combined H3 HTTP + RFC9220 full-suite proof artifact with measured transport-only baseline rows. | H3 HTTP gate passes; RFC9220 full-suite gate passes; zero fixture events; all required tunnel rows are n=100; `quinn_transport` and `s2n_quic_transport` are measured non-gate rows. |
 | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-n100-plus-close-and-mixed-comparators.json` | Prior combined artifact before mixed adapter fairness fix and suite-gate promotion. | Retained for historical comparison. |
 | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-rfc9220-n100.json` | Earlier RFC9220 echo-only proof. | Echo gate passed; superseded by suite artifact. |
 | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-quic-transport-local.json` | Transport-only `quinn_transport`/`s2n_quic_transport` baseline. | Lower-layer echo rows only. |
