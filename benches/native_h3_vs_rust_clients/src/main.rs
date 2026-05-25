@@ -5709,8 +5709,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tokio_quiche_local_fixture_measures_repeated_rfc9220_tunnel_slow_consumer_mixed_workload()
-    {
+    async fn tokio_quiche_local_fixture_measures_repeated_rfc9220_tunnel_slow_consumer_mixed_workload(
+    ) {
         let measurements =
             super::measure_local_native_fixture(0, 5, Some("tokio_quiche_rfc9220_tunnel_mixed"))
                 .await
