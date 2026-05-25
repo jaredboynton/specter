@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
 use crate::headers::Headers;
+use crate::headers::Headers;
 use crate::request::RequestBody;
 use crate::response::{Body, Response};
 use crate::transport::connector::MaybeHttpsStream;
@@ -122,7 +123,7 @@ impl H2Handle {
         &self,
         method: Method,
         uri: &Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: Option<Bytes>,
     ) -> Result<Response> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -130,7 +131,7 @@ impl H2Handle {
         let command = DriverCommand::SendRequest {
             method,
             uri: uri.clone(),
-            headers,
+            headers: headers.clone(),
             body,
             response_tx,
         };
@@ -159,7 +160,7 @@ impl H2Handle {
         &self,
         method: Method,
         uri: &Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: RequestBody,
         body_timeouts: H2BodyTimeouts,
     ) -> Result<Response> {
@@ -170,7 +171,7 @@ impl H2Handle {
         {
             return result;
         }
-        self.send_streaming_request_command_path(method, uri, headers, body, body_timeouts)
+        self.send_streaming_request_command_path(method, uri, &headers, body, body_timeouts)
             .await
     }
 
@@ -178,7 +179,7 @@ impl H2Handle {
         &self,
         method: Method,
         uri: &Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: RequestBody,
         body_timeouts: H2BodyTimeouts,
     ) -> Result<Response> {
@@ -197,7 +198,7 @@ impl H2Handle {
         let command = DriverCommand::SendStreamingRequest {
             method,
             uri: uri.clone(),
-            headers,
+            headers: headers.clone(),
             body,
             body_shared: body_shared.clone(),
             headers_tx,
@@ -228,7 +229,7 @@ impl H2Handle {
         &self,
         method: &Method,
         uri: &Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         body_is_empty: bool,
         body_timeouts: H2BodyTimeouts,
     ) -> Option<Result<Response>> {
@@ -308,14 +309,14 @@ impl H2Handle {
     pub async fn open_websocket_tunnel(
         &self,
         uri: Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
     ) -> Result<H2Tunnel> {
         let (response_tx, response_rx) = oneshot::channel();
 
         self.command_tx
             .send(DriverCommand::OpenWebSocketTunnel {
                 uri,
-                headers,
+                headers: headers.clone(),
                 response_tx,
             })
             .await

@@ -20,6 +20,7 @@ use tracing;
 pub type StreamingHeadersResult = Result<(u16, Vec<(String, String)>)>;
 
 use crate::error::{Error, Result};
+use crate::headers::Headers;
 use crate::request::{RequestBody, RequestBodyStream};
 use crate::transport::h2::body::{H2BodyDataPush, H2BodyPush, H2BodyShared};
 use crate::transport::h2::connection::{
@@ -39,7 +40,7 @@ pub enum DriverCommand {
     SendRequest {
         method: http::Method,
         uri: http::Uri,
-        headers: Vec<(String, String)>,
+        headers: Headers,
         body: Option<bytes::Bytes>,
         response_tx: oneshot::Sender<Result<StreamResponse>>,
     },
@@ -47,7 +48,7 @@ pub enum DriverCommand {
     SendStreamingRequest {
         method: Method,
         uri: Uri,
-        headers: Vec<(String, String)>,
+        headers: Headers,
         body: RequestBody,
         body_shared: Arc<H2BodyShared>,
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
@@ -55,7 +56,7 @@ pub enum DriverCommand {
     /// Open an RFC 8441 WebSocket tunnel on a pooled HTTP/2 stream.
     OpenWebSocketTunnel {
         uri: Uri,
-        headers: Vec<(String, String)>,
+        headers: Headers,
         response_tx: oneshot::Sender<Result<H2Tunnel>>,
     },
     /// Queue outbound DATA for an open RFC 8441 tunnel.
@@ -961,7 +962,7 @@ where
     async fn handle_open_websocket_tunnel(
         &mut self,
         uri: Uri,
-        headers: Vec<(String, String)>,
+        headers: Headers,
         response_tx: oneshot::Sender<Result<H2Tunnel>>,
     ) -> Result<()> {
         if !self.has_available_stream_slot() {
@@ -981,7 +982,7 @@ where
     async fn open_websocket_tunnel_internal(
         &mut self,
         uri: Uri,
-        headers: Vec<(String, String)>,
+        headers: Headers,
         response_tx: oneshot::Sender<Result<H2Tunnel>>,
     ) -> Result<()> {
         match self
