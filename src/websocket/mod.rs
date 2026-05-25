@@ -11,9 +11,9 @@ use std::time::Duration;
 
 pub use client::WebSocketBuilder;
 pub(crate) use client::WebSocketClientParts;
-pub use connection::{WebSocket, WebSocketReader, WebSocketWriter};
+pub use connection::{WebSocket, WebSocketFrame, WebSocketFrameOpcode, WebSocketReader, WebSocketWriter};
 pub use error::{WebSocketError, WebSocketResult};
-pub use message::{CloseCode, CloseFrame, Message};
+pub use message::{CloseCode, CloseFrame, Message, PreparedMessage};
 
 /// WebSocket frame/message limits and idle timeouts.
 #[derive(Debug, Clone)]
