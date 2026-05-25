@@ -1,9 +1,7 @@
 //! BoringSSL TLS connector.
 
 use boring::ex_data::Index;
-use boring::ssl::{
-    NameType, Ssl, SslConnector, SslMethod, SslSessionCacheMode, SslVersion,
-};
+use boring::ssl::{NameType, Ssl, SslConnector, SslMethod, SslSessionCacheMode, SslVersion};
 use boring::x509::X509;
 use foreign_types_shared::ForeignTypeRef;
 use http::Uri;
@@ -23,9 +21,7 @@ use crate::error::Error;
 use crate::fingerprint::tls::TlsFingerprint;
 use crate::transport::dns::DnsConfig;
 use crate::transport::session::{SessionCache, SessionCacheKey};
-use crate::transport::tcp::{
-    configure_tcp_socket_with_buffers, TcpFingerprint, TcpSocketBuffers,
-};
+use crate::transport::tcp::{configure_tcp_socket_with_buffers, TcpFingerprint, TcpSocketBuffers};
 
 // FFI bindings for BoringSSL extension control
 use boring_sys::{CRYPTO_BUFFER, SSL, SSL_CTX, SSL_SESSION};
@@ -493,9 +489,8 @@ impl BoringConnector {
                 .map_err(|e| Error::Tls(format!("Failed to set max TLS version: {}", e)))?;
         }
 
-        builder.set_session_cache_mode(
-            SslSessionCacheMode::CLIENT | SslSessionCacheMode::NO_INTERNAL,
-        );
+        builder
+            .set_session_cache_mode(SslSessionCacheMode::CLIENT | SslSessionCacheMode::NO_INTERNAL);
 
         if self.enable_early_data {
             unsafe {
@@ -518,9 +513,8 @@ impl BoringConnector {
                 return;
             }
             if let Ok(der) = session.to_der() {
-                let early_data_capable = unsafe {
-                    SSL_SESSION_early_data_capable(session.as_ptr()) != 0
-                };
+                let early_data_capable =
+                    unsafe { SSL_SESSION_early_data_capable(session.as_ptr()) != 0 };
                 let max_age = Duration::from_secs(session.timeout().max(0) as u64);
                 session_cache.store_session(
                     SessionCacheKey::new(&host, port),
@@ -590,12 +584,7 @@ impl BoringConnector {
                     .session_cache
                     .supports_zero_rtt(&SessionCacheKey::new(host, port))
         });
-        let ssl = self.prepare_ssl(
-            ssl_connector,
-            host,
-            port,
-            attempt_early_data,
-        )?;
+        let ssl = self.prepare_ssl(ssl_connector, host, port, attempt_early_data)?;
 
         if attempt_early_data {
             let early_data = early_data.expect("checked above");
@@ -778,27 +767,28 @@ impl BoringConnector {
             });
 
         let addrs = interleave_addresses(self.dns_config.resolve(host, port).await?);
-        let tcp_stream = if self.tcp_fingerprint.is_some() || self.tcp_socket_buffers.is_configured() {
-            connect_tcp_configured(
-                addrs,
-                self.tcp_fingerprint.clone(),
-                self.tcp_socket_buffers,
-                self.tcp_keepalive.clone(),
-                self.happy_eyeballs_delay,
-                host,
-                port,
-            )
-            .await?
-        } else {
-            connect_tcp_async(
-                addrs,
-                self.happy_eyeballs_delay,
-                self.tcp_keepalive.clone(),
-                host,
-                port,
-            )
-            .await?
-        };
+        let tcp_stream =
+            if self.tcp_fingerprint.is_some() || self.tcp_socket_buffers.is_configured() {
+                connect_tcp_configured(
+                    addrs,
+                    self.tcp_fingerprint.clone(),
+                    self.tcp_socket_buffers,
+                    self.tcp_keepalive.clone(),
+                    self.happy_eyeballs_delay,
+                    host,
+                    port,
+                )
+                .await?
+            } else {
+                connect_tcp_async(
+                    addrs,
+                    self.happy_eyeballs_delay,
+                    self.tcp_keepalive.clone(),
+                    host,
+                    port,
+                )
+                .await?
+            };
 
         tcp_stream
             .set_nodelay(true)
@@ -811,7 +801,10 @@ impl BoringConnector {
                 .await?;
             Ok((MaybeHttpsStream::Https(ssl_stream), outcome))
         } else {
-            Ok((MaybeHttpsStream::Http(tcp_stream), EarlyDataOutcome::NotAttempted))
+            Ok((
+                MaybeHttpsStream::Http(tcp_stream),
+                EarlyDataOutcome::NotAttempted,
+            ))
         }
     }
 
@@ -835,8 +828,16 @@ fn alpn_index(mode: AlpnMode) -> usize {
 }
 
 fn interleave_addresses(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
-    let mut v6 = addrs.iter().copied().filter(|addr| addr.is_ipv6()).collect::<Vec<_>>();
-    let mut v4 = addrs.iter().copied().filter(|addr| addr.is_ipv4()).collect::<Vec<_>>();
+    let mut v6 = addrs
+        .iter()
+        .copied()
+        .filter(|addr| addr.is_ipv6())
+        .collect::<Vec<_>>();
+    let mut v4 = addrs
+        .iter()
+        .copied()
+        .filter(|addr| addr.is_ipv4())
+        .collect::<Vec<_>>();
     let mut out = Vec::with_capacity(addrs.len());
     loop {
         let mut progressed = false;
@@ -949,9 +950,8 @@ async fn connect_tcp_configured(
             let socket = Socket::new(domain, Type::STREAM, Some(socket2::Protocol::TCP))
                 .map_err(|e| Error::Connection(format!("Failed to create socket: {e}")))?;
             let tcp_fp = tcp_fp.unwrap_or_default();
-            configure_tcp_socket_with_buffers(&socket, &tcp_fp, tcp_socket_buffers).map_err(|e| {
-                Error::Connection(format!("Failed to configure TCP socket: {e}"))
-            })?;
+            configure_tcp_socket_with_buffers(&socket, &tcp_fp, tcp_socket_buffers)
+                .map_err(|e| Error::Connection(format!("Failed to configure TCP socket: {e}")))?;
             apply_tcp_keepalive(socket2::SockRef::from(&socket), &keepalive)?;
             socket
                 .connect_timeout(&addr.into(), per_attempt_timeout)
@@ -1021,7 +1021,8 @@ where
                 if early_offset < early_data.len()
                     && unsafe { SSL_in_early_data(pending.ssl().as_ptr()) != 0 }
                 {
-                    let written = write_tls_early_data(pending.ssl_mut(), &early_data[early_offset..])?;
+                    let written =
+                        write_tls_early_data(pending.ssl_mut(), &early_data[early_offset..])?;
                     early_offset += written;
                 }
                 mid = pending_handshake(pending).await?;
@@ -1030,18 +1031,13 @@ where
                 return Err(Error::Tls(format!("TLS handshake setup failed: {err}")));
             }
             Err(SslHandshakeError::Failure(err)) => {
-                return Err(Error::Tls(format!(
-                    "TLS handshake failed: {}",
-                    err.error()
-                )));
+                return Err(Error::Tls(format!("TLS handshake failed: {}", err.error())));
             }
         }
     }
 }
 
-fn wrap_tokio_ssl_stream<S>(
-    stream: boring::ssl::SslStream<AsyncStreamBridge<S>>,
-) -> SslStream<S> {
+fn wrap_tokio_ssl_stream<S>(stream: boring::ssl::SslStream<AsyncStreamBridge<S>>) -> SslStream<S> {
     // Both types are single-field newtypes over the same inner `SslStream<AsyncStreamBridge<S>>`.
     unsafe { std::mem::transmute(stream) }
 }

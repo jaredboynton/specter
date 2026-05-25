@@ -4,17 +4,20 @@
 //!
 //! Run with: cargo run --example tcp_fingerprint
 //!
-//! TCP fingerprinting configures:
-//! - Initial window size (receive buffer)
+//! TCP fingerprinting configures metadata and portable options such as:
+//! - Initial window size metadata
 //! - TTL (Time To Live)
-//! - Socket buffer sizes
+//! - Optional TCP_NOTSENT_LOWAT
+//!
+//! Socket buffer sizes are OS-autotuned by default. Use `TcpSocketBuffers`
+//! only when a deployment explicitly needs fixed `SO_RCVBUF` / `SO_SNDBUF`.
 //!
 //! Note: Some TCP options (MSS, window scaling, SACK, timestamps) are negotiated
 //! during TCP handshake and cannot be directly set via socket2 on all platforms.
 
 use specter::fingerprint::tls::TlsFingerprint;
 use specter::transport::connector::BoringConnector;
-use specter::transport::tcp::TcpFingerprint;
+use specter::transport::tcp::{TcpFingerprint, TcpSocketBuffers};
 use tracing::info;
 
 #[tokio::main]
@@ -38,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  - Window Scale: {}", tcp_fp.window_scale);
     info!("  - SACK Permitted: {}", tcp_fp.sack_permitted);
     info!("  - Timestamps: {}", tcp_fp.timestamps);
+    info!("  - Socket Buffers: OS autotuned by default");
     info!("");
 
     // Create TLS fingerprint
@@ -88,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         window_scale: 7,
         sack_permitted: true,
         timestamps: true,
+        tcp_notsent_lowat: None,
     };
 
     info!("Custom TCP Fingerprint:");
@@ -96,6 +101,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         custom_tcp_fp.window_size
     );
     info!("  - Window Scale: {} (custom)", custom_tcp_fp.window_scale);
+    info!("");
+
+    let fixed_buffer_connector = BoringConnector::new()
+        .with_tcp_fingerprint(custom_tcp_fp)
+        .tcp_socket_buffers(TcpSocketBuffers::symmetric(262_144));
+    drop(fixed_buffer_connector);
+    info!("Explicit socket buffers can be opted into with TcpSocketBuffers");
     info!("");
 
     info!("TCP fingerprinting helps match browser TCP/IP stack characteristics");
