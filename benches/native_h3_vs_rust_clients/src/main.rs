@@ -2836,12 +2836,11 @@ fn measure_quiche_direct_rfc9220_tunnel_mixed_once(
                     let chunk_end = payload_offset
                         .saturating_add(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE)
                         .min(tunnel_payload.len());
-                    let fin = chunk_end == tunnel_payload.len();
                     match http3.send_body(
                         &mut conn,
                         opened_tunnel_stream_id,
                         &tunnel_payload.as_ref()[payload_offset..chunk_end],
-                        fin,
+                        false,
                     ) {
                         Ok(0) | Err(quiche::h3::Error::Done) => {
                             flush_quiche_packets(&socket, &mut conn, &mut out)?;
@@ -2884,6 +2883,44 @@ fn measure_quiche_direct_rfc9220_tunnel_mixed_once(
                         tunnel_payload.len(),
                         payload_offset
                     );
+                }
+                let mut fin_sent = false;
+                while !fin_sent && Instant::now() < deadline {
+                    match http3.send_body(&mut conn, opened_tunnel_stream_id, &[], true) {
+                        Ok(_) => fin_sent = true,
+                        Err(quiche::h3::Error::Done) => {
+                            flush_quiche_packets(&socket, &mut conn, &mut out)?;
+                            loop {
+                                match socket.recv_from(&mut recv_buf) {
+                                    Ok((len, from)) => {
+                                        let recv_info = quiche::RecvInfo {
+                                            to: local_addr,
+                                            from,
+                                        };
+                                        if let Err(err) = conn.recv(&mut recv_buf[..len], recv_info)
+                                        {
+                                            if err != quiche::Error::Done {
+                                                return Err(anyhow::anyhow!(
+                                                    "quiche RFC 9220 mixed recv while sending tunnel FIN failed: {err:?}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                                    Err(err) => return Err(err.into()),
+                                }
+                            }
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(err) => {
+                            return Err(anyhow::anyhow!(
+                                "quiche RFC 9220 mixed tunnel FIN send failed: {err:?}"
+                            ));
+                        }
+                    }
+                }
+                if !fin_sent {
+                    anyhow::bail!("quiche RFC 9220 mixed tunnel FIN send timed out");
                 }
                 let opened_stream_id = http3.send_request(&mut conn, &stream_headers, true)?;
                 tunnel_stream_id = Some(opened_tunnel_stream_id);
@@ -2944,22 +2981,38 @@ fn measure_quiche_direct_rfc9220_tunnel_mixed_once(
                     }
                     Ok((event_stream_id, quiche::h3::Event::Finished)) => {
                         if Some(event_stream_id) == stream_stream_id {
+                            loop {
+                                match http3.recv_body(&mut conn, event_stream_id, &mut recv_buf) {
+                                    Ok(read) => {
+                                        stream_first_byte_ns.get_or_insert_with(|| {
+                                            start.elapsed().as_nanos() as f64
+                                        });
+                                        stream_bytes = stream_bytes.saturating_add(read as u64);
+                                    }
+                                    Err(quiche::h3::Error::Done) => break,
+                                    Err(err) => {
+                                        return Err(anyhow::anyhow!(
+                                            "quiche RFC 9220 mixed stream body failed on finish: {err:?}"
+                                        ));
+                                    }
+                                }
+                            }
                             stream_finished = true;
                         } else if Some(event_stream_id) == tunnel_stream_id {
-                            tunnel_finished = true;
-                        }
-                        if stream_finished && tunnel_finished {
-                            if tunnel_echoed != expected_tunnel_bytes {
-                                anyhow::bail!(
-                                    "quiche RFC 9220 mixed echo length mismatch: expected {expected_tunnel_bytes}, got {tunnel_echoed}"
-                                );
+                            loop {
+                                match http3.recv_body(&mut conn, event_stream_id, &mut recv_buf) {
+                                    Ok(read) => {
+                                        tunnel_echoed = tunnel_echoed.saturating_add(read);
+                                    }
+                                    Err(quiche::h3::Error::Done) => break,
+                                    Err(err) => {
+                                        return Err(anyhow::anyhow!(
+                                            "quiche RFC 9220 mixed tunnel body failed on finish: {err:?}"
+                                        ));
+                                    }
+                                }
                             }
-                            return Ok(AdapterSample::new(
-                                stream_first_byte_ns
-                                    .unwrap_or_else(|| start.elapsed().as_nanos() as f64),
-                                start.elapsed().as_nanos() as f64,
-                                stream_bytes.saturating_add(tunnel_echoed as u64),
-                            ));
+                            tunnel_finished = true;
                         }
                     }
                     Ok((_, quiche::h3::Event::Reset(error_code))) => {
@@ -2972,6 +3025,18 @@ fn measure_quiche_direct_rfc9220_tunnel_mixed_once(
                             "quiche RFC 9220 mixed h3 poll failed: {err:?}"
                         ));
                     }
+                }
+                if stream_finished && tunnel_finished && tunnel_echoed >= expected_tunnel_bytes {
+                    if tunnel_echoed != expected_tunnel_bytes {
+                        anyhow::bail!(
+                            "quiche RFC 9220 mixed echo length mismatch: expected {expected_tunnel_bytes}, got {tunnel_echoed}"
+                        );
+                    }
+                    return Ok(AdapterSample::new(
+                        stream_first_byte_ns.unwrap_or_else(|| start.elapsed().as_nanos() as f64),
+                        start.elapsed().as_nanos() as f64,
+                        stream_bytes.saturating_add(tunnel_echoed as u64),
+                    ));
                 }
             }
         }
