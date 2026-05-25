@@ -1094,7 +1094,7 @@ fn artifact_with_competitor_rows_and_fixture_events<S: AsRef<str>>(
     Artifact {
         benchmark: "native_h3_vs_rust_clients",
         benchmark_version: "matrix-1",
-        audited_at: "2026-05-24",
+        audited_at: "2026-05-25",
         competitors: competitor_specs(),
         superiority_gate: superiority_gate(&rows),
         rfc9220_full_suite_superiority_gate: rfc9220_tunnel_superiority_gate(&rows),
