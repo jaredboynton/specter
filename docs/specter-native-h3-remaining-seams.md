@@ -25,7 +25,6 @@ This is the current native H3 gap ledger. It is intentionally not a change log.
 
 | Priority | Gap | Current state | Next proof needed |
 |---|---|---|---|
-| P1 | Native QUIC path migration completion | PATH_CHALLENGE/PATH_RESPONSE token handling, CID inventory primitives, anti-amplification primitives, driver outbound anti-amplification gating, 1-RTT CID routing, post-validation client DCID promotion, migrated peer-address acceptance, server-side post-handshake `NEW_CONNECTION_ID` packetization, and same-fixture migration-CID routing are implemented. | Full server-side migration lifecycle and soak coverage across active peer-address changes. |
 | P2 | Browser ACK parity | Threshold + `max_ack_delay_ms` timer paths exist for client/server/fixture, including tuned benchmark profile support. | Capture Chrome/Firefox QUIC ACK thresholds/delays by version and compare against Specter defaults and `ack_eliciting_threshold = 128`. |
 | P2 | TLS/H3 capture presets | Certificate compression, deterministic-vs-browser-permuted extension policy, raw ordered transport parameters, session replay, and 0-RTT controls exist. | Capture-derived raw transport-parameter presets and explicit extension-list ordering beyond BoringSSL permutation policy. |
 | P2 | Cross-protocol capacity policy | Native H3 streaming bodies and RFC9220 tunnels expose public capacity snapshots; internal byte-bounded H3 body/tunnel flow control and fair send scheduling exist. | Unified H1/H2/H3 capacity knobs and policy docs where API consumers need one cross-protocol control surface. |
@@ -44,6 +43,7 @@ Keep these under regression coverage; do not relist them as active gaps.
 | Retry and Version Negotiation | Retry integrity, Retry-driven Initial restart, VN-driven version selection/restart, loop guards, and no-overlap errors are implemented. |
 | PATH_CHALLENGE primitives | Client packetization and matching PATH_RESPONSE validation are implemented; remaining work is migration lifecycle, not token handling. |
 | Post-handshake NEW_CONNECTION_ID | `NativeQuicServerHandshake::build_server_new_connection_id_packet` can issue migration CIDs after application keys, and the local same-fixture server advertises/registers a migration CID after HandshakeDone. |
+| Server-side path migration lifecycle | Server-side PATH_RESPONSE packetization, migrated-peer PATH_CHALLENGE issuance, peer-address-bound PATH_RESPONSE validation, and same-fixture peer promotion after validation are implemented. |
 | Driver anti-amplification gating | Native H3 driver records received bytes per path, promotes validated migrated paths, and routes outbound sends through RFC9000 § 8.1 budget checks for unvalidated paths. |
 | RFC9002 recovery/PTO core | Per-space RTT/PTO/loss state, congestion response, CRYPTO PTO retransmission, app-space PTO, and mock/same-fixture server wake paths are implemented. |
 | Recovery soak/backoff validation | Repeated PTO backoff/reset, packet/time-threshold loss, persistent congestion collapse, early timer-poll no-op behavior, Initial/Handshake CRYPTO PTO retransmission, and client/server app-space STREAM retransmission are covered by recovery and handshake regression tests. |
@@ -90,10 +90,9 @@ Unsupported RFC9220 capability-audit rows remain explicit non-comparators: `h3_q
 
 ## Next Execution Order
 
-1. Finish server-side path migration lifecycle and soak coverage across active peer-address changes.
-2. Capture browser ACK behavior and calibrate native ACK thresholds/timers against Chrome/Firefox versions.
-3. Add capture-derived TLS/H3 presets for raw transport parameters and extension ordering where BoringSSL allows control.
-4. Design unified H1/H2/H3 capacity knobs only if API consumers need one cross-protocol control surface.
+1. Capture browser ACK behavior and calibrate native ACK thresholds/timers against Chrome/Firefox versions.
+2. Add capture-derived TLS/H3 presets for raw transport parameters and extension ordering where BoringSSL allows control.
+3. Design unified H1/H2/H3 capacity knobs only if API consumers need one cross-protocol control surface.
 
 ## Validation Commands
 

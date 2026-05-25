@@ -9,6 +9,7 @@ use bytes::{Bytes, BytesMut};
 use crate::error::{Error, Result};
 use crate::fingerprint::{Http3Fingerprint, QuicTransportParams, TlsFingerprint};
 use crate::transport::h3::native;
+use crate::transport::h3::path::{match_local_connection_id, QuicConnectionIdInventory};
 use crate::transport::h3::quic::{
     build_initial_crypto_packet, decode_frames, decode_long_header, decode_transport_parameters,
     decode_version_negotiation_packet, derive_initial_key_material,
@@ -34,6 +35,45 @@ use getrandom::fill as getrandom_fill;
 const QUIC_VERSION_1: u32 = 1;
 const INITIAL_PACKET_NUMBER_LEN: usize = 4;
 const AES_GCM_TAG_LEN: usize = 16;
+const MIN_PATH_VALIDATION_DATAGRAM: usize = 1200;
+const QUIC_CONNECTION_MIGRATION_ERROR: u64 = 0x0a;
+
+fn new_server_cid_inventory(
+    fingerprint: &Http3Fingerprint,
+    server_source_cid: &ConnectionId,
+    client_source_cid: &ConnectionId,
+) -> QuicConnectionIdInventory {
+    let mut inventory =
+        QuicConnectionIdInventory::new(fingerprint.transport.active_connection_id_limit);
+    inventory.install_initial_local(server_source_cid.clone(), [0u8; 16]);
+    inventory.install_initial_peer(
+        Bytes::copy_from_slice(client_source_cid.as_bytes()),
+        [0u8; 16],
+    );
+    inventory
+}
+
+fn new_client_cid_inventory(
+    fingerprint: &Http3Fingerprint,
+    source_cid: &ConnectionId,
+) -> QuicConnectionIdInventory {
+    let mut inventory =
+        QuicConnectionIdInventory::new(fingerprint.transport.active_connection_id_limit);
+    inventory.install_initial_local(source_cid.clone(), [0u8; 16]);
+    inventory
+}
+
+fn pad_short_header_payload_to_min_datagram(
+    payload: Bytes,
+    short_header_len: usize,
+    min_datagram: usize,
+) -> Bytes {
+    let mut out = payload.to_vec();
+    while short_header_len + out.len() + AES_GCM_TAG_LEN < min_datagram {
+        out.push(0);
+    }
+    Bytes::from(out)
+}
 
 fn recovery_state_from_transport(params: &QuicTransportParams) -> RecoveryState {
     let max_ack_delay = Duration::from_millis(params.max_ack_delay_ms);
@@ -757,6 +797,7 @@ pub struct NativeQuicHandshake {
     client_application_recovery_lost_packets: Vec<u64>,
     client_application_ecn_congestion: bool,
     client_path_validator: QuicPathValidator,
+    client_cid_inventory: QuicConnectionIdInventory,
     client_pmtu_probe: QuicPmtuProbePolicy,
     server_transport_parameters_validated: bool,
     recovery: RecoveryState,
@@ -801,6 +842,7 @@ pub struct NativeQuicServerHandshake {
     server_initial_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     server_handshake_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
     server_path_validator: QuicPathValidator,
+    cid_inventory: QuicConnectionIdInventory,
     recovery: RecoveryState,
     ack_delay_exponent: u64,
     next_client_initial_packet_number: u64,
@@ -839,6 +881,11 @@ impl NativeQuicServerHandshake {
         server_source_cid: ConnectionId,
     ) -> Result<Self> {
         let initial_keys = derive_initial_key_material(client_destination_cid.as_bytes())?;
+        let cid_inventory = new_server_cid_inventory(
+            fingerprint,
+            &server_source_cid,
+            &client_source_cid,
+        );
         Ok(Self {
             tls: NativeQuicTlsSession::server_with_connection_ids(
                 fingerprint,
@@ -873,6 +920,7 @@ impl NativeQuicServerHandshake {
             server_initial_sent_crypto: BTreeMap::new(),
             server_handshake_sent_crypto: BTreeMap::new(),
             server_path_validator: QuicPathValidator::default(),
+            cid_inventory,
             next_client_initial_packet_number: 0,
             next_client_handshake_packet_number: 0,
             next_client_application_packet_number: 0,
@@ -912,6 +960,11 @@ impl NativeQuicServerHandshake {
         ticket_keys: &[u8; crate::transport::h3::tls::NATIVE_H3_TICKET_KEY_LEN],
     ) -> Result<Self> {
         let initial_keys = derive_initial_key_material(client_destination_cid.as_bytes())?;
+        let cid_inventory = new_server_cid_inventory(
+            fingerprint,
+            &server_source_cid,
+            &client_source_cid,
+        );
         Ok(Self {
             tls: NativeQuicTlsSession::server_with_connection_ids_and_ticket_keys(
                 fingerprint,
@@ -964,6 +1017,7 @@ impl NativeQuicServerHandshake {
             server_initial_sent_crypto: BTreeMap::new(),
             server_handshake_sent_crypto: BTreeMap::new(),
             server_path_validator: QuicPathValidator::default(),
+            cid_inventory,
             next_client_initial_packet_number: 0,
             next_client_handshake_packet_number: 0,
             next_client_application_packet_number: 0,
@@ -988,6 +1042,11 @@ impl NativeQuicServerHandshake {
         transport_retry_source_cid: Option<ConnectionId>,
     ) -> Result<Self> {
         let initial_keys = derive_initial_key_material(client_destination_cid.as_bytes())?;
+        let cid_inventory = new_server_cid_inventory(
+            fingerprint,
+            &server_source_cid,
+            &client_source_cid,
+        );
         Ok(Self {
             tls: NativeQuicTlsSession::server_with_transport_parameter_connection_ids(
                 fingerprint,
@@ -1023,6 +1082,7 @@ impl NativeQuicServerHandshake {
             server_initial_sent_crypto: BTreeMap::new(),
             server_handshake_sent_crypto: BTreeMap::new(),
             server_path_validator: QuicPathValidator::default(),
+            cid_inventory,
             next_client_initial_packet_number: 0,
             next_client_handshake_packet_number: 0,
             next_client_application_packet_number: 0,
@@ -1582,7 +1642,7 @@ impl NativeQuicServerHandshake {
                 now,
                 ecn_mark,
             )?;
-            events.extend(self.client_h3_events_from_frames(frames)?);
+            events.extend(self.client_h3_events_from_frames(frames, None)?);
         }
         Ok(events)
     }
@@ -2517,6 +2577,7 @@ impl NativeQuicHandshake {
             })
             .map(QuicTlsSecret::packet_key_material)
             .transpose()?;
+        let client_cid_inventory = new_client_cid_inventory(fingerprint, &source_cid);
 
         Ok(Self {
             client_initial,
@@ -4368,6 +4429,7 @@ impl NativeQuicHandshake {
                     });
                 }
                 QuicFrame::PathChallenge(data) => events.push(ServerH3Event::PathChallenge(data)),
+                QuicFrame::PathResponse(_) => {}
                 QuicFrame::Padding
                 | QuicFrame::Ping
                 | QuicFrame::Ack { .. }

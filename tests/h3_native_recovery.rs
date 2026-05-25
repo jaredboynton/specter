@@ -355,7 +355,10 @@ fn rfc9002_recovery_ignores_timeout_before_loss_detection_deadline() {
         .expect("application packet should arm PTO");
     let early = timer - Duration::from_millis(1);
 
-    assert_eq!(recovery.on_loss_detection_timeout(early), LossDetectionOutcome::Idle);
+    assert_eq!(
+        recovery.on_loss_detection_timeout(early),
+        LossDetectionOutcome::Idle
+    );
     assert_eq!(
         recovery.pto_count(),
         0,
