@@ -865,6 +865,13 @@ impl RecoveryState {
 
     /// RFC 9002 6.2.1 OnLossDetectionTimeout.
     pub fn on_loss_detection_timeout(&mut self, now: Instant) -> LossDetectionOutcome {
+        if self
+            .loss_detection_timer
+            .is_some_and(|deadline| now < deadline)
+        {
+            return LossDetectionOutcome::Idle;
+        }
+
         if let Some((space, _)) = self.earliest_loss_time() {
             let lost = self.detect_and_remove_lost_packets(space, now);
             self.update_loss_detection_timer();

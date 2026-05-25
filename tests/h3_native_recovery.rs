@@ -335,6 +335,33 @@ fn rfc9002_recovery_time_threshold_marks_packet_lost_after_loss_delay() {
 }
 
 #[test]
+fn rfc9002_recovery_ignores_timeout_before_loss_detection_deadline() {
+    let mut recovery = RecoveryState::default();
+    let sent_at = Instant::now();
+    recovery.on_packet_sent(
+        PacketNumberSpace::Application,
+        1,
+        SentPacketInfo::new(sent_at, 1200, true, true),
+    );
+    let timer = recovery
+        .loss_detection_timer()
+        .expect("application packet should arm PTO");
+    let early = timer - Duration::from_millis(1);
+
+    assert_eq!(recovery.on_loss_detection_timeout(early), LossDetectionOutcome::Idle);
+    assert_eq!(
+        recovery.pto_count(),
+        0,
+        "early timer polls must not advance PTO backoff"
+    );
+    assert_eq!(
+        recovery.loss_detection_timer(),
+        Some(timer),
+        "early timer polls must keep the original loss-detection deadline"
+    );
+}
+
+#[test]
 fn rfc9002_recovery_pto_target_picks_initial_then_handshake_when_no_in_flight() {
     let mut recovery = RecoveryState::default();
     recovery.set_has_handshake_keys(false);
