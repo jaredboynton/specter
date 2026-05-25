@@ -23,7 +23,9 @@ use crate::error::Error;
 use crate::fingerprint::tls::TlsFingerprint;
 use crate::transport::dns::DnsConfig;
 use crate::transport::session::{SessionCache, SessionCacheKey};
-use crate::transport::tcp::{configure_tcp_socket, TcpFingerprint};
+use crate::transport::tcp::{
+    configure_tcp_socket_with_buffers, TcpFingerprint, TcpSocketBuffers,
+};
 
 // FFI bindings for BoringSSL extension control
 use boring_sys::{CRYPTO_BUFFER, SSL, SSL_CTX, SSL_SESSION};
@@ -210,6 +212,7 @@ pub enum EarlyDataOutcome {
 pub struct BoringConnector {
     tls_config: Option<TlsFingerprint>,
     tcp_fingerprint: Option<TcpFingerprint>,
+    tcp_socket_buffers: TcpSocketBuffers,
     dns_config: DnsConfig,
     tcp_keepalive: TcpKeepaliveConfig,
     root_certs: Vec<Vec<u8>>,
@@ -244,6 +247,7 @@ impl BoringConnector {
         Self {
             tls_config: None,
             tcp_fingerprint: None,
+            tcp_socket_buffers: TcpSocketBuffers::none(),
             dns_config: DnsConfig::new(),
             tcp_keepalive: TcpKeepaliveConfig::default(),
             root_certs: Vec::new(),
@@ -294,6 +298,15 @@ impl BoringConnector {
     /// Set TCP fingerprint configuration.
     pub fn with_tcp_fingerprint(mut self, tcp_fp: TcpFingerprint) -> Self {
         self.tcp_fingerprint = Some(tcp_fp);
+        self
+    }
+
+    /// Explicitly override TCP socket receive and send buffers.
+    ///
+    /// Defaults to OS autotuning. Set this only when a fixed socket buffer is
+    /// required for a specific deployment or test.
+    pub fn tcp_socket_buffers(mut self, buffers: TcpSocketBuffers) -> Self {
+        self.tcp_socket_buffers = buffers;
         self
     }
 
@@ -765,10 +778,11 @@ impl BoringConnector {
             });
 
         let addrs = interleave_addresses(self.dns_config.resolve(host, port).await?);
-        let tcp_stream = if let Some(ref tcp_fp) = self.tcp_fingerprint {
-            connect_tcp_fingerprint(
+        let tcp_stream = if self.tcp_fingerprint.is_some() || self.tcp_socket_buffers.is_configured() {
+            connect_tcp_configured(
                 addrs,
-                tcp_fp.clone(),
+                self.tcp_fingerprint.clone(),
+                self.tcp_socket_buffers,
                 self.tcp_keepalive.clone(),
                 self.happy_eyeballs_delay,
                 host,
@@ -899,9 +913,10 @@ async fn connect_tcp_async(
 
 /// Loser attempts in the fingerprint path may continue until their bounded
 /// `connect_timeout` even after a winner is chosen.
-async fn connect_tcp_fingerprint(
+async fn connect_tcp_configured(
     addrs: Vec<SocketAddr>,
-    tcp_fp: TcpFingerprint,
+    tcp_fp: Option<TcpFingerprint>,
+    tcp_socket_buffers: TcpSocketBuffers,
     keepalive: TcpKeepaliveConfig,
     delay: Duration,
     host: &str,
@@ -933,7 +948,8 @@ async fn connect_tcp_fingerprint(
             };
             let socket = Socket::new(domain, Type::STREAM, Some(socket2::Protocol::TCP))
                 .map_err(|e| Error::Connection(format!("Failed to create socket: {e}")))?;
-            configure_tcp_socket(&socket, &tcp_fp).map_err(|e| {
+            let tcp_fp = tcp_fp.unwrap_or_default();
+            configure_tcp_socket_with_buffers(&socket, &tcp_fp, tcp_socket_buffers).map_err(|e| {
                 Error::Connection(format!("Failed to configure TCP socket: {e}"))
             })?;
             apply_tcp_keepalive(socket2::SockRef::from(&socket), &keepalive)?;

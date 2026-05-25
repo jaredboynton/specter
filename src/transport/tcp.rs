@@ -1,7 +1,7 @@
 //! TCP/IP stack fingerprinting for browser impersonation.
 //!
 //! Configures TCP socket options to match browser behavior:
-//! - Initial window size
+//! - Initial window size metadata
 //! - TTL (Time To Live)
 //! - MSS (Maximum Segment Size)
 //! - Window scaling
@@ -9,6 +9,7 @@
 //! - TCP timestamps
 //!
 //! These options are detectable before TLS handshake (p0f-style fingerprinting).
+//! Socket buffer sizes are left to OS autotuning unless explicitly overridden.
 
 use std::io;
 
@@ -16,7 +17,7 @@ use std::io;
 #[derive(Debug, Clone)]
 pub struct TcpFingerprint {
     /// Initial receive window size (bytes).
-    /// Chrome: 65535 (default), can be adjusted via socket buffer size
+    /// Chrome: 65535 (default); socket buffers are OS-autotuned unless explicitly overridden.
     pub window_size: u32,
     /// Initial TTL (Time To Live) for IPv4 packets.
     /// macOS: 64, Linux: 64, Windows: 128
@@ -73,16 +74,62 @@ impl TcpFingerprint {
     }
 }
 
+/// Explicit TCP socket buffer overrides.
+///
+/// By default Specter leaves `SO_RCVBUF` and `SO_SNDBUF` untouched so modern
+/// kernels can autotune TCP buffers for high-bandwidth, high-RTT links.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TcpSocketBuffers {
+    recv: Option<usize>,
+    send: Option<usize>,
+}
+
+impl TcpSocketBuffers {
+    /// Leave TCP socket buffers under operating-system control.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Set the same receive and send buffer size.
+    pub fn symmetric(bytes: usize) -> Self {
+        Self {
+            recv: Some(bytes),
+            send: Some(bytes),
+        }
+    }
+
+    /// Set receive and send buffer sizes independently.
+    pub fn new(recv: Option<usize>, send: Option<usize>) -> Self {
+        Self { recv, send }
+    }
+
+    /// Returns true when either socket buffer should be explicitly configured.
+    pub fn is_configured(&self) -> bool {
+        self.recv.is_some() || self.send.is_some()
+    }
+}
+
 /// Configure a TCP socket with fingerprint settings.
 ///
 /// Uses socket2 crate for cross-platform socket options.
 /// Some TCP options may not be available or configurable on all platforms.
 pub fn configure_tcp_socket(socket: &socket2::Socket, fp: &TcpFingerprint) -> io::Result<()> {
-    // Set receive buffer size (influences window size)
-    socket.set_recv_buffer_size(fp.window_size as usize)?;
+    configure_tcp_socket_with_buffers(socket, fp, TcpSocketBuffers::none())
+}
 
-    // Set send buffer size (should match receive for symmetry)
-    socket.set_send_buffer_size(fp.window_size as usize)?;
+/// Configure a TCP socket with fingerprint settings and explicit buffer overrides.
+pub fn configure_tcp_socket_with_buffers(
+    socket: &socket2::Socket,
+    fp: &TcpFingerprint,
+    buffers: TcpSocketBuffers,
+) -> io::Result<()> {
+    if let Some(bytes) = buffers.recv {
+        socket.set_recv_buffer_size(bytes)?;
+    }
+
+    if let Some(bytes) = buffers.send {
+        socket.set_send_buffer_size(bytes)?;
+    }
 
     // Set TTL for IPv4 packets
     socket.set_ttl_v4(fp.ttl as u32)?;
@@ -207,6 +254,29 @@ mod tests {
 
         assert_eq!(socket.recv_buffer_size().unwrap(), initial_recv);
         assert_eq!(socket.send_buffer_size().unwrap(), initial_send);
+    }
+
+    #[test]
+    fn explicit_tcp_socket_buffers_apply_overrides() {
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(socket2::Protocol::TCP)).unwrap();
+        let requested = 262_144;
+
+        configure_tcp_socket_with_buffers(
+            &socket,
+            &TcpFingerprint::default(),
+            TcpSocketBuffers::symmetric(requested),
+        )
+        .unwrap();
+
+        assert!(socket.recv_buffer_size().unwrap() >= requested);
+        assert!(socket.send_buffer_size().unwrap() >= requested);
+    }
+
+    #[test]
+    fn tcp_socket_buffers_can_configure_one_direction() {
+        assert!(TcpSocketBuffers::new(Some(65_536), None).is_configured());
+        assert!(TcpSocketBuffers::new(None, Some(65_536)).is_configured());
+        assert!(!TcpSocketBuffers::none().is_configured());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
