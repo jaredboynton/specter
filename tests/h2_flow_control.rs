@@ -10,6 +10,12 @@ use tokio::time::timeout;
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};
 
+const CHROME_CONNECTION_WINDOW_UPDATE: u32 = 15_663_105;
+
+fn window_update_increment(payload: &[u8]) -> u32 {
+    u32::from_be_bytes([payload[0] & 0x7f, payload[1], payload[2], payload[3]])
+}
+
 #[allow(dead_code)]
 async fn perform_handshake(conn: &MockH2Connection) -> std::io::Result<()> {
     conn.read_preface().await?;
@@ -35,6 +41,71 @@ async fn perform_handshake(conn: &MockH2Connection) -> std::io::Result<()> {
     assert_eq!(flags & 0x01, 0x01);
 
     Ok(())
+}
+
+#[tokio::test]
+async fn connection_window_update_refresh_uses_advertised_increment() {
+    let server = MockH2Server::new().await.unwrap();
+    let url = format!("http://127.0.0.1:{}/large", server.port());
+
+    let _handle = server.start(move |conn| async move {
+        conn.read_preface().await.unwrap();
+
+        let mut saw_initial_connection_window_update = false;
+        let mut sent_settings = false;
+        let stream_id = loop {
+            let (_, frame_type, flags, stream_id, _) = conn.read_frame().await.unwrap();
+            match frame_type {
+                0x01 => break stream_id,
+                0x04 if flags & 0x01 == 0 => {
+                    if !sent_settings {
+                        conn.send_settings(&[]).await.unwrap();
+                        conn.send_settings_ack().await.unwrap();
+                        sent_settings = true;
+                    }
+                }
+                0x08 if stream_id == 0 => {
+                    saw_initial_connection_window_update = true;
+                }
+                _ => {}
+            }
+        };
+        assert!(saw_initial_connection_window_update);
+
+        conn.send_headers(stream_id, &[0x88], false, true)
+            .await
+            .unwrap();
+
+        let chunk = vec![b'a'; 16 * 1024];
+        let total_chunks = (9 * 1024 * 1024) / chunk.len();
+        for index in 0..total_chunks {
+            conn.send_data(stream_id, &chunk, index + 1 == total_chunks)
+                .await
+                .unwrap();
+        }
+
+        loop {
+            let (_, frame_type, _, stream_id, payload) = conn.read_frame().await.unwrap();
+            if frame_type == 0x08 && stream_id == 0 {
+                assert_eq!(
+                    window_update_increment(&payload),
+                    CHROME_CONNECTION_WINDOW_UPDATE
+                );
+                break;
+            }
+        }
+    });
+
+    let client = Client::builder()
+        .prefer_http2(true)
+        .http2_prior_knowledge(true)
+        .http2_initial_stream_window_size(Some(16 * 1024 * 1024))
+        .build()
+        .unwrap();
+
+    let res = client.get(url.as_str()).send().await.unwrap();
+    assert!(res.is_success());
+    assert_eq!(res.body().len(), 9 * 1024 * 1024);
 }
 
 #[tokio::test]
