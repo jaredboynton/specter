@@ -194,7 +194,9 @@ async fn handle_h1_connection(mut stream: TcpStream, logs: Arc<Mutex<Vec<H1Log>>
                 stream.flush().await.unwrap();
                 stream.write_all(b"5\r\nfirst\r\n").await.unwrap();
                 stream.flush().await.unwrap();
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                let (_hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
+                let _held = stream;
+                let _ = hold_rx.await;
                 return;
             }
             _ => {

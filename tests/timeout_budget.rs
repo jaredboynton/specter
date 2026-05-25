@@ -12,7 +12,7 @@ mod helpers;
 use helpers::mock_h2_server::MockH2Server;
 
 const MAX_TIMEOUT_SECS: u64 = 15;
-const MAX_SLEEP_SECS: u64 = 5;
+const MAX_SLEEP_SECS: u64 = 1;
 const MAX_NEXTTEST_KILL_WINDOW_SECS: u64 = 30;
 
 #[test]

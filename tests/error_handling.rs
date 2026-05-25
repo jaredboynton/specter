@@ -80,8 +80,9 @@ async fn test_read_timeout_ttfb() {
             let (stream, _) = listener.accept().await.unwrap();
             // Hold the connection open but never write anything.
             tokio::spawn(async move {
+                let (_hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
                 let _held = stream;
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                let _ = hold_rx.await;
             });
         }
     });
@@ -129,9 +130,6 @@ async fn test_connection_reset_partial_response() {
         // Close the connection (simulates reset/truncation).
         drop(stream);
     });
-
-    // Small delay so server is ready.
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = Client::builder().prefer_http2(false).build().unwrap();
 
@@ -183,8 +181,6 @@ async fn test_tls_handshake_failure() {
         }
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     // Use a client that does NOT skip TLS verification for localhost.
     let client = Client::builder()
         .localhost_allows_invalid_certs(false)
@@ -224,8 +220,9 @@ async fn test_combined_timeouts() {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
             tokio::spawn(async move {
+                let (_hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
                 let _held = stream;
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                let _ = hold_rx.await;
             });
         }
     });
