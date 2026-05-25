@@ -519,7 +519,7 @@ impl<'a> WebSocketH2Builder<'a> {
             .parse()
             .map_err(|e| Error::HttpProtocol(format!("Invalid URI: {}", e)))?;
 
-        let headers = self.headers.to_vec();
+        let headers = self.headers.clone();
         let pool_key = self.client.make_pool_key(&uri);
 
         if let Some(conn) = {
@@ -527,7 +527,7 @@ impl<'a> WebSocketH2Builder<'a> {
             pool.get(&pool_key).cloned()
         } {
             match conn
-                .open_websocket_tunnel(uri.clone(), headers.clone())
+                .open_websocket_tunnel(uri.clone(), &headers)
                 .await
             {
                 Ok(tunnel) => return Ok(tunnel),
@@ -570,7 +570,7 @@ impl<'a> WebSocketH2Builder<'a> {
             pool.insert(pool_key, pooled_conn.clone());
         }
 
-        pooled_conn.open_websocket_tunnel(uri, headers).await
+        pooled_conn.open_websocket_tunnel(uri, &headers).await
     }
 }
 
@@ -631,7 +631,7 @@ impl<'a> WebSocketH3Builder<'a> {
             h3_client = h3_client.danger_accept_invalid_certs(true);
         }
 
-        let fut = h3_client.open_websocket_tunnel(h3_url.as_str(), self.headers.to_vec());
+        let fut = h3_client.open_websocket_tunnel(h3_url.as_str(), &self.headers);
         if let Some(total_timeout) = self.client.timeouts.total {
             tokio_timeout(total_timeout, fut)
                 .await
@@ -964,7 +964,7 @@ impl<'a> RequestBuilder<'a> {
             let fut = client.h3_client.send_streaming_with_timeouts(
                 request.url.as_str(),
                 request.method.as_str(),
-                request.headers.to_vec(),
+                &request.headers,
                 body,
                 body_timeouts,
             );
@@ -1150,7 +1150,7 @@ impl<'a> RequestBuilder<'a> {
                 let send_fut = conn.send_streaming_request(
                     request.method.clone(),
                     &uri,
-                    request.headers.to_vec(),
+                    request.headers.clone(),
                     body,
                     body_timeouts,
                 );
@@ -1227,7 +1227,7 @@ impl<'a> RequestBuilder<'a> {
                         let send_fut = pooled_conn.send_streaming_request(
                             request.method.clone(),
                             &uri,
-                            request.headers.to_vec(),
+                            request.headers.clone(),
                             request.body.clone(),
                             body_timeouts,
                         );
@@ -1313,7 +1313,7 @@ impl<'a> RequestBuilder<'a> {
                 let send_fut = pooled_conn.send_streaming_request(
                     request.method.clone(),
                     &uri,
-                    request.headers.to_vec(),
+                    request.headers.clone(),
                     body,
                     body_timeouts,
                 );
@@ -1484,7 +1484,7 @@ impl Client {
         let fut = self.h3_client.send_request(
             url.as_str(),
             request.method.as_str(),
-            request.headers.to_vec(),
+            &request.headers,
             body,
         );
 
@@ -1531,7 +1531,7 @@ impl Client {
         let alt_svc_cache = self.alt_svc_cache.clone();
         let origin = Self::origin_for_url(&request.url);
 
-        let headers_vec = request.headers.to_vec();
+        let headers_vec = request.headers.clone();
         let body_bytes = if request.body.is_empty() {
             None
         } else {
@@ -1564,7 +1564,7 @@ impl Client {
                     .send_request(
                         request.method.clone(),
                         &uri,
-                        headers_vec.clone(),
+                        &headers_vec,
                         body_bytes.clone(),
                     )
                     .await;
@@ -1628,7 +1628,7 @@ impl Client {
                 let fut = pooled_conn.send_request(
                     request.method.clone(),
                     &uri,
-                    headers_vec.clone(),
+                    &headers_vec,
                     body_bytes.clone(),
                 );
 
@@ -1710,7 +1710,7 @@ impl Client {
             let fut = pooled_conn.send_request(
                 request.method.clone(),
                 &uri,
-                headers_vec.clone(),
+                &headers_vec,
                 body_bytes.clone(),
             );
 
@@ -1951,7 +1951,7 @@ impl Client {
         let fut = async move {
             let mut conn = conn;
             let stream_id = conn
-                .send_headers_raw(&method, &uri, &headers.to_vec(), true)
+                .send_headers_raw(&method, &uri, &headers, true)
                 .await?;
             let (status, headers, end_stream) = conn
                 .read_response_headers_with_end_stream(stream_id)
