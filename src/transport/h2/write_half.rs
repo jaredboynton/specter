@@ -19,6 +19,8 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
+use crate::headers::Headers;
+use crate::headers::Headers;
 
 use super::frame::{
     ContinuationFrame, DataFrame, ErrorCode, GoAwayFrame, HeadersFrame, PingFrame, RstStreamFrame,
@@ -80,7 +82,7 @@ where
         &self,
         method: &Method,
         uri: &Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         end_stream: bool,
         max_frame_size: usize,
     ) -> Result<u32> {
@@ -119,10 +121,13 @@ where
             ));
         }
 
-        let header_block =
-            guard
-                .encoder
-                .encode_request(method.as_str(), scheme, authority, path, headers);
+        let header_block = guard.encoder.encode_request(
+            method.as_str(),
+            scheme,
+            authority,
+            path,
+            &Headers::from(headers.to_vec()),
+        );
 
         if header_block.is_empty() {
             return Err(Error::HttpProtocol(
@@ -318,7 +323,7 @@ where
         &self,
         method: &Method,
         uri: &Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         body: Option<Bytes>,
         max_frame_size: usize,
     ) -> Result<u32> {
@@ -357,10 +362,13 @@ where
             ));
         }
 
-        let header_block =
-            guard
-                .encoder
-                .encode_request(method.as_str(), scheme, authority, path, headers);
+        let header_block = guard.encoder.encode_request(
+            method.as_str(),
+            scheme,
+            authority,
+            path,
+            &Headers::from(headers.to_vec()),
+        );
 
         if header_block.is_empty() {
             return Err(Error::HttpProtocol(
