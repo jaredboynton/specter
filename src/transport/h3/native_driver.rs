@@ -1058,11 +1058,7 @@ impl NativeH3Driver {
                 .max(1200)
         ];
         loop {
-            let sent_scheduled_data = if self.command_rx.is_empty() {
-                self.flush_scheduled_send_work().await?
-            } else {
-                false
-            };
+            let sent_scheduled_data = self.flush_scheduled_send_work().await?;
             self.flush_tunnel_inbound();
             self.flush_streaming_responses();
             let released_credit = H3ReleasedReceiveCredit::new(
@@ -1074,12 +1070,7 @@ impl NativeH3Driver {
             }
             self.send_client_pmtu_probe_if_available().await?;
             if sent_scheduled_data && self.has_outbound_send_work() {
-                if self.command_rx.is_empty() {
-                    tokio::task::yield_now().await;
-                }
-                if self.command_rx.is_empty() {
-                    continue;
-                }
+                continue;
             }
             let has_pending_work = self.has_pending_work();
             if self.last_activity.elapsed() > self.max_idle_timeout && !has_pending_work {
@@ -1120,9 +1111,7 @@ impl NativeH3Driver {
                 command = self.command_rx.recv() => {
                     self.last_activity = Instant::now();
                     match command {
-                        Some(command) => {
-                            self.handle_command(command).await?;
-                        }
+                        Some(command) => self.handle_command(command).await?,
                         None => {
                             self.send_connection_close(0x00, Bytes::from_static(b"Client shutdown"))
                                 .await?;
@@ -1675,7 +1664,7 @@ impl NativeH3Driver {
                 stream_id,
                 outbound,
             } => {
-                self.send_tunnel_data(stream_id, outbound);
+                self.send_tunnel_data(stream_id, outbound).await?;
             }
         }
         Ok(())
@@ -1707,13 +1696,9 @@ impl NativeH3Driver {
         Ok(())
     }
 
-    fn send_tunnel_data(&mut self, stream_id: u64, outbound: H3TunnelOutbound) {
-        self.enqueue_tunnel_data(stream_id, outbound);
-    }
-
-    fn enqueue_tunnel_data(&mut self, stream_id: u64, outbound: H3TunnelOutbound) {
+    async fn send_tunnel_data(&mut self, stream_id: u64, outbound: H3TunnelOutbound) -> Result<()> {
         let Some(tunnel) = self.pending_tunnels.get_mut(&stream_id) else {
-            return;
+            return Ok(());
         };
         tunnel
             .pending_outbound
@@ -1721,6 +1706,8 @@ impl NativeH3Driver {
                 outbound,
                 self.transport_config.tunnel_outbound_byte_budget,
             ));
+        self.flush_scheduled_send_work().await?;
+        Ok(())
     }
 
     async fn flush_scheduled_send_work(&mut self) -> Result<bool> {
