@@ -3296,17 +3296,6 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
     .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 mixed body writer timed out"))?
     .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 mixed body writer dropped"))?;
 
-    for index in 0..LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES {
-        let fin = index + 1 == LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES;
-        send_tokio_quiche_outbound_frame(
-            &mut tunnel_sender,
-            OutboundFrame::Body(rfc9220_tunnel_payload(b'U'), fin),
-            deadline,
-            "tokio_quiche RFC 9220 mixed tunnel",
-        )
-        .await?;
-    }
-
     controller
         .request_sender()
         .send(NewClientRequest {
@@ -3317,6 +3306,23 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
         .map_err(|_| {
             anyhow::anyhow!("tokio_quiche RFC 9220 mixed stream request driver is closed")
         })?;
+
+    for _ in 0..LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES {
+        send_tokio_quiche_outbound_frame(
+            &mut tunnel_sender,
+            OutboundFrame::Body(rfc9220_tunnel_payload(b'U'), false),
+            deadline,
+            "tokio_quiche RFC 9220 mixed tunnel",
+        )
+        .await?;
+    }
+    send_tokio_quiche_outbound_frame(
+        &mut tunnel_sender,
+        OutboundFrame::Body(Bytes::new(), true),
+        deadline,
+        "tokio_quiche RFC 9220 mixed tunnel fin",
+    )
+    .await?;
 
     let mut tunnel_stream_id = None;
     let mut stream_stream_id = None;
@@ -3482,7 +3488,7 @@ async fn read_tokio_quiche_rfc9220_tunnel_mixed_slow(
         match frame {
             tokio_quiche::http3::driver::InboundFrame::Body(chunk, fin) => {
                 echoed = echoed.saturating_add(chunk.len());
-                saw_fin = fin;
+                saw_fin = fin && echoed >= expected_tunnel_bytes;
             }
             tokio_quiche::http3::driver::InboundFrame::Datagram(_) => {}
         }
