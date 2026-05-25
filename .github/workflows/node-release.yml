@@ -15,7 +15,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   preflight:
@@ -60,9 +59,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -158,9 +154,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2
         with:

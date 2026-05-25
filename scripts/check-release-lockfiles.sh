@@ -10,6 +10,11 @@ manifests=(
     "bindings/python/Cargo.toml"
 )
 
+if grep -q "RUSTC_WRAPPER=sccache" "$PROJECT_ROOT/.github/workflows/node-release.yml"; then
+    echo "Node Release must not set RUSTC_WRAPPER=sccache; napi build runs cargo metadata and fails under sccache when CARGO_INCREMENTAL is set." >&2
+    exit 1
+fi
+
 version_from_cargo_toml() {
     local manifest="$1"
     python3 - "$manifest" <<'PY'

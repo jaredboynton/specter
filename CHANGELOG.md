@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-05-25
+
+### Fixed
+- **Node release build stability**: Removed `sccache` from the Node release workflow because `napi build` runs `cargo metadata`, which fails when the Rust toolchain action has exported `CARGO_INCREMENTAL` and Cargo is wrapped by `sccache`. Added a release preflight guard so the Node workflow cannot reintroduce that wrapper.
+
 ## [4.0.2] - 2026-05-25
 
 ### Fixed

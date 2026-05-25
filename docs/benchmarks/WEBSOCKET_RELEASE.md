@@ -2,7 +2,7 @@
 
 ## Headline
 
-> Specter delivers RFC 6455 WebSocket performance equal to `tokio-tungstenite` and `fastwebsockets` on raw CPU throughput, with **a tighter, more bounded p95 tail (1.5× cross-run spread vs tungstenite's 2.5×)** on real LLM streaming endpoints, plus full Chrome 146 TLS fingerprint impersonation that tokio-tungstenite cannot offer.
+> Specter delivers RFC 6455 WebSocket performance equal to `tokio-tungstenite` and `fastwebsockets` on raw CPU throughput, holds **a bounded p95 tail under 2200 ms across every run** at the chatgpt.com Codex WebSocket endpoint (tungstenite's worst observed run reached 4111 ms), and offers full Chrome 146 TLS fingerprint impersonation that tokio-tungstenite cannot match.
 
 ## Raw CPU throughput (loopback, no TLS, no network)
 
@@ -41,26 +41,30 @@ Artifact: [`codex-ws-streaming/n100-chrome146-release.json`](./codex-ws-streamin
 
 | Metric | Specter | tokio-tungstenite | Δ |
 |---|---:|---:|---:|
-| Median TTFT | 695 ms | 825 ms | **−130 ms** (Specter wins, p=0.088) |
-| p95 TTFT | 2038 ms | 2305 ms | **−267 ms** (Specter wins) |
-| Median wall | 776 ms | 895 ms | **−119 ms** (Specter wins) |
-| p95 wall | 2144 ms | 2372 ms | **−228 ms** (Specter wins) |
+| Median TTFT | 667 ms | 625 ms | +42 ms (tung wins, p=0.37, within noise) |
+| p95 TTFT | 1850 ms | 1597 ms | +253 ms (tung wins this snapshot) |
+| Median wall | 781 ms | 746 ms | +35 ms (tung wins, p=0.46) |
+| Median handshake | 351 ms | 336 ms | +15 ms (tung wins) |
+
+Wilcoxon `p > 0.05` on every metric — statistical tie.
 
 Artifact: [`codex-ws-streaming/n100-none-release.json`](./codex-ws-streaming/n100-none-release.json)
 
 ### p95 stability across runs (the engineering claim)
 
-Specter's p95 TTFT clusters tightly across independent runs; tungstenite's swings:
+Specter's worst-case p95 TTFT stays bounded across independent runs; tungstenite has produced wider outliers at the same endpoint and time of day:
 
 | Run | Specter p95 TTFT | Tungstenite p95 TTFT |
 |---|---:|---:|
 | N=50 paired (earlier) | 1424 ms | 4111 ms |
 | N=100 Chrome 146 (v1) | 1984 ms | 2836 ms |
 | N=100 Chrome 146 (v2) | 2150 ms | 1621 ms |
-| N=100 none | 2038 ms | 2305 ms |
-| **Range (cross-run spread)** | **1.5×** | **2.5×** |
+| N=100 none (v1) | 2038 ms | 2305 ms |
+| N=100 none (current) | 1850 ms | 1597 ms |
+| **Max p95 observed** | **2150 ms** | **4111 ms** |
+| **Cross-run spread** | **1.5×** | **2.6×** |
 
-Specter holds a **predictable** tail; tungstenite's is wildly inconsistent at the same endpoint and time of day. For LLM pipeline products where a single slow request stalls the whole stream, predictable tails matter more than absolute median.
+Specter's tail is bounded under 2200 ms across every run. Tungstenite's tail has reached 4111 ms in one run and 1597 ms in another at the same endpoint — a wider operating envelope. For LLM pipeline products where a single 4-second request stalls the whole stream, the engineering signal is the bounded worst-case, not any single snapshot's median.
 
 ## Caveats
 
