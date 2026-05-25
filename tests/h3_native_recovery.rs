@@ -236,7 +236,10 @@ fn rfc9002_recovery_pto_doubles_on_each_timeout_until_ack_resets_it() {
     );
 
     let initial_pto = recovery.current_pto();
-    let outcome = recovery.on_loss_detection_timeout(now);
+    let timer = recovery
+        .loss_detection_timer()
+        .expect("application packet should arm PTO");
+    let outcome = recovery.on_loss_detection_timeout(timer);
     assert!(matches!(
         outcome,
         LossDetectionOutcome::Pto {
@@ -246,7 +249,10 @@ fn rfc9002_recovery_pto_doubles_on_each_timeout_until_ack_resets_it() {
     assert_eq!(recovery.pto_count(), 1);
     assert_eq!(recovery.current_pto(), initial_pto * 2);
 
-    let _ = recovery.on_loss_detection_timeout(now);
+    let timer = recovery
+        .loss_detection_timer()
+        .expect("second PTO should re-arm timer");
+    let _ = recovery.on_loss_detection_timeout(timer);
     assert_eq!(recovery.pto_count(), 2);
     assert_eq!(recovery.current_pto(), initial_pto * 4);
 
@@ -338,6 +344,7 @@ fn rfc9002_recovery_time_threshold_marks_packet_lost_after_loss_delay() {
 fn rfc9002_recovery_ignores_timeout_before_loss_detection_deadline() {
     let mut recovery = RecoveryState::default();
     let sent_at = Instant::now();
+    recovery.mark_handshake_complete();
     recovery.on_packet_sent(
         PacketNumberSpace::Application,
         1,
@@ -496,7 +503,10 @@ fn rfc9002_recovery_discard_space_returns_bytes_in_flight_and_resets_pto_count()
         SentPacketInfo::new(now, 900, true, true),
     );
     assert_eq!(recovery.congestion().bytes_in_flight(), 2000);
-    let _ = recovery.on_loss_detection_timeout(now);
+    let timer = recovery
+        .loss_detection_timer()
+        .expect("handshake packet should arm PTO");
+    let _ = recovery.on_loss_detection_timeout(timer);
     assert!(recovery.pto_count() >= 1);
 
     recovery.discard_space(PacketNumberSpace::Handshake);
