@@ -433,31 +433,52 @@ fn normalize_path(path: &str) -> String {
 }
 
 fn remove_dot_segments(path: &str) -> String {
-    let absolute = path.starts_with('/');
-    let mut output: Vec<&str> = Vec::new();
+    // RFC 3986 section 5.2.4 byte-walker algorithm; preserves trailing slashes
+    // that the segment-split form drops (e.g. `..` from `/a/b/c` -> `/a/`).
+    let mut input = path.to_string();
+    let mut output = String::new();
 
-    for segment in path.split('/') {
-        match segment {
-            "" | "." => continue,
-            ".." => {
-                if !output.is_empty() {
-                    output.pop();
-                }
-            }
-            _ => output.push(segment),
+    while !input.is_empty() {
+        if let Some(rest) = input.strip_prefix("../") {
+            input = rest.to_string();
+        } else if let Some(rest) = input.strip_prefix("./") {
+            input = rest.to_string();
+        } else if let Some(rest) = input.strip_prefix("/./") {
+            input = format!("/{rest}");
+        } else if input == "/." {
+            input = "/".to_string();
+        } else if let Some(rest) = input.strip_prefix("/../") {
+            input = format!("/{rest}");
+            pop_last_segment(&mut output);
+        } else if input == "/.." {
+            input = "/".to_string();
+            pop_last_segment(&mut output);
+        } else if input == "." || input == ".." {
+            input.clear();
+        } else {
+            let start = if input.starts_with('/') { 1 } else { 0 };
+            let end = match input[start..].find('/') {
+                Some(idx) => start + idx,
+                None => input.len(),
+            };
+            output.push_str(&input[..end]);
+            input = input[end..].to_string();
         }
     }
 
-    if absolute {
-        if output.is_empty() {
-            "/".to_string()
-        } else {
-            format!("/{}", output.join("/"))
+    output
+}
+
+fn pop_last_segment(output: &mut String) {
+    // RFC 3986 5.2.4 step C: remove last segment AND its preceding `/` (if any).
+    while let Some(byte) = output.as_bytes().last() {
+        if *byte == b'/' {
+            break;
         }
-    } else if output.is_empty() {
-        String::new()
-    } else {
-        output.join("/")
+        output.pop();
+    }
+    if output.ends_with('/') {
+        output.pop();
     }
 }
 

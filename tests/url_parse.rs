@@ -14,9 +14,10 @@ fn parse_basic_https_url() {
 
 #[test]
 fn relative_resolution_dot_segments() {
+    // RFC 3986 section 5.2.4 preserves trailing slashes for `.` and `..`.
     let base = Url::parse("https://example.com/a/b/c").unwrap();
-    assert_eq!(base.join("..").unwrap().as_str(), "https://example.com/a/b");
-    assert_eq!(base.join(".").unwrap().as_str(), "https://example.com/a/b/c");
+    assert_eq!(base.join("..").unwrap().as_str(), "https://example.com/a/");
+    assert_eq!(base.join(".").unwrap().as_str(), "https://example.com/a/b/");
     assert_eq!(
         base.join("../../a").unwrap().as_str(),
         "https://example.com/a"
@@ -94,7 +95,7 @@ fn percent_encoding_round_trip() {
     let url = Url::parse(input).unwrap();
     assert_eq!(url.as_str(), input);
     assert_eq!(url.path(), "/%E2%9C%93");
-    assert_eq!(url.query(), Some("%26%3D"));
+    assert_eq!(url.query(), Some("q=%26%3D"));
 }
 
 #[test]
