@@ -737,7 +737,7 @@ pub fn headers_to_owned(headers: Vec<(&'static str, &'static str)>) -> Vec<(Stri
 }
 
 /// Byte span into a contiguous header buffer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeaderSpan {
     name_start: u32,
     name_len: u32,
@@ -831,7 +831,8 @@ impl HeadersBuilder {
 
     pub fn insert(&mut self, name: impl AsRef<[u8]>, value: impl AsRef<[u8]>) {
         let name = name.as_ref();
-        self.spans.retain(|span| !name_eq_ignore_ascii_case(&self.buf, span, name));
+        self.spans
+            .retain(|span| !name_eq_ignore_ascii_case(&self.buf, span, name));
         self.push(name, value);
     }
 
@@ -880,12 +881,9 @@ impl HeadersBuilder {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
-        self.spans.iter().map(|span| {
-            (
-                span.name(&self.buf),
-                span.value(&self.buf),
-            )
-        })
+        self.spans
+            .iter()
+            .map(|span| (span.name(&self.buf), span.value(&self.buf)))
     }
 
     pub fn build(self) -> Headers {
@@ -900,7 +898,7 @@ impl HeadersBuilder {
 ///
 /// This preserves insertion order for fingerprinting while providing
 /// convenient lookup and mutation helpers.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Headers {
     buf: Bytes,
     spans: Arc<[HeaderSpan]>,
@@ -986,12 +984,9 @@ impl Headers {
     }
 
     pub fn iter_bytes(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
-        self.spans.iter().map(|span| {
-            (
-                span.name(&self.buf),
-                span.value(&self.buf),
-            )
-        })
+        self.spans
+            .iter()
+            .map(|span| (span.name(&self.buf), span.value(&self.buf)))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
