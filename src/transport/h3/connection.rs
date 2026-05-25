@@ -285,7 +285,6 @@ impl H3Connection {
             .send_to(handshake.client_initial().packet.as_ref(), peer_addr)
             .await
             .map_err(Error::Io)?;
-        eprintln!("temporary client sent initial");
         handshake.record_client_initial_sent_at(Instant::now());
         let mut pending_zero_rtt = if let Some(request) = zero_rtt_request {
             let packet = handshake.build_client_h3_zero_rtt_request_packet(
@@ -298,7 +297,6 @@ impl H3Connection {
                 .send_to(packet.packet.as_ref(), peer_addr)
                 .await
                 .map_err(Error::Io)?;
-            eprintln!("temporary client sent zero-rtt pn {}", packet.packet_number);
             Some(PendingZeroRttRequest {
                 request,
                 stream_id: packet.stream_id,
