@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::time::timeout as tokio_timeout;
-use url::Url;
+use crate::url::Url;
 
 use crate::cookie::CookieJar;
 use crate::error::{Error, Result};

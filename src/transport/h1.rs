@@ -545,7 +545,7 @@ impl H1Connection {
         &mut self,
         method: Method,
         uri: &Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: Option<Bytes>,
     ) -> Result<Response> {
         // Build and send the request
@@ -591,7 +591,7 @@ impl H1Connection {
         mut self,
         method: Method,
         uri: &Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: RequestBody,
         options: H1StreamingOptions,
     ) -> Result<Response> {
@@ -649,7 +649,7 @@ impl H1Connection {
     pub(crate) fn build_request_bytes(
         method: &Method,
         uri: &Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         body_kind: H1RequestBodyKind,
     ) -> Result<Vec<u8>> {
         Self::build_request_impl(method, uri, headers, body_kind)
@@ -659,7 +659,7 @@ impl H1Connection {
         &self,
         method: &Method,
         uri: &Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         body_kind: H1RequestBodyKind,
     ) -> Result<Vec<u8>> {
         Self::build_request_impl(method, uri, headers, body_kind)
@@ -668,7 +668,7 @@ impl H1Connection {
     fn build_request_impl(
         method: &Method,
         uri: &Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         body_kind: H1RequestBodyKind,
     ) -> Result<Vec<u8>> {
         let mut request = Vec::with_capacity(1024);
@@ -1621,8 +1621,9 @@ async fn write_tcp_vectored_all(
         IoSlice::new(chunk),
         IoSlice::new(suffix),
     ];
+    let mut bufs: &mut [IoSlice<'_>] = &mut bufs;
     while !bufs.is_empty() {
-        let n = tcp.write_vectored(&bufs).await?;
+        let n = tcp.write_vectored(bufs).await?;
         if n == 0 {
             return Err(std::io::ErrorKind::WriteZero.into());
         }

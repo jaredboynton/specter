@@ -768,7 +768,7 @@ fn root_store_pool_key(root_certs: &[Vec<u8>], use_platform_roots: bool) -> Stri
 }
 
 fn parse_url_host(url: &str) -> Result<(String, u16, String)> {
-    let u = url::Url::parse(url).map_err(|e| Error::Connection(e.to_string()))?;
+    let u = crate::url::Url::parse(url).map_err(|e| Error::Connection(e.to_string()))?;
     if u.scheme() != "https" {
         return Err(Error::Connection("HTTP/3 requires https".into()));
     }

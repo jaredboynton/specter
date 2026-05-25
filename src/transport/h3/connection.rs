@@ -578,7 +578,7 @@ fn apply_udp_ecn_marking(
 }
 
 fn parse_url(url: &str) -> Result<(String, u16, String)> {
-    let u = url::Url::parse(url).map_err(|e| Error::CookieParse(e.to_string()))?;
+    let u = crate::url::Url::parse(url).map_err(|e| Error::CookieParse(e.to_string()))?;
     if u.scheme() != "https" {
         return Err(Error::Connection("HTTP/3 requires https".into()));
     }
