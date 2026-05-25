@@ -30,6 +30,7 @@ use specter::transport::h3::tls::{
 use specter::{DnsConfig, H3Backend, H3Client};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 mod helpers;
@@ -3611,6 +3612,100 @@ fn native_h3_client_path_challenge_validates_only_matching_path_response() {
         .is_empty());
     assert!(handshake.is_client_path_validated(&challenge));
     assert_eq!(handshake.client_path_validation_pending_count(), 0);
+}
+
+#[test]
+fn native_h3_client_path_migration_binds_validation_to_address_and_connection_id() {
+    let read_secret = Bytes::from_static(&[0x6a; 32]);
+    let write_secret = Bytes::from_static(&[0x6b; 32]);
+    let server_keys = derive_packet_key_material_from_secret(read_secret.clone()).unwrap();
+    let mut handshake = NativeQuicHandshake::client(
+        "example.com",
+        &Http3Fingerprint::chrome(),
+        ConnectionId::from_static(b"server-dcid"),
+        ConnectionId::from_static(b"client-scid"),
+    )
+    .unwrap();
+    handshake
+        .install_tls_secrets(&[
+            QuicTlsSecret {
+                direction: QuicSecretDirection::Read,
+                level: QuicEncryptionLevel::Application,
+                secret: read_secret,
+            },
+            QuicTlsSecret {
+                direction: QuicSecretDirection::Write,
+                level: QuicEncryptionLevel::Application,
+                secret: write_secret,
+            },
+        ])
+        .unwrap();
+
+    let migrated_address = SocketAddr::from(([198, 51, 100, 10], 4433));
+    let wrong_address = SocketAddr::from(([203, 0, 113, 7], 4433));
+    let migrated_cid = ConnectionId::from_static(b"migrated-cid");
+    let challenge = *b"MIGRATE!";
+
+    let new_cid_packet = protect_short_header_packet(
+        &server_keys,
+        &ConnectionId::from_static(b"client-scid"),
+        0,
+        2,
+        false,
+        &encode_frame(&QuicFrame::NewConnectionId {
+            sequence_number: 3,
+            retire_prior_to: 0,
+            connection_id: Bytes::copy_from_slice(migrated_cid.as_bytes()),
+            stateless_reset_token: [0x42; 16],
+        }),
+    )
+    .unwrap();
+    assert!(handshake
+        .open_server_h3_event_packet(&new_cid_packet)
+        .unwrap()
+        .is_empty());
+
+    handshake
+        .build_client_path_challenge_packet_for_address(migrated_address, 3, challenge)
+        .unwrap();
+    assert_eq!(handshake.client_path_validation_pending_count(), 1);
+    assert!(!handshake.is_client_path_address_validated(&migrated_address));
+
+    let wrong_response = protect_short_header_packet(
+        &server_keys,
+        &ConnectionId::from_static(b"client-scid"),
+        1,
+        2,
+        false,
+        &encode_frame(&QuicFrame::PathResponse(challenge)),
+    )
+    .unwrap();
+    assert!(handshake
+        .open_server_h3_event_packet_from(&wrong_response, wrong_address)
+        .unwrap()
+        .is_empty());
+    assert_eq!(handshake.client_path_validation_pending_count(), 1);
+    assert!(!handshake.is_client_path_address_validated(&migrated_address));
+
+    let matching_response = protect_short_header_packet(
+        &server_keys,
+        &ConnectionId::from_static(b"client-scid"),
+        2,
+        2,
+        false,
+        &encode_frame(&QuicFrame::PathResponse(challenge)),
+    )
+    .unwrap();
+    assert!(handshake
+        .open_server_h3_event_packet_from(&matching_response, migrated_address)
+        .unwrap()
+        .is_empty());
+    assert!(handshake.is_client_path_address_validated(&migrated_address));
+    assert_eq!(handshake.client_path_validation_pending_count(), 0);
+    assert_eq!(
+        handshake.client_path_migration_connection_id(&migrated_address),
+        Some(&migrated_cid)
+    );
 }
 
 #[test]
