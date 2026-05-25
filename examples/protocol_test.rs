@@ -227,7 +227,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total = all_results.len();
 
     info!("Passed: {}/{}", passed, total);
-    info!("Failed: {} required, {} optional", failed_required, failed_optional);
+    info!(
+        "Failed: {} required, {} optional",
+        failed_required, failed_optional
+    );
     info!("");
 
     if failed_required > 0 {
