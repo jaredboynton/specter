@@ -165,7 +165,7 @@ pub struct QuicConnectionIdEntry {
     pub stateless_reset_token: [u8; 16],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct QuicPendingPathValidation {
     remote_address: Option<SocketAddr>,
     connection_id_sequence: Option<u64>,
@@ -225,7 +225,7 @@ impl QuicPathValidator {
         self.pending.retain(|_, pending| {
             pending
                 .connection_id_sequence
-                .is_none_or(|sequence| sequence >= retire_prior_to)
+                .map_or(true, |sequence| sequence >= retire_prior_to)
         });
         self.connection_ids.insert(sequence_number, entry);
         Ok(())
