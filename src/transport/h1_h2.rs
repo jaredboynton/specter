@@ -1147,7 +1147,7 @@ impl<'a> RequestBuilder<'a> {
                 let send_fut = conn.send_streaming_request(
                     request.method.clone(),
                     &uri,
-                    request.headers.clone(),
+                    &request.headers,
                     body,
                     body_timeouts,
                 );
@@ -1224,7 +1224,7 @@ impl<'a> RequestBuilder<'a> {
                         let send_fut = pooled_conn.send_streaming_request(
                             request.method.clone(),
                             &uri,
-                            request.headers.clone(),
+                            &request.headers,
                             request.body.clone(),
                             body_timeouts,
                         );
@@ -1310,7 +1310,7 @@ impl<'a> RequestBuilder<'a> {
                 let send_fut = pooled_conn.send_streaming_request(
                     request.method.clone(),
                     &uri,
-                    request.headers.clone(),
+                    &request.headers,
                     body,
                     body_timeouts,
                 );
