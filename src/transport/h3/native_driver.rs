@@ -2996,4 +2996,116 @@ mod tests {
             "delivered reset should retire the tunnel state"
         );
     }
+
+    #[tokio::test]
+    async fn driver_promotes_peer_address_after_validated_path_response() {
+        let read_secret = Bytes::from_static(&[0x5a; 32]);
+        let write_secret = Bytes::from_static(&[0x5b; 32]);
+        let server_keys =
+            crate::transport::h3::quic::derive_packet_key_material_from_secret(read_secret.clone())
+                .expect("server keys");
+        let mut handshake = NativeQuicHandshake::client_with_verify_peer(
+            "localhost",
+            &Http3Fingerprint::default(),
+            crate::transport::h3::quic::ConnectionId::from_static(b"server-dcid"),
+            crate::transport::h3::quic::ConnectionId::from_static(b"client-scid"),
+            false,
+        )
+        .expect("handshake");
+        handshake
+            .install_tls_secrets(&[
+                crate::transport::h3::tls::QuicTlsSecret {
+                    direction: crate::transport::h3::tls::QuicSecretDirection::Read,
+                    level: crate::transport::h3::tls::QuicEncryptionLevel::Application,
+                    secret: read_secret,
+                },
+                crate::transport::h3::tls::QuicTlsSecret {
+                    direction: crate::transport::h3::tls::QuicSecretDirection::Write,
+                    level: crate::transport::h3::tls::QuicEncryptionLevel::Application,
+                    secret: write_secret,
+                },
+            ])
+            .expect("tls secrets");
+
+        let original_peer = SocketAddr::from(([127, 0, 0, 1], 4433));
+        let migrated_peer = SocketAddr::from(([127, 0, 0, 1], 4434));
+        let migrated_cid = crate::transport::h3::quic::ConnectionId::from_static(b"migrated-cid");
+        let challenge = *b"MIGRATE!";
+        let new_cid_packet = crate::transport::h3::quic::protect_short_header_packet(
+            &server_keys,
+            &crate::transport::h3::quic::ConnectionId::from_static(b"client-scid"),
+            0,
+            2,
+            false,
+            &crate::transport::h3::quic::encode_frame(
+                &crate::transport::h3::quic::QuicFrame::NewConnectionId {
+                    sequence_number: 3,
+                    retire_prior_to: 0,
+                    connection_id: Bytes::copy_from_slice(migrated_cid.as_bytes()),
+                    stateless_reset_token: [0x42; 16],
+                },
+            ),
+        )
+        .expect("new cid packet");
+        assert!(handshake
+            .open_server_h3_event_packet(&new_cid_packet)
+            .expect("open new cid")
+            .is_empty());
+        handshake
+            .build_client_path_challenge_packet_for_address(migrated_peer, 3, challenge)
+            .expect("path challenge");
+
+        let matching_response = crate::transport::h3::quic::protect_short_header_packet(
+            &server_keys,
+            &crate::transport::h3::quic::ConnectionId::from_static(b"client-scid"),
+            1,
+            2,
+            false,
+            &crate::transport::h3::quic::encode_frame(
+                &crate::transport::h3::quic::QuicFrame::PathResponse(challenge),
+            ),
+        )
+        .expect("path response");
+
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("socket"));
+        let mut driver = NativeH3Driver {
+            command_tx,
+            command_rx,
+            handshake,
+            fingerprint: Http3Fingerprint::default(),
+            socket,
+            peer_addr: original_peer,
+            state: NativeH3DriverState::default(),
+            pending_responses: HashMap::new(),
+            pending_streaming_responses: HashMap::new(),
+            pending_tunnels: HashMap::new(),
+            pending_commands: VecDeque::new(),
+            is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            closing_connection_close_packet: None,
+            body_progress_notify: Arc::new(Notify::new()),
+            send_scheduler: H3SendScheduler::default(),
+            transport_config: H3TransportConfig::default(),
+            session_cache: crate::transport::h3::session_cache::NativeH3SessionCache::new(),
+            session_cache_key: crate::transport::h3::session_cache::NativeH3SessionCacheKey::new(
+                "localhost",
+                std::iter::empty::<Vec<u8>>(),
+                false,
+                None,
+            ),
+            max_idle_timeout: Duration::from_secs(1),
+            last_activity: Instant::now(),
+            initial_datagram: None,
+        };
+
+        driver
+            .process_datagram_from(migrated_peer, &matching_response, None)
+            .await
+            .expect("process migrated path response");
+
+        assert_eq!(driver.peer_addr, migrated_peer);
+        assert!(driver
+            .handshake
+            .is_client_path_address_validated(&migrated_peer));
+    }
 }
