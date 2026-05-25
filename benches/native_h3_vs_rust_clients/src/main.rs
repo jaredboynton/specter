@@ -479,9 +479,7 @@ fn tokio_quiche_rfc9220_tunnel_row_from_samples(samples: &[AdapterSample]) -> Be
     )
 }
 
-fn quiche_direct_rfc9220_tunnel_close_row_from_samples(
-    samples: &[AdapterSample],
-) -> BenchmarkRow {
+fn quiche_direct_rfc9220_tunnel_close_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
     adapter_row_from_samples(
         "quiche_direct_rfc9220_tunnel_close",
         "quiche_direct_rfc9220_tunnel_close_adapter",
@@ -489,9 +487,7 @@ fn quiche_direct_rfc9220_tunnel_close_row_from_samples(
     )
 }
 
-fn tokio_quiche_rfc9220_tunnel_close_row_from_samples(
-    samples: &[AdapterSample],
-) -> BenchmarkRow {
+fn tokio_quiche_rfc9220_tunnel_close_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
     adapter_row_from_samples(
         "tokio_quiche_rfc9220_tunnel_close",
         "tokio_quiche_rfc9220_tunnel_close_adapter",
@@ -2585,9 +2581,7 @@ async fn measure_quiche_direct_rfc9220_tunnel_close(
     .map_err(|error| anyhow::anyhow!("quiche RFC 9220 close blocking task failed: {error}"))?
 }
 
-fn measure_quiche_direct_rfc9220_tunnel_close_once(
-    url: &str,
-) -> anyhow::Result<AdapterSample> {
+fn measure_quiche_direct_rfc9220_tunnel_close_once(url: &str) -> anyhow::Result<AdapterSample> {
     measure_quiche_direct_rfc9220_tunnel_once_with_payload(url, rfc9220_tunnel_payload(b'Q'))
 }
 
