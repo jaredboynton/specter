@@ -109,6 +109,45 @@ async fn connection_window_update_refresh_uses_advertised_increment() {
 }
 
 #[tokio::test]
+async fn zero_initial_connection_window_size_does_not_send_invalid_window_update() {
+    let server = MockH2Server::new().await.unwrap();
+    let url = format!("http://127.0.0.1:{}/zero-window-update", server.port());
+
+    let _handle = server.start(move |conn| async move {
+        conn.read_preface().await.unwrap();
+
+        let stream_id = loop {
+            let (_, frame_type, flags, stream_id, _) = conn.read_frame().await.unwrap();
+            match frame_type {
+                0x01 => break stream_id,
+                0x04 if flags & 0x01 == 0 => {
+                    conn.send_settings(&[]).await.unwrap();
+                    conn.send_settings_ack().await.unwrap();
+                }
+                0x08 if stream_id == 0 => {
+                    panic!("client sent a zero-sized connection WINDOW_UPDATE");
+                }
+                _ => {}
+            }
+        };
+
+        conn.send_headers(stream_id, &[0x88], true, true)
+            .await
+            .unwrap();
+    });
+
+    let client = Client::builder()
+        .prefer_http2(true)
+        .http2_prior_knowledge(true)
+        .http2_initial_connection_window_size(Some(65_535))
+        .build()
+        .unwrap();
+
+    let res = client.get(url.as_str()).send().await.unwrap();
+    assert!(res.is_success());
+}
+
+#[tokio::test]
 async fn test_large_upload_flow_control() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("trace")
