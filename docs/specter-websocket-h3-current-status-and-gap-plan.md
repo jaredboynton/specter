@@ -38,7 +38,7 @@ This file is the current cross-protocol capability and gap plan for requests, st
 
 | Priority | Gap | Scope | Next action |
 |---|---|---|---|
-| P1 | Native QUIC path migration | H3 runtime production readiness. | Finish outbound-builder anti-amplification gating and full server-side migration lifecycle; post-handshake `NEW_CONNECTION_ID` packetization and same-fixture migration-CID routing are now covered. |
+| P1 | Native QUIC path migration | H3 runtime production readiness. | Finish full server-side migration lifecycle and soak coverage across active peer-address changes; post-handshake `NEW_CONNECTION_ID`, same-fixture migration-CID routing, and driver anti-amplification gating are covered. |
 | P1 | Recovery soak/backoff validation | H3 runtime production readiness. | Stress repeated loss/PTO/backoff/persistent congestion and client/server app retransmission under load. |
 | P2 | Browser ACK parity | H3 fingerprinting and performance. | Capture Chrome/Firefox ACK thresholds and delays by version and compare with `ack_eliciting_threshold` / `max_ack_delay_ms`. |
 | P2 | TLS/H3 capture presets | H3 fingerprinting. | Add capture-derived raw transport-parameter presets and explicit extension-list ordering where possible beyond BoringSSL permutation policy. |
@@ -59,6 +59,7 @@ This file is the current cross-protocol capability and gap plan for requests, st
 | Retry / Version Negotiation | Retry integrity, Retry/VN handshake restart, loop guards, and no-overlap handling are implemented. |
 | PATH_CHALLENGE token handling | Packetization and matching response validation are implemented. |
 | Post-handshake NEW_CONNECTION_ID | Server packetization and same-fixture advertisement/routing are implemented. |
+| Driver anti-amplification gating | Native H3 driver records path receive bytes, promotes validated migrated paths, and budget-checks outbound sends to unvalidated paths. |
 | RFC9002 recovery/PTO core | Per-space recovery, RTT/PTO, CRYPTO retransmission, app retransmission, and server wake paths are implemented. |
 | Close drain | Bounded `CONNECTION_CLOSE` replay/suppression exists for client, mock server, and same-fixture server. |
 | Key update | Native QUIC 1-RTT key update is implemented with previous-key retention and ACK gating. |
@@ -81,7 +82,7 @@ This file is the current cross-protocol capability and gap plan for requests, st
 
 ## Recommended Next Work
 
-1. Finish native QUIC path migration driver/server integration.
+1. Finish native QUIC server-side path migration lifecycle and soak coverage.
 2. Run recovery soak/backoff validation after path migration work stops touching the driver hot path.
 3. Capture browser ACK behavior and map it to Specter's fingerprint knobs.
 4. Add capture-derived H3/TLS presets where backend control is sufficient.

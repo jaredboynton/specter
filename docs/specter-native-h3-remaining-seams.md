@@ -25,7 +25,7 @@ This is the current native H3 gap ledger. It is intentionally not a change log.
 
 | Priority | Gap | Current state | Next proof needed |
 |---|---|---|---|
-| P1 | Native QUIC path migration completion | PATH_CHALLENGE/PATH_RESPONSE token handling, CID inventory primitives, anti-amplification primitives, 1-RTT CID routing, post-validation client DCID promotion, migrated peer-address acceptance, server-side post-handshake `NEW_CONNECTION_ID` packetization, and same-fixture migration-CID routing are implemented. | Driver/server integration for outbound-builder anti-amplification gating and full server-side migration lifecycle. |
+| P1 | Native QUIC path migration completion | PATH_CHALLENGE/PATH_RESPONSE token handling, CID inventory primitives, anti-amplification primitives, driver outbound anti-amplification gating, 1-RTT CID routing, post-validation client DCID promotion, migrated peer-address acceptance, server-side post-handshake `NEW_CONNECTION_ID` packetization, and same-fixture migration-CID routing are implemented. | Full server-side migration lifecycle and soak coverage across active peer-address changes. |
 | P1 | Recovery soak/backoff validation | RFC9002-style recovery/PTO implementation is wired through client/server packet spaces and app data retransmit paths. | Longer soak/backoff runs that exercise repeated loss, PTO backoff/reset, persistent congestion, and server/client app-space retransmission under load. |
 | P2 | Browser ACK parity | Threshold + `max_ack_delay_ms` timer paths exist for client/server/fixture, including tuned benchmark profile support. | Capture Chrome/Firefox QUIC ACK thresholds/delays by version and compare against Specter defaults and `ack_eliciting_threshold = 128`. |
 | P2 | TLS/H3 capture presets | Certificate compression, deterministic-vs-browser-permuted extension policy, raw ordered transport parameters, session replay, and 0-RTT controls exist. | Capture-derived raw transport-parameter presets and explicit extension-list ordering beyond BoringSSL permutation policy. |
@@ -45,6 +45,7 @@ Keep these under regression coverage; do not relist them as active gaps.
 | Retry and Version Negotiation | Retry integrity, Retry-driven Initial restart, VN-driven version selection/restart, loop guards, and no-overlap errors are implemented. |
 | PATH_CHALLENGE primitives | Client packetization and matching PATH_RESPONSE validation are implemented; remaining work is migration lifecycle, not token handling. |
 | Post-handshake NEW_CONNECTION_ID | `NativeQuicServerHandshake::build_server_new_connection_id_packet` can issue migration CIDs after application keys, and the local same-fixture server advertises/registers a migration CID after HandshakeDone. |
+| Driver anti-amplification gating | Native H3 driver records received bytes per path, promotes validated migrated paths, and routes outbound sends through RFC9000 § 8.1 budget checks for unvalidated paths. |
 | RFC9002 recovery/PTO core | Per-space RTT/PTO/loss state, congestion response, CRYPTO PTO retransmission, app-space PTO, and mock/same-fixture server wake paths are implemented. |
 | Close drain | Client, mock-server, and same-fixture server retain/replay protected `CONNECTION_CLOSE` packets during bounded drain windows and suppress non-close sends after draining. |
 | Key update | 1-RTT key update has traffic-secret/key-phase rotation, previous-key retention, and local-update ACK gating. |
@@ -89,7 +90,7 @@ Unsupported RFC9220 capability-audit rows remain explicit non-comparators: `h3_q
 
 ## Next Execution Order
 
-1. Finish path migration driver/server integration: anti-amplification gating and server migration lifecycle.
+1. Finish server-side path migration lifecycle and soak coverage across active peer-address changes.
 2. Run recovery soak/backoff validation across repeated loss, PTO, app retransmission, and persistent congestion cases.
 3. Capture browser ACK behavior and calibrate native ACK thresholds/timers against Chrome/Firefox versions.
 4. Add capture-derived TLS/H3 presets for raw transport parameters and extension ordering where BoringSSL allows control.
