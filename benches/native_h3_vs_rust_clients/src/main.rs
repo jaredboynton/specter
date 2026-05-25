@@ -37,6 +37,7 @@ const LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES: usize = 40;
 const LOCAL_FIXTURE_TUNNEL_SLOW_CONSUMER_DELAY_MS: u64 = 25;
 const LOCAL_FIXTURE_TUNNEL_SLOW_READ_DELAY_MS: u64 = 1;
 const LOCAL_FIXTURE_TRANSPORT_PAYLOAD_SIZE: usize = 1_024;
+const RFC9220_TUNNEL_MIN_SAMPLE_COUNT: usize = 100;
 const QUINN_TRANSPORT_ALPN: &[u8] = b"specter-transport-bench";
 
 #[derive(Debug, Serialize)]
@@ -48,6 +49,7 @@ struct Artifact {
     rows: Vec<BenchmarkRow>,
     fixture_events: Vec<FixtureEvent>,
     superiority_gate: SuperiorityGate,
+    rfc9220_tunnel_superiority_gate: Rfc9220TunnelSuperiorityGate,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,6 +119,20 @@ struct SuperiorityGate {
     no_h3_superiority_claim_without_all_required_rows: bool,
     required_h3_clients: Vec<&'static str>,
     missing_required_rows: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct Rfc9220TunnelSuperiorityGate {
+    status: &'static str,
+    pass: bool,
+    reason: &'static str,
+    fastest_non_specter_rfc9220_tunnel_client: Option<&'static str>,
+    no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows: bool,
+    minimum_sample_count: usize,
+    required_rfc9220_tunnel_clients: Vec<&'static str>,
+    missing_required_rfc9220_tunnel_rows: Vec<&'static str>,
+    under_sampled_required_rfc9220_tunnel_rows: Vec<&'static str>,
+    missing_required_rfc9220_tunnel_metrics: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -755,10 +771,142 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
     }
 }
 
+fn required_rfc9220_tunnel_clients() -> Vec<&'static str> {
+    vec![
+        "specter_native_rfc9220_tunnel",
+        "quiche_direct_rfc9220_tunnel",
+        "tokio_quiche_rfc9220_tunnel",
+    ]
+}
+
+fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperiorityGate {
+    let required_rfc9220_tunnel_clients = required_rfc9220_tunnel_clients();
+    let comparator_clients = required_rfc9220_tunnel_clients
+        .iter()
+        .copied()
+        .filter(|id| *id != "specter_native_rfc9220_tunnel")
+        .collect::<Vec<_>>();
+    let missing_required_rfc9220_tunnel_rows = required_rfc9220_tunnel_clients
+        .iter()
+        .copied()
+        .filter(|id| {
+            rows.iter()
+                .find(|row| row.competitor_id == *id)
+                .is_none_or(|row| row.status != "measured_pass")
+        })
+        .collect::<Vec<_>>();
+    let under_sampled_required_rfc9220_tunnel_rows = required_rfc9220_tunnel_clients
+        .iter()
+        .copied()
+        .filter(|id| {
+            rows.iter()
+                .find(|row| row.competitor_id == *id && row.status == "measured_pass")
+                .is_some_and(|row| {
+                    row.sample_count
+                        .is_none_or(|sample_count| sample_count < RFC9220_TUNNEL_MIN_SAMPLE_COUNT)
+                })
+        })
+        .collect::<Vec<_>>();
+    let missing_required_rfc9220_tunnel_metrics =
+        if missing_required_rfc9220_tunnel_rows.is_empty()
+            && under_sampled_required_rfc9220_tunnel_rows.is_empty()
+        {
+            required_rfc9220_tunnel_clients
+                .iter()
+                .copied()
+                .filter(|id| {
+                    measured_metrics_with_min_sample_count(
+                        rows,
+                        id,
+                        RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
+                    )
+                    .is_none()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+    let specter_metrics = measured_metrics_with_min_sample_count(
+        rows,
+        "specter_native_rfc9220_tunnel",
+        RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
+    );
+    let comparator_metrics = comparator_clients
+        .iter()
+        .filter_map(|id| {
+            measured_metrics_with_min_sample_count(rows, id, RFC9220_TUNNEL_MIN_SAMPLE_COUNT)
+        })
+        .collect::<Vec<_>>();
+    let fastest_non_specter_rfc9220_tunnel_client =
+        fastest_by_p50_then_p95_then_throughput(&comparator_metrics);
+
+    let missing_required_n100_rows = !missing_required_rfc9220_tunnel_rows.is_empty()
+        || !under_sampled_required_rfc9220_tunnel_rows.is_empty();
+    let missing_metrics = !missing_required_rfc9220_tunnel_metrics.is_empty();
+    let specter_beats_all_required = specter_metrics.is_some_and(|specter| {
+        comparator_metrics.iter().all(|competitor| {
+            specter.p50_ttft_ns < competitor.p50_ttft_ns
+                && specter.p95_ttft_ns < competitor.p95_ttft_ns
+                && specter.bytes_per_sec > competitor.bytes_per_sec
+        })
+    });
+    let pass = !missing_required_n100_rows
+        && !missing_metrics
+        && comparator_metrics.len() == comparator_clients.len()
+        && specter_beats_all_required;
+
+    Rfc9220TunnelSuperiorityGate {
+        status: if pass {
+            "pass"
+        } else if missing_required_n100_rows || missing_metrics {
+            "incomplete"
+        } else {
+            "fail"
+        },
+        pass,
+        reason: if pass {
+            "specter_native_rfc9220_tunnel_is_faster_than_required_rfc9220_tunnel_competitors"
+        } else if missing_required_n100_rows {
+            "no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows"
+        } else if missing_metrics {
+            "missing_required_rfc9220_tunnel_performance_metrics"
+        } else {
+            "specter_native_rfc9220_tunnel_not_faster_than_required_rfc9220_tunnel_competitors"
+        },
+        fastest_non_specter_rfc9220_tunnel_client,
+        no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows: true,
+        minimum_sample_count: RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
+        required_rfc9220_tunnel_clients,
+        missing_required_rfc9220_tunnel_rows,
+        under_sampled_required_rfc9220_tunnel_rows,
+        missing_required_rfc9220_tunnel_metrics,
+    }
+}
+
 fn measured_metrics(rows: &[BenchmarkRow], competitor_id: &'static str) -> Option<MeasuredMetrics> {
     let row = rows
         .iter()
         .find(|row| row.competitor_id == competitor_id && row.status == "measured_pass")?;
+    Some(MeasuredMetrics {
+        competitor_id,
+        p50_ttft_ns: row.p50_ttft_ns?,
+        p95_ttft_ns: row.p95_ttft_ns?,
+        bytes_per_sec: row.bytes_per_sec?,
+    })
+}
+
+fn measured_metrics_with_min_sample_count(
+    rows: &[BenchmarkRow],
+    competitor_id: &'static str,
+    minimum_sample_count: usize,
+) -> Option<MeasuredMetrics> {
+    let row = rows
+        .iter()
+        .find(|row| row.competitor_id == competitor_id && row.status == "measured_pass")?;
+    if row.sample_count? < minimum_sample_count {
+        return None;
+    }
     Some(MeasuredMetrics {
         competitor_id,
         p50_ttft_ns: row.p50_ttft_ns?,
@@ -825,9 +973,18 @@ fn artifact_with_competitor_rows_and_fixture_events<S: AsRef<str>>(
         audited_at: "2026-05-24",
         competitors: competitor_specs(),
         superiority_gate: superiority_gate(&rows),
+        rfc9220_tunnel_superiority_gate: rfc9220_tunnel_superiority_gate(&rows),
         rows,
         fixture_events,
     }
+}
+
+fn requirement_failed(args: &[String], artifact: &Artifact) -> bool {
+    (args.iter().any(|arg| arg == "--require-superiority") && !artifact.superiority_gate.pass)
+        || (args
+            .iter()
+            .any(|arg| arg == "--require-rfc9220-tunnel-superiority")
+            && !artifact.rfc9220_tunnel_superiority_gate.pass)
 }
 
 fn option_value(args: &[String], name: &str) -> Option<String> {
@@ -1037,7 +1194,7 @@ async fn main() -> anyhow::Result<()> {
     fs::write(&json_path, serde_json::to_vec_pretty(&artifact)?)?;
     println!("wrote benchmark artifact {}", json_path.display());
 
-    if args.iter().any(|arg| arg == "--require-superiority") && !artifact.superiority_gate.pass {
+    if requirement_failed(&args, &artifact) {
         std::process::exit(1);
     }
 
@@ -3815,6 +3972,170 @@ mod tests {
             assert!(row.p50_ttft_ns.is_some());
             assert!(row.p95_ttft_ns.is_some());
         }
+    }
+
+    #[test]
+    fn rfc9220_tunnel_superiority_gate_passes_independently_from_http_gate() {
+        let measured_rows = vec![
+            super::BenchmarkRow {
+                competitor_id: "specter_native_rfc9220_tunnel".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(200_000.0),
+                p95_ttft_ns: Some(350_000.0),
+                bytes_per_sec: Some(4_000_000.0),
+                source: "specter_native_rfc9220_tunnel_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "quiche_direct_rfc9220_tunnel".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(2_700_000.0),
+                p95_ttft_ns: Some(2_850_000.0),
+                bytes_per_sec: Some(370_000.0),
+                source: "quiche_direct_rfc9220_tunnel_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "tokio_quiche_rfc9220_tunnel".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(4_000_000.0),
+                p95_ttft_ns: Some(4_600_000.0),
+                bytes_per_sec: Some(235_000.0),
+                source: "tokio_quiche_rfc9220_tunnel_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+        ];
+        let artifact =
+            super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &measured_rows);
+        let artifact_json = serde_json::to_value(&artifact).unwrap();
+        let tunnel_gate = &artifact_json["rfc9220_tunnel_superiority_gate"];
+
+        assert_eq!(artifact.superiority_gate.status, "incomplete");
+        assert_eq!(
+            tunnel_gate["required_rfc9220_tunnel_clients"],
+            serde_json::json!([
+                "specter_native_rfc9220_tunnel",
+                "quiche_direct_rfc9220_tunnel",
+                "tokio_quiche_rfc9220_tunnel"
+            ])
+        );
+        assert_eq!(tunnel_gate["minimum_sample_count"], serde_json::json!(100));
+        assert_eq!(tunnel_gate["pass"], serde_json::json!(true));
+        assert_eq!(tunnel_gate["status"], serde_json::json!("pass"));
+        assert_eq!(
+            tunnel_gate["reason"],
+            serde_json::json!(
+                "specter_native_rfc9220_tunnel_is_faster_than_required_rfc9220_tunnel_competitors"
+            )
+        );
+        assert_eq!(
+            tunnel_gate["fastest_non_specter_rfc9220_tunnel_client"],
+            serde_json::json!("quiche_direct_rfc9220_tunnel")
+        );
+    }
+
+    #[test]
+    fn rfc9220_tunnel_superiority_gate_requires_all_rows_at_n100() {
+        let measured_rows = vec![
+            super::BenchmarkRow {
+                competitor_id: "specter_native_rfc9220_tunnel".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(200_000.0),
+                p95_ttft_ns: Some(350_000.0),
+                bytes_per_sec: Some(4_000_000.0),
+                source: "specter_native_rfc9220_tunnel_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "quiche_direct_rfc9220_tunnel".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(2_700_000.0),
+                p95_ttft_ns: Some(2_850_000.0),
+                bytes_per_sec: Some(370_000.0),
+                source: "quiche_direct_rfc9220_tunnel_adapter".into(),
+                sample_count: Some(99),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "tokio_quiche_rfc9220_tunnel".into(),
+                status: "pending_measurement".into(),
+                source: "native_h3_vs_rust_clients_harness".into(),
+                ..super::BenchmarkRow::default()
+            },
+        ];
+        let artifact =
+            super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &measured_rows);
+        let tunnel_gate = &serde_json::to_value(&artifact).unwrap()["rfc9220_tunnel_superiority_gate"];
+
+        assert_eq!(tunnel_gate["pass"], serde_json::json!(false));
+        assert_eq!(tunnel_gate["status"], serde_json::json!("incomplete"));
+        assert_eq!(
+            tunnel_gate["reason"],
+            serde_json::json!("no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows")
+        );
+        assert_eq!(
+            tunnel_gate["under_sampled_required_rfc9220_tunnel_rows"],
+            serde_json::json!(["quiche_direct_rfc9220_tunnel"])
+        );
+        assert_eq!(
+            tunnel_gate["missing_required_rfc9220_tunnel_rows"],
+            serde_json::json!(["tokio_quiche_rfc9220_tunnel"])
+        );
+    }
+
+    #[test]
+    fn rfc9220_tunnel_requirement_flag_is_separate_from_http_requirement_flag() {
+        let measured_rows = vec![
+            super::BenchmarkRow {
+                competitor_id: "specter_native_rfc9220_tunnel".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(200_000.0),
+                p95_ttft_ns: Some(350_000.0),
+                bytes_per_sec: Some(4_000_000.0),
+                source: "specter_native_rfc9220_tunnel_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "quiche_direct_rfc9220_tunnel".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(2_700_000.0),
+                p95_ttft_ns: Some(2_850_000.0),
+                bytes_per_sec: Some(370_000.0),
+                source: "quiche_direct_rfc9220_tunnel_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+            super::BenchmarkRow {
+                competitor_id: "tokio_quiche_rfc9220_tunnel".into(),
+                status: "measured_pass".into(),
+                p50_ttft_ns: Some(4_000_000.0),
+                p95_ttft_ns: Some(4_600_000.0),
+                bytes_per_sec: Some(235_000.0),
+                source: "tokio_quiche_rfc9220_tunnel_adapter".into(),
+                sample_count: Some(100),
+                ..super::BenchmarkRow::default()
+            },
+        ];
+        let artifact =
+            super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &measured_rows);
+
+        assert!(!artifact.superiority_gate.pass);
+        assert!(super::requirement_failed(
+            &["bench".into(), "--require-superiority".into()],
+            &artifact
+        ));
+        assert!(!super::requirement_failed(
+            &[
+                "bench".into(),
+                "--require-rfc9220-tunnel-superiority".into()
+            ],
+            &artifact
+        ));
     }
 
     #[test]
