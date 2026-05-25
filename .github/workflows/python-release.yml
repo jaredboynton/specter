@@ -112,12 +112,14 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          manylinux: '2014'
+          # manylinux2014 (CentOS 7) ships clang 5 which is too old for bindgen 0.72
+          # (clang_getTranslationUnitTargetInfo requires libclang >= 9). manylinux_2_28
+          # is AlmaLinux 8 with GCC 14 + modern clang; covers Debian 10+, Ubuntu 18.10+,
+          # Fedora 29+, RHEL 8+ which is the realistic 2026 PyPI install base.
+          manylinux: '2_28'
           args: --release --locked --out dist -m bindings/python/Cargo.toml
-          # manylinux2014 image lacks clang; bindgen (used by boring-sys) needs libclang.
-          # The action runs this script inside the container before the maturin build.
           before-script-linux: |
-            yum install -y clang
+            dnf install -y clang
           # The action mounts $GITHUB_WORKSPACE at the same absolute path inside the
           # container (NOT /io -- that's the raw `docker run` convention). BORING_*
           # env vars are NOT in the action's ALLOWED_ENV_PREFIXES, so they must be

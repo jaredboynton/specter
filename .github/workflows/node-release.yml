@@ -165,7 +165,7 @@ jobs:
       - name: Test
         run: |
           cd bindings/node
-          npm test
+          npx jest --runInBand
 
   test-linux:
     name: Test bindings (Linux ${{ matrix.target }})
@@ -217,7 +217,7 @@ jobs:
         working-directory: bindings/node
         env:
           NODE_ENV: test
-        run: npx jest
+        run: npx jest --runInBand
 
   publish:
     name: Publish to npm
