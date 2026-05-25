@@ -2,6 +2,8 @@
 
 Artifacts for the connect-path performance fixes (C1-C5).
 
+Structured validation data: [`summary.json`](summary.json).
+
 ## Workloads
 
 | Workload | Validates | Method |
