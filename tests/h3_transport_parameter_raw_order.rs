@@ -141,3 +141,62 @@ fn native_quic_raw_ordered_transport_parameters_can_place_dynamic_server_cids() 
         ]
     );
 }
+
+#[test]
+fn native_quic_chrome_capture_ordered_transport_parameters_are_browser_preset() {
+    let params = QuicTransportParams::chrome_capture_ordered();
+    let encoded = encode_transport_parameters_with_initial_source_connection_id(
+        &params,
+        &ConnectionId::from_static(b"chrome-scid"),
+    );
+    let decoded = decode_transport_parameters(&encoded).unwrap();
+
+    assert_eq!(
+        decoded,
+        vec![
+            TransportParameter::MaxIdleTimeout(30_000),
+            TransportParameter::MaxUdpPayloadSize(65_535),
+            TransportParameter::InitialMaxData(15_663_105),
+            TransportParameter::InitialMaxStreamDataBidiLocal(1_000_000),
+            TransportParameter::InitialMaxStreamDataBidiRemote(1_000_000),
+            TransportParameter::InitialMaxStreamDataUni(1_000_000),
+            TransportParameter::InitialMaxStreamsBidi(100),
+            TransportParameter::InitialMaxStreamsUni(100),
+            TransportParameter::AckDelayExponent(3),
+            TransportParameter::MaxAckDelay(25),
+            TransportParameter::DisableActiveMigration,
+            TransportParameter::ActiveConnectionIdLimit(2),
+            TransportParameter::InitialSourceConnectionId(Bytes::from_static(b"chrome-scid")),
+            TransportParameter::Additional(27, Bytes::new()),
+        ]
+    );
+}
+
+#[test]
+fn native_quic_firefox_capture_ordered_transport_parameters_are_browser_preset() {
+    let params = QuicTransportParams::firefox_capture_ordered();
+    let encoded = encode_transport_parameters_with_initial_source_connection_id(
+        &params,
+        &ConnectionId::from_static(b"firefox-scid"),
+    );
+    let decoded = decode_transport_parameters(&encoded).unwrap();
+
+    assert_eq!(
+        decoded,
+        vec![
+            TransportParameter::MaxIdleTimeout(30_000),
+            TransportParameter::MaxUdpPayloadSize(65_535),
+            TransportParameter::InitialMaxData(15_663_105),
+            TransportParameter::InitialMaxStreamDataBidiLocal(4 * 1024 * 1024),
+            TransportParameter::InitialMaxStreamDataBidiRemote(4 * 1024 * 1024),
+            TransportParameter::InitialMaxStreamDataUni(4 * 1024 * 1024),
+            TransportParameter::InitialMaxStreamsBidi(100),
+            TransportParameter::InitialMaxStreamsUni(100),
+            TransportParameter::AckDelayExponent(3),
+            TransportParameter::MaxAckDelay(20),
+            TransportParameter::DisableActiveMigration,
+            TransportParameter::ActiveConnectionIdLimit(2),
+            TransportParameter::InitialSourceConnectionId(Bytes::from_static(b"firefox-scid")),
+        ]
+    );
+}

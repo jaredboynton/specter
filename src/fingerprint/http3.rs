@@ -73,6 +73,20 @@ impl RawQuicTransportParameter {
     const RETRY_SOURCE_CONNECTION_ID_PLACEHOLDER: &'static [u8] =
         b"$specter:retry_source_connection_id";
 
+    pub fn varint(id: u64, value: u64) -> Self {
+        Self {
+            id,
+            value: encode_quic_varint(value),
+        }
+    }
+
+    pub fn empty(id: u64) -> Self {
+        Self {
+            id,
+            value: Vec::new(),
+        }
+    }
+
     pub fn original_destination_connection_id() -> Self {
         Self {
             id: Self::ORIGINAL_DESTINATION_CONNECTION_ID_ID,
@@ -111,6 +125,26 @@ impl RawQuicTransportParameter {
             }
             _ => None,
         }
+    }
+}
+
+fn encode_quic_varint(value: u64) -> Vec<u8> {
+    if value < 64 {
+        vec![value as u8]
+    } else if value < 16_384 {
+        let encoded = 0x4000 | value;
+        vec![(encoded >> 8) as u8, encoded as u8]
+    } else if value < 1_073_741_824 {
+        let encoded = 0x8000_0000 | value;
+        vec![
+            (encoded >> 24) as u8,
+            (encoded >> 16) as u8,
+            (encoded >> 8) as u8,
+            encoded as u8,
+        ]
+    } else {
+        let encoded = 0xc000_0000_0000_0000 | value;
+        encoded.to_be_bytes().to_vec()
     }
 }
 
@@ -201,6 +235,13 @@ impl QuicTransportParams {
         }
     }
 
+    pub fn chrome_capture_ordered() -> Self {
+        let mut params = Self::chrome();
+        params.raw_ordered_transport_parameters =
+            Some(capture_ordered_transport_parameters(&params));
+        params
+    }
+
     pub fn firefox() -> Self {
         Self {
             grease: false,
@@ -211,6 +252,13 @@ impl QuicTransportParams {
             initial_max_stream_data_uni: 4 * 1024 * 1024,
             ..Self::chrome()
         }
+    }
+
+    pub fn firefox_capture_ordered() -> Self {
+        let mut params = Self::firefox();
+        params.raw_ordered_transport_parameters =
+            Some(capture_ordered_transport_parameters(&params));
+        params
     }
 
     pub fn pool_key_string(&self) -> String {
@@ -277,6 +325,83 @@ impl QuicTransportParams {
             self.ecn_codepoint,
         )
     }
+}
+
+fn capture_ordered_transport_parameters(
+    params: &QuicTransportParams,
+) -> Vec<RawQuicTransportParameter> {
+    const TP_MAX_IDLE_TIMEOUT: u64 = 0x01;
+    const TP_MAX_UDP_PAYLOAD_SIZE: u64 = 0x03;
+    const TP_INITIAL_MAX_DATA: u64 = 0x04;
+    const TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL: u64 = 0x05;
+    const TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE: u64 = 0x06;
+    const TP_INITIAL_MAX_STREAM_DATA_UNI: u64 = 0x07;
+    const TP_INITIAL_MAX_STREAMS_BIDI: u64 = 0x08;
+    const TP_INITIAL_MAX_STREAMS_UNI: u64 = 0x09;
+    const TP_ACK_DELAY_EXPONENT: u64 = 0x0a;
+    const TP_MAX_ACK_DELAY: u64 = 0x0b;
+    const TP_DISABLE_ACTIVE_MIGRATION: u64 = 0x0c;
+    const TP_ACTIVE_CONNECTION_ID_LIMIT: u64 = 0x0e;
+    const TP_GREASE_RESERVED: u64 = 27;
+    const TP_MAX_DATAGRAM_FRAME_SIZE: u64 = 0x20;
+
+    let mut ordered = vec![
+        RawQuicTransportParameter::varint(TP_MAX_IDLE_TIMEOUT, params.max_idle_timeout_ms),
+        RawQuicTransportParameter::varint(
+            TP_MAX_UDP_PAYLOAD_SIZE,
+            params.max_recv_udp_payload_size as u64,
+        ),
+        RawQuicTransportParameter::varint(TP_INITIAL_MAX_DATA, params.initial_max_data),
+        RawQuicTransportParameter::varint(
+            TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+            params.initial_max_stream_data_bidi_local,
+        ),
+        RawQuicTransportParameter::varint(
+            TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+            params.initial_max_stream_data_bidi_remote,
+        ),
+        RawQuicTransportParameter::varint(
+            TP_INITIAL_MAX_STREAM_DATA_UNI,
+            params.initial_max_stream_data_uni,
+        ),
+        RawQuicTransportParameter::varint(
+            TP_INITIAL_MAX_STREAMS_BIDI,
+            params.initial_max_streams_bidi,
+        ),
+        RawQuicTransportParameter::varint(
+            TP_INITIAL_MAX_STREAMS_UNI,
+            params.initial_max_streams_uni,
+        ),
+        RawQuicTransportParameter::varint(TP_ACK_DELAY_EXPONENT, params.ack_delay_exponent),
+        RawQuicTransportParameter::varint(TP_MAX_ACK_DELAY, params.max_ack_delay_ms),
+    ];
+    if params.disable_active_migration {
+        ordered.push(RawQuicTransportParameter::empty(TP_DISABLE_ACTIVE_MIGRATION));
+    }
+    ordered.push(RawQuicTransportParameter::varint(
+        TP_ACTIVE_CONNECTION_ID_LIMIT,
+        params.active_connection_id_limit,
+    ));
+    ordered.push(RawQuicTransportParameter::initial_source_connection_id());
+    if let Some(value) = params.max_datagram_frame_size {
+        ordered.push(RawQuicTransportParameter::varint(
+            TP_MAX_DATAGRAM_FRAME_SIZE,
+            value,
+        ));
+    }
+    if params.grease {
+        ordered.push(RawQuicTransportParameter::empty(TP_GREASE_RESERVED));
+    }
+    ordered.extend(
+        params
+            .additional_transport_parameters
+            .iter()
+            .map(|(id, value)| RawQuicTransportParameter {
+                id: *id,
+                value: value.clone(),
+            }),
+    );
+    ordered
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
