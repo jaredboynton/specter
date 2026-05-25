@@ -4213,6 +4213,15 @@ impl NativeQuicHandshake {
         self.open_server_h3_event_packet_with_path_ecn(packet, Some(remote_address), None)
     }
 
+    pub fn open_server_h3_event_packet_from_with_ecn(
+        &mut self,
+        packet: &[u8],
+        remote_address: SocketAddr,
+        ecn_mark: Option<QuicEcnMark>,
+    ) -> Result<Vec<ServerH3Event>> {
+        self.open_server_h3_event_packet_with_path_ecn(packet, Some(remote_address), ecn_mark)
+    }
+
     pub fn open_server_h3_event_packet_with_ecn(
         &mut self,
         packet: &[u8],

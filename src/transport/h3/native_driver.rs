@@ -1123,8 +1123,23 @@ impl NativeH3Driver {
                 recv = recv_from_with_ecn(&self.socket, &mut buf), if !receive_paused_for_body => {
                     self.last_activity = Instant::now();
                     let received = recv.map_err(Error::Io)?;
-                    if received.peer == self.peer_addr {
-                        self.process_datagram(&buf[..received.len], received.ecn_mark).await?;
+                    if received.peer == self.peer_addr
+                        || buf[..received.len]
+                            .first()
+                            .is_some_and(|first| first & 0x80 == 0)
+                    {
+                        if let Err(error) = self
+                            .process_datagram_from(
+                                received.peer,
+                                &buf[..received.len],
+                                received.ecn_mark,
+                            )
+                            .await
+                        {
+                            if received.peer == self.peer_addr {
+                                return Err(error);
+                            }
+                        }
                     }
                 }
                 _ = tokio::time::sleep(remaining_idle), if !has_pending_work => {
@@ -1997,6 +2012,16 @@ impl NativeH3Driver {
         datagram: &[u8],
         ecn_mark: Option<QuicEcnMark>,
     ) -> Result<()> {
+        self.process_datagram_from(self.peer_addr, datagram, ecn_mark)
+            .await
+    }
+
+    async fn process_datagram_from(
+        &mut self,
+        remote_address: SocketAddr,
+        datagram: &[u8],
+        ecn_mark: Option<QuicEcnMark>,
+    ) -> Result<()> {
         // RFC9000 § 10.2: once we are draining we MUST drop all incoming
         // packets without further processing.
         if self.handshake.close_state().is_draining() {
@@ -2015,7 +2040,9 @@ impl NativeH3Driver {
             if datagram.first().is_some_and(|first| first & 0x80 == 0) {
                 // Short-header application packet: parse to detect a peer
                 // CONNECTION_CLOSE that would transition us to draining.
-                let _ = self.handshake.open_server_h3_event_packet(datagram);
+                let _ = self
+                    .handshake
+                    .open_server_h3_event_packet_from(datagram, remote_address);
             }
             if self
                 .handshake
@@ -2036,6 +2063,9 @@ impl NativeH3Driver {
         }
 
         if datagram.first().is_some_and(|first| first & 0x80 != 0) {
+            if remote_address != self.peer_addr {
+                return Ok(());
+            }
             let processed_packets = self
                 .handshake
                 .process_server_datagram_with_ecn(datagram, ecn_mark)?;
@@ -2068,7 +2098,8 @@ impl NativeH3Driver {
 
         let events = self
             .handshake
-            .open_server_h3_event_packet_with_ecn(datagram, ecn_mark)?;
+            .open_server_h3_event_packet_from_with_ecn(datagram, remote_address, ecn_mark)?;
+        self.promote_peer_address_if_validated(remote_address);
         self.drain_session_tickets();
         if let Some(packet) = self
             .handshake
@@ -2114,6 +2145,16 @@ impl NativeH3Driver {
         }
         self.process_pending_commands().await?;
         Ok(())
+    }
+
+    fn promote_peer_address_if_validated(&mut self, remote_address: SocketAddr) {
+        if remote_address != self.peer_addr
+            && self
+                .handshake
+                .is_client_path_address_validated(&remote_address)
+        {
+            self.peer_addr = remote_address;
+        }
     }
 
     fn drain_session_tickets(&mut self) {
