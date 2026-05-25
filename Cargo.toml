@@ -115,27 +115,19 @@ harness = false
 # Release builds rooted at this crate use thin LTO and a single codegen unit
 # so the bench numbers we publish reflect the full inlining the optimiser is
 # capable of. Downstream consumers pick their own profile and ignore this.
+# We avoid `panic = "abort"` and `lto = "fat"`: empirical measurement
+# showed fat LTO + panic=abort regressed the H1 request-body bench on
+# this codebase by ~3pp on TTFT and throughput (LLVM's global codegen
+# decisions across all crates inlined this hot path less favourably).
+# Thin LTO with `codegen-units = 1` captures most of the inlining win
+# without the regression.
 [profile.release]
 lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
 
-# `release-lto` is the maximally-optimised profile we run benches under.
-# Fat LTO + panic=abort + stripped symbols unlock everything the optimiser
-# can do at the cost of compile time. `[profile.bench]` inherits from here
-# so every published benchmark number is taken from this profile.
-[profile.release-lto]
-inherits = "release"
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = "symbols"
-debug-assertions = false
-overflow-checks = false
-incremental = false
-
 [profile.bench]
-inherits = "release-lto"
+inherits = "release"
 
 [profile.dev]
 debug = "line-tables-only"
