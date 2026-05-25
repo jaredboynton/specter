@@ -25,12 +25,22 @@ name = "specter"
 
 [features]
 default = []
+# Replace the system allocator with mimalloc. Opt-in because it raises
+# steady-state RSS slightly (mimalloc returns pages to the OS lazily) and
+# we don't want to surprise consumers. Cited gain: ~26% RPS on HTTP-shaped
+# workloads in filtermail's bench. jemalloc is not offered because it
+# bakes the 4 KiB page assumption and segfaults on Apple M-series and
+# Raspberry Pi 5 (16 KiB pages).
+mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 # TLS with BoringSSL
 boring = "4"
 boring-sys = "4"
 tokio-boring = "4"
+
+# Optional global allocator (see [features].mimalloc)
+mimalloc = { version = "0.1", optional = true, default-features = false }
 
 # HTTP/1.1 (minimal implementation)
 httparse = "1"
@@ -101,6 +111,32 @@ harness = false
 
 # Inner-loop iteration tuning. These profile sections only affect builds rooted
 # at this crate; downstream consumers ignore them, so they are safe for publish.
+
+# Release builds rooted at this crate use thin LTO and a single codegen unit
+# so the bench numbers we publish reflect the full inlining the optimiser is
+# capable of. Downstream consumers pick their own profile and ignore this.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+# `release-lto` is the maximally-optimised profile we run benches under.
+# Fat LTO + panic=abort + stripped symbols unlock everything the optimiser
+# can do at the cost of compile time. `[profile.bench]` inherits from here
+# so every published benchmark number is taken from this profile.
+[profile.release-lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug-assertions = false
+overflow-checks = false
+incremental = false
+
+[profile.bench]
+inherits = "release-lto"
+
 [profile.dev]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
