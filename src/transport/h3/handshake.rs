@@ -1584,6 +1584,12 @@ impl NativeQuicServerHandshake {
             ));
         };
         let now = Instant::now();
+        let destination_cid_len = match_local_connection_id(
+            packet,
+            self.cid_inventory.unretired_locals(),
+        )
+        .map(|(_, len)| len)
+        .unwrap_or_else(|| self.server_source_cid.as_bytes().len());
         let opened = try_open_one_rtt_packet(
             client_application_keys,
             self.client_application_next_keys.as_ref(),
@@ -1591,7 +1597,7 @@ impl NativeQuicServerHandshake {
             self.read_key_phase,
             now,
             packet,
-            self.server_source_cid.as_bytes().len(),
+            destination_cid_len,
             self.next_client_application_packet_number,
         )?;
         if matches!(opened.outcome, OneRttOpenOutcome::Next) {
@@ -1704,6 +1710,24 @@ impl NativeQuicServerHandshake {
                 } => self
                     .server_application_flow_control
                     .apply_max_streams(*bidirectional, *max_streams),
+                QuicFrame::NewConnectionId {
+                    sequence_number,
+                    retire_prior_to,
+                    connection_id,
+                    stateless_reset_token,
+                } => {
+                    let _ = self.cid_inventory.observe_peer_new_connection_id(
+                        *sequence_number,
+                        *retire_prior_to,
+                        connection_id.clone(),
+                        *stateless_reset_token,
+                    );
+                }
+                QuicFrame::RetireConnectionId { sequence_number } => {
+                    let _ = self
+                        .cid_inventory
+                        .observe_peer_retire_connection_id(*sequence_number);
+                }
                 _ => {}
             }
         }
@@ -2084,6 +2108,11 @@ impl NativeQuicServerHandshake {
                 "native QUIC NEW_CONNECTION_ID retire_prior_to exceeds sequence_number".into(),
             ));
         }
+        self.cid_inventory.register_local_issued(
+            sequence_number,
+            connection_id.clone(),
+            stateless_reset_token,
+        )?;
         self.build_server_application_control_packet(QuicFrame::NewConnectionId {
             sequence_number,
             retire_prior_to,
@@ -2631,6 +2660,7 @@ impl NativeQuicHandshake {
             client_application_recovery_lost_packets: Vec::new(),
             client_application_ecn_congestion: false,
             client_path_validator: QuicPathValidator::default(),
+            client_cid_inventory,
             client_pmtu_probe: QuicPmtuProbePolicy::from_transport(&fingerprint.transport),
             server_transport_parameters_validated: false,
             recovery: recovery_state_from_transport(&fingerprint.transport),
@@ -2680,6 +2710,7 @@ impl NativeQuicHandshake {
             source_cid.clone(),
             fingerprint.transport.initial_datagram_size,
         )?;
+        let client_cid_inventory = new_client_cid_inventory(fingerprint, &source_cid);
 
         Ok(Self {
             client_initial,
@@ -2733,6 +2764,7 @@ impl NativeQuicHandshake {
             client_application_recovery_lost_packets: Vec::new(),
             client_application_ecn_congestion: false,
             client_path_validator: QuicPathValidator::default(),
+            client_cid_inventory,
             client_pmtu_probe: QuicPmtuProbePolicy::from_transport(&fingerprint.transport),
             server_transport_parameters_validated: false,
             recovery: recovery_state_from_transport(&fingerprint.transport),
@@ -2784,6 +2816,7 @@ impl NativeQuicHandshake {
             source_cid.clone(),
             fingerprint.transport.initial_datagram_size,
         )?;
+        let client_cid_inventory = new_client_cid_inventory(fingerprint, &source_cid);
 
         Ok(Self {
             client_initial,
@@ -2837,6 +2870,7 @@ impl NativeQuicHandshake {
             client_application_recovery_lost_packets: Vec::new(),
             client_application_ecn_congestion: false,
             client_path_validator: QuicPathValidator::default(),
+            client_cid_inventory,
             client_pmtu_probe: QuicPmtuProbePolicy::from_transport(&fingerprint.transport),
             server_transport_parameters_validated: false,
             recovery: recovery_state_from_transport(&fingerprint.transport),

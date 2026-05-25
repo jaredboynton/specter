@@ -3607,18 +3607,21 @@ fn native_h3_server_path_migration_validates_only_matching_peer_address() {
         .open_server_h3_event_packet(challenge_packet.packet.as_ref())
         .expect("client opens server path challenge");
     assert_eq!(client_events, vec![ServerH3Event::PathChallenge(challenge)]);
-    let response = client
+    let wrong_peer_response = client
         .build_client_path_response_packet(challenge)
         .expect("client path response");
 
     server
-        .open_client_h3_event_packet_from(response.packet.as_ref(), wrong_peer)
+        .open_client_h3_event_packet_from(wrong_peer_response.packet.as_ref(), wrong_peer)
         .expect("wrong-peer response should parse but not validate migrated path");
     assert!(
         !server.is_server_path_address_validated(&migrated_peer),
         "PATH_RESPONSE from the wrong peer address must not validate migration"
     );
 
+    let response = client
+        .build_client_path_response_packet(challenge)
+        .expect("fresh client path response");
     server
         .open_client_h3_event_packet_from(response.packet.as_ref(), migrated_peer)
         .expect("matching-peer response should validate migrated path");
