@@ -2558,6 +2558,43 @@ async fn measure_quiche_direct_rfc9220_tunnel(
 }
 
 fn measure_quiche_direct_rfc9220_tunnel_once(url: &str) -> anyhow::Result<AdapterSample> {
+    measure_quiche_direct_rfc9220_tunnel_once_with_payload(url, rfc9220_tunnel_payload(b'q'))
+}
+
+async fn measure_quiche_direct_rfc9220_tunnel_close(
+    url: &str,
+    warmups: usize,
+    samples: usize,
+) -> anyhow::Result<BenchmarkRow> {
+    let url = url.to_owned();
+    tokio::task::spawn_blocking(move || {
+        for _ in 0..warmups {
+            let _ = measure_quiche_direct_rfc9220_tunnel_close_once(&url)?;
+        }
+
+        let mut measured = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            measured.push(measure_quiche_direct_rfc9220_tunnel_close_once(&url)?);
+        }
+
+        Ok(quiche_direct_rfc9220_tunnel_close_row_from_samples(
+            &measured,
+        ))
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("quiche RFC 9220 close blocking task failed: {error}"))?
+}
+
+fn measure_quiche_direct_rfc9220_tunnel_close_once(
+    url: &str,
+) -> anyhow::Result<AdapterSample> {
+    measure_quiche_direct_rfc9220_tunnel_once_with_payload(url, rfc9220_tunnel_payload(b'Q'))
+}
+
+fn measure_quiche_direct_rfc9220_tunnel_once_with_payload(
+    url: &str,
+    payload: Bytes,
+) -> anyhow::Result<AdapterSample> {
     let url = parse_rfc9220_network_url(url)?;
     let peer_addr = url
         .socket_addrs(|| Some(443))?
@@ -2608,7 +2645,6 @@ fn measure_quiche_direct_rfc9220_tunnel_once(url: &str) -> anyhow::Result<Adapte
     let start = Instant::now();
     let deadline = start + adapter_timeout();
     let request_headers = quiche_rfc9220_tunnel_headers(&url)?;
-    let payload = rfc9220_tunnel_payload(b'q');
     let mut recv_buf = [0u8; 65535];
     let mut out = [0u8; QUICHE_MAX_DATAGRAM_SIZE];
 
@@ -2742,6 +2778,38 @@ async fn measure_tokio_quiche_rfc9220_tunnel(
 }
 
 async fn measure_tokio_quiche_rfc9220_tunnel_once(url: &str) -> anyhow::Result<AdapterSample> {
+    measure_tokio_quiche_rfc9220_tunnel_once_with_payload(url, rfc9220_tunnel_payload(b't')).await
+}
+
+async fn measure_tokio_quiche_rfc9220_tunnel_close(
+    url: &str,
+    warmups: usize,
+    samples: usize,
+) -> anyhow::Result<BenchmarkRow> {
+    for _ in 0..warmups {
+        let _ = measure_tokio_quiche_rfc9220_tunnel_close_once(url).await?;
+    }
+
+    let mut measured = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        measured.push(measure_tokio_quiche_rfc9220_tunnel_close_once(url).await?);
+    }
+
+    Ok(tokio_quiche_rfc9220_tunnel_close_row_from_samples(
+        &measured,
+    ))
+}
+
+async fn measure_tokio_quiche_rfc9220_tunnel_close_once(
+    url: &str,
+) -> anyhow::Result<AdapterSample> {
+    measure_tokio_quiche_rfc9220_tunnel_once_with_payload(url, rfc9220_tunnel_payload(b'T')).await
+}
+
+async fn measure_tokio_quiche_rfc9220_tunnel_once_with_payload(
+    url: &str,
+    payload: Bytes,
+) -> anyhow::Result<AdapterSample> {
     use tokio_quiche::http3::driver::{ClientH3Event, H3Event, NewClientRequest, OutboundFrame};
 
     let url = parse_rfc9220_network_url(url)?;
@@ -2757,7 +2825,6 @@ async fn measure_tokio_quiche_rfc9220_tunnel_once(url: &str) -> anyhow::Result<A
     };
     let host = url.host_str();
     let headers = tokio_quiche_rfc9220_tunnel_headers(&url)?;
-    let payload = rfc9220_tunnel_payload(b't');
     let socket = tokio::net::UdpSocket::bind(bind_addr).await?;
     socket.connect(peer_addr).await?;
 
