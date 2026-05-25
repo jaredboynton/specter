@@ -2361,9 +2361,10 @@ impl NativeQuicHandshake {
         )
     }
 
-    // Cross-agent compatibility shim for the sibling P1 session-resumption
-    // worker. When a cached DER session exists, install it before emitting the
-    // ClientHello; otherwise use the ordinary first-handshake constructor.
+    /// Build a client handshake that optionally replays a cached TLS 1.3
+    /// session ticket. When `session_der` is `Some`, the ClientHello is emitted
+    /// via the resumption path (`client_with_replayed_session_ticket`);
+    /// otherwise it falls through to the ordinary first-handshake constructor.
     #[allow(clippy::too_many_arguments)]
     pub fn client_with_tls_fingerprint_and_session(
         server_name: &str,
