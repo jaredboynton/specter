@@ -11,6 +11,7 @@
 
 [build]
 rustc-wrapper = ""
+incremental = true
 
 [env]
 CARGO_INCREMENTAL = { value = "1", force = true }
