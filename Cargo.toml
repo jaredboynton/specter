@@ -105,6 +105,7 @@ harness = false
 [profile.dev]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
+incremental = true
 
 [profile.dev.package."*"]
 debug = 0
@@ -112,6 +113,7 @@ debug = 0
 [profile.test]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
+incremental = true
 
 [profile.test.package."*"]
 debug = 0
@@ -125,6 +127,7 @@ codegen-units = 256
 opt-level = 0
 debug-assertions = true
 overflow-checks = true
+incremental = true
 
 [profile.fast-test.package."*"]
 debug = 0

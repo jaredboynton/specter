@@ -153,6 +153,95 @@ build-boringssl *TARGETS:
         ./scripts/build-boringssl.sh {{ TARGETS }}
     fi
 
+# Fast incremental lib check (avoids 70+ integration-test crates)
+[group('build')]
+check-lib:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [[ "$(uname -m)" == "arm64" ]]; then
+        TARGET="aarch64-apple-darwin"
+    else
+        TARGET="x86_64-apple-darwin"
+    fi
+
+    . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
+
+    cargo check --lib --locked
+
+# Incremental check for changed files only; never runs `cargo check --tests`
+[group('build')]
+check-changed base="main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [[ "$(uname -m)" == "arm64" ]]; then
+        TARGET="aarch64-apple-darwin"
+    else
+        TARGET="x86_64-apple-darwin"
+    fi
+
+    . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
+
+    BASE_INPUT="{{ base }}"
+    if git rev-parse --verify "$BASE_INPUT" >/dev/null 2>&1; then
+        BASE_REF="$(git merge-base "$BASE_INPUT" HEAD)"
+    elif git rev-parse --verify "origin/$BASE_INPUT" >/dev/null 2>&1; then
+        BASE_REF="$(git merge-base "origin/$BASE_INPUT" HEAD)"
+    else
+        echo "Base '$BASE_INPUT' not found; checking lib only."
+        cargo check --lib --locked
+        exit 0
+    fi
+
+    CHANGED_FILE="$(mktemp)"
+    trap 'rm -f "$CHANGED_FILE"' EXIT
+    {
+        git diff --name-only "$BASE_REF" HEAD
+        git diff --name-only --cached
+        git diff --name-only
+        git ls-files --others --exclude-standard
+    } | sort -u > "$CHANGED_FILE"
+
+    if [[ ! -s "$CHANGED_FILE" ]]; then
+        echo "No changed files since $BASE_REF."
+        exit 0
+    fi
+
+    echo "Changed files:"
+    sed 's/^/  /' "$CHANGED_FILE"
+
+    if grep -Eq '^(Cargo\.toml|Cargo\.lock|src/|tests/helpers/|benches/|\.config/nextest\.toml|justfile|scripts/|\.github/workflows/)' "$CHANGED_FILE"; then
+        echo "Shared or lib-scoped code changed; checking lib only."
+        cargo check --lib --locked
+        exit 0
+    fi
+
+    RUST_CHANGED="$(grep -E '\.rs$' "$CHANGED_FILE" || true)"
+    if [[ -z "$RUST_CHANGED" ]]; then
+        echo "No Rust files changed; skipping cargo check."
+        exit 0
+    fi
+
+    CHECKED=0
+    while IFS= read -r changed; do
+        if [[ "$changed" == tests/*.rs ]]; then
+            bin="$(basename "$changed" .rs)"
+            echo "Checking integration test: $bin"
+            cargo check --test "$bin" --locked
+            CHECKED=1
+        else
+            echo "Non-integration Rust file changed; checking lib only."
+            cargo check --lib --locked
+            exit 0
+        fi
+    done <<< "$RUST_CHANGED"
+
+    if [[ "$CHECKED" -eq 0 ]]; then
+        echo "No matching integration-test binaries; checking lib only."
+        cargo check --lib --locked
+    fi
+
 # =============================================================================
 # TEST
 # =============================================================================
