@@ -281,7 +281,7 @@ pub struct NativeH3Response {
     pub body: Bytes,
 }
 
-pub(crate) struct NativeH3PendingResponse {
+pub struct NativeH3PendingResponse {
     pub stream_id: u64,
     pub response_tx: oneshot::Sender<Result<StreamResponse>>,
 }

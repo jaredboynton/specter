@@ -276,6 +276,32 @@ impl NativeQuicTlsSession {
         Ok(session)
     }
 
+    /// Variant of [`Self::server_with_connection_ids`] that installs a fixed
+    /// 48-byte TLS session-ticket key (STEK). Two in-process server
+    /// instances constructed with the same `ticket_keys` can decrypt each
+    /// other's TLS 1.3 NewSessionTicket frames, which lets handshake-level
+    /// resumption fixtures span two `NativeQuicServerHandshake` instances.
+    pub fn server_with_connection_ids_and_ticket_keys(
+        fingerprint: &Http3Fingerprint,
+        cert_pem: &[u8],
+        key_pem: &[u8],
+        original_destination_connection_id: &ConnectionId,
+        initial_source_connection_id: &ConnectionId,
+        ticket_keys: &[u8; NATIVE_H3_TICKET_KEY_LEN],
+    ) -> Result<Self> {
+        let mut session = Self::new_server(
+            fingerprint,
+            cert_pem,
+            key_pem,
+            Some(original_destination_connection_id),
+            Some(initial_source_connection_id),
+            None,
+            Some(ticket_keys),
+        )?;
+        session.drive_handshake("QUIC server handshake")?;
+        Ok(session)
+    }
+
     pub fn server_with_transport_parameter_connection_ids(
         fingerprint: &Http3Fingerprint,
         cert_pem: &[u8],
