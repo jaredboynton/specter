@@ -3,6 +3,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::error::{Error, Result};
+use crate::headers::Headers;
 use crate::fingerprint::{
     H3Settings, Http3Fingerprint, QpackHeaderBlockStrategy, QpackStringEncodingStrategy,
 };
@@ -389,7 +390,7 @@ pub fn build_websocket_connect_headers(
 pub fn build_request_headers(
     method: &http::Method,
     uri: &http::Uri,
-    headers: &[(String, String)],
+    headers: &Headers,
 ) -> Result<Vec<H3Header>> {
     let scheme = uri.scheme_str().unwrap_or("https");
     let authority = uri
@@ -406,16 +407,23 @@ pub fn build_request_headers(
         H3Header::new(":path", path),
     ];
 
-    for (name, value) in headers {
-        let lower = name.to_ascii_lowercase();
-        if !name.starts_with(':')
+    for (name, value) in headers.iter_bytes() {
+        let lower = if name.iter().all(|b| b.is_ascii_lowercase()) {
+            String::from_utf8_lossy(name).into_owned()
+        } else {
+            name.iter().map(|b| b.to_ascii_lowercase() as char).collect()
+        };
+        if name.first() != Some(&b':')
             && lower != "connection"
             && lower != "keep-alive"
             && lower != "proxy-connection"
             && lower != "transfer-encoding"
             && lower != "upgrade"
         {
-            h3_headers.push(H3Header::new(lower, value));
+            h3_headers.push(H3Header::new(
+                lower,
+                String::from_utf8_lossy(value).into_owned(),
+            ));
         }
     }
 

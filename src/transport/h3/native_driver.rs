@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::error::{Error, Result};
 use crate::fingerprint::Http3Fingerprint;
+use crate::headers::Headers;
 use crate::request::{RequestBody, RequestBodyStream};
 use crate::transport::h3::body::{H3BodyPush, H3BodyShared};
 use crate::transport::h3::command::{DriverCommand, StreamResponse, StreamingHeadersResult};
@@ -325,7 +326,7 @@ pub struct NativeH3PendingResponse {
 pub enum NativeH3StreamingResponseEvent {
     Headers {
         status: u16,
-        headers: Vec<(String, String)>,
+        headers: Headers,
     },
     Data(Bytes),
     Finished,
@@ -338,7 +339,7 @@ pub enum NativeH3StreamingResponseEvent {
 pub enum NativeH3TunnelEvent {
     Open {
         status: u16,
-        headers: Vec<(String, String)>,
+        headers: Headers,
     },
     Data(Bytes),
     Finished,

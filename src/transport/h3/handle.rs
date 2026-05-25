@@ -128,7 +128,7 @@ impl H3Handle {
         &self,
         method: http::Method,
         uri: &http::Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: Option<Bytes>,
     ) -> Result<Response> {
         // Allocate a oneshot channel for the response
@@ -138,7 +138,7 @@ impl H3Handle {
         let command = DriverCommand::SendRequest {
             method,
             uri: uri.clone(),
-            headers,
+            headers: headers.clone(),
             body,
             response_tx,
         };
@@ -169,7 +169,7 @@ impl H3Handle {
         &self,
         method: http::Method,
         uri: &http::Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: RequestBody,
     ) -> Result<Response> {
         self.send_streaming_request(method, uri, headers, body, H3BodyTimeouts::default())
@@ -183,7 +183,7 @@ impl H3Handle {
         &self,
         method: http::Method,
         uri: &http::Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: RequestBody,
         body_timeouts: H3BodyTimeouts,
     ) -> Result<Response> {
@@ -197,7 +197,7 @@ impl H3Handle {
             .send(DriverCommand::SendStreamingRequest {
                 method,
                 uri: uri.clone(),
-                headers,
+                headers: headers.clone(),
                 body,
                 headers_tx,
                 body_shared: body_shared.clone(),
@@ -221,14 +221,14 @@ impl H3Handle {
     pub async fn open_websocket_tunnel(
         &self,
         uri: http::Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
     ) -> Result<H3Tunnel> {
         let (response_tx, response_rx) = oneshot::channel();
 
         self.command_tx
             .send(DriverCommand::OpenWebSocketTunnel {
                 uri,
-                headers,
+                headers: headers.clone(),
                 response_tx,
             })
             .await

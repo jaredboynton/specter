@@ -4,6 +4,7 @@ use bytes::Bytes;
 use tokio::sync::oneshot;
 
 use crate::error::Result;
+use crate::headers::Headers;
 use crate::request::RequestBody;
 use crate::transport::h3::body::H3BodyShared;
 use crate::transport::h3::H3Tunnel;
@@ -22,7 +23,7 @@ pub enum DriverCommand {
     SendRequest {
         method: http::Method,
         uri: http::Uri,
-        headers: Vec<(String, String)>,
+        headers: Headers,
         body: Option<Bytes>,
         response_tx: oneshot::Sender<Result<StreamResponse>>,
     },
@@ -31,7 +32,7 @@ pub enum DriverCommand {
     SendStreamingRequest {
         method: http::Method,
         uri: http::Uri,
-        headers: Vec<(String, String)>,
+        headers: Headers,
         body: RequestBody,
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
         body_shared: Arc<H3BodyShared>,
@@ -39,7 +40,7 @@ pub enum DriverCommand {
     /// Open an RFC 9220 WebSocket-over-HTTP/3 tunnel.
     OpenWebSocketTunnel {
         uri: http::Uri,
-        headers: Vec<(String, String)>,
+        headers: Headers,
         response_tx: oneshot::Sender<Result<H3Tunnel>>,
     },
 }

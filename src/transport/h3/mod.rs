@@ -48,6 +48,7 @@ pub const MIN_H3_TUNNEL_INBOUND_BYTE_BUDGET: usize = 1024;
 
 use crate::error::{Error, Result};
 use crate::fingerprint::{Http3Fingerprint, TlsFingerprint};
+use crate::headers::Headers;
 use crate::pool::multiplexer::OriginKey;
 use crate::request::RequestBody;
 use crate::response::Response;
@@ -369,7 +370,7 @@ impl H3Client {
         &self,
         url: &str,
         method: &str,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: Option<Vec<u8>>,
     ) -> Result<Response> {
         let is_idempotent = is_idempotent_method(method);
@@ -425,7 +426,7 @@ impl H3Client {
         &self,
         url: &str,
         method: &str,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: RequestBody,
     ) -> Result<Response> {
         self.send_streaming_with_timeouts(url, method, headers, body, H3BodyTimeouts::default())
@@ -437,7 +438,7 @@ impl H3Client {
         &self,
         url: &str,
         method: &str,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: RequestBody,
         body_timeouts: H3BodyTimeouts,
     ) -> Result<Response> {
@@ -491,7 +492,7 @@ impl H3Client {
     pub async fn open_websocket_tunnel(
         &self,
         url: &str,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
     ) -> Result<H3Tunnel> {
         let (handle, _, _) = self.resolve_handle_for_request(url).await?;
         let uri: http::Uri = url
@@ -512,7 +513,7 @@ impl H3Client {
         url: &str,
         method: http::Method,
         uri: http::Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: Option<bytes::Bytes>,
     ) -> Result<Option<Response>> {
         if !is_zero_rtt_safe_request(method.as_str(), body.as_ref()) {

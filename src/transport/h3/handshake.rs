@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use bytes::{Bytes, BytesMut};
 
 use crate::error::{Error, Result};
+use crate::headers::Headers;
 use crate::fingerprint::{Http3Fingerprint, QuicTransportParams, TlsFingerprint};
 use crate::transport::h3::native;
 use crate::transport::h3::path::{match_local_connection_id, QuicConnectionIdInventory};
@@ -3713,7 +3714,7 @@ impl NativeQuicHandshake {
         &mut self,
         method: &http::Method,
         uri: &http::Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         body: Option<Bytes>,
     ) -> Result<ClientApplicationPacket> {
         let stream_id = self.next_client_bidirectional_stream_id;
@@ -3735,7 +3736,7 @@ impl NativeQuicHandshake {
         stream_id: u64,
         method: &http::Method,
         uri: &http::Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         body: Option<Bytes>,
     ) -> Result<ClientApplicationPacket> {
         let h3_headers = native::build_request_headers(method, uri, headers)?;
@@ -3918,7 +3919,7 @@ impl NativeQuicHandshake {
         &mut self,
         method: &http::Method,
         uri: &http::Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         body: Option<Bytes>,
     ) -> Result<ClientApplicationPacket> {
         if self.client_application_keys.is_none() {
@@ -3941,7 +3942,7 @@ impl NativeQuicHandshake {
         &mut self,
         method: &http::Method,
         uri: &http::Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         body: Option<Bytes>,
         fin: bool,
     ) -> Result<ClientApplicationPacket> {
@@ -3973,7 +3974,7 @@ impl NativeQuicHandshake {
         &self,
         method: &http::Method,
         uri: &http::Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
         body: Option<Bytes>,
     ) -> Result<Bytes> {
         let h3_headers = native::build_request_headers(method, uri, headers)?;
@@ -3987,7 +3988,7 @@ impl NativeQuicHandshake {
     pub fn build_client_h3_websocket_connect_packet(
         &mut self,
         uri: &http::Uri,
-        headers: &[(String, String)],
+        headers: &Headers,
     ) -> Result<ClientApplicationPacket> {
         if self.client_application_keys.is_none() {
             return Err(Error::Quic(

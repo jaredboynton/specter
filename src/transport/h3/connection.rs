@@ -9,6 +9,7 @@ use tokio::sync::oneshot;
 use crate::error::{Error, Result};
 use crate::fingerprint::{Http3Fingerprint, QuicTransportParams, TlsFingerprint};
 use crate::transport::dns::DnsConfig;
+use crate::headers::Headers;
 use crate::transport::h3::command::StreamResponse;
 use crate::transport::h3::handle::{H3Handle, NativeH3HandshakeReport};
 use crate::transport::h3::handshake::NativeQuicHandshake;
@@ -21,6 +22,7 @@ use crate::transport::h3::udp_ecn::{enable_udp_ecn_receive, recv_from_with_ecn};
 use crate::transport::h3::H3TransportConfig;
 
 use crate::transport::h3::native_driver::{spawn_native_h3_driver, NativeH3PendingResponse};
+use crate::headers::Headers;
 use bytes::Bytes;
 use getrandom::fill as getrandom_fill;
 
@@ -33,7 +35,7 @@ pub struct H3Connection;
 pub(crate) struct NativeH3ZeroRttRequest {
     pub method: http::Method,
     pub uri: http::Uri,
-    pub headers: Vec<(String, String)>,
+    pub headers: Headers,
     pub body: Option<Bytes>,
     pub payload: Bytes,
 }
@@ -48,16 +50,16 @@ impl NativeH3ZeroRttRequest {
         fingerprint: &Http3Fingerprint,
         method: http::Method,
         uri: http::Uri,
-        headers: Vec<(String, String)>,
+        headers: &Headers,
         body: Option<Bytes>,
     ) -> Result<Self> {
-        let h3_headers = native::build_request_headers(&method, &uri, &headers)?;
+        let h3_headers = native::build_request_headers(&method, &uri, headers)?;
         let payload =
             native::encode_request_stream_with_fingerprint(&h3_headers, body.clone(), fingerprint);
         Ok(Self {
             method,
             uri,
-            headers,
+            headers: headers.clone(),
             body,
             payload,
         })
