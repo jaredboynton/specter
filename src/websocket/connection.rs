@@ -381,13 +381,8 @@ impl WebSocket {
                 }));
             }
             read_buffer.reserve(READ_CHUNK_SIZE);
-            let n = Self::io_with_timeout(
-                url,
-                read_timeout,
-                "read",
-                stream.read_buf(read_buffer),
-            )
-            .await?;
+            let n = Self::io_with_timeout(url, read_timeout, "read", stream.read_buf(read_buffer))
+                .await?;
             if n == 0 {
                 return Ok(None);
             }
@@ -441,7 +436,6 @@ impl WebSocketReader {
             }
         }
     }
-
 }
 
 impl WebSocketWriter {
