@@ -2990,6 +2990,14 @@ impl NativeQuicHandshake {
         self.client_path_validator.is_validated(data)
     }
 
+    pub fn client_pmtu_current_size(&self) -> usize {
+        self.client_pmtu_probe.current_size()
+    }
+
+    pub fn client_pmtu_pending_probe_size(&self) -> Option<usize> {
+        self.client_pmtu_probe.pending_probe_size()
+    }
+
     pub fn client_application_lost_packets(&self) -> Vec<u64> {
         self.client_application_loss_detector.lost_packets()
     }
@@ -3814,6 +3822,19 @@ impl NativeQuicHandshake {
         self.build_client_application_control_packet(frame)
     }
 
+    pub fn build_client_pmtu_probe_packet(
+        &mut self,
+        now: Instant,
+    ) -> Result<Option<ClientApplicationControlPacket>> {
+        let Some(target_size) = self.client_pmtu_probe.next_probe_size() else {
+            return Ok(None);
+        };
+        let packet = self.build_client_application_probe_packet(target_size, now)?;
+        self.client_pmtu_probe
+            .on_probe_sent(packet.packet_number, packet.packet.len(), now);
+        Ok(Some(packet))
+    }
+
     pub fn build_client_connection_close_packet(
         &mut self,
         error_code: u64,
@@ -3898,6 +3919,40 @@ impl NativeQuicHandshake {
         &mut self,
         frame: QuicFrame,
     ) -> Result<ClientApplicationControlPacket> {
+        self.build_client_application_payload_packet(padded_short_header_payload(encode_frame(&frame)))
+    }
+
+    fn build_client_application_probe_packet(
+        &mut self,
+        target_size: usize,
+        now: Instant,
+    ) -> Result<ClientApplicationControlPacket> {
+        let Some(_client_application_keys) = &self.client_application_keys else {
+            return Err(Error::Quic(
+                "native application packet encryption is waiting for TLS application keys".into(),
+            ));
+        };
+        let packet_number_len = 2;
+        let header_len = 1 + self.destination_cid.as_bytes().len() + packet_number_len;
+        let tag_len = AES_GCM_TAG_LEN;
+        let target_payload_len = target_size.saturating_sub(header_len + tag_len);
+        let mut payload = encode_frame(&QuicFrame::Ping).to_vec();
+        payload.resize(target_payload_len.max(payload.len()), 0);
+        self.build_client_application_payload_packet_at(Bytes::from(payload), now)
+    }
+
+    fn build_client_application_payload_packet(
+        &mut self,
+        payload: Bytes,
+    ) -> Result<ClientApplicationControlPacket> {
+        self.build_client_application_payload_packet_at(payload, Instant::now())
+    }
+
+    fn build_client_application_payload_packet_at(
+        &mut self,
+        payload: Bytes,
+        now: Instant,
+    ) -> Result<ClientApplicationControlPacket> {
         let Some(client_application_keys) = &self.client_application_keys else {
             return Err(Error::Quic(
                 "native application packet encryption is waiting for TLS application keys".into(),
@@ -3906,16 +3961,14 @@ impl NativeQuicHandshake {
 
         let packet_number = self.next_client_application_packet_number;
         let packet_number_len = 2;
-        let frame = padded_short_header_payload(encode_frame(&frame));
         let packet = protect_short_header_packet(
             client_application_keys,
             &self.destination_cid,
             packet_number,
             packet_number_len,
             self.write_key_phase,
-            &frame,
+            &payload,
         )?;
-        let now = Instant::now();
         let packet_size = packet.len();
         self.client_application_loss_detector
             .on_packet_sent_at(packet_number, now);
@@ -3984,6 +4037,7 @@ impl NativeQuicHandshake {
             for packet_number in self.client_application_loss_detector.on_ack_frame(frame)? {
                 self.client_application_sent_streams.remove(&packet_number);
                 self.application_key_update.note_packet_acked(packet_number);
+                self.client_pmtu_probe.on_probe_acked(packet_number);
             }
             if matches!(frame, QuicFrame::Ack { .. } | QuicFrame::AckEcn { .. }) {
                 let outcome = self.recovery.on_ack_received(
@@ -3995,6 +4049,10 @@ impl NativeQuicHandshake {
                 for (packet_number, _) in outcome.newly_acked {
                     self.client_application_sent_streams.remove(&packet_number);
                     self.application_key_update.note_packet_acked(packet_number);
+                    self.client_pmtu_probe.on_probe_acked(packet_number);
+                }
+                for (packet_number, _) in &outcome.lost {
+                    self.client_pmtu_probe.on_probe_lost(*packet_number);
                 }
                 self.client_application_recovery_lost_packets.extend(
                     outcome
@@ -4449,6 +4507,7 @@ impl NativeQuicHandshake {
         self.client_application_sent_streams.clear();
         self.client_application_recovery_lost_packets.clear();
         self.client_path_validator = QuicPathValidator::default();
+        self.client_pmtu_probe = QuicPmtuProbePolicy::from_transport(&self.fingerprint.transport);
         self.recovery = recovery_state_from_transport(&self.fingerprint.transport);
         self.next_client_initial_packet_number = 1;
         self.next_server_initial_packet_number = 0;
