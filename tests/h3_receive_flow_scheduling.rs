@@ -322,8 +322,7 @@ fn native_h3_driver_schedules_request_body_and_tunnel_data_fairly() {
 
 #[test]
 fn native_h3_driver_keeps_tunnel_data_off_control_command_queue() {
-    let command =
-        std::fs::read_to_string("src/transport/h3/command.rs").expect("command source");
+    let command = std::fs::read_to_string("src/transport/h3/command.rs").expect("command source");
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
     let spawn = driver
