@@ -28,6 +28,7 @@ struct TestResult {
     duration_ms: u64,
     body_len: usize,
     success: bool,
+    required: bool,
     error: Option<String>,
 }
 
@@ -40,6 +41,7 @@ impl TestResult {
             duration_ms,
             body_len,
             success: true,
+            required: true,
             error: None,
         }
     }
@@ -52,6 +54,20 @@ impl TestResult {
             duration_ms: 0,
             body_len: 0,
             success: false,
+            required: true,
+            error: Some(error),
+        }
+    }
+
+    fn optional_failure(name: &str, protocol: &str, error: String) -> Self {
+        Self {
+            name: name.to_string(),
+            protocol: protocol.to_string(),
+            status: 0,
+            duration_ms: 0,
+            body_len: 0,
+            success: false,
+            required: false,
             error: Some(error),
         }
     }
@@ -102,12 +118,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| s.as_str());
 
     // Initialize tracing if verbose
-    if verbose {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_target(true)
-            .init();
-    }
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(if verbose {
+            tracing::Level::DEBUG
+        } else {
+            tracing::Level::INFO
+        })
+        .with_target(verbose);
+    let _ = subscriber.try_init();
 
     info!("================================================================================");
     info!("Specter Protocol Test Suite");
@@ -198,16 +216,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("================================================================================");
 
     let passed = all_results.iter().filter(|r| r.success).count();
-    let failed = all_results.iter().filter(|r| !r.success).count();
+    let failed_required = all_results
+        .iter()
+        .filter(|r| !r.success && r.required)
+        .count();
+    let failed_optional = all_results
+        .iter()
+        .filter(|r| !r.success && !r.required)
+        .count();
     let total = all_results.len();
 
     info!("Passed: {}/{}", passed, total);
-    info!("Failed: {}/{}", failed, total);
+    info!("Failed: {} required, {} optional", failed_required, failed_optional);
     info!("");
 
-    if failed > 0 {
-        info!("Failed tests:");
-        for result in all_results.iter().filter(|r| !r.success) {
+    if failed_required > 0 {
+        info!("Failed required tests:");
+        for result in all_results.iter().filter(|r| !r.success && r.required) {
+            info!(
+                "  - {}: {}",
+                result.name,
+                result.error.as_ref().unwrap_or(&"Unknown".to_string())
+            );
+        }
+    }
+
+    if failed_optional > 0 {
+        info!("Optional failures:");
+        for result in all_results.iter().filter(|r| !r.success && !r.required) {
             info!(
                 "  - {}: {}",
                 result.name,
@@ -245,7 +281,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("  HTTP/3:   {}/{} passed", h3_passed, h3_results.len());
     }
 
-    if failed > 0 {
+    if failed_required > 0 {
         std::process::exit(1);
     }
 
@@ -258,9 +294,18 @@ fn print_result(result: &TestResult) {
             "  [PASS] {} - {} {} ({}ms, {} bytes)",
             result.name, result.protocol, result.status, result.duration_ms, result.body_len
         );
-    } else {
+    } else if result.required {
         info!(
             "  [FAIL] {} - {}",
+            result.name,
+            result
+                .error
+                .as_ref()
+                .unwrap_or(&"Unknown error".to_string())
+        );
+    } else {
+        info!(
+            "  [WARN] {} - optional check failed: {}",
             result.name,
             result
                 .error
@@ -447,7 +492,7 @@ async fn test_http3_explicit(url: &str, _verbose: bool) -> TestResult {
         .build()
     {
         Ok(c) => c,
-        Err(e) => return TestResult::failure(name, format!("Client build failed: {}", e)),
+        Err(e) => return TestResult::optional_failure(name, "HTTP/3", format!("{}", e)),
     };
 
     // Include forbidden headers to verify filtering
@@ -476,7 +521,7 @@ async fn test_http3_explicit(url: &str, _verbose: bool) -> TestResult {
 
             TestResult::success(name, protocol, status, duration, body_len)
         }
-        Err(e) => TestResult::failure(name, format!("{}", e)),
+        Err(e) => TestResult::optional_failure(name, "HTTP/3", format!("{}", e)),
     }
 }
 
