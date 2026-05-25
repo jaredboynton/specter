@@ -275,9 +275,9 @@
     {
       "competitor_id": "tokio_quiche_rfc9220_tunnel_mixed",
       "status": "measured_pass",
-      "p50_ttft_ns": 4548334.0,
-      "p95_ttft_ns": 4917125.0,
-      "bytes_per_sec": 3110879.0692521217,
+      "p50_ttft_ns": 92553000.0,
+      "p95_ttft_ns": 102379292.0,
+      "bytes_per_sec": 963604.3674059935,
       "source": "tokio_quiche_rfc9220_tunnel_mixed_adapter",
       "protocol": "h3_rfc9220",
       "workload": "slow_consumer_tunnel_plus_http3_streaming",
