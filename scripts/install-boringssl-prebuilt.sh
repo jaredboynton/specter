@@ -39,7 +39,8 @@ detect_boring_sys_version() {
         return 0
     fi
     [[ -f "$BORING_SYS_MANIFEST" ]] || error "Manifest not found: $BORING_SYS_MANIFEST"
-    cargo metadata --format-version 1 --locked --manifest-path "$BORING_SYS_MANIFEST" \
+    env -u RUSTC_WRAPPER -u CARGO_INCREMENTAL \
+        cargo metadata --format-version 1 --locked --manifest-path "$BORING_SYS_MANIFEST" \
         | python3 -c 'import json,sys
 data=json.load(sys.stdin)
 for p in data.get("packages",[]):
