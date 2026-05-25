@@ -3709,6 +3709,82 @@ fn native_h3_client_path_migration_binds_validation_to_address_and_connection_id
 }
 
 #[test]
+fn native_h3_client_path_migration_promotes_validated_connection_id_for_future_packets() {
+    let read_secret = Bytes::from_static(&[0x7a; 32]);
+    let write_secret = Bytes::from_static(&[0x7b; 32]);
+    let server_keys = derive_packet_key_material_from_secret(read_secret.clone()).unwrap();
+    let mut handshake = NativeQuicHandshake::client(
+        "example.com",
+        &Http3Fingerprint::chrome(),
+        ConnectionId::from_static(b"server-dcid"),
+        ConnectionId::from_static(b"client-scid"),
+    )
+    .unwrap();
+    handshake
+        .install_tls_secrets(&[
+            QuicTlsSecret {
+                direction: QuicSecretDirection::Read,
+                level: QuicEncryptionLevel::Application,
+                secret: read_secret,
+            },
+            QuicTlsSecret {
+                direction: QuicSecretDirection::Write,
+                level: QuicEncryptionLevel::Application,
+                secret: write_secret,
+            },
+        ])
+        .unwrap();
+
+    let migrated_address = SocketAddr::from(([198, 51, 100, 10], 4433));
+    let migrated_cid = ConnectionId::from_static(b"migrated-cid");
+    let challenge = *b"MIGRATE!";
+    let new_cid_packet = protect_short_header_packet(
+        &server_keys,
+        &ConnectionId::from_static(b"client-scid"),
+        0,
+        2,
+        false,
+        &encode_frame(&QuicFrame::NewConnectionId {
+            sequence_number: 3,
+            retire_prior_to: 0,
+            connection_id: Bytes::copy_from_slice(migrated_cid.as_bytes()),
+            stateless_reset_token: [0x42; 16],
+        }),
+    )
+    .unwrap();
+    assert!(handshake
+        .open_server_h3_event_packet(&new_cid_packet)
+        .unwrap()
+        .is_empty());
+
+    handshake
+        .build_client_path_challenge_packet_for_address(migrated_address, 3, challenge)
+        .unwrap();
+    let matching_response = protect_short_header_packet(
+        &server_keys,
+        &ConnectionId::from_static(b"client-scid"),
+        1,
+        2,
+        false,
+        &encode_frame(&QuicFrame::PathResponse(challenge)),
+    )
+    .unwrap();
+    assert!(handshake
+        .open_server_h3_event_packet_from(&matching_response, migrated_address)
+        .unwrap()
+        .is_empty());
+
+    let future_control = handshake
+        .build_client_path_response_packet(*b"SERVER??")
+        .unwrap();
+    assert_eq!(
+        &future_control.packet[1..1 + migrated_cid.as_bytes().len()],
+        migrated_cid.as_bytes(),
+        "future 1-RTT packets after path validation must use the migrated peer-issued CID"
+    );
+}
+
+#[test]
 fn native_h3_client_pmtu_probe_packet_promotes_size_only_after_ack() {
     let read_secret = Bytes::from_static(&[0x8c; 32]);
     let write_secret = Bytes::from_static(&[0x8d; 32]);
