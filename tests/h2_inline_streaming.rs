@@ -537,11 +537,14 @@ async fn large_streaming_body_avoids_driver_backpressure_stalls() {
     assert_eq!(response.status().as_u16(), 200);
 
     let mut received = 0usize;
-    while let Some(frame) = timeout(DEFAULT_TIMEOUT, response.body_mut().frame())
-        .await
-        .transpose()
-        .unwrap()
-    {
+    loop {
+        let Some(frame) = timeout(DEFAULT_TIMEOUT, response.body_mut().frame())
+            .await
+            .unwrap()
+        else {
+            break;
+        };
+        let frame = frame.unwrap();
         if let Ok(data) = frame.into_data() {
             received += data.len();
         }
