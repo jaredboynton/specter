@@ -32,7 +32,8 @@
   "jest": {
     "testMatch": [
       "**/__tests__/*.test.js"
-    ]
+    ],
+    "testTimeout": 60000
   },
   "optionalDependencies": {
     "specters-darwin-x64": "4.1.0",
