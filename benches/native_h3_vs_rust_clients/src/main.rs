@@ -135,6 +135,18 @@ struct Rfc9220TunnelSuperiorityGate {
     missing_required_rfc9220_tunnel_rows: Vec<&'static str>,
     under_sampled_required_rfc9220_tunnel_rows: Vec<&'static str>,
     missing_required_rfc9220_tunnel_metrics: Vec<&'static str>,
+    /// Per-workload (echo / close / mixed) sub-gates so the suite artifact
+    /// records exactly which sub-gate failed when `pass = false`.
+    workload_sub_gates: Vec<Rfc9220TunnelWorkloadSubGate>,
+}
+
+#[derive(Debug, Serialize)]
+struct Rfc9220TunnelWorkloadSubGate {
+    workload: &'static str,
+    specter_id: &'static str,
+    pass: bool,
+    reason: &'static str,
+    failing_comparators: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -869,19 +881,24 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
     }
 }
 
-fn rfc9220_tunnel_workloads() -> [(&'static str, &'static str, &'static str); 3] {
+/// Workload entries in the RFC 9220 suite gate. Tuple shape is
+/// `(workload_label, specter_id, quiche_id, tokio_quiche_id)`.
+fn rfc9220_tunnel_workloads() -> [(&'static str, &'static str, &'static str, &'static str); 3] {
     [
         (
+            "echo",
             "specter_native_rfc9220_tunnel",
             "quiche_direct_rfc9220_tunnel",
             "tokio_quiche_rfc9220_tunnel",
         ),
         (
+            "close_fin",
             "specter_native_rfc9220_tunnel_close",
             "quiche_direct_rfc9220_tunnel_close",
             "tokio_quiche_rfc9220_tunnel_close",
         ),
         (
+            "mixed",
             "specter_native_rfc9220_tunnel_mixed",
             "quiche_direct_rfc9220_tunnel_mixed",
             "tokio_quiche_rfc9220_tunnel_mixed",
@@ -892,7 +909,7 @@ fn rfc9220_tunnel_workloads() -> [(&'static str, &'static str, &'static str); 3]
 fn required_rfc9220_tunnel_clients() -> Vec<&'static str> {
     rfc9220_tunnel_workloads()
         .into_iter()
-        .flat_map(|(specter, quiche, tokio_quiche)| [specter, quiche, tokio_quiche])
+        .flat_map(|(_workload, specter, quiche, tokio_quiche)| [specter, quiche, tokio_quiche])
         .collect()
 }
 
@@ -945,15 +962,26 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
 
     let mut comparator_metrics = Vec::new();
     let mut specter_beats_all_required = true;
-    for (specter_id, quiche_id, tokio_quiche_id) in rfc9220_tunnel_workloads() {
+    let mut workload_sub_gates = Vec::new();
+    for (workload, specter_id, quiche_id, tokio_quiche_id) in rfc9220_tunnel_workloads() {
         let Some(specter_metrics) = measured_metrics_with_min_sample_count(
             rows,
             specter_id,
             RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
         ) else {
             specter_beats_all_required = false;
+            workload_sub_gates.push(Rfc9220TunnelWorkloadSubGate {
+                workload,
+                specter_id,
+                pass: false,
+                reason: "missing_specter_workload_metrics",
+                failing_comparators: vec![quiche_id, tokio_quiche_id],
+            });
             continue;
         };
+        let mut workload_pass = true;
+        let mut failing_comparators = Vec::new();
+        let mut missing_comparator = false;
         for comparator_id in [quiche_id, tokio_quiche_id] {
             let Some(competitor_metrics) = measured_metrics_with_min_sample_count(
                 rows,
@@ -961,13 +989,31 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
                 RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
             ) else {
                 specter_beats_all_required = false;
+                workload_pass = false;
+                missing_comparator = true;
+                failing_comparators.push(comparator_id);
                 continue;
             };
             comparator_metrics.push(competitor_metrics);
             if !specter_beats_rfc9220_tunnel_comparator(specter_metrics, competitor_metrics) {
                 specter_beats_all_required = false;
+                workload_pass = false;
+                failing_comparators.push(comparator_id);
             }
         }
+        workload_sub_gates.push(Rfc9220TunnelWorkloadSubGate {
+            workload,
+            specter_id,
+            pass: workload_pass,
+            reason: if workload_pass {
+                "specter_workload_faster_than_required_comparators"
+            } else if missing_comparator {
+                "missing_required_comparator_workload_metrics"
+            } else {
+                "specter_workload_not_faster_than_required_comparators"
+            },
+            failing_comparators,
+        });
     }
     let fastest_non_specter_rfc9220_tunnel_client =
         fastest_by_p50_then_p95_then_throughput(&comparator_metrics);
@@ -1005,6 +1051,7 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
         missing_required_rfc9220_tunnel_rows,
         under_sampled_required_rfc9220_tunnel_rows,
         missing_required_rfc9220_tunnel_metrics,
+        workload_sub_gates,
     }
 }
 
@@ -1082,6 +1129,10 @@ fn artifact_with_competitor_rows_and_fixture_events<S: AsRef<str>>(
     measured_competitor_rows: &[BenchmarkRow],
     fixture_events: Vec<FixtureEvent>,
 ) -> Artifact {
+    let fixture_events = fixture_events
+        .into_iter()
+        .filter(should_record_local_native_h3_fixture_event)
+        .collect::<Vec<_>>();
     let imported_competitor_rows = competitor_artifact_jsons
         .iter()
         .flat_map(|artifact_json| competitor_rows_from_artifact(artifact_json.as_ref()))
@@ -1956,7 +2007,7 @@ impl LocalNativeH3Connection {
                                 classification.fatal
                             );
                         }
-                        self.record_event(FixtureEvent {
+                        let event = FixtureEvent {
                             client: self.client.clone(),
                             level: classification.level,
                             kind: classification.kind,
@@ -1966,7 +2017,10 @@ impl LocalNativeH3Connection {
                             message: error.to_string(),
                             datagram: Some(datagram),
                             app_ready: Some(app_ready),
-                        });
+                        };
+                        if should_record_local_native_h3_fixture_event(&event) {
+                            self.record_event(event);
+                        }
                     }
                 }
                 response = self.response_rx.recv() => {
@@ -2460,6 +2514,10 @@ fn classify_local_native_h3_packet_error_with_datagram(
 
 fn should_log_local_native_h3_fixture_event(classification: &FixtureErrorClassification) -> bool {
     classification.level != "debug"
+}
+
+fn should_record_local_native_h3_fixture_event(event: &FixtureEvent) -> bool {
+    event.kind != "packet_noise"
 }
 
 async fn measure_specter_native(
@@ -5343,6 +5401,33 @@ mod tests {
             serde_json::json!("non_fatal_packet_open_after_application_ready")
         );
         assert_eq!(event_json["fatal"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn artifact_omits_ignored_fixture_packet_noise() {
+        let event = super::FixtureEvent {
+            client: "tokio_quiche_rfc9220_tunnel_mixed".into(),
+            level: "debug",
+            kind: "packet_noise",
+            classification: "post_application_short_header_packet_open_noise",
+            category: "ignored_short_header_packet_open_after_application_ready",
+            fatal: false,
+            message: "QUIC packet open failed".into(),
+            datagram: Some("len=1200 short_prefix=[ab, cd]".into()),
+            app_ready: Some(true),
+        };
+
+        let artifact = super::artifact_with_competitor_rows_and_fixture_events(
+            None,
+            &Vec::<String>::new(),
+            &[],
+            vec![event],
+        );
+
+        assert!(
+            artifact.fixture_events.is_empty(),
+            "ignored cleanup/short-header packet-open noise must not dirty benchmark proof artifacts",
+        );
     }
 
     #[test]
