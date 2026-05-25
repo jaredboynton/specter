@@ -370,6 +370,7 @@ impl H3Client {
         headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
     ) -> Result<Response> {
+        eprintln!("h3 send_request method={method}");
         let is_idempotent = is_idempotent_method(method);
         let body_bytes = body.map(bytes::Bytes::from);
         let uri: http::Uri = url
