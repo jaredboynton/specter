@@ -180,8 +180,9 @@ impl HpackEncoder {
         authority: &str,
         scheme: &str,
         path: &str,
-        headers: &Headers,
+        headers: impl Into<Headers>,
     ) -> Result<Bytes, String> {
+        let headers = headers.into();
         if authority.is_empty() {
             return Err(":authority must not be empty".to_string());
         }
