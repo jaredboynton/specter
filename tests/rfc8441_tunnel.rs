@@ -290,7 +290,6 @@ async fn rfc8441_tunnel_send_bytes_wakes_idle_driver() {
         .unwrap()
         .expect("status 200 should return a tunnel");
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
     tunnel
         .send_bytes(Bytes::from_static(b"ping"), false)
         .await

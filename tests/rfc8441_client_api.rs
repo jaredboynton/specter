@@ -132,9 +132,7 @@ async fn rfc8441_wss_with_h1_alpn_is_rejected_for_h2_only_websocket() {
     let server = MockH2Server::new().await.unwrap();
     let url = format!("{}/chat?room=one", server.url_tls()).replace("https://", "wss://");
 
-    server.start_tls(acceptor, |_conn| async move {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    });
+    server.start_tls(acceptor, |_conn| async move {});
 
     let client = Client::builder()
         .add_root_certificate(ca_cert)
