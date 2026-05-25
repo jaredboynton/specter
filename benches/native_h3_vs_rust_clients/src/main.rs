@@ -231,6 +231,24 @@ fn competitor_specs() -> Vec<CompetitorSpec> {
                 "tokio-quiche Extended CONNECT/WebSocket-over-H3 tunnel comparator adapter.",
         },
         CompetitorSpec {
+            id: "quiche_direct_rfc9220_tunnel_close",
+            crate_name: "quiche",
+            version: "0.29.0",
+            role: "h3_tunnel_comparator",
+            required_for_superiority: false,
+            invocation_notes:
+                "Low-level quiche RFC 9220 tunnel comparator for client DATA+FIN and server FIN timing.",
+        },
+        CompetitorSpec {
+            id: "tokio_quiche_rfc9220_tunnel_close",
+            crate_name: "tokio-quiche",
+            version: "0.19.0",
+            role: "h3_tunnel_comparator",
+            required_for_superiority: false,
+            invocation_notes:
+                "tokio-quiche RFC 9220 tunnel comparator for client DATA+FIN and server FIN timing.",
+        },
+        CompetitorSpec {
             id: "h3_quinn_rfc9220_tunnel",
             crate_name: "h3+h3-quinn",
             version: "h3 0.0.8 / h3-quinn 0.0.10",
@@ -461,6 +479,26 @@ fn tokio_quiche_rfc9220_tunnel_row_from_samples(samples: &[AdapterSample]) -> Be
     )
 }
 
+fn quiche_direct_rfc9220_tunnel_close_row_from_samples(
+    samples: &[AdapterSample],
+) -> BenchmarkRow {
+    adapter_row_from_samples(
+        "quiche_direct_rfc9220_tunnel_close",
+        "quiche_direct_rfc9220_tunnel_close_adapter",
+        samples,
+    )
+}
+
+fn tokio_quiche_rfc9220_tunnel_close_row_from_samples(
+    samples: &[AdapterSample],
+) -> BenchmarkRow {
+    adapter_row_from_samples(
+        "tokio_quiche_rfc9220_tunnel_close",
+        "tokio_quiche_rfc9220_tunnel_close_adapter",
+        samples,
+    )
+}
+
 fn quinn_transport_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
     adapter_row_from_samples("quinn_transport", "quinn_transport_adapter", samples)
 }
@@ -526,6 +564,14 @@ fn row_context(competitor_id: &str) -> Option<RowContext> {
             default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
             notes: Some("RFC9220 comparator adapter for raw byte echo over WebSocket Extended CONNECT; excluded from the HTTP/3 superiority gate."),
         }),
+        "quiche_direct_rfc9220_tunnel_close" | "tokio_quiche_rfc9220_tunnel_close" => {
+            Some(RowContext {
+                protocol: "h3_rfc9220",
+                workload: "websocket_over_h3_raw_tunnel_close_fin",
+                default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
+                notes: Some("RFC9220 comparator adapter measuring client DATA+FIN through echoed DATA and server FIN delivery."),
+            })
+        }
         "h3_quinn_rfc9220_tunnel" => Some(RowContext {
             protocol: "h3_rfc9220",
             workload: "websocket_over_h3_raw_tunnel_echo",
@@ -605,6 +651,8 @@ fn local_native_fixture_measurement_plan() -> Vec<&'static str> {
     plan.push("specter_native_rfc9220_tunnel_mixed");
     plan.push("quiche_direct_rfc9220_tunnel");
     plan.push("tokio_quiche_rfc9220_tunnel");
+    plan.push("quiche_direct_rfc9220_tunnel_close");
+    plan.push("tokio_quiche_rfc9220_tunnel_close");
     plan
 }
 
@@ -653,7 +701,10 @@ fn placeholder_rows(
                     "pending_measurement"
                 } else if matches!(
                     spec.id,
-                    "quiche_direct_rfc9220_tunnel" | "tokio_quiche_rfc9220_tunnel"
+                    "quiche_direct_rfc9220_tunnel"
+                        | "tokio_quiche_rfc9220_tunnel"
+                        | "quiche_direct_rfc9220_tunnel_close"
+                        | "tokio_quiche_rfc9220_tunnel_close"
                 ) {
                     "pending_measurement"
                 } else {
@@ -1068,6 +1119,26 @@ async fn main() -> anyhow::Result<()> {
             .await?,
         );
     }
+    if let Some(url) = option_value(&args, "--measure-quiche-direct-rfc9220-tunnel-close-url") {
+        measured_competitor_rows.push(
+            measure_quiche_direct_rfc9220_tunnel_close(
+                &url,
+                option_usize(&args, "--warmups", 3)?,
+                option_usize(&args, "--samples", 30)?,
+            )
+            .await?,
+        );
+    }
+    if let Some(url) = option_value(&args, "--measure-tokio-quiche-rfc9220-tunnel-close-url") {
+        measured_competitor_rows.push(
+            measure_tokio_quiche_rfc9220_tunnel_close(
+                &url,
+                option_usize(&args, "--warmups", 3)?,
+                option_usize(&args, "--samples", 30)?,
+            )
+            .await?,
+        );
+    }
     if let Some(url) = option_value(&args, "--measure-specter-native-rfc9220-tunnel-close-url") {
         measured_competitor_rows.push(
             measure_specter_native_rfc9220_tunnel_close(
@@ -1248,6 +1319,14 @@ async fn measure_local_native_fixture(
             "tokio_quiche_rfc9220_tunnel" => {
                 let tunnel_url = fixture.tunnel_url();
                 measure_tokio_quiche_rfc9220_tunnel(&tunnel_url, warmups, samples).await
+            }
+            "quiche_direct_rfc9220_tunnel_close" => {
+                let tunnel_url = fixture.tunnel_url();
+                measure_quiche_direct_rfc9220_tunnel_close(&tunnel_url, warmups, samples).await
+            }
+            "tokio_quiche_rfc9220_tunnel_close" => {
+                let tunnel_url = fixture.tunnel_url();
+                measure_tokio_quiche_rfc9220_tunnel_close(&tunnel_url, warmups, samples).await
             }
             other => anyhow::bail!("unknown local native fixture client {other}"),
         }
