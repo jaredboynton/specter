@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **TCP-TLS session resumption and 0-RTT**: `BoringConnector` now caches `SslConnector` instances and stores TLS 1.3 session tickets in a host-keyed external cache via BoringSSL's new-session callback. Opt in to TCP 0-RTT with `ClientBuilder::http_tls_early_data(true)` for eligible GET/HEAD/OPTIONS H1 requests on fresh dials.
+- **Happy Eyeballs v2 (RFC 8305)**: Dual-stack connects now interleave IPv6/IPv4 attempts with a 250 ms stagger (configurable via `BoringConnector::happy_eyeballs_delay`).
+- **Python/Node DNS cache controls**: Bindings expose `hickory_dns(bool)`, `dns_cache_ttl(seconds)`, and `http_tls_early_data(bool)`.
+
+### Changed
+- **DNS cache default**: Resolver results are cached for 300 s by default. Pass `.hickory_dns(false)` (Rust) or `hickory_dns=False` (Python/Node) to restore per-request resolution.
+
+### Fixed
+- **HTTP/2 fingerprint PING bridge**: Chrome/Firefox `ping_interval` values now flow into `H2TransportConfig.keep_alive_interval` with `keep_alive_while_idle = true` when callers have not overridden the interval, so idle pooled H2 connections emit browser-like PING frames.
+
 ## [4.0.3] - 2026-05-25
 
 ### Fixed
