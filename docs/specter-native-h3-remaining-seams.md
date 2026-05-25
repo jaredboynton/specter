@@ -25,7 +25,6 @@ This is the current native H3 gap ledger. It is intentionally not a change log.
 
 | Priority | Gap | Current state | Next proof needed |
 |---|---|---|---|
-| P2 | TLS/H3 capture presets | Certificate compression, deterministic-vs-browser-permuted extension policy, raw ordered transport parameters, session replay, and 0-RTT controls exist. | Capture-derived raw transport-parameter presets and explicit extension-list ordering beyond BoringSSL permutation policy. |
 | P2 | Cross-protocol capacity policy | Native H3 streaming bodies and RFC9220 tunnels expose public capacity snapshots; internal byte-bounded H3 body/tunnel flow control and fair send scheduling exist. | Unified H1/H2/H3 capacity knobs and policy docs where API consumers need one cross-protocol control surface. |
 
 ## Closed Gaps / Regression Guards
@@ -40,7 +39,7 @@ Keep these under regression coverage; do not relist them as active gaps.
 | Fixture event classification | Fixture events serialize stable `category` and `fatal` fields; ignored post-application short-header packet-open noise is suppressed from logs and artifacts, while non-ignored packet errors remain serialized with `category` and `fatal`; current release artifacts have zero events. |
 | QUIC connection IDs | Required server transport parameters include original-destination, initial-source, and retry-source CIDs; server/client 1-RTT routing uses the expected CIDs. |
 | Retry and Version Negotiation | Retry integrity, Retry-driven Initial restart, VN-driven version selection/restart, loop guards, and no-overlap errors are implemented. |
-| PATH_CHALLENGE primitives | Client packetization and matching PATH_RESPONSE validation are implemented; remaining work is migration lifecycle, not token handling. |
+| PATH_CHALLENGE primitives | Client and server packetization, matching PATH_RESPONSE validation, and peer-address-bound migration validation are implemented. |
 | Post-handshake NEW_CONNECTION_ID | `NativeQuicServerHandshake::build_server_new_connection_id_packet` can issue migration CIDs after application keys, and the local same-fixture server advertises/registers a migration CID after HandshakeDone. |
 | Server-side path migration lifecycle | Server-side PATH_RESPONSE packetization, migrated-peer PATH_CHALLENGE issuance, peer-address-bound PATH_RESPONSE validation, and same-fixture peer promotion after validation are implemented. |
 | Driver anti-amplification gating | Native H3 driver records received bytes per path, promotes validated migrated paths, and routes outbound sends through RFC9000 § 8.1 budget checks for unvalidated paths. |
@@ -52,8 +51,8 @@ Keep these under regression coverage; do not relist them as active gaps.
 | ACK_ECN and ECN marking | ACK_ECN encode/decode, counter validation, CE growth tracking, congestion response, socket receive ECN reporting, and fingerprint-controlled outbound ECN marking are implemented. |
 | PMTU probing | Native H3 has probe policy, PING+PADDING probes, ACK-only promotion, and loss-driven search-ceiling reduction. |
 | ACK timer/decimation | Pending ACKs flush on `max_ack_delay_ms`; idle handling treats delayed ACKs as driver work. |
-| TLS features | Certificate compression, session-ticket capture/replay, `NativeH3SessionCache`, 0-RTT opt-in policy, and handshake-status reporting are wired. |
-| Raw ordered transport parameters | Caller-supplied raw ordered QUIC transport parameter lists encode in order with dynamic CID placeholders and pool-key separation. |
+| TLS/H3 capture presets | Certificate compression, deterministic-vs-browser-permuted extension policy, `TlsFingerprint::extension_order`, session-ticket capture/replay, `NativeH3SessionCache`, 0-RTT controls, and explicit Chrome/Firefox capture-ordered QUIC transport parameter presets are wired. |
+| Raw ordered transport parameters | Caller-supplied and browser preset raw ordered QUIC transport parameter lists encode in order with dynamic CID placeholders and pool-key separation. |
 | H3 scheduling/fairness | Request-body/tunnel DATA class rotation, per-stream rotation, adaptive DATA budgets, and origin-fair slow-path dispatch are implemented. |
 | Flow control/backpressure | Streaming responses and RFC9220 tunnels release receive credit on public byte consumption; RFC9220 outbound sends use byte permits and release them on transmit. |
 | H3/RFC9220 capacity metrics | `Body::h3_capacity()` reports native H3 streaming body buffer pressure; `H3Tunnel::capacity()` reports RFC9220 inbound/outbound byte-budget pressure. |
@@ -90,8 +89,7 @@ Unsupported RFC9220 capability-audit rows remain explicit non-comparators: `h3_q
 
 ## Next Execution Order
 
-1. Add capture-derived TLS/H3 presets for raw transport parameters and extension ordering where BoringSSL allows control.
-2. Design unified H1/H2/H3 capacity knobs only if API consumers need one cross-protocol control surface.
+1. Design unified H1/H2/H3 capacity knobs only if API consumers need one cross-protocol control surface.
 
 ## Validation Commands
 

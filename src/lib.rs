@@ -38,7 +38,7 @@ pub use timeouts::{recv_with_idle_timeout, Timeouts};
 pub use version::HttpVersion;
 pub use websocket::{
     CloseCode, CloseFrame, Message, WebSocket, WebSocketBuilder, WebSocketConfig, WebSocketError,
-    WebSocketResult,
+    WebSocketReader, WebSocketResult, WebSocketWriter,
 };
 
 // Transport re-exports
