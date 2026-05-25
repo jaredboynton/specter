@@ -5,6 +5,13 @@
 //! Specter provides HTTP/1.1, HTTP/2, and HTTP/3 support with BoringSSL-based
 //! TLS fingerprinting (JA3/JA4) across all protocols.
 
+// Opt-in mimalloc as the global allocator. Enabled via the `mimalloc`
+// feature; ships off by default so the system allocator continues to
+// govern downstream consumers that do not opt in.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 // Core modules
 pub mod auth;
 pub mod cache;

@@ -87,26 +87,32 @@ impl Url {
         })
     }
 
+    #[inline]
     pub fn as_str(&self) -> &str {
         &self.inner
     }
 
+    #[inline]
     pub fn scheme(&self) -> &str {
         self.uri.scheme_str().unwrap_or("")
     }
 
+    #[inline]
     pub fn path(&self) -> &str {
         self.uri.path()
     }
 
+    #[inline]
     pub fn query(&self) -> Option<&str> {
         self.uri.query()
     }
 
+    #[inline]
     pub fn port(&self) -> Option<u16> {
         self.uri.port_u16()
     }
 
+    #[inline]
     pub fn port_or_known_default(&self) -> Option<u16> {
         self.port().or_else(|| known_default_port(self.scheme()))
     }
@@ -116,6 +122,7 @@ impl Url {
         parse_host_port(authority).ok().map(|(host, _)| host)
     }
 
+    #[inline]
     pub fn host_str(&self) -> Option<&str> {
         self.host_str.as_deref()
     }

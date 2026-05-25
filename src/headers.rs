@@ -757,6 +757,7 @@ impl HeaderSpan {
     }
 }
 
+#[inline]
 fn name_eq_ignore_ascii_case(buf: &[u8], span: &HeaderSpan, name: &[u8]) -> bool {
     let header_name = span.name(buf);
     header_name.len() == name.len()
@@ -889,7 +890,7 @@ impl HeadersBuilder {
     pub fn build(self) -> Headers {
         Headers {
             buf: self.buf.freeze(),
-            spans: Arc::from(self.spans.into_boxed_slice()),
+            spans: Arc::new(self.spans),
         }
     }
 }
@@ -1048,7 +1049,7 @@ impl Headers {
 
     pub fn extend(&mut self, other: Headers) {
         // Materialise the source spans before borrowing self, since
-        // unshared_storage() takes a mutable borrow.
+        // `with_mut` takes a mutable borrow of self for the whole closure.
         let entries: Vec<(Bytes, Bytes)> = other
             .iter_bytes()
             .map(|(name, value)| {
@@ -1058,37 +1059,11 @@ impl Headers {
                 )
             })
             .collect();
-        let (buf, spans) = self.unshared_storage();
-        for (name, value) in &entries {
-            push_header_bytes(buf, spans, name, value);
-        }
-    }
-
-    /// Return uniquely-owned mutable storage. If this `Headers` shares its
-    /// buffer or span vector via a clone, this performs one copy to detach;
-    /// subsequent mutations on the same `Headers` instance are
-    /// allocation-free.
-    fn unshared_storage(&mut self) -> (&mut BytesMut, &mut Vec<HeaderSpan>) {
-        // Detach `buf` from any sharing.
-        let buf = std::mem::take(&mut self.buf);
-        let buf_mut = buf.try_into_mut().unwrap_or_else(|shared| {
-            let mut owned = BytesMut::with_capacity(shared.len().max(64));
-            owned.extend_from_slice(&shared);
-            owned
+        self.with_mut(|buf, spans| {
+            for (name, value) in &entries {
+                push_header_bytes(buf, spans, name, value);
+            }
         });
-        // We need the buf back in self for the rest of this function's
-        // borrow lifetime. Park it in a temporary BytesMut field via a
-        // re-entrant pattern: stash the BytesMut into a transient field
-        // and return a borrow. Since we can't add a transient field to
-        // Headers without changing layout, we exchange Bytes for a fresh
-        // Bytes containing the BytesMut data and store the BytesMut on
-        // the stack — but the borrow needs to outlive the function. The
-        // simpler workable pattern: store the BytesMut by leaking it into
-        // self.buf as a frozen Bytes and provide an in-band BytesMut only
-        // for the duration of the closure-style mutation. The cleanest
-        // approach instead is a separate `with_mut` helper below.
-        let _ = buf_mut;
-        unreachable!("unshared_storage must be paired with with_mut");
     }
 
     /// Apply a closure to uniquely-owned `BytesMut + Vec<HeaderSpan>` and
