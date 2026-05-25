@@ -1,6 +1,7 @@
 //! Native QUIC packet primitives for Specter's HTTP/3 transport.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use boring::hash::hmac_sha256;
@@ -156,23 +157,145 @@ pub struct RetryPacket {
     pub integrity_tag: [u8; RETRY_INTEGRITY_TAG_LEN],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuicConnectionIdEntry {
+    pub sequence_number: u64,
+    pub retire_prior_to: u64,
+    pub connection_id: ConnectionId,
+    pub stateless_reset_token: [u8; 16],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuicPendingPathValidation {
+    remote_address: Option<SocketAddr>,
+    connection_id_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuicPathState {
+    connection_id_sequence: u64,
+    validated: bool,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct QuicPathValidator {
-    pending: BTreeSet<[u8; 8]>,
+    pending: BTreeMap<[u8; 8], QuicPendingPathValidation>,
     validated: BTreeSet<[u8; 8]>,
+    paths: BTreeMap<SocketAddr, QuicPathState>,
+    connection_ids: BTreeMap<u64, QuicConnectionIdEntry>,
 }
 
 impl QuicPathValidator {
+    pub fn register_connection_id(
+        &mut self,
+        sequence_number: u64,
+        retire_prior_to: u64,
+        connection_id: ConnectionId,
+        stateless_reset_token: [u8; 16],
+    ) -> Result<()> {
+        if retire_prior_to > sequence_number {
+            return Err(Error::Quic(
+                "native QUIC NEW_CONNECTION_ID retire_prior_to exceeds sequence_number".into(),
+            ));
+        }
+        if connection_id.as_bytes().is_empty() {
+            return Err(Error::Quic(
+                "native QUIC NEW_CONNECTION_ID cannot carry an empty connection id".into(),
+            ));
+        }
+
+        let entry = QuicConnectionIdEntry {
+            sequence_number,
+            retire_prior_to,
+            connection_id,
+            stateless_reset_token,
+        };
+        if let Some(existing) = self.connection_ids.get(&sequence_number) {
+            if existing != &entry {
+                return Err(Error::Quic(
+                    "native QUIC NEW_CONNECTION_ID changed an existing sequence number".into(),
+                ));
+            }
+        }
+
+        self.connection_ids
+            .retain(|sequence, _| *sequence >= retire_prior_to);
+        self.paths
+            .retain(|_, path| path.connection_id_sequence >= retire_prior_to);
+        self.pending.retain(|_, pending| {
+            pending
+                .connection_id_sequence
+                .is_none_or(|sequence| sequence >= retire_prior_to)
+        });
+        self.connection_ids.insert(sequence_number, entry);
+        Ok(())
+    }
+
     pub fn path_challenge(&mut self, data: [u8; 8]) -> QuicFrame {
-        self.pending.insert(data);
+        self.pending
+            .insert(data, QuicPendingPathValidation::default());
         QuicFrame::PathChallenge(data)
     }
 
+    pub fn path_challenge_for_address(
+        &mut self,
+        remote_address: SocketAddr,
+        connection_id_sequence: u64,
+        data: [u8; 8],
+    ) -> Result<QuicFrame> {
+        if !self.connection_ids.contains_key(&connection_id_sequence) {
+            return Err(Error::Quic(
+                "native QUIC path migration requires an available connection id".into(),
+            ));
+        }
+        if self.pending.contains_key(&data) {
+            return Err(Error::Quic(
+                "native QUIC path challenge data is already pending".into(),
+            ));
+        }
+
+        self.pending.insert(
+            data,
+            QuicPendingPathValidation {
+                remote_address: Some(remote_address),
+                connection_id_sequence: Some(connection_id_sequence),
+            },
+        );
+        self.paths.insert(
+            remote_address,
+            QuicPathState {
+                connection_id_sequence,
+                validated: false,
+            },
+        );
+        Ok(QuicFrame::PathChallenge(data))
+    }
+
     pub fn on_path_response(&mut self, data: [u8; 8]) -> bool {
-        if !self.pending.remove(&data) {
+        let Some(pending) = self.pending.remove(&data) else {
+            return false;
+        };
+        self.validated.insert(data);
+        if let (Some(remote_address), Some(connection_id_sequence)) =
+            (pending.remote_address, pending.connection_id_sequence)
+        {
+            self.mark_path_validated(remote_address, connection_id_sequence);
+        }
+        true
+    }
+
+    pub fn on_path_response_from(&mut self, remote_address: SocketAddr, data: [u8; 8]) -> bool {
+        let Some(pending) = self.pending.get(&data).copied() else {
+            return false;
+        };
+        if pending.remote_address != Some(remote_address) {
             return false;
         }
+        self.pending.remove(&data);
         self.validated.insert(data);
+        if let Some(connection_id_sequence) = pending.connection_id_sequence {
+            self.mark_path_validated(remote_address, connection_id_sequence);
+        }
         true
     }
 
@@ -180,8 +303,32 @@ impl QuicPathValidator {
         self.validated.contains(data)
     }
 
+    pub fn is_address_validated(&self, remote_address: &SocketAddr) -> bool {
+        self.paths
+            .get(remote_address)
+            .is_some_and(|path| path.validated)
+    }
+
+    pub fn migration_connection_id(&self, remote_address: &SocketAddr) -> Option<&ConnectionId> {
+        let path = self.paths.get(remote_address)?;
+        if !path.validated {
+            return None;
+        }
+        self.connection_ids
+            .get(&path.connection_id_sequence)
+            .map(|entry| &entry.connection_id)
+    }
+
     pub fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+
+    fn mark_path_validated(&mut self, remote_address: SocketAddr, connection_id_sequence: u64) {
+        if let Some(path) = self.paths.get_mut(&remote_address) {
+            if path.connection_id_sequence == connection_id_sequence {
+                path.validated = true;
+            }
+        }
     }
 }
 
