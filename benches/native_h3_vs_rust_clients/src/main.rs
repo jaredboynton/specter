@@ -2690,18 +2690,18 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
     let stream_url = stream_url.to_owned();
     let tunnel_url = tunnel_url.to_owned();
 
-    let stream_task = {
+    let stream_handle = {
         let client = client.clone();
         let stream_url = stream_url.clone();
-        async move {
+        tokio::spawn(async move {
             measure_specter_native_http3_stream_with_client(&client, &stream_url, start).await
-        }
+        })
     };
 
-    let tunnel_task = {
+    let tunnel_handle = {
         let client = client.clone();
         let payload = payload.clone();
-        async move {
+        tokio::spawn(async move {
             let mut tunnel =
                 tokio::time::timeout(adapter_timeout(), client.websocket_h3(&tunnel_url).open())
                     .await
@@ -2748,11 +2748,21 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
 
             let _ = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes()).await;
             Ok::<_, anyhow::Error>(echoed)
-        }
+        })
     };
 
-    let ((stream_first_byte_ns, stream_bytes), echoed) =
-        tokio::try_join!(stream_task, tunnel_task)?;
+    let ((stream_first_byte_ns, stream_bytes), echoed) = tokio::try_join!(
+        async {
+            stream_handle
+                .await
+                .map_err(|error| anyhow::anyhow!("specter_native RFC 9220 mixed stream task failed: {error}"))?
+        },
+        async {
+            tunnel_handle
+                .await
+                .map_err(|error| anyhow::anyhow!("specter_native RFC 9220 mixed tunnel task failed: {error}"))?
+        }
+    )?;
 
     Ok(AdapterSample::new(
         stream_first_byte_ns,
@@ -5183,38 +5193,7 @@ mod tests {
 
     #[test]
     fn rfc9220_tunnel_requirement_flag_is_separate_from_http_requirement_flag() {
-        let measured_rows = vec![
-            super::BenchmarkRow {
-                competitor_id: "specter_native_rfc9220_tunnel".into(),
-                status: "measured_pass".into(),
-                p50_ttft_ns: Some(200_000.0),
-                p95_ttft_ns: Some(350_000.0),
-                bytes_per_sec: Some(4_000_000.0),
-                source: "specter_native_rfc9220_tunnel_adapter".into(),
-                sample_count: Some(100),
-                ..super::BenchmarkRow::default()
-            },
-            super::BenchmarkRow {
-                competitor_id: "quiche_direct_rfc9220_tunnel".into(),
-                status: "measured_pass".into(),
-                p50_ttft_ns: Some(2_700_000.0),
-                p95_ttft_ns: Some(2_850_000.0),
-                bytes_per_sec: Some(370_000.0),
-                source: "quiche_direct_rfc9220_tunnel_adapter".into(),
-                sample_count: Some(100),
-                ..super::BenchmarkRow::default()
-            },
-            super::BenchmarkRow {
-                competitor_id: "tokio_quiche_rfc9220_tunnel".into(),
-                status: "measured_pass".into(),
-                p50_ttft_ns: Some(4_000_000.0),
-                p95_ttft_ns: Some(4_600_000.0),
-                bytes_per_sec: Some(235_000.0),
-                source: "tokio_quiche_rfc9220_tunnel_adapter".into(),
-                sample_count: Some(100),
-                ..super::BenchmarkRow::default()
-            },
-        ];
+        let measured_rows = rfc9220_full_suite_passing_rows();
         let artifact =
             super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &measured_rows);
 
