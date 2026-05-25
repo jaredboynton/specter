@@ -2096,9 +2096,11 @@ impl NativeH3Driver {
             return Ok(());
         }
 
-        let events = self
-            .handshake
-            .open_server_h3_event_packet_from_with_ecn(datagram, remote_address, ecn_mark)?;
+        let events = self.handshake.open_server_h3_event_packet_from_with_ecn(
+            datagram,
+            remote_address,
+            ecn_mark,
+        )?;
         self.promote_peer_address_if_validated(remote_address);
         self.drain_session_tickets();
         if let Some(packet) = self
