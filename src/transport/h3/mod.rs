@@ -16,8 +16,8 @@ pub mod tls;
 mod tunnel;
 pub(crate) mod udp_ecn;
 
-pub(crate) use body::{H3Body, H3BodyTimeouts, DEFAULT_H3_BODY_SLOT_CAPACITY};
 pub use body::H3BodyCapacity;
+pub(crate) use body::{H3Body, H3BodyTimeouts, DEFAULT_H3_BODY_SLOT_CAPACITY};
 pub use command::DriverCommand;
 pub use connection::H3Connection;
 pub(crate) use dispatcher::H3Dispatcher;

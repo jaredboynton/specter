@@ -116,8 +116,14 @@ impl H3TunnelCredit {
     }
 
     pub(crate) fn capacity(&self) -> H3TunnelCapacity {
-        let outbound_available_bytes = self.send_semaphore.available_permits().min(self.send_budget);
-        let inbound_available_bytes = self.recv_semaphore.available_permits().min(self.recv_budget);
+        let outbound_available_bytes = self
+            .send_semaphore
+            .available_permits()
+            .min(self.send_budget);
+        let inbound_available_bytes = self
+            .recv_semaphore
+            .available_permits()
+            .min(self.recv_budget);
         H3TunnelCapacity {
             outbound_budget: self.send_budget,
             outbound_available_bytes,
