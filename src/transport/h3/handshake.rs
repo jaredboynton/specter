@@ -1983,6 +1983,31 @@ impl NativeQuicServerHandshake {
         self.build_server_application_control_packet(QuicFrame::HandshakeDone)
     }
 
+    pub fn build_server_new_connection_id_packet(
+        &mut self,
+        sequence_number: u64,
+        retire_prior_to: u64,
+        connection_id: ConnectionId,
+        stateless_reset_token: [u8; 16],
+    ) -> Result<ServerApplicationControlPacket> {
+        if connection_id.as_bytes().is_empty() {
+            return Err(Error::Quic(
+                "native QUIC NEW_CONNECTION_ID cannot carry an empty connection id".into(),
+            ));
+        }
+        if retire_prior_to > sequence_number {
+            return Err(Error::Quic(
+                "native QUIC NEW_CONNECTION_ID retire_prior_to exceeds sequence_number".into(),
+            ));
+        }
+        self.build_server_application_control_packet(QuicFrame::NewConnectionId {
+            sequence_number,
+            retire_prior_to,
+            connection_id: Bytes::copy_from_slice(connection_id.as_bytes()),
+            stateless_reset_token,
+        })
+    }
+
     pub fn build_server_h3_raw_stream_packet(
         &mut self,
         stream_id: u64,

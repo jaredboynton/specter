@@ -78,15 +78,15 @@ impl HttpCache {
                 0
             };
 
-            if ttl == 0 {
+            let etag = response.get_header("etag").map(|s| s.to_string());
+            let last_modified = response.get_header("last-modified").map(|s| s.to_string());
+
+            if ttl == 0 && etag.is_none() && last_modified.is_none() {
                 // No implicit caching for now unless heuristics added
                 return;
             }
 
             let expires = SystemTime::now() + Duration::from_secs(ttl);
-
-            let etag = response.get_header("etag").map(|s| s.to_string());
-            let last_modified = response.get_header("last-modified").map(|s| s.to_string());
 
             let entry = CacheEntry {
                 response: response.clone(),

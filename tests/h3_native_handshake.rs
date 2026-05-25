@@ -521,6 +521,42 @@ fn native_h3_server_handshake_packetizes_handshake_done() {
 }
 
 #[test]
+fn native_h3_server_issues_post_handshake_connection_id_for_migration() {
+    let (_, mut client, mut server) = completed_native_server_handshake();
+    let migration_cid = ConnectionId::from_static(b"server-migrate");
+    let stateless_reset_token = [0x5c; 16];
+
+    let packet = server
+        .build_server_new_connection_id_packet(1, 0, migration_cid.clone(), stateless_reset_token)
+        .unwrap();
+    let frames = client
+        .open_server_application_packet(packet.packet.as_ref())
+        .unwrap();
+
+    assert_eq!(
+        frames,
+        vec![QuicFrame::NewConnectionId {
+            sequence_number: 1,
+            retire_prior_to: 0,
+            connection_id: Bytes::copy_from_slice(migration_cid.as_bytes()),
+            stateless_reset_token,
+        }]
+    );
+
+    let migrated_address = SocketAddr::from(([198, 51, 100, 44], 4433));
+    let challenge = *b"POSTCID!";
+    let challenge_packet = client
+        .build_client_path_challenge_packet_for_address(migrated_address, 1, challenge)
+        .unwrap();
+
+    assert_eq!(
+        &challenge_packet.packet[1..1 + migration_cid.as_bytes().len()],
+        migration_cid.as_bytes(),
+        "client path validation should use the post-handshake server-issued CID"
+    );
+}
+
+#[test]
 fn native_h3_client_opens_server_packet_after_one_rtt_key_update() {
     let fingerprint = Http3Fingerprint::chrome();
     let client_destination_cid = ConnectionId::from_static(b"server-dcid");

@@ -68,7 +68,7 @@ fn test_cache_revalidation_etag() {
     let response = Response::new(
         200,
         Headers::from(vec![
-            ("Cache-Control".to_string(), "max-age=1".to_string()), // Expire quickly
+            ("Cache-Control".to_string(), "max-age=0".to_string()),
             ("ETag".to_string(), "\"12345\"".to_string()),
         ]),
         Bytes::from("data"),
@@ -76,11 +76,6 @@ fn test_cache_revalidation_etag() {
     );
 
     cache.store(url, &response);
-
-    // Simulate passage of time (mocking not easy with SystemTime, relying on short processing
-    // or manual modification if possible, but fields private.
-    // We'll rely on explicit sleep for 1.1s for test simplicity)
-    std::thread::sleep(std::time::Duration::from_millis(1100));
 
     let cached = cache.get(&Method::GET, url);
     match cached {

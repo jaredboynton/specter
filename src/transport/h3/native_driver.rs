@@ -1058,6 +1058,9 @@ impl NativeH3Driver {
                 .max(1200)
         ];
         loop {
+            if self.state.peer_settings_received() && !self.pending_commands.is_empty() {
+                self.process_pending_commands().await?;
+            }
             let sent_scheduled_data = self.flush_scheduled_send_work().await?;
             self.flush_tunnel_inbound();
             self.flush_streaming_responses();
@@ -1070,7 +1073,12 @@ impl NativeH3Driver {
             }
             self.send_client_pmtu_probe_if_available().await?;
             if sent_scheduled_data && self.has_outbound_send_work() {
-                continue;
+                if self.command_rx.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+                if self.command_rx.is_empty() {
+                    continue;
+                }
             }
             let has_pending_work = self.has_pending_work();
             if self.last_activity.elapsed() > self.max_idle_timeout && !has_pending_work {
@@ -1111,7 +1119,10 @@ impl NativeH3Driver {
                 command = self.command_rx.recv() => {
                     self.last_activity = Instant::now();
                     match command {
-                        Some(command) => self.handle_command(command).await?,
+                        Some(command) => {
+                            self.handle_command(command).await?;
+                            self.drain_ready_tunnel_data_commands();
+                        }
                         None => {
                             self.send_connection_close(0x00, Bytes::from_static(b"Client shutdown"))
                                 .await?;
@@ -1664,10 +1675,25 @@ impl NativeH3Driver {
                 stream_id,
                 outbound,
             } => {
-                self.send_tunnel_data(stream_id, outbound).await?;
+                self.send_tunnel_data(stream_id, outbound);
             }
         }
         Ok(())
+    }
+
+    fn drain_ready_tunnel_data_commands(&mut self) {
+        while let Ok(command) = self.command_rx.try_recv() {
+            match command {
+                DriverCommand::SendTunnelData {
+                    stream_id,
+                    outbound,
+                } => self.enqueue_tunnel_data(stream_id, outbound),
+                command => {
+                    self.pending_commands.push_back(command);
+                    break;
+                }
+            }
+        }
     }
 
     async fn queue_flow_control_blocked_command(&mut self, command: DriverCommand) -> Result<()> {
@@ -1696,9 +1722,13 @@ impl NativeH3Driver {
         Ok(())
     }
 
-    async fn send_tunnel_data(&mut self, stream_id: u64, outbound: H3TunnelOutbound) -> Result<()> {
+    fn send_tunnel_data(&mut self, stream_id: u64, outbound: H3TunnelOutbound) {
+        self.enqueue_tunnel_data(stream_id, outbound);
+    }
+
+    fn enqueue_tunnel_data(&mut self, stream_id: u64, outbound: H3TunnelOutbound) {
         let Some(tunnel) = self.pending_tunnels.get_mut(&stream_id) else {
-            return Ok(());
+            return;
         };
         tunnel
             .pending_outbound
@@ -1706,8 +1736,6 @@ impl NativeH3Driver {
                 outbound,
                 self.transport_config.tunnel_outbound_byte_budget,
             ));
-        self.flush_scheduled_send_work().await?;
-        Ok(())
     }
 
     async fn flush_scheduled_send_work(&mut self) -> Result<bool> {

@@ -12,7 +12,6 @@ mod helpers;
 use bytes::Bytes;
 use helpers::mock_server::MockHttpServer;
 use specter::Client;
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
