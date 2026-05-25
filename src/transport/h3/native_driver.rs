@@ -1734,13 +1734,11 @@ impl NativeH3Driver {
     }
 
     async fn flush_scheduled_send_work(&mut self) -> Result<bool> {
-        let classes = self
-            .send_scheduler
-            .next_classes(
-                self.has_control_work(),
-                self.has_request_body_work(),
-                self.has_tunnel_data_work(),
-            );
+        let classes = self.send_scheduler.next_classes(
+            self.has_control_work(),
+            self.has_request_body_work(),
+            self.has_tunnel_data_work(),
+        );
 
         for class in classes {
             let progressed_stream = match class {
@@ -2186,7 +2184,11 @@ impl NativeH3Driver {
         self.send_packet_to_path(self.peer_addr, packet).await
     }
 
-    async fn send_packet_to_path(&mut self, remote_address: SocketAddr, packet: &[u8]) -> Result<()> {
+    async fn send_packet_to_path(
+        &mut self,
+        remote_address: SocketAddr,
+        packet: &[u8],
+    ) -> Result<()> {
         if !self.can_send_to_path(remote_address, packet.len()) {
             return Err(Error::Quic(
                 "native QUIC anti-amplification budget exhausted for unvalidated path".into(),
@@ -2580,7 +2582,11 @@ impl NativeH3Driver {
                 let tunnel_outbound_tx = self.tunnel_outbound_tx.clone();
                 tokio::spawn(async move {
                     while let Some(outbound) = outbound_rx.recv().await {
-                        if tunnel_outbound_tx.send((stream_id, outbound)).await.is_err() {
+                        if tunnel_outbound_tx
+                            .send((stream_id, outbound))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -2672,6 +2678,43 @@ mod tests {
             scheduler.next_classes(false, true, true),
             [H3SendClass::RequestBody, H3SendClass::TunnelData],
             "request bodies must regain the next class turn after tunnel progress"
+        );
+    }
+
+    #[test]
+    fn send_scheduler_prioritizes_control_without_perturbing_data_rotation() {
+        let mut scheduler = H3SendScheduler::default();
+
+        assert_eq!(
+            scheduler.next_classes(true, true, true),
+            [
+                H3SendClass::Control,
+                H3SendClass::RequestBody,
+                H3SendClass::TunnelData,
+            ],
+            "fresh request/tunnel control packets must drain before DATA classes"
+        );
+
+        scheduler.record_stream_progress(H3SendClass::Control, 0);
+        assert_eq!(
+            scheduler.next_classes(true, true, true),
+            [
+                H3SendClass::Control,
+                H3SendClass::RequestBody,
+                H3SendClass::TunnelData,
+            ],
+            "control progress must not consume a DATA-class fairness turn"
+        );
+
+        scheduler.record_stream_progress(H3SendClass::RequestBody, 4);
+        assert_eq!(
+            scheduler.next_classes(true, true, true),
+            [
+                H3SendClass::Control,
+                H3SendClass::TunnelData,
+                H3SendClass::RequestBody,
+            ],
+            "control priority must preserve the next DATA-class turn after request-body progress"
         );
     }
 

@@ -321,6 +321,203 @@ fn native_h3_driver_schedules_request_body_and_tunnel_data_fairly() {
 }
 
 #[test]
+fn native_h3_driver_keeps_tunnel_data_off_control_command_queue() {
+    let command =
+        std::fs::read_to_string("src/transport/h3/command.rs").expect("command source");
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let spawn = driver
+        .split("pub fn spawn_native_h3_driver")
+        .nth(1)
+        .expect("native H3 driver spawn")
+        .split("struct NativeH3Driver")
+        .next()
+        .expect("native H3 driver spawn section");
+    let select_loop = driver
+        .split("tokio::select!")
+        .nth(1)
+        .expect("native H3 driver select loop")
+        .split("fn has_pending_work")
+        .next()
+        .expect("native H3 driver select section");
+    let tunnel_event = driver
+        .split("fn apply_tunnel_event")
+        .nth(1)
+        .expect("native H3 driver tunnel event path")
+        .split("fn apply_reset_event")
+        .next()
+        .expect("native H3 tunnel event section");
+    let handle_command = driver
+        .split("async fn handle_command")
+        .nth(1)
+        .expect("native H3 driver command handler")
+        .split("async fn queue_flow_control_blocked_command")
+        .next()
+        .expect("native H3 command handler section");
+
+    assert!(
+        !command.contains("SendTunnelData"),
+        "RFC 9220 tunnel DATA must not be a DriverCommand variant"
+    );
+    assert!(
+        spawn.contains("mpsc::channel::<(u64, H3TunnelOutbound)>(32)"),
+        "native H3 driver must allocate a dedicated tunnel outbound channel"
+    );
+    assert!(
+        select_loop.contains("tunnel_outbound_rx.recv()")
+            && select_loop.contains("send_tunnel_data(stream_id, outbound)"),
+        "driver select loop must drain tunnel DATA from the dedicated channel"
+    );
+    assert!(
+        tunnel_event.contains("tunnel_outbound_tx.send((stream_id, outbound))"),
+        "public tunnel writer must forward DATA through the dedicated tunnel outbound channel"
+    );
+    assert!(
+        handle_command.contains("pending_control_packets")
+            && handle_command.contains("push_back((packet.stream_id, packet.packet))"),
+        "fresh request and tunnel-open packets must enqueue on the strict-priority control queue"
+    );
+}
+
+#[test]
+fn native_h3_driver_serves_control_frames_ahead_of_in_flight_tunnel_data() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+
+    assert!(
+        driver.contains("enum H3SendClass")
+            && driver.contains("Control")
+            && driver.contains("RequestBody")
+            && driver.contains("TunnelData"),
+        "H3SendClass must carry a strict-priority Control variant so HEADERS frames cannot \
+         sit behind in-flight tunnel DATA"
+    );
+
+    let next_classes = driver
+        .split("fn next_classes")
+        .nth(1)
+        .expect("scheduler must define next_classes")
+        .split("fn ordered_streams")
+        .next()
+        .expect("next_classes section");
+    let control_pos = next_classes
+        .find("H3SendClass::Control")
+        .expect("next_classes must push Control");
+    let request_pos = next_classes
+        .find("H3SendClass::RequestBody")
+        .unwrap_or(usize::MAX);
+    let tunnel_pos = next_classes
+        .find("H3SendClass::TunnelData")
+        .unwrap_or(usize::MAX);
+    assert!(
+        control_pos < request_pos && control_pos < tunnel_pos,
+        "next_classes must push Control ahead of both data classes for strict priority"
+    );
+
+    let flush_scheduled = driver
+        .split("async fn flush_scheduled_send_work")
+        .nth(1)
+        .expect("driver must have flush_scheduled_send_work")
+        .split("async fn flush_pending_control_packet_once")
+        .next()
+        .expect("flush_scheduled_send_work section");
+    assert!(
+        flush_scheduled.contains("has_control_work"),
+        "flush_scheduled_send_work must consult has_control_work() so pending HEADERS are flushed"
+    );
+    assert!(
+        flush_scheduled.contains("flush_pending_control_packet_once"),
+        "flush_scheduled_send_work must drain pending control packets via \
+         flush_pending_control_packet_once"
+    );
+
+    let flush_control = driver
+        .split("async fn flush_pending_control_packet_once")
+        .nth(1)
+        .expect("driver must define flush_pending_control_packet_once")
+        .split("async fn flush_pending_tunnel_data_once")
+        .next()
+        .expect("flush_pending_control_packet_once section");
+    assert!(
+        flush_control.contains("pending_control_packets.pop_front()")
+            && flush_control.contains("send_packet_to_peer"),
+        "flush_pending_control_packet_once must pop a queued control packet and emit it to the peer"
+    );
+
+    for command in [
+        "DriverCommand::SendRequest",
+        "DriverCommand::SendStreamingRequest",
+        "DriverCommand::OpenWebSocketTunnel",
+    ] {
+        let arm = driver
+            .split(command)
+            .nth(1)
+            .unwrap_or_else(|| panic!("handle_command must include arm for {command}"));
+        let arm_section = arm.split("DriverCommand::").next().unwrap_or(arm);
+        assert!(
+            arm_section.contains("pending_control_packets.push_back"),
+            "{command} arm must queue its HEADERS packet on pending_control_packets instead of \
+             sending synchronously"
+        );
+    }
+}
+
+#[test]
+fn native_h3_driver_routes_tunnel_outbound_off_command_channel() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+
+    assert!(
+        driver.contains("tunnel_outbound_tx: mpsc::Sender<(u64, H3TunnelOutbound)>")
+            && driver.contains("tunnel_outbound_rx: mpsc::Receiver<(u64, H3TunnelOutbound)>"),
+        "driver must own a dedicated tunnel-outbound mpsc so SendTunnelData traffic does not \
+         queue behind control commands on command_rx"
+    );
+
+    let drive_loop = driver
+        .split("async fn drive_loop")
+        .nth(1)
+        .expect("driver must have drive_loop")
+        .split("fn has_pending_work")
+        .next()
+        .expect("drive_loop section");
+    let select_idx = drive_loop
+        .find("tokio::select!")
+        .expect("drive_loop must use tokio::select!");
+    let after_select = &drive_loop[select_idx..];
+    let biased_idx = after_select
+        .find("biased")
+        .expect("drive_loop select must be biased so command_rx wins");
+    let command_idx = after_select
+        .find("self.command_rx.recv()")
+        .expect("drive_loop must poll command_rx in its select");
+    let tunnel_idx = after_select
+        .find("self.tunnel_outbound_rx.recv()")
+        .expect("drive_loop must poll tunnel_outbound_rx in its select");
+    assert!(
+        biased_idx < command_idx && command_idx < tunnel_idx,
+        "biased select must place command_rx ahead of tunnel_outbound_rx so a streaming-request \
+         command is dequeued before any further tunnel DATA"
+    );
+
+    let apply_tunnel = driver
+        .split("fn apply_tunnel_event")
+        .nth(1)
+        .expect("driver must apply tunnel events")
+        .split("fn push_streaming_body")
+        .next()
+        .expect("apply_tunnel_event section");
+    assert!(
+        apply_tunnel.contains("tunnel_outbound_tx.send((stream_id, outbound))"),
+        "per-tunnel forwarder must push outbound DATA onto tunnel_outbound_tx, not command_tx"
+    );
+    assert!(
+        !apply_tunnel.contains("DriverCommand::SendTunnelData"),
+        "per-tunnel forwarder must not wrap outbound DATA in a DriverCommand (removed in suite-gate refactor)"
+    );
+}
+
+#[test]
 fn native_h3_driver_releases_tunnel_outbound_credit_per_wire_chunk() {
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
