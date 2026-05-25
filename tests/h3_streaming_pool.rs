@@ -523,6 +523,7 @@ async fn h3_pool_evicts_closed_or_draining_connections() {
     });
 
     let client = H3Client::new().danger_accept_invalid_certs(true);
+    let first_handle = client.handle(&url).await.unwrap();
 
     let mut resp1 = client
         .send_streaming(&url, "GET", vec![], RequestBody::Empty)
@@ -541,13 +542,21 @@ async fn h3_pool_evicts_closed_or_draining_connections() {
         bytes::Bytes::from_static(b"first")
     );
 
-    // Give background driver a tiny moment to process GOAWAY
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !first_handle.is_draining() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first H3 handle should observe GOAWAY and enter draining");
 
-    let mut resp2 = client
-        .send_streaming(&url, "GET", vec![], RequestBody::Empty)
-        .await
-        .unwrap();
+    let mut resp2 = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.send_streaming(&url, "GET", vec![], RequestBody::Empty),
+    )
+    .await
+    .expect("second request should open a fresh H3 connection")
+    .unwrap();
     assert_eq!(resp2.status(), 200);
     assert_eq!(
         resp2
