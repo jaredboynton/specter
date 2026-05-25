@@ -169,6 +169,11 @@ check-lib:
 
     cargo check --lib --locked
 
+# Check release lockfiles and BoringSSL prebuild metadata resolution
+[group('quality')]
+check-release-lockfiles:
+    ./scripts/check-release-lockfiles.sh
+
 # Incremental check for changed files only; never runs `cargo check --tests`
 [group('build')]
 check-changed base="main":

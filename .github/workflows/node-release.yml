@@ -18,7 +18,20 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
+  preflight:
+    name: Release lockfile preflight
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check release lockfiles
+        run: ./scripts/check-release-lockfiles.sh
+
   build:
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -131,6 +144,7 @@ jobs:
 
   test:
     name: Test bindings
+    needs: preflight
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4

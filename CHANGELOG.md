@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.2] - 2026-05-25
+
+### Fixed
+- **Node/Python release lockfile preflight**: Refreshed binding lockfiles after the root `libc` dependency addition and added a release-lockfile preflight so stale binding lockfiles fail once before release matrix builds fan out.
+- **BoringSSL prebuilt installer version resolution**: Resolved the `boring-sys` prebuild tag from checked-in Cargo lockfiles instead of invoking full Cargo dependency resolution, avoiding unrelated `--locked` metadata failures during prebuilt installation.
+
 ### Added
 - **Native QUIC server path migration lifecycle**: `NativeQuicServerHandshake` now tracks locally issued and peer-issued CIDs in `QuicConnectionIdInventory`, decrypts inbound 1-RTT packets via longest-prefix local CID matching, registers post-handshake `NEW_CONNECTION_ID` frames before packetization, rotates outbound DCIDs through the peer inventory, emits RFC 9000 § 8.2.1 padded PATH_CHALLENGE/PATH_RESPONSE datagrams (>= 1200 bytes), closes with `CONNECTION_MIGRATION` (0x0a) when active migration is disabled, and exposes server path-validation helpers. `NativeQuicHandshake` now issues client-side post-handshake `NEW_CONNECTION_ID` frames via `build_client_new_connection_id_packet`. `QuicServerPathRuntime` in `src/transport/h3/path.rs` drives mock-server primary vs probing peer promotion with anti-amplification send gating. Coverage lives in `tests/h3_native_handshake.rs`, `tests/h3_native_path_migration.rs`, `src/transport/h3/path.rs::tests`, and `tests/helpers/mock_h3_server.rs`.
 

@@ -24,6 +24,9 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Check release lockfiles
+        run: ./scripts/check-release-lockfiles.sh
+
       - uses: mozilla-actions/sccache-action@v0.0.9
       - run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 

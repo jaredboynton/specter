@@ -21,6 +21,7 @@ OPTIONS:
     --manifest-path <path>   Resolve the release tag from this Cargo manifest
     --version <tag>          Override release tag, e.g. v4.22.0
     --repo <owner/repo>      Override prebuilt repo
+    --print-version          Print the resolved release tag and exit
 EOF
 }
 
@@ -39,16 +40,44 @@ detect_boring_sys_version() {
         return 0
     fi
     [[ -f "$BORING_SYS_MANIFEST" ]] || error "Manifest not found: $BORING_SYS_MANIFEST"
-    env -u RUSTC_WRAPPER -u CARGO_INCREMENTAL \
-        cargo metadata --format-version 1 --locked --manifest-path "$BORING_SYS_MANIFEST" \
-        | python3 -c 'import json,sys
-data=json.load(sys.stdin)
-for p in data.get("packages",[]):
-    if p.get("name")=="boring-sys":
-        print(p.get("version",""))
-        break
-else:
-    raise SystemExit("boring-sys not found in cargo metadata")'
+
+    local manifest_dir lockfile
+    manifest_dir="$(cd "$(dirname "$BORING_SYS_MANIFEST")" && pwd)"
+    if [[ -f "$manifest_dir/Cargo.lock" ]]; then
+        lockfile="$manifest_dir/Cargo.lock"
+    elif [[ -f "$PROJECT_ROOT/Cargo.lock" ]]; then
+        lockfile="$PROJECT_ROOT/Cargo.lock"
+    else
+        error "No Cargo.lock found for manifest: $BORING_SYS_MANIFEST"
+    fi
+
+    python3 - "$lockfile" <<'PY'
+import sys
+
+lockfile = sys.argv[1]
+name = None
+version = None
+
+with open(lockfile, encoding="utf-8") as fh:
+    for raw_line in fh:
+        line = raw_line.strip()
+        if line == "[[package]]":
+            if name == "boring-sys" and version:
+                print(version)
+                raise SystemExit(0)
+            name = None
+            version = None
+        elif line.startswith("name = "):
+            name = line.split("=", 1)[1].strip().strip('"')
+        elif line.startswith("version = "):
+            version = line.split("=", 1)[1].strip().strip('"')
+
+if name == "boring-sys" and version:
+    print(version)
+    raise SystemExit(0)
+
+raise SystemExit(f"boring-sys not found in {lockfile}")
+PY
 }
 
 checksum() {
@@ -65,10 +94,15 @@ checksum() {
 
 main() {
     local target=""
+    local print_version=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --help|-h) usage; exit 0 ;;
+            --print-version)
+                print_version=1
+                shift
+                ;;
             --manifest-path)
                 [[ $# -ge 2 ]] || error "--manifest-path requires a path"
                 set_manifest "$2"
@@ -93,12 +127,17 @@ main() {
         esac
     done
 
-    [[ -n "$target" ]] || error "Missing target"
-
     if [[ -z "$BSSL_PREBUILD_VERSION" ]]; then
         BSSL_PREBUILD_VERSION="v$(detect_boring_sys_version)"
     fi
     [[ "$BSSL_PREBUILD_VERSION" == v* ]] || BSSL_PREBUILD_VERSION="v$BSSL_PREBUILD_VERSION"
+
+    if [[ "$print_version" -eq 1 ]]; then
+        echo "$BSSL_PREBUILD_VERSION"
+        exit 0
+    fi
+
+    [[ -n "$target" ]] || error "Missing target"
 
     local asset="bssl-$target.tar.gz"
     local base_url="https://github.com/$BSSL_PREBUILD_REPO/releases/download/$BSSL_PREBUILD_VERSION"

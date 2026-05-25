@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "specter-python"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1199,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "specters"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "atomic-waker",
  "base64",
@@ -1216,6 +1216,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "libc",
  "parking_lot",
  "pin-project-lite",
  "psl",
