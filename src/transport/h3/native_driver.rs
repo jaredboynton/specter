@@ -736,7 +736,6 @@ pub fn spawn_native_h3_driver(
         pending_responses.insert(pending.stream_id, pending.response_tx);
     }
     let driver = NativeH3Driver {
-        command_tx: command_tx.clone(),
         command_rx,
         tunnel_outbound_tx,
         tunnel_outbound_rx,
@@ -781,8 +780,12 @@ pub fn spawn_native_h3_driver(
 }
 
 struct NativeH3Driver {
-    command_tx: mpsc::Sender<DriverCommand>,
     command_rx: mpsc::Receiver<DriverCommand>,
+    /// Dedicated channel for outbound RFC 9220 tunnel DATA. Bypasses
+    /// `command_rx` so a streaming-request or tunnel-open command never
+    /// queues behind a burst of in-flight tunnel writes.
+    tunnel_outbound_tx: mpsc::Sender<(u64, H3TunnelOutbound)>,
+    tunnel_outbound_rx: mpsc::Receiver<(u64, H3TunnelOutbound)>,
     handshake: NativeQuicHandshake,
     fingerprint: Http3Fingerprint,
     socket: Arc<UdpSocket>,
@@ -793,6 +796,12 @@ struct NativeH3Driver {
     pending_streaming_responses: HashMap<u64, NativeDriverStreamingResponseState>,
     pending_tunnels: HashMap<u64, NativeDriverTunnelState>,
     pending_commands: VecDeque<DriverCommand>,
+    /// Strict-priority HEADERS/control packet queue. `handle_command`
+    /// builds the wire packet for streaming-request and tunnel-open
+    /// commands and queues it here; the scheduler drains this ahead of any
+    /// DATA-class flush so a freshly-issued request never sits behind
+    /// in-flight tunnel/request body bytes.
+    pending_control_packets: VecDeque<(u64, Bytes)>,
     send_scheduler: H3SendScheduler,
     is_draining: Arc<std::sync::atomic::AtomicBool>,
     closing_connection_close_packet: Option<Bytes>,
@@ -1163,6 +1172,12 @@ impl NativeH3Driver {
                         }
                     }
                 }
+                tunnel_outbound = self.tunnel_outbound_rx.recv() => {
+                    self.last_activity = Instant::now();
+                    if let Some((stream_id, outbound)) = tunnel_outbound {
+                        self.send_tunnel_data(stream_id, outbound).await?;
+                    }
+                }
                 recv = recv_from_with_ecn(&self.socket, &mut buf), if !receive_paused_for_body => {
                     self.last_activity = Instant::now();
                     let received = recv.map_err(Error::Io)?;
@@ -1224,7 +1239,11 @@ impl NativeH3Driver {
     }
 
     fn has_outbound_send_work(&self) -> bool {
-        self.has_request_body_work() || self.has_tunnel_data_work()
+        self.has_control_work() || self.has_request_body_work() || self.has_tunnel_data_work()
+    }
+
+    fn has_control_work(&self) -> bool {
+        !self.pending_control_packets.is_empty()
     }
 
     fn has_request_body_work(&self) -> bool {
@@ -1522,7 +1541,8 @@ impl NativeH3Driver {
                 };
                 self.state.track_response_stream(packet.stream_id);
                 self.pending_responses.insert(packet.stream_id, response_tx);
-                self.send_packet_to_peer(packet.packet.as_ref()).await?;
+                self.pending_control_packets
+                    .push_back((packet.stream_id, packet.packet));
             }
             DriverCommand::SendStreamingRequest {
                 method,
@@ -1609,8 +1629,8 @@ impl NativeH3Driver {
                         request_stream,
                     ),
                 );
-                self.send_packet_to_peer(packet.packet.as_ref()).await?;
-                self.flush_scheduled_send_work().await?;
+                self.pending_control_packets
+                    .push_back((packet.stream_id, packet.packet));
             }
             DriverCommand::OpenWebSocketTunnel {
                 uri,
@@ -1669,13 +1689,8 @@ impl NativeH3Driver {
                         self.transport_config.tunnel_inbound_byte_budget,
                     ),
                 );
-                self.send_packet_to_peer(packet.packet.as_ref()).await?;
-            }
-            DriverCommand::SendTunnelData {
-                stream_id,
-                outbound,
-            } => {
-                self.send_tunnel_data(stream_id, outbound).await?;
+                self.pending_control_packets
+                    .push_back((packet.stream_id, packet.packet));
             }
         }
         Ok(())
@@ -1721,11 +1736,15 @@ impl NativeH3Driver {
     async fn flush_scheduled_send_work(&mut self) -> Result<bool> {
         let classes = self
             .send_scheduler
-            .next_classes(false, self.has_request_body_work(), self.has_tunnel_data_work());
+            .next_classes(
+                self.has_control_work(),
+                self.has_request_body_work(),
+                self.has_tunnel_data_work(),
+            );
 
         for class in classes {
             let progressed_stream = match class {
-                H3SendClass::Control => None,
+                H3SendClass::Control => self.flush_pending_control_packet_once().await?,
                 H3SendClass::RequestBody => self.flush_request_stream_bodies_once().await?,
                 H3SendClass::TunnelData => self.flush_pending_tunnel_data_once().await?,
             };
@@ -1736,6 +1755,14 @@ impl NativeH3Driver {
         }
 
         Ok(false)
+    }
+
+    async fn flush_pending_control_packet_once(&mut self) -> Result<Option<u64>> {
+        let Some((stream_id, packet)) = self.pending_control_packets.pop_front() else {
+            return Ok(None);
+        };
+        self.send_packet_to_peer(packet.as_ref()).await?;
+        Ok(Some(stream_id))
     }
 
     async fn flush_pending_tunnel_data_once(&mut self) -> Result<Option<u64>> {
@@ -2550,17 +2577,10 @@ impl NativeH3Driver {
                 let Some(mut outbound_rx) = tunnel.outbound_rx.take() else {
                     return;
                 };
-                let command_tx = self.command_tx.clone();
+                let tunnel_outbound_tx = self.tunnel_outbound_tx.clone();
                 tokio::spawn(async move {
                     while let Some(outbound) = outbound_rx.recv().await {
-                        if command_tx
-                            .send(DriverCommand::SendTunnelData {
-                                stream_id,
-                                outbound,
-                            })
-                            .await
-                            .is_err()
-                        {
+                        if tunnel_outbound_tx.send((stream_id, outbound)).await.is_err() {
                             break;
                         }
                     }
@@ -2985,7 +3005,8 @@ mod tests {
             TunnelInboundStatus::Open
         );
 
-        let (command_tx, command_rx) = mpsc::channel(1);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (tunnel_outbound_tx, tunnel_outbound_rx) = mpsc::channel(1);
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("socket"));
         let peer_addr = socket.local_addr().expect("socket addr");
         let fingerprint = Http3Fingerprint::default();
@@ -2998,8 +3019,9 @@ mod tests {
         )
         .expect("handshake");
         let mut driver = NativeH3Driver {
-            command_tx,
             command_rx,
+            tunnel_outbound_tx,
+            tunnel_outbound_rx,
             handshake,
             fingerprint,
             socket,
@@ -3014,6 +3036,7 @@ mod tests {
             pending_streaming_responses: HashMap::new(),
             pending_tunnels: HashMap::from([(stream_id, tunnel)]),
             pending_commands: VecDeque::new(),
+            pending_control_packets: VecDeque::new(),
             is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             closing_connection_close_packet: None,
             body_progress_notify: Arc::new(Notify::new()),
@@ -3124,11 +3147,13 @@ mod tests {
         )
         .expect("path response");
 
-        let (command_tx, command_rx) = mpsc::channel(1);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (tunnel_outbound_tx, tunnel_outbound_rx) = mpsc::channel(1);
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("socket"));
         let mut driver = NativeH3Driver {
-            command_tx,
             command_rx,
+            tunnel_outbound_tx,
+            tunnel_outbound_rx,
             handshake,
             fingerprint: Http3Fingerprint::default(),
             socket,
@@ -3143,6 +3168,7 @@ mod tests {
             pending_streaming_responses: HashMap::new(),
             pending_tunnels: HashMap::new(),
             pending_commands: VecDeque::new(),
+            pending_control_packets: VecDeque::new(),
             is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             closing_connection_close_packet: None,
             body_progress_notify: Arc::new(Notify::new()),
@@ -3183,13 +3209,15 @@ mod tests {
         )
         .expect("handshake");
 
-        let (command_tx, command_rx) = mpsc::channel(1);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (tunnel_outbound_tx, tunnel_outbound_rx) = mpsc::channel(1);
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("socket"));
         let original_peer = SocketAddr::from(([127, 0, 0, 1], 4433));
         let migrated_peer = SocketAddr::from(([127, 0, 0, 1], 4434));
         let mut driver = NativeH3Driver {
-            command_tx,
             command_rx,
+            tunnel_outbound_tx,
+            tunnel_outbound_rx,
             handshake,
             fingerprint,
             socket,
@@ -3204,6 +3232,7 @@ mod tests {
             pending_streaming_responses: HashMap::new(),
             pending_tunnels: HashMap::new(),
             pending_commands: VecDeque::new(),
+            pending_control_packets: VecDeque::new(),
             is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             closing_connection_close_packet: None,
             body_progress_notify: Arc::new(Notify::new()),
