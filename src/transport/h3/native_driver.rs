@@ -1068,6 +1068,7 @@ impl NativeH3Driver {
             if released_credit.has_credit() && !self.receive_backpressured() {
                 self.send_receive_flow_control_updates().await?;
             }
+            self.send_client_pmtu_probe_if_available().await?;
             if sent_scheduled_data && self.has_outbound_send_work() {
                 continue;
             }
@@ -1228,6 +1229,23 @@ impl NativeH3Driver {
                 .await
                 .map_err(Error::Io)?;
         }
+        Ok(())
+    }
+
+    async fn send_client_pmtu_probe_if_available(&mut self) -> Result<()> {
+        if self.handshake.client_pmtu_pending_probe_size().is_some() {
+            return Ok(());
+        }
+        let Some(packet) = self
+            .handshake
+            .build_client_pmtu_probe_packet(Instant::now())?
+        else {
+            return Ok(());
+        };
+        self.socket
+            .send_to(packet.packet.as_ref(), self.peer_addr)
+            .await
+            .map_err(Error::Io)?;
         Ok(())
     }
 
