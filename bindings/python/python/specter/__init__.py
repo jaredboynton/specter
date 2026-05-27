@@ -75,6 +75,19 @@ from .specter import (
     is_valid_close_code,
 )
 
+try:
+    from .specter import (
+        SyncClient as _NativeSyncClient,
+        SyncClientBuilder as _NativeSyncClientBuilder,
+        SyncRequestBuilder as _NativeSyncRequestBuilder,
+        SyncResponse as _NativeSyncResponse,
+    )
+except ImportError:
+    _NativeSyncClient = None
+    _NativeSyncClientBuilder = None
+    _NativeSyncRequestBuilder = None
+    _NativeSyncResponse = None
+
 import asyncio as _asyncio
 
 AsyncClient = Client
@@ -202,19 +215,15 @@ class SyncRequestBuilder:
 
     def header(self, key, value):
         self._inner.header(key, value)
-        return self
 
     def headers(self, headers):
         self._inner.headers(headers)
-        return self
 
     def version(self, version):
         self._inner.version(version)
-        return self
 
     def body(self, body):
         self._inner.body(body)
-        return self
 
     def body_stream(self, async_iterable):
         raise TypeError(
@@ -223,11 +232,9 @@ class SyncRequestBuilder:
 
     def json(self, json_str):
         self._inner.json(json_str)
-        return self
 
     def form(self, form_str):
         self._inner.form(form_str)
-        return self
 
     def send(self):
         return SyncResponse(_run(_await_send(self._inner)))
@@ -287,7 +294,14 @@ class SyncResponse:
         return self._inner.content_type
 
 
-__version__ = "4.1.9"
+if _NativeSyncClient is not None:
+    SyncClient = _NativeSyncClient
+    SyncClientBuilder = _NativeSyncClientBuilder
+    SyncRequestBuilder = _NativeSyncRequestBuilder
+    SyncResponse = _NativeSyncResponse
+
+
+__version__ = "4.1.10"
 __all__ = [
     "AsyncClient",
     "Client",

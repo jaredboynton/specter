@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.10] - 2026-05-27
+
+### Fixed
+
+- Moved Python `SyncClient` onto native PyO3 classes with a client-owned Tokio runtime and GIL release around blocking sends while keeping the pure-Python compatibility wrapper for older local extensions.
+
 ## [4.1.9] - 2026-05-27
 
 ### Added
