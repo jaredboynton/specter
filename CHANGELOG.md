@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.8] - 2026-05-27
+
+### Fixed
+
+- Added HTTP/2 padded-DATA zstd exact-body regression coverage and shipped a synchronized crates.io, npm, PyPI, and GitHub release after 4.1.7 only reached crates.io.
+- Restored current-toolchain compilation in the TLS handshake poll path.
+
 ## [4.1.7] - 2026-05-25
 
 ### Fixed

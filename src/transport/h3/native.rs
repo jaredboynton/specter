@@ -343,7 +343,7 @@ pub fn build_websocket_connect_headers(
         .authority()
         .ok_or_else(|| Error::HttpProtocol("RFC 9220 CONNECT requires :authority".into()))?
         .as_str();
-    let path = crate::transport::origin_form_path(&uri);
+    let path = crate::transport::origin_form_path(uri);
 
     let mut h3_headers = vec![
         H3Header::new(":method", "CONNECT"),
@@ -402,7 +402,7 @@ pub fn build_request_headers(
         .map(|authority| authority.as_str())
         .or_else(|| uri.host())
         .unwrap_or("");
-    let path = crate::transport::origin_form_path(&uri);
+    let path = crate::transport::origin_form_path(uri);
 
     let mut h3_headers = vec![
         H3Header::new(":method", method.as_str()),

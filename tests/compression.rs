@@ -7,12 +7,14 @@
 //! - zstd Content-Encoding
 //! - Identity (no compression) baseline
 
+use specter::transport::h2::{flags, hpack_impl::Encoder};
 use specter::Client;
 use std::io::Write;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 mod helpers;
+use helpers::mock_h2_server::MockH2Server;
 
 const TEST_BODY: &str =
     "Hello, compressed world! This is a test payload for verifying decompression.";
@@ -180,6 +182,86 @@ async fn test_zstd_decompression() {
     assert_eq!(
         text, TEST_BODY,
         "Decompressed zstd body does not match original"
+    );
+}
+
+#[tokio::test]
+async fn h2_padded_zstd_response_decodes_exact_body() {
+    let body = TEST_BODY.repeat(2048).into_bytes();
+    let compressed = zstd_compress(&body);
+    let split = compressed.len() / 2;
+    let first_chunk = compressed[..split].to_vec();
+    let second_chunk = compressed[split..].to_vec();
+
+    let server = MockH2Server::new().await.unwrap();
+    let url = format!("http://127.0.0.1:{}/zstd", server.port());
+
+    let _handle = server.start(move |conn| {
+        let first_chunk = first_chunk.clone();
+        let second_chunk = second_chunk.clone();
+        async move {
+            conn.read_preface().await.unwrap();
+            let stream_id = loop {
+                let (_, frame_type, frame_flags, stream_id, _) = conn.read_frame().await.unwrap();
+                match frame_type {
+                    0x01 => break stream_id,
+                    0x04 if frame_flags & flags::ACK == 0 => {
+                        conn.send_settings(&[]).await.unwrap();
+                        conn.send_settings_ack().await.unwrap();
+                    }
+                    _ => {}
+                }
+            };
+
+            let mut encoder = Encoder::new();
+            let headers = encoder.encode(&[
+                (b":status".as_slice(), b"200".as_slice()),
+                (b"content-encoding".as_slice(), b"zstd".as_slice()),
+                (b"content-type".as_slice(), b"text/plain".as_slice()),
+            ]);
+            conn.send_headers(stream_id, &headers, false, true)
+                .await
+                .unwrap();
+
+            let mut first_payload = Vec::with_capacity(first_chunk.len() + 4);
+            first_payload.push(3);
+            first_payload.extend_from_slice(&first_chunk);
+            first_payload.extend_from_slice(&[0, 0, 0]);
+            conn.send_frame(0x00, flags::PADDED, stream_id, &first_payload)
+                .await
+                .unwrap();
+
+            let mut second_payload = Vec::with_capacity(second_chunk.len() + 6);
+            second_payload.push(5);
+            second_payload.extend_from_slice(&second_chunk);
+            second_payload.extend_from_slice(&[0, 0, 0, 0, 0]);
+            conn.send_frame(
+                0x00,
+                flags::PADDED | flags::END_STREAM,
+                stream_id,
+                &second_payload,
+            )
+            .await
+            .unwrap();
+        }
+    });
+
+    let client = Client::builder()
+        .prefer_http2(true)
+        .http2_prior_knowledge(true)
+        .build()
+        .unwrap();
+    let resp = client.get(url.as_str()).send().await.unwrap();
+
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.content_encoding(), Some("zstd"));
+    assert_eq!(
+        resp.bytes_raw().expect("raw body").as_ref(),
+        compressed.as_slice()
+    );
+    assert_eq!(
+        resp.bytes().expect("decoded body").as_ref(),
+        body.as_slice()
     );
 }
 
