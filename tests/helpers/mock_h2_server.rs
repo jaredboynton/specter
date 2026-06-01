@@ -269,6 +269,46 @@ impl MockH2Connection {
         Ok((length, frame_type, flags, stream_id, payload))
     }
 
+    /// Read the next complete frame, allowing the caller to set the per-read
+    /// timeout instead of the helper's default 1s `TEST_IO_TIMEOUT`.
+    ///
+    /// Additive helper for duplex tests where a flow-control-constrained client
+    /// can legitimately go quiet for longer than 1s between writes (a 1s read
+    /// would otherwise close the connection mid-exchange and masquerade as a
+    /// driver stall). Existing callers and `TEST_IO_TIMEOUT` are unchanged, so
+    /// the rest of the suite is unaffected.
+    #[allow(dead_code)]
+    pub async fn read_frame_with_timeout(
+        &self,
+        budget: Duration,
+    ) -> std::io::Result<(u32, u8, u8, u32, Bytes)> {
+        let mut stream = self.stream.lock().await;
+        let mut header = [0u8; 9];
+        timeout(budget, stream.read_exact(&mut header))
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "mock H2 helper read timed out")
+            })??;
+
+        let length = u32::from_be_bytes([0, header[0], header[1], header[2]]);
+        let frame_type = header[3];
+        let flags = header[4];
+        let stream_id = u32::from_be_bytes([header[5] & 0x7F, header[6], header[7], header[8]]);
+
+        let payload = if length > 0 {
+            let mut buf = vec![0u8; length as usize];
+            timeout(budget, stream.read_exact(&mut buf))
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "mock H2 helper read timed out")
+                })??;
+            Bytes::from(buf)
+        } else {
+            Bytes::new()
+        };
+        Ok((length, frame_type, flags, stream_id, payload))
+    }
+
     /// Read the next HEADERS frame and HPACK-decode its header block.
     #[allow(dead_code)]
     pub async fn read_decoded_headers(&self) -> std::io::Result<DecodedHeadersFrame> {
