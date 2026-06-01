@@ -17,6 +17,8 @@ pub mod auth;
 pub mod cache;
 pub mod cookie;
 pub mod error;
+#[cfg(feature = "grpc")]
+pub mod grpc;
 pub mod headers;
 pub mod request;
 pub mod response;
@@ -38,6 +40,8 @@ pub mod pool;
 pub use cookie::{hash_cookie_value, CookieJar};
 pub use error::{Error, Result};
 pub use fingerprint::{FingerprintProfile, PriorityTree};
+#[cfg(feature = "grpc")]
+pub use grpc::{encode_message, GrpcEncoding, GrpcFramer};
 pub use headers::Headers;
 pub use headers::HeadersBuilder;
 pub use headers::OrderedHeaders;

@@ -32,6 +32,11 @@ default = []
 # bakes the 4 KiB page assumption and segfaults on Apple M-series and
 # Raspberry Pi 5 (16 KiB pages).
 mimalloc = ["dep:mimalloc"]
+# Opt-in gRPC support (length-prefix message framing codec). Bytes-in /
+# bytes-out: no protobuf/prost/tonic, no .proto codegen. Reuses the existing
+# non-optional flate2 dependency for per-message gzip. Never compiled into the
+# default build or the perf-gate benchmark.
+grpc = []
 
 [dependencies]
 # TLS with BoringSSL
