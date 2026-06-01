@@ -113,7 +113,10 @@ impl Body {
     /// `Ok(None)`. See [`crate::transport::h2::H2Body::trailers`] for the
     /// three-state contract (clean end and not-requested both map to
     /// `Ok(None)`; a stream reset maps to `Err`).
-    pub(crate) async fn trailers(&mut self) -> Result<Option<Headers>> {
+    ///
+    /// Public so language bindings (node/python) can surface gRPC
+    /// `grpc-status`/`grpc-message` trailers from a streaming [`Body`].
+    pub async fn trailers(&mut self) -> Result<Option<Headers>> {
         match &mut self.inner {
             BodyInner::H2(body) => body.trailers().await,
             BodyInner::Empty
