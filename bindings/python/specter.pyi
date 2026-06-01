@@ -57,6 +57,38 @@ class HttpVersion(Enum):
     Http3Only = ...
     Auto = ...
 
+class GrpcEncoding(Enum):
+    """gRPC message compression encoding."""
+    Identity = ...
+    Gzip = ...
+
+def encode_message(payload: bytes, compress: bool, encoding: GrpcEncoding) -> bytes:
+    """Frame a single gRPC message as [1B flag][4B big-endian length][payload].
+
+    When compress is True and encoding is GrpcEncoding.Gzip, the payload is
+    gzip-compressed and the flag byte is set; otherwise the payload is written
+    verbatim with a clear flag.
+    """
+    ...
+
+class GrpcFramer:
+    """Incremental decoder for gRPC length-prefixed messages."""
+
+    def __init__(self, encoding: GrpcEncoding) -> None: ...
+
+    @property
+    def encoding(self) -> GrpcEncoding:
+        """The negotiated stream encoding."""
+        ...
+
+    def push(self, chunk: bytes) -> None:
+        """Append an incoming chunk of body bytes."""
+        ...
+
+    def next_message(self) -> Optional[bytes]:
+        """Return the next complete message payload, or None if more bytes are needed."""
+        ...
+
 class Timeouts:
     """Timeout configuration for HTTP requests.
     
@@ -190,9 +222,18 @@ class RequestBuilder:
     def header(self, key: str, value: str) -> None:
         """Add a header to the request."""
         ...
-    
+
     def headers(self, headers: List[Tuple[str, str]]) -> None:
         """Set all headers (replaces existing headers)."""
+        ...
+
+    @property
+    def method(self) -> str:
+        """The HTTP method for this request."""
+        ...
+
+    def headers_list(self) -> List[Tuple[str, str]]:
+        """The currently set request headers, in insertion (wire) order."""
         ...
 
     def version(self, version: HttpVersion) -> None:
@@ -271,6 +312,17 @@ class Client:
         """Create an RFC 9220 Extended CONNECT raw HTTP/3 tunnel builder."""
         ...
 
+    def grpc_request(self, url: str, encoding: GrpcEncoding) -> RequestBuilder:
+        """Create a unary gRPC request builder.
+
+        Presets a POST with the gRPC headers in wire order:
+        content-type: application/grpc+proto, te: trailers, and (only for
+        GrpcEncoding.Gzip) grpc-encoding: gzip. The url path must already be
+        /package.Service/Method. Frame the payload with encode_message, attach
+        via .body(...), .send(), then deframe the response with a GrpcFramer.
+        """
+        ...
+
 AsyncClient = Client
 
 class Response:
@@ -298,7 +350,16 @@ class Response:
     def body(self) -> AsyncIterator[bytes]:
         """Response body as an async iterator of byte chunks."""
         ...
-    
+
+    async def trailers(self) -> Optional[Dict[str, str]]:
+        """Await HTTP/2 response trailers, if any.
+
+        Returns a dict of trailer pairs when the stream delivered real trailers
+        (gRPC grpc-status/grpc-message ride here), or None on a clean end or
+        when trailers were not requested. Raises on a stream reset.
+        """
+        ...
+
     def text(self) -> str:
         """Get the response body as text (with decompression if needed)."""
         ...

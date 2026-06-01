@@ -24,9 +24,11 @@ mod ws_types;
 
 // Re-export specter types - use ::specter to disambiguate from pymodule name
 use ::specter::{
-    Body as RustBody, Client as RustClient, ClientBuilder as RustClientBuilder,
-    CookieJar as RustCookieJar, Error as RustError, FingerprintProfile as RustFingerprintProfile,
-    HttpVersion as RustHttpVersion, Response as RustResponse, Timeouts as RustTimeouts,
+    encode_message as rust_encode_message, Body as RustBody, Client as RustClient,
+    ClientBuilder as RustClientBuilder, CookieJar as RustCookieJar, Error as RustError,
+    FingerprintProfile as RustFingerprintProfile, GrpcEncoding as RustGrpcEncoding,
+    GrpcFramer as RustGrpcFramer, HttpVersion as RustHttpVersion, Response as RustResponse,
+    Timeouts as RustTimeouts,
 };
 
 /// Python wrapper for Specter HTTP client.
@@ -252,6 +254,93 @@ pub enum HttpVersion {
     Auto,
 }
 
+/// gRPC message compression encoding.
+#[pyclass(eq, eq_int)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrpcEncoding {
+    /// No compression. A message flagged compressed under this encoding is a
+    /// protocol error.
+    Identity,
+    /// gzip compression.
+    Gzip,
+}
+
+fn to_rust_grpc_encoding(encoding: GrpcEncoding) -> RustGrpcEncoding {
+    match encoding {
+        GrpcEncoding::Identity => RustGrpcEncoding::Identity,
+        GrpcEncoding::Gzip => RustGrpcEncoding::Gzip,
+    }
+}
+
+/// Frame a single gRPC message: `[1B compress-flag][4B BE length][payload]`.
+///
+/// When `compress` is true and `encoding` is `GrpcEncoding.Gzip`, the payload
+/// is gzip-compressed and the flag byte is set; otherwise the payload is
+/// written verbatim with a clear flag.
+#[pyfunction]
+fn encode_message<'py>(
+    py: Python<'py>,
+    payload: &[u8],
+    compress: bool,
+    encoding: GrpcEncoding,
+) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+    let framed = rust_encode_message(payload, compress, to_rust_grpc_encoding(encoding))
+        .map_err(to_py_err)?;
+    Ok(pyo3::types::PyBytes::new(py, &framed))
+}
+
+/// Incremental decoder for gRPC length-prefixed messages.
+///
+/// Push raw byte chunks as they arrive off a response body, then repeatedly
+/// call `next_message()` until it returns `None` to drain every fully-available
+/// message.
+#[pyclass]
+pub struct GrpcFramer {
+    inner: RustGrpcFramer,
+}
+
+#[pymethods]
+impl GrpcFramer {
+    /// Create a framer for the given stream encoding.
+    #[new]
+    fn new(encoding: GrpcEncoding) -> Self {
+        Self {
+            inner: RustGrpcFramer::new(to_rust_grpc_encoding(encoding)),
+        }
+    }
+
+    /// The negotiated stream encoding.
+    #[getter]
+    fn encoding(&self) -> GrpcEncoding {
+        match self.inner.encoding() {
+            RustGrpcEncoding::Identity => GrpcEncoding::Identity,
+            RustGrpcEncoding::Gzip => GrpcEncoding::Gzip,
+        }
+    }
+
+    /// Append an incoming chunk of body bytes.
+    fn push(&mut self, chunk: &[u8]) {
+        self.inner.push(Bytes::from(chunk.to_vec()));
+    }
+
+    /// Return the next fully-available, decompressed message payload, or
+    /// `None` if more bytes are needed. Drain in a loop until `None`.
+    fn next_message<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, pyo3::types::PyBytes>>> {
+        match self.inner.next_message().map_err(to_py_err)? {
+            Some(message) => Ok(Some(pyo3::types::PyBytes::new(py, &message))),
+            None => Ok(None),
+        }
+    }
+
+    /// Get the string representation.
+    fn __repr__(&self) -> String {
+        "<specter.GrpcFramer>".to_string()
+    }
+}
+
 /// Timeout configuration for HTTP requests.
 #[pyclass]
 #[derive(Debug, Clone)]
@@ -394,6 +483,35 @@ impl Client {
             url,
             method,
             headers: Vec::new(),
+            body: None,
+            version: None,
+        }
+    }
+
+    /// Create a unary gRPC request builder.
+    ///
+    /// Presets a POST request with the gRPC regular headers in wire order:
+    /// `content-type: application/grpc+proto`, `te: trailers`, and (only when
+    /// `encoding` is `GrpcEncoding.Gzip`) `grpc-encoding: gzip`. The `url` path
+    /// must already be `/package.Service/Method`. The caller frames the payload
+    /// with `encode_message`, attaches it via `.body(...)`, then `.send()`, and
+    /// deframes the response with a `GrpcFramer`.
+    fn grpc_request(&self, url: String, encoding: GrpcEncoding) -> RequestBuilder {
+        let mut headers = vec![
+            (
+                "content-type".to_string(),
+                "application/grpc+proto".to_string(),
+            ),
+            ("te".to_string(), "trailers".to_string()),
+        ];
+        if encoding == GrpcEncoding::Gzip {
+            headers.push(("grpc-encoding".to_string(), "gzip".to_string()));
+        }
+        RequestBuilder {
+            client: self.clone(),
+            url,
+            method: "POST".to_string(),
+            headers,
             body: None,
             version: None,
         }
@@ -562,6 +680,21 @@ impl RequestBuilder {
     fn header(&mut self, key: String, value: String) -> PyResult<()> {
         self.headers.push((key, value));
         Ok(())
+    }
+
+    /// The HTTP method for this request.
+    #[getter]
+    fn method(&self) -> String {
+        self.method.clone()
+    }
+
+    /// The currently set request headers, in insertion (wire) order.
+    fn headers_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let list = PyList::empty(py);
+        for (key, value) in self.headers.iter() {
+            list.append((key, value))?;
+        }
+        Ok(list)
     }
 
     /// Set all headers (replaces existing headers).
@@ -1300,6 +1433,54 @@ impl Response {
         }
     }
 
+    /// Await HTTP/2 response trailers, if any.
+    ///
+    /// Returns a dict of trailer header pairs when the stream delivered real
+    /// trailers (gRPC `grpc-status`/`grpc-message` ride here), or `None` on a
+    /// clean end or when trailers were not requested. Raises on a stream reset.
+    #[allow(clippy::await_holding_lock)]
+    fn trailers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let body = self.body.clone();
+        future_into_py(py, async move {
+            let (tx, rx) = oneshot::channel();
+            std::thread::spawn(move || {
+                let result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|err| PyRuntimeError::new_err(err.to_string()))
+                    .and_then(|runtime| {
+                        runtime.block_on(async move {
+                            let mut body = body.lock().map_err(|_| {
+                                PyRuntimeError::new_err("response body lock poisoned")
+                            })?;
+                            let trailers = body.trailers().await.map_err(to_py_err)?;
+                            Ok(trailers.map(|headers| {
+                                headers
+                                    .iter()
+                                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                                    .collect::<Vec<(String, String)>>()
+                            }))
+                        })
+                    });
+                let _ = tx.send(result);
+            });
+
+            match rx
+                .await
+                .map_err(|_| PyRuntimeError::new_err("response trailers worker thread exited"))??
+            {
+                Some(pairs) => Python::with_gil(|py| {
+                    let dict = PyDict::new(py);
+                    for (key, value) in pairs {
+                        dict.set_item(key, value)?;
+                    }
+                    Ok(Some(dict.into_any().unbind()))
+                }),
+                None => Ok(None),
+            }
+        })
+    }
+
     /// Get the HTTP version string.
     #[getter]
     fn http_version(&self) -> String {
@@ -1672,6 +1853,9 @@ pub fn specter(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FingerprintProfile>()?;
     m.add_class::<HttpVersion>()?;
     m.add_class::<Timeouts>()?;
+    m.add_class::<GrpcEncoding>()?;
+    m.add_class::<GrpcFramer>()?;
+    m.add_function(wrap_pyfunction!(encode_message, m)?)?;
     ws_types::register(m)?;
     websocket::register(m)?;
     websocket_h2::register(m)?;

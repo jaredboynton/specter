@@ -278,6 +278,57 @@ test-one binary filter="":
     fi
 
 # =============================================================================
+# BENCH / GATE
+# =============================================================================
+
+# Runs the default build (grpc OFF) and exits non-zero on a required-threshold
+# regression (TTFT >=5%, throughput >=5%, Wilcoxon p<0.01, p95 bounded). The
+# floor the gRPC work must not regress; run on final merged state before tagging.
+# H2 streaming perf gate (exits non-zero on a perf regression)
+[group('bench')]
+bench-gate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [[ "$(uname -m)" == "arm64" ]]; then
+        TARGET="aarch64-apple-darwin"
+    else
+        TARGET="x86_64-apple-darwin"
+    fi
+
+    . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
+
+    cargo bench --bench streaming_vs_reqwest --locked -- \
+        --protocol h2 --response-body-streaming \
+        --require-thresholds --json target/grpc-gate.json
+
+# Induces a required-threshold failure via --self-test-threshold-failure; this
+# recipe succeeds ONLY when the gate exits non-zero, proving it can fail.
+# Negative control: prove the perf gate is capable of failing
+[group('bench')]
+bench-gate-selftest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [[ "$(uname -m)" == "arm64" ]]; then
+        TARGET="aarch64-apple-darwin"
+    else
+        TARGET="x86_64-apple-darwin"
+    fi
+
+    . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
+
+    if cargo bench --bench streaming_vs_reqwest --locked -- \
+        --protocol h2 --response-body-streaming \
+        --require-thresholds --self-test-threshold-failure \
+        --json target/grpc-gate-selftest.json; then
+        echo "bench-gate-selftest: FAIL - gate returned 0 under induced failure" >&2
+        exit 1
+    else
+        echo "bench-gate-selftest: OK - gate exited non-zero under induced failure" >&2
+    fi
+
+# =============================================================================
 # QUALITY
 # =============================================================================
 

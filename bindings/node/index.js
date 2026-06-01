@@ -158,6 +158,9 @@ module.exports.isValidCloseCode = binding.isValidCloseCode;
 module.exports.clientBuilder = binding.clientBuilder;
 module.exports.timeoutsApiDefaults = binding.timeoutsApiDefaults;
 module.exports.timeoutsStreamingDefaults = binding.timeoutsStreamingDefaults;
+module.exports.GrpcEncoding = binding.GrpcEncoding;
+module.exports.GrpcFramer = binding.GrpcFramer;
+module.exports.encodeMessage = binding.encodeMessage;
 
 const requestBuilderSend = binding.RequestBuilder.prototype.send;
 const requestBuilderBodyStreamBridge = binding.RequestBuilder.prototype.bodyStreamBridge;

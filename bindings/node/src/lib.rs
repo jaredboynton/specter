@@ -27,6 +27,12 @@ use ::specter::{
     HttpVersion as RustHttpVersion, Response as RustResponse, Timeouts as RustTimeouts,
 };
 
+// gRPC support (crate feature `grpc`).
+use ::specter::grpc::{
+    encode_message as rust_encode_message, GrpcEncoding as RustGrpcEncoding,
+    GrpcFramer as RustGrpcFramer,
+};
+
 /// Node.js wrapper for Specter HTTP client.
 #[napi]
 pub struct Client {
@@ -382,6 +388,35 @@ impl Client {
             version: None,
         }
     }
+
+    /// Create a gRPC unary/streaming request builder.
+    ///
+    /// Presets a `POST` to the given URL (whose path must already be
+    /// `/package.Service/Method`) with the gRPC headers in wire order:
+    /// `content-type: application/grpc+proto`, `te: trailers`, and
+    /// `grpc-encoding: gzip` only when `encoding` is `Gzip`. Frame the payload
+    /// with `encodeMessage`, set it via `.body()`, then `.send()`.
+    #[napi]
+    pub fn grpc_request(&self, url: String, encoding: GrpcEncoding) -> RequestBuilder {
+        let mut headers = vec![
+            (
+                "content-type".to_string(),
+                "application/grpc+proto".to_string(),
+            ),
+            ("te".to_string(), "trailers".to_string()),
+        ];
+        if matches!(encoding, GrpcEncoding::Gzip) {
+            headers.push(("grpc-encoding".to_string(), "gzip".to_string()));
+        }
+        RequestBuilder {
+            client: self.inner.clone(),
+            url,
+            method: "POST".to_string(),
+            headers,
+            body: request_body_slot(),
+            version: None,
+        }
+    }
 }
 
 #[napi]
@@ -410,6 +445,22 @@ impl RequestBuilder {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(self)
+    }
+
+    /// Get the currently-staged headers as an array of [key, value] pairs, in
+    /// insertion order (the order they are emitted on the wire).
+    #[napi]
+    pub fn headers_list(&self) -> Vec<Vec<String>> {
+        self.headers
+            .iter()
+            .map(|(key, value)| vec![key.clone(), value.clone()])
+            .collect()
+    }
+
+    /// Get the HTTP method for this request.
+    #[napi(getter)]
+    pub fn method(&self) -> String {
+        self.method.clone()
     }
 
     /// Set the preferred HTTP version for this request.
@@ -963,6 +1014,49 @@ impl Response {
             .map_err(|_| Error::new(Status::GenericFailure, "Response body worker thread exited"))?
     }
 
+    /// Await HTTP/2 response trailers (e.g. gRPC `grpc-status` / `grpc-message`).
+    ///
+    /// Returns the trailers as an object of header pairs when present, null when
+    /// the stream ended cleanly without trailers (or trailers were not
+    /// requested), and rejects when the stream was reset.
+    #[napi]
+    #[allow(clippy::await_holding_lock)]
+    pub async fn trailers(&self) -> Result<Option<HashMap<String, String>>> {
+        let body = self.body.clone();
+        let (tx, rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| Error::new(Status::GenericFailure, err.to_string()))
+                .and_then(|runtime| {
+                    runtime.block_on(async move {
+                        let mut body = body.lock().map_err(|_| {
+                            Error::new(Status::GenericFailure, "Response body lock is poisoned")
+                        })?;
+                        match body.trailers().await.map_err(to_napi_err)? {
+                            Some(headers) => {
+                                let mut map = HashMap::new();
+                                for (key, value) in headers.iter() {
+                                    map.entry(key.to_string())
+                                        .and_modify(|v: &mut String| {
+                                            *v = format!("{}, {}", v, value);
+                                        })
+                                        .or_insert_with(|| value.to_string());
+                                }
+                                Ok(Some(map))
+                            }
+                            None => Ok(None),
+                        }
+                    })
+                });
+            let _ = tx.send(result);
+        });
+
+        rx.await
+            .map_err(|_| Error::new(Status::GenericFailure, "Response body worker thread exited"))?
+    }
+
     /// Get the HTTP version string.
     #[napi(getter)]
     pub fn http_version(&self) -> String {
@@ -1059,6 +1153,77 @@ pub fn timeouts_streaming_defaults() -> Timeouts {
         write_idle: Some(30.0),
         total: None,
         pool_acquire: Some(5.0),
+    }
+}
+
+/// gRPC per-stream message encoding negotiated via the `grpc-encoding` header.
+#[napi]
+pub enum GrpcEncoding {
+    /// No compression.
+    Identity,
+    /// gzip compression.
+    Gzip,
+}
+
+fn to_rust_grpc_encoding(encoding: GrpcEncoding) -> RustGrpcEncoding {
+    match encoding {
+        GrpcEncoding::Identity => RustGrpcEncoding::Identity,
+        GrpcEncoding::Gzip => RustGrpcEncoding::Gzip,
+    }
+}
+
+/// Frame a single gRPC message: prepend the compression flag and big-endian
+/// length, gzip-compressing the payload when `compress` is set and `encoding`
+/// is `Gzip`.
+#[napi]
+pub fn encode_message(payload: Buffer, compress: bool, encoding: GrpcEncoding) -> Result<Buffer> {
+    let framed = rust_encode_message(&payload, compress, to_rust_grpc_encoding(encoding))
+        .map_err(to_napi_err)?;
+    Ok(Buffer::from(framed.to_vec()))
+}
+
+/// Incremental decoder for gRPC length-prefixed messages.
+///
+/// Push raw body chunks with `push`, then call `nextMessage` repeatedly until it
+/// returns null to drain every fully-available message.
+#[napi]
+pub struct GrpcFramer {
+    inner: RustGrpcFramer,
+}
+
+#[napi]
+impl GrpcFramer {
+    /// Create a framer for the given stream encoding.
+    #[napi(constructor)]
+    pub fn new(encoding: GrpcEncoding) -> Self {
+        Self {
+            inner: RustGrpcFramer::new(to_rust_grpc_encoding(encoding)),
+        }
+    }
+
+    /// The negotiated stream encoding.
+    #[napi(getter)]
+    pub fn encoding(&self) -> GrpcEncoding {
+        match self.inner.encoding() {
+            RustGrpcEncoding::Identity => GrpcEncoding::Identity,
+            RustGrpcEncoding::Gzip => GrpcEncoding::Gzip,
+        }
+    }
+
+    /// Append an incoming body chunk.
+    #[napi]
+    pub fn push(&mut self, chunk: Buffer) {
+        self.inner.push(Bytes::from(chunk.to_vec()));
+    }
+
+    /// Return the next fully-available, decompressed message payload, or null if
+    /// more bytes are needed. Drain in a loop until null.
+    #[napi]
+    pub fn next_message(&mut self) -> Result<Option<Buffer>> {
+        self.inner
+            .next_message()
+            .map_err(to_napi_err)
+            .map(|maybe| maybe.map(|msg| Buffer::from(msg.to_vec())))
     }
 }
 
