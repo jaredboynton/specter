@@ -185,6 +185,15 @@ impl H2Handle {
         body_timeouts: H2BodyTimeouts,
     ) -> Result<Response> {
         let (headers_tx, headers_rx) = oneshot::channel();
+        // Allocate the trailer side channel ONLY when the caller requested
+        // trailers (`te: trailers`). A warm non-gRPC streaming request - the
+        // gate's TTFT path - constructs zero extra channels here.
+        let (trailers_tx, trailers_rx) = if wants_trailers(headers) {
+            let (tx, rx) = oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let initial_window_size = self
             .inline
             .as_ref()
@@ -203,6 +212,7 @@ impl H2Handle {
             body,
             body_shared: body_shared.clone(),
             headers_tx,
+            trailers_tx,
         };
 
         self.command_tx
@@ -217,7 +227,11 @@ impl H2Handle {
         Ok(Response::with_body(
             status,
             Headers::from(regular_headers),
-            Body::from_h2(H2Body::new(body_shared, body_timeouts)),
+            Body::from_h2(H2Body::new_with_trailers(
+                body_shared,
+                body_timeouts,
+                trailers_rx,
+            )),
             "HTTP/2".to_string(),
         ))
     }
@@ -254,6 +268,15 @@ impl H2Handle {
         }
 
         let (headers_tx, headers_rx) = oneshot::channel::<StreamingHeadersResult>();
+        // Allocate the trailer side channel ONLY when the caller requested
+        // trailers (`te: trailers`). A warm non-gRPC inline streaming request
+        // constructs zero extra channels here.
+        let (trailers_tx, trailers_rx) = if wants_trailers(headers) {
+            let (tx, rx) = oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let body_shared = H2BodyShared::new_with_capacity(
             inline.body_progress_notify.clone(),
             inline.initial_window_size,
@@ -278,6 +301,7 @@ impl H2Handle {
             headers_tx,
             body_shared: body_shared.clone(),
             recv_window: inline.initial_window_size as i32,
+            trailers_tx,
         };
 
         if inline.register_tx.send(registration).is_err() {
@@ -289,7 +313,11 @@ impl H2Handle {
             Ok(Ok((status, regular_headers))) => Ok(Response::with_body(
                 status,
                 Headers::from(regular_headers),
-                Body::from_h2(H2Body::new(body_shared, body_timeouts)),
+                Body::from_h2(H2Body::new_with_trailers(
+                    body_shared,
+                    body_timeouts,
+                    trailers_rx,
+                )),
                 "HTTP/2".to_string(),
             )),
             Ok(Err(e)) => Err(e),
@@ -327,5 +355,184 @@ impl H2Handle {
         response_rx
             .await
             .map_err(|_| Error::HttpProtocol("Tunnel response channel closed".into()))?
+    }
+}
+
+/// Whether the caller asked for HTTP/2 response trailers, signalled by a
+/// `te: trailers` request header (the gRPC convention; `te` may be a
+/// comma-separated list, or spread across multiple `te` header lines).
+/// Scans all `te` lines so that `te: deflate` + `te: trailers` on separate
+/// lines is detected correctly. Allocates nothing when `te` is absent -
+/// the warm non-gRPC streaming path. This is the free signal that gates
+/// trailer-channel allocation at both streaming construction sites.
+fn wants_trailers(headers: &Headers) -> bool {
+    headers.get_all("te").iter().any(|value| {
+        value
+            .split(',')
+            .any(|token| token.trim().eq_ignore_ascii_case("trailers"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wants_trailers;
+    use crate::headers::Headers;
+    use crate::request::RequestBody;
+    use crate::transport::h2::body::H2BodyShared;
+    use crate::transport::h2::driver::{DriverCommand, InlineRegistration};
+    use std::sync::Arc;
+    use tokio::sync::{oneshot, Notify};
+
+    #[test]
+    fn wants_trailers_false_without_te() {
+        let headers = Headers::from_vec(vec![(
+            "content-type".to_string(),
+            "application/grpc+proto".to_string(),
+        )]);
+        assert!(!wants_trailers(&headers));
+    }
+
+    #[test]
+    fn wants_trailers_true_for_te_trailers() {
+        let headers = Headers::from_vec(vec![("te".to_string(), "trailers".to_string())]);
+        assert!(wants_trailers(&headers));
+    }
+
+    #[test]
+    fn wants_trailers_true_in_te_list_and_case_insensitive() {
+        let headers = Headers::from_vec(vec![("TE".to_string(), "deflate, Trailers".to_string())]);
+        assert!(wants_trailers(&headers));
+    }
+
+    #[test]
+    fn wants_trailers_false_for_unrelated_te() {
+        let headers = Headers::from_vec(vec![("te".to_string(), "deflate, gzip".to_string())]);
+        assert!(!wants_trailers(&headers));
+    }
+
+    #[test]
+    fn wants_trailers_true_for_separate_te_lines() {
+        // Two separate `te` header lines: first carries only `deflate`,
+        // second carries `trailers`. A single `headers.get("te")` call would
+        // return only the first line and miss the signal; `get_all` must be used.
+        let headers = Headers::from_vec(vec![
+            ("te".to_string(), "deflate".to_string()),
+            ("te".to_string(), "trailers".to_string()),
+        ]);
+        assert!(wants_trailers(&headers));
+    }
+
+    // Structural no-alloc tests: confirm that the trailer-channel sender
+    // field (`trailers_tx`) is `None` for requests that do not carry
+    // `te: trailers`, and `Some` for those that do.
+
+    fn make_body_shared() -> Arc<H2BodyShared> {
+        H2BodyShared::new_with_capacity(Arc::new(Notify::new()), 65_535, 16)
+    }
+
+    #[test]
+    fn send_streaming_request_command_no_te_has_no_trailers_tx() {
+        let headers_without_te = Headers::from_vec(vec![(
+            "content-type".to_string(),
+            "application/grpc+proto".to_string(),
+        )]);
+        let (headers_tx, _headers_rx) = oneshot::channel();
+        let (trailers_tx, _trailers_rx) = if wants_trailers(&headers_without_te) {
+            let (tx, rx) = oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        let command = DriverCommand::SendStreamingRequest {
+            method: http::Method::POST,
+            uri: "https://example.com/svc/method".parse().unwrap(),
+            headers: headers_without_te,
+            body: RequestBody::Empty,
+            body_shared: make_body_shared(),
+            headers_tx,
+            trailers_tx,
+        };
+        if let DriverCommand::SendStreamingRequest { trailers_tx, .. } = command {
+            assert!(
+                trailers_tx.is_none(),
+                "no te:trailers -> trailers_tx must be None"
+            );
+        }
+    }
+
+    #[test]
+    fn send_streaming_request_command_with_te_has_trailers_tx() {
+        let headers_with_te = Headers::from_vec(vec![("te".to_string(), "trailers".to_string())]);
+        let (headers_tx, _headers_rx) = oneshot::channel();
+        let (trailers_tx, _trailers_rx) = if wants_trailers(&headers_with_te) {
+            let (tx, rx) = oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        let command = DriverCommand::SendStreamingRequest {
+            method: http::Method::POST,
+            uri: "https://example.com/svc/method".parse().unwrap(),
+            headers: headers_with_te,
+            body: RequestBody::Empty,
+            body_shared: make_body_shared(),
+            headers_tx,
+            trailers_tx,
+        };
+        if let DriverCommand::SendStreamingRequest { trailers_tx, .. } = command {
+            assert!(
+                trailers_tx.is_some(),
+                "te:trailers -> trailers_tx must be Some"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_registration_no_te_has_no_trailers_tx() {
+        let headers_without_te = Headers::from_vec(vec![(
+            "content-type".to_string(),
+            "application/grpc+proto".to_string(),
+        )]);
+        let (headers_tx, _headers_rx) = oneshot::channel();
+        let (trailers_tx, _trailers_rx) = if wants_trailers(&headers_without_te) {
+            let (tx, rx) = oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        let reg = InlineRegistration {
+            stream_id: 1,
+            headers_tx,
+            body_shared: make_body_shared(),
+            recv_window: 65_535,
+            trailers_tx,
+        };
+        assert!(
+            reg.trailers_tx.is_none(),
+            "no te:trailers -> InlineRegistration::trailers_tx must be None"
+        );
+    }
+
+    #[test]
+    fn inline_registration_with_te_has_trailers_tx() {
+        let headers_with_te = Headers::from_vec(vec![("te".to_string(), "trailers".to_string())]);
+        let (headers_tx, _headers_rx) = oneshot::channel();
+        let (trailers_tx, _trailers_rx) = if wants_trailers(&headers_with_te) {
+            let (tx, rx) = oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        let reg = InlineRegistration {
+            stream_id: 1,
+            headers_tx,
+            body_shared: make_body_shared(),
+            recv_window: 65_535,
+            trailers_tx,
+        };
+        assert!(
+            reg.trailers_tx.is_some(),
+            "te:trailers -> InlineRegistration::trailers_tx must be Some"
+        );
     }
 }

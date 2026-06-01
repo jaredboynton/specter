@@ -106,6 +106,24 @@ impl Body {
         }
     }
 
+    /// Await HTTP/2 response trailers for this body, if any.
+    ///
+    /// Only H2 streaming bodies can carry trailers, and only when the caller
+    /// requested them (`te: trailers`). Every other body variant returns
+    /// `Ok(None)`. See [`crate::transport::h2::H2Body::trailers`] for the
+    /// three-state contract (clean end and not-requested both map to
+    /// `Ok(None)`; a stream reset maps to `Err`).
+    pub(crate) async fn trailers(&mut self) -> Result<Option<Headers>> {
+        match &mut self.inner {
+            BodyInner::H2(body) => body.trailers().await,
+            BodyInner::Empty
+            | BodyInner::Buffered(_)
+            | BodyInner::H1(_)
+            | BodyInner::H2Direct(_)
+            | BodyInner::H3(_) => Ok(None),
+        }
+    }
+
     /// `true` for an empty buffered body. Streaming bodies report `false`
     /// because the buffered length is unknown until the body is drained.
     pub fn is_empty(&self) -> bool {
@@ -492,6 +510,22 @@ impl Response {
 
     pub fn headers(&self) -> &Headers {
         &self.headers
+    }
+
+    /// Await the HTTP/2 response trailers for this response, if any.
+    ///
+    /// gRPC carries `grpc-status`/`grpc-message` in a trailing HEADERS frame;
+    /// this surfaces them. Three outcomes:
+    /// - `Ok(Some(headers))` - a real trailers frame arrived.
+    /// - `Ok(None)` - a clean trailer-less end, trailers were not requested
+    ///   (`te: trailers` absent), or the response is buffered / non-H2.
+    /// - `Err(_)` - the stream was reset (RST_STREAM / transport error) before
+    ///   a clean end; distinct from `Ok(None)`.
+    ///
+    /// Await this only after the body stream has returned end: a resolved
+    /// trailer channel does not imply the body has been fully drained.
+    pub async fn trailers(&mut self) -> Result<Option<Headers>> {
+        self.body.trailers().await
     }
 
     pub fn url(&self) -> Option<&Url> {

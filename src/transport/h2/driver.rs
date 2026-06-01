@@ -52,6 +52,10 @@ pub enum DriverCommand {
         body: RequestBody,
         body_shared: Arc<H2BodyShared>,
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
+        /// Side-channel sender for HTTP/2 response trailers. `Some` only when
+        /// the caller requested trailers (request carried `te: trailers`);
+        /// `None` keeps the warm streaming path allocation-free.
+        trailers_tx: Option<oneshot::Sender<Result<Vec<(String, String)>>>>,
     },
     /// Open an RFC 8441 WebSocket tunnel on a pooled HTTP/2 stream.
     OpenWebSocketTunnel {
@@ -122,6 +126,10 @@ pub struct InlineRegistration {
     pub headers_tx: oneshot::Sender<StreamingHeadersResult>,
     pub body_shared: Arc<H2BodyShared>,
     pub recv_window: i32,
+    /// Side-channel sender for HTTP/2 response trailers. `Some` only when the
+    /// inline caller requested trailers (`te: trailers`); `None` otherwise so
+    /// the warm inline path allocates no extra channel.
+    pub trailers_tx: Option<oneshot::Sender<Result<Vec<(String, String)>>>>,
 }
 
 struct NotifyWake(Arc<Notify>);
@@ -166,6 +174,11 @@ struct DriverStreamState {
     response_tx: Option<oneshot::Sender<Result<StreamResponse>>>,
     /// Oneshot sender for streaming response headers
     streaming_headers_tx: Option<oneshot::Sender<StreamingHeadersResult>>,
+    /// Side-channel sender for HTTP/2 response trailers. `Some` only when the
+    /// caller requested trailers (`te: trailers`). Sent on the trailers HEADERS
+    /// branch (`Ok`) or on reset via `fail_stream` (`Err`); dropped un-sent on a
+    /// clean trailer-less end, which the receiver maps to `Ok(None)`.
+    trailers_tx: Option<oneshot::Sender<Result<Vec<(String, String)>>>>,
     /// Streaming response body state shared with the public Body poller.
     streaming_body: Option<Arc<H2BodyShared>>,
     /// Accumulated response status
@@ -207,6 +220,7 @@ impl DriverStreamState {
         Self {
             response_tx: Some(response_tx),
             streaming_headers_tx: None,
+            trailers_tx: None,
             streaming_body: None,
             status: None,
             headers: Vec::new(),
@@ -224,6 +238,7 @@ impl DriverStreamState {
 
     fn streaming(
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
+        trailers_tx: Option<oneshot::Sender<Result<Vec<(String, String)>>>>,
         body_shared: Arc<H2BodyShared>,
         pending_body: Bytes,
         request_stream: Option<DriverStreamingRequestBody>,
@@ -232,6 +247,7 @@ impl DriverStreamState {
         Self {
             response_tx: None,
             streaming_headers_tx: Some(headers_tx),
+            trailers_tx,
             streaming_body: Some(body_shared),
             status: None,
             headers: Vec::new(),
@@ -249,10 +265,18 @@ impl DriverStreamState {
 
     fn streaming_inline(
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
+        trailers_tx: Option<oneshot::Sender<Result<Vec<(String, String)>>>>,
         body_shared: Arc<H2BodyShared>,
         recv_window: i32,
     ) -> Self {
-        let mut state = Self::streaming(headers_tx, body_shared, Bytes::new(), None, recv_window);
+        let mut state = Self::streaming(
+            headers_tx,
+            trailers_tx,
+            body_shared,
+            Bytes::new(),
+            None,
+            recv_window,
+        );
         state.inline = true;
         state
     }
@@ -553,7 +577,12 @@ where
     fn register_inline_stream(&mut self, reg: InlineRegistration) {
         self.streams.insert(
             reg.stream_id,
-            DriverStreamState::streaming_inline(reg.headers_tx, reg.body_shared, reg.recv_window),
+            DriverStreamState::streaming_inline(
+                reg.headers_tx,
+                reg.trailers_tx,
+                reg.body_shared,
+                reg.recv_window,
+            ),
         );
     }
 
@@ -899,6 +928,7 @@ where
             body,
             body_shared,
             headers_tx,
+            trailers_tx,
         } = cmd
         {
             let (body_bytes, request_stream, end_stream) = match body {
@@ -943,6 +973,7 @@ where
                         stream_id,
                         DriverStreamState::streaming(
                             headers_tx,
+                            trailers_tx,
                             body_shared,
                             body_bytes,
                             request_stream,
@@ -1495,6 +1526,9 @@ where
             if let Some(tx) = stream.streaming_headers_tx.take() {
                 let _ = tx.send(Err(Error::HttpProtocol(message.clone())));
             }
+            if let Some(tx) = stream.trailers_tx.take() {
+                let _ = tx.send(Err(Error::HttpProtocol(message.clone())));
+            }
             if let Some(body) = stream.streaming_body.take() {
                 let _ = body.fail(Error::HttpProtocol(message));
             }
@@ -1767,6 +1801,14 @@ where
                     } else {
                         // status == 0, likely trailers HEADERS frame (no :status)
                         tracing::debug!("H2Driver: Received trailers for stream {}", stream_id);
+                        // Route the already-decoded trailer block out via the
+                        // side channel when the caller requested trailers. When
+                        // `trailers_tx` is `None` (no `te: trailers`), this is a
+                        // no-op and `regular_headers` is dropped exactly as
+                        // before, off the DATA hot path.
+                        if let Some(tx) = stream.trailers_tx.take() {
+                            let _ = tx.send(Ok(regular_headers));
+                        }
                         if (header.flags & flags::END_STREAM) != 0 {
                             if let Some(body) = stream.streaming_body.as_ref() {
                                 body.finish();

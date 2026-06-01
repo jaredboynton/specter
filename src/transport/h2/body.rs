@@ -320,10 +320,18 @@ pub(crate) struct H2Body {
     total_sleep: Option<Pin<Box<Sleep>>>,
     terminal: bool,
     pending_release_bytes: usize,
+    /// Side-channel receiver for HTTP/2 response trailers. `Some` only when the
+    /// caller requested trailers (`te: trailers`). Consumed on first `trailers()`
+    /// await. Never an item in the SPSC ring; off the DATA hot path entirely.
+    trailers_rx: Option<tokio::sync::oneshot::Receiver<Result<Vec<(String, String)>>>>,
 }
 
 impl H2Body {
-    pub(crate) fn new(shared: Arc<H2BodyShared>, timeouts: H2BodyTimeouts) -> Self {
+    pub(crate) fn new_with_trailers(
+        shared: Arc<H2BodyShared>,
+        timeouts: H2BodyTimeouts,
+        trailers_rx: Option<tokio::sync::oneshot::Receiver<Result<Vec<(String, String)>>>>,
+    ) -> Self {
         Self {
             shared,
             read_idle_timeout: timeouts.read_idle,
@@ -332,6 +340,29 @@ impl H2Body {
             total_sleep: timeouts.total.map(|duration| Box::pin(sleep(duration))),
             terminal: false,
             pending_release_bytes: 0,
+            trailers_rx,
+        }
+    }
+
+    /// Await the HTTP/2 response trailers for this stream, if any.
+    ///
+    /// Three-state contract (see the gRPC trailer-surfacing design):
+    /// - receiver is `None` (trailers never requested) -> `Ok(None)`
+    /// - `Err(RecvError)` (sender dropped = clean trailer-less end) -> `Ok(None)`
+    /// - `Ok(Err(e))` (driver sent a reset error) -> `Err(e)`
+    /// - `Ok(Ok(headers))` (real trailer frame) -> `Ok(Some(Headers))`
+    ///
+    /// The receiver is consumed on the first await; a second call yields
+    /// `Ok(None)`. Await only after the body stream has returned end: a
+    /// resolved trailer channel does not imply the body has been drained.
+    pub(crate) async fn trailers(&mut self) -> Result<Option<crate::headers::Headers>> {
+        let Some(rx) = self.trailers_rx.take() else {
+            return Ok(None);
+        };
+        match rx.await {
+            Err(_) => Ok(None),
+            Ok(Err(e)) => Err(e),
+            Ok(Ok(headers)) => Ok(Some(crate::headers::Headers::from(headers))),
         }
     }
 
@@ -630,6 +661,54 @@ mod tests {
         assert_eq!(capacity.buffered_bytes, 10);
         assert!(!capacity.closed);
         assert!(!capacity.ended);
+    }
+
+    fn test_body(
+        trailers_rx: Option<tokio::sync::oneshot::Receiver<Result<Vec<(String, String)>>>>,
+    ) -> H2Body {
+        let shared = H2BodyShared::new_with_capacity(Arc::new(Notify::new()), 65_535, 2);
+        H2Body::new_with_trailers(shared, H2BodyTimeouts::default(), trailers_rx)
+    }
+
+    // Structural no-alloc backstop: a body built without a trailer receiver
+    // (the non-`te: trailers` warm path) resolves trailers to `Ok(None)` and
+    // never awaits a channel. Neither handle.rs construction site allocates a
+    // trailer `oneshot::channel()` unless `wants_trailers` is true.
+    #[tokio::test]
+    async fn trailers_none_receiver_yields_ok_none() {
+        let mut body = test_body(None);
+        assert!(body.trailers().await.unwrap().is_none());
+        // Idempotent: a second call also yields Ok(None).
+        assert!(body.trailers().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn trailers_dropped_sender_yields_ok_none() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut body = test_body(Some(rx));
+        drop(tx); // clean trailer-less end
+        assert!(body.trailers().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn trailers_reset_error_yields_err() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut body = test_body(Some(rx));
+        tx.send(Err(Error::HttpProtocol("stream reset".into())))
+            .unwrap();
+        assert!(body.trailers().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn trailers_real_frame_yields_some_headers() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut body = test_body(Some(rx));
+        tx.send(Ok(vec![("grpc-status".to_string(), "0".to_string())]))
+            .unwrap();
+        let trailers = body.trailers().await.unwrap().unwrap();
+        assert_eq!(trailers.get("grpc-status"), Some("0"));
+        // Consumed on first await.
+        assert!(body.trailers().await.unwrap().is_none());
     }
 }
 
