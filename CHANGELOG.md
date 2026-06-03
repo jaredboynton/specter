@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- HTTP/2 warm streaming path now borrows the cookie helpers, dropping a per-request allocation on the cookie-bearing path (commit `26d5a78`). A/B measurement on a quiet host showed this neutral on TTFB and throughput; it is allocation hygiene with no measured latency or throughput effect.
+- Re-baselined all published streaming, native-HTTP/3, and WebSocket benchmark numbers (README and `docs/benchmarks/`) to a single quiet AWS Graviton4 host so every competitor comparison is measured on the same machine, replacing the prior mix of Mac-sourced runs. Code is unchanged from 4.2.0; the figures move with the environment. Streaming clears every gate by wide margins with paired Wilcoxon p underflowing to zero at n=100 (H2 request-body TTFB and throughput rose versus the prior Mac figures; H2 response-body TTFB and H1 response-body throughput fell). The native HTTP/3 superiority gate passes against quiche, tokio-quiche, h3-quinn, and reqwest_h3. WebSocket loopback message-rate is parity with fastwebsockets and tokio-tungstenite inside run-to-run variance.
+
+### Removed
+
+- Withdrew the RFC 9220 WebSocket-over-H3 tunnel superiority claim from the README. On the Graviton4 host the full-suite gate does not pass: Specter leads p50 TTFB and throughput on all three tunnel workloads and wins the slow-consumer mixed workload outright, while tokio-quiche holds a lower p95 tail on the echo and client-DATA+FIN workloads. The measured result is recorded in `docs/benchmarks/native-h3-vs-rust-clients/README.md`.
+
 ## [4.2.0] - 2026-06-03
 
 ### Added

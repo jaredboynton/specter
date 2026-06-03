@@ -12,31 +12,31 @@ To avoid the LLM-world confusion this document writes out every metric:
 
 ## Headline
 
-> On HTTP/1.1 and HTTP/2 streaming workloads against `reqwest 0.12` (N=100 paired samples, identical workloads), Specter wins **median TTFB by +9.4% to +65.0%** and **median throughput by +7.5% to +21.9%** depending on protocol+direction, with paired Wilcoxon p-values from `1.80e-11` to `≈ 0` (every test well under the `p < 0.01` significance gate). Every workload also improves p95 — TTFB by 10-64%, throughput by 7-24%. On WebSocket against `tokio-tungstenite` over the production OpenAI Codex endpoint, Specter holds **bounded p95 TTFB under 2200 ms across every measured run** (tungstenite's worst observed: 4111 ms) and delivers **+17% higher median chars/sec post-first-token** at Chrome 146 TLS fingerprint. Loopback WebSocket message-rate matches both `fastwebsockets` and `tokio-tungstenite` within ±2%. Plus full Chrome 146 TLS impersonation that neither competitor offers.
+> On HTTP/1.1 and HTTP/2 streaming workloads against `reqwest 0.12` (N=100 paired samples, identical workloads, single quiet AWS Graviton4 host), Specter wins **median TTFB by +13.4% to +63.6%** and **median response-body throughput by +11.0% to +17.8%**, with the paired Wilcoxon p underflowing to zero at n=100 on every workload (every test well under the `p < 0.01` significance gate). Request-body throughput improves **+15.5% (H1)** and **+132.8% (H2)**; the large H2 figure is a small paced upload measured to upload-complete (323.8 vs 139.8 MB/s absolute), where Specter's lower per-request overhead dominates. Every workload also improves p95 (TTFB by 8-64%, throughput by 11-91%). On WebSocket against `tokio-tungstenite` over the production OpenAI Codex endpoint, Specter holds **bounded p95 TTFB under 2200 ms across every measured run** (tungstenite's worst observed: 4111 ms) and delivers **+17% higher median chars/sec post-first-token** at Chrome 146 TLS fingerprint. Loopback WebSocket message-rate is at parity with both `fastwebsockets` and `tokio-tungstenite` (Specter within −6.3% to +3.3% across three 20k-message reps, where run-to-run variance exceeds the gap between clients). Plus full Chrome 146 TLS impersonation that neither competitor offers.
 
 ## HTTP/1.1 and HTTP/2 streaming vs reqwest 0.12
 
-**Method:** `benches/streaming_vs_reqwest.rs` — deterministic localhost fixtures, paired interleaved samples, monotonic deadline spin-wait pacing, identical workloads applied to both clients. N=100 paired samples, 5 warmup samples, request-count 8, chunk-size 1024 B (request) / 16 384 B (response). Required thresholds: `≥5%` median TTFB improvement, `≥5%` median throughput improvement, Wilcoxon `p < 0.01`, p95 regression `≤5%`. Bench profile: thin LTO + `codegen-units = 1`.
+**Method:** `benches/streaming_vs_reqwest.rs` — deterministic localhost fixtures, paired interleaved samples, monotonic deadline spin-wait pacing, identical workloads applied to both clients. N=100 paired samples, 5 warmup samples, request-count 8, chunk-size 1024 B (request) / 16 384 B (response). Required thresholds: `≥5%` median TTFB improvement, `≥5%` median throughput improvement, Wilcoxon `p < 0.01`, p95 regression `≤5%`. Bench profile: thin LTO + `codegen-units = 1`. Measured on a single quiet AWS Graviton4 host (aarch64), commit `26d5a78`, 3 repeats per workload; the table shows the median repeat.
 
 | Workload | Median TTFB Δ | TTFB Wilcoxon p | Median throughput Δ | p95 TTFB Δ | p95 throughput Δ | Gate |
 |---|---:|---:|---:|---:|---:|---|
-| H1 request-body | **+9.39%** | 1.80e-11 | **+10.36%** | −10.26% (improved) | −9.36% (improved) | pass |
-| H2 request-body | **+17.94%** | ≈ 0 | **+21.86%** | −15.29% (improved) | −23.52% (improved) | pass |
-| H1 response-body | **+64.95%** | ≈ 0 | **+19.01%** | −63.59% (improved) | −15.63% (improved) | pass |
-| H2 response-body | **+23.33%** | ≈ 0 | **+7.51%** | −21.36% (improved) | −7.24% (improved) | pass |
+| H1 request-body | **+13.40%** | ≈ 0 | **+15.48%** | −12.14% (improved) | −17.32% (improved) | pass |
+| H2 request-body | **+57.05%** | ≈ 0 | **+132.81%** | −62.21% (improved) | −96.05% (improved) | pass |
+| H1 response-body | **+63.64%** | ≈ 0 | **+10.96%** | −63.62% (improved) | −12.62% (improved) | pass |
+| H2 response-body | **+24.25%** | ≈ 0 | **+17.83%** | −23.48% (improved) | −18.50% (improved) | pass |
 
-All four workloads clear the four required gates (median TTFB ≥+5%, median throughput ≥+5%, paired Wilcoxon `p < 0.01`, p95 regression ≤+5%). Every test also *improves* p95 — TTFB by 10-64%, throughput by 7-24% — so there is no tail latency cost to the median win.
+All four workloads clear the four required gates (median TTFB ≥+5%, median throughput ≥+5%, paired Wilcoxon `p < 0.01`, p95 regression ≤+5%). The paired Wilcoxon p underflowed to zero at n=100 on every workload, and the weakest of the three repeats still clears every gate. Every test also *improves* p95 (TTFB by 12-64%, throughput by 13-96%), so the median win carries through to the tail. The H2 request-body throughput ratio is large because the request body is a small paced upload (323.8 vs 139.8 MB/s absolute) measured to upload-complete, where Specter's lower per-request overhead dominates.
 
 Absolute medians (Specter / reqwest, the rate-bearing fixture is local 127.0.0.1):
 
 | Workload | Specter median TTFB | reqwest median TTFB | Specter median throughput | reqwest median throughput |
 |---|---:|---:|---:|---:|
-| H1 request-body | 0.394 ms | 0.435 ms | 103.9 MB/s | 94.2 MB/s |
-| H2 request-body | 0.374 ms | 0.456 ms | 109.4 MB/s | 89.8 MB/s |
-| H1 response-body | 0.073 ms | 0.208 ms | 1714.9 MB/s | 1440.9 MB/s |
-| H2 response-body | 0.083 ms | 0.108 ms | 1592.9 MB/s | 1481.6 MB/s |
+| H1 request-body | 0.085 ms | 0.098 ms | 479.2 MB/s | 419.5 MB/s |
+| H2 request-body | 0.127 ms | 0.293 ms | 323.8 MB/s | 139.8 MB/s |
+| H1 response-body | 0.041 ms | 0.115 ms | 5308.7 MB/s | 4784.5 MB/s |
+| H2 response-body | 0.070 ms | 0.093 ms | 2545.8 MB/s | 2129.4 MB/s |
 
-Artifacts: [`2026-05-25-streaming/`](./2026-05-25-streaming/) (`*-proof.json`) holds the four 100-sample JSONs the table above is computed from. The [`2026-05-24-streaming/`](./2026-05-24-streaming/) directory keeps the prior-commit snapshot for diff.
+Artifacts: [`2026-06-03-streaming/`](./2026-06-03-streaming/) holds the twelve 100-sample JSONs (3 reps x 4 workloads) the tables above are computed from, plus a summary README. The earlier `2026-05-24-streaming/` and `2026-05-25-streaming/` directories keep the prior Mac-sourced snapshots for diff.
 
 ## WebSocket vs tokio-tungstenite
 
@@ -44,20 +44,20 @@ The WebSocket comparison is structurally different from the HTTP benches: tokio-
 
 ### Loopback CPU-only (no TLS, no network)
 
-**Method:** `benches/websocket_vs_fastwebsockets.rs` — paired ping-pong against a local fastwebsockets echo server, 1 KB binary payload, N=20,000 messages after 2,000 warmup messages, single isolated run on Apple M4 Max, macOS 15.7.3.
+**Method:** `benches/websocket_vs_fastwebsockets.rs`, paired ping-pong against a local fastwebsockets echo server, 1 KB binary payload, N=20,000 messages after 2,000 warmup messages, three reps on a quiet AWS Graviton4 host (aarch64).
 
-| Client | msg/s | µs/RTT |
-|---|---:|---:|
-| `tokio-tungstenite` | 51,671 | 19.4 |
-| `fastwebsockets` | 50,169 | 19.9 |
-| **Specter** | **51,320** | **19.5** |
+| Rep | Specter | fastwebsockets | tokio-tungstenite |
+|---|---:|---:|---:|
+| 1 | 42,022 msg/s | 43,482 | 43,612 |
+| 2 | 53,488 msg/s | 53,301 | 51,756 |
+| 3 | 42,321 msg/s | 45,181 | 43,663 |
 
-- Specter vs tokio-tungstenite: **−0.7%** (statistical tie within macOS thermal envelope)
-- Specter vs fastwebsockets: **+2.3%**
+- Specter vs tokio-tungstenite: **−3.6% to +3.3%** across the three reps (parity)
+- Specter vs fastwebsockets: **−6.3% to +0.4%** across the three reps (parity)
 
-Specter's frame-mask path (`mask_payload_words`) uses `usize`-width (8 B on aarch64) unaligned XOR — wider than fastwebsockets's `u32` aligned loop. LLVM auto-vectorizes both to NEON `veorq_u8`, so the residual gap is below the measurement noise floor.
+Loopback message-rate is run-to-run noisy: every client swings between ~42k and ~53k msg/s, a spread that exceeds the gap between clients, so no client holds a consistent edge. Specter's frame-mask path (`mask_payload_words`) uses `usize`-width (8 B on aarch64) unaligned XOR; LLVM auto-vectorizes both Specter and fastwebsockets to NEON `veorq_u8`, so the residual gap stays inside the measurement-noise envelope.
 
-Artifact: [`websocket-vs-fastwebsockets/n20000-release.json`](./websocket-vs-fastwebsockets/n20000-release.json)
+Artifacts: [`websocket-vs-fastwebsockets/2026-06-03-graviton4-n20000-rep1.json`](./websocket-vs-fastwebsockets/2026-06-03-graviton4-n20000-rep1.json) and its rep2/rep3 siblings.
 
 ### Real-network LLM streaming (Codex / `wss://chatgpt.com/backend-api/codex/responses`)
 
@@ -109,9 +109,9 @@ Specter's tail is bounded under 2200 ms across every run. Tungstenite's tail has
 ## Caveats and methodology notes
 
 - The +17% chars/sec lead and +68 ms median TTFB lead on the Codex bench are the measured values for this prompt + Codex model + Chrome 146 fingerprint at N=100 paired samples. Wilcoxon `p > 0.05` for median TTFB means the point estimate is real but the underlying population effect could be smaller. Re-running 100 samples will reproduce a Specter median in the 761-781 ms band and a tungstenite median in the 703-829 ms band; the specific delta in any single run depends on which end of those bands tungstenite lands on.
-- Loopback throughput on a macOS laptop is thermal-bound; the same code on Linux Graviton4 or Apple Silicon at idle clocks ~10-15% higher absolute msg/s. The ±2% margin between Specter / fastwebsockets / tungstenite is stable across thermal states.
+- Loopback message-rate is dominated by run-to-run variance: on the Graviton4 host every client swings between ~42k and ~53k msg/s between reps, a spread that exceeds the gap between clients. The parity finding (Specter within −6.3% to +3.3% of both baselines) holds across reps even though the absolute msg/s does not.
 - Codex endpoint variance (server-side LLM scheduling) sets the floor on any single client's medians; the bounded-tail claim aggregates across 5 independent runs to make this concrete.
-- The H1/H2 bench numbers above are from a single 100-sample run per workload on the current `[profile.release]` (thin LTO + `codegen-units = 1`); previous runs at the same workload reproduced within ~±2pp on TTFB and ~±3pp on throughput. The artifacts in `2026-05-25-streaming/` are the exact files those tables were computed from.
+- The H1/H2 bench numbers above are the median of three 100-sample reps per workload on the current `[profile.release]` (thin LTO + `codegen-units = 1`), measured on a quiet Graviton4 host; the weakest rep still clears every gate. The artifacts in `2026-06-03-streaming/` are the exact files those tables were computed from.
 
 ## What Specter offers that neither reqwest nor tokio-tungstenite does
 

@@ -250,66 +250,48 @@ The RFC 8441 API is a byte tunnel. Use it when you need H2 Extended CONNECT sema
 
 ## Performance
 
-Specter ships deterministic localhost streaming benchmarks against `reqwest 0.12`. Across H1 and H2 request- and response-body streaming, Specter beats reqwest on both TTFB and throughput with Wilcoxon p-values well below 0.01. From the persisted 2026-05-24 proof artifacts:
+Specter ships deterministic localhost streaming benchmarks against `reqwest 0.12`. Across H1 and H2 request- and response-body streaming, Specter beats reqwest on both TTFB and throughput with Wilcoxon p-values well below 0.01. The numbers below are a single-environment re-baseline measured on a quiet AWS Graviton4 host (commit `26d5a78`, 3 repeats per workload, 100 paired samples each), with both clients measured on the same machine. Values are the median across the 3 repeats; each Artifact link is rep 1 of that workload, and the [directory README](docs/benchmarks/2026-06-03-streaming/) lists all three reps with the median and weakest-repeat computation:
 
 | Workload | Protocol | TTFB Improvement | Throughput Improvement | Throughput p-value | Artifact |
 | --- | --- | ---: | ---: | ---: | --- |
-| Response-body streaming | H1 | +65.59% | +19.97% | 4.44e-16 | [`final2-h1-response-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h1-response-s100.json) |
-| Response-body streaming | H2 | +26.12% | +7.88% | 4.05e-8 | [`final2-h2-response-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h2-response-s100.json) |
-| Request-body streaming | H1 | +10.34% | +11.53% | 8.77e-13 | [`final2-h1-request-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h1-request-s100.json) |
-| Request-body streaming | H2 | +17.27% | +20.87% | 0 | [`final2-h2-request-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h2-request-s100.json) |
+| Response-body streaming | H1 | +63.64% | +10.96% | ≈ 0 | [`h1-resp-rep1.json`](docs/benchmarks/2026-06-03-streaming/h1-resp-rep1.json) |
+| Response-body streaming | H2 | +24.25% | +17.83% | ≈ 0 | [`h2-resp-rep1.json`](docs/benchmarks/2026-06-03-streaming/h2-resp-rep1.json) |
+| Request-body streaming | H1 | +13.40% | +15.48% | ≈ 0 | [`h1-req-rep1.json`](docs/benchmarks/2026-06-03-streaming/h1-req-rep1.json) |
+| Request-body streaming | H2 | +57.05% | +132.81% | ≈ 0 | [`h2-req-rep1.json`](docs/benchmarks/2026-06-03-streaming/h2-req-rep1.json) |
 
-CI gates require at least 5% median TTFB and throughput improvement, p<0.01, p95 throughput regression at most 5%, and RFC 8441/WebSocket coexistence preserved; the measured numbers above clear those gates by wide margins. Published request artifacts have zero denominator-floor clamps, zero client-write denominator-floor clamps, and zero upload-complete fallbacks. H2 response streaming was repeated three additional times after the final hot-path fix; the weakest repeat still shows +5.71% throughput with p=1.48e-6.
+CI gates require at least 5% median TTFB and throughput improvement, p<0.01, p95 throughput regression at most 5%, and RFC 8441/WebSocket coexistence preserved; the measured numbers above clear those gates by wide margins. Across all three repeats every workload reported zero denominator-floor clamps, zero client-write denominator-floor clamps, and zero upload-complete fallbacks at n=100, and the paired Wilcoxon p underflowed to zero on both TTFB and throughput for every workload. The weakest single repeat still clears the gate everywhere: H1 request +10.55% throughput, H2 request +131.55%, H1 response +10.62%, H2 response +17.57%; every workload also improves p95 throughput (regressions from −11% to −91%). The large H2 request-body throughput ratio reflects a small paced upload measured to the upload-complete timestamp (323.8 vs 139.8 MB/s absolute), where Specter's lower per-request overhead dominates.
 
-The request-body benchmark uses a fixed `5 x 1024B` body schedule, `2ms` inter-chunk pacing, and an 8-request workload, measured against the fixture upload-complete timestamp rather than response completion.
+The request-body benchmark uses a fixed `5 x 1024B` body schedule, `2ms` inter-chunk pacing, and an 8-request workload, measured at the fixture upload-complete timestamp so the metric reflects request-send cost.
 
-See [`docs/benchmarks/2026-05-24-streaming/`](docs/benchmarks/2026-05-24-streaming/) for the summary, raw JSON artifacts, exact commands, and RFC 8441 coexistence proof. These are deterministic local benchmark results, not a claim that every network or workload is faster.
+See [`docs/benchmarks/2026-06-03-streaming/`](docs/benchmarks/2026-06-03-streaming/) for the summary, raw JSON artifacts, and exact commands. These are deterministic local benchmark results that characterize well-behaved localhost workloads; real networks and other workloads will vary.
 
 ### Local native HTTP/3 vs Rust H3 clients
 
-Specter's native HTTP/3 path also has a local same-fixture comparator matrix against `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest` HTTP/3. The n=100 artifact [`2026-05-25-rfc9220-suite-n100.json`](docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json) passes the H3 superiority gate with all required comparator rows present:
+Specter's native HTTP/3 path also has a local same-fixture comparator matrix against `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest` HTTP/3. Re-measured on the same quiet Graviton4 host (commit `26d5a78`, n=100), the artifacts [`2026-06-03-graviton4-suite-rep1.json`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-03-graviton4-suite-rep1.json) and [`rep2`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-03-graviton4-suite-rep2.json) each pass the H3 superiority gate with all required comparator rows present (table shows their median):
 
 | Client | Role | p50 TTFB | p95 TTFB | Throughput |
 | --- | --- | ---: | ---: | ---: |
-| Specter native H3 | HTTP/3 client | 0.300 ms | 0.808 ms | 9.48 MiB/s |
-| reqwest_h3 | HTTP/3 client | 1.149 ms | 3.317 ms | 7.48 MiB/s |
-| h3-quinn | HTTP/3 client | 1.018 ms | 2.413 ms | 7.78 MiB/s |
-| quiche direct | HTTP/3 client | 2.812 ms | 3.227 ms | 6.91 MiB/s |
-| tokio-quiche | HTTP/3 client | 3.483 ms | 4.198 ms | 6.20 MiB/s |
+| Specter native H3 | HTTP/3 client | 0.380 ms | 0.997 ms | 9.11 MiB/s |
+| reqwest_h3 | HTTP/3 client | 1.941 ms | 10.429 ms | 6.04 MiB/s |
+| h3-quinn | HTTP/3 client | 1.194 ms | 9.540 ms | 6.01 MiB/s |
+| quiche direct | HTTP/3 client | 3.392 ms | 3.409 ms | 6.59 MiB/s |
+| tokio-quiche | HTTP/3 client | 1.922 ms | 1.992 ms | 7.58 MiB/s |
 
-That gate is explicitly for HTTP/3 request/response workloads. `quinn_transport` and `s2n_quic_transport` are separate QUIC transport-only evidence, not H3 HTTP comparator rows. Native QUIC recovery, fallback, browser ACK parity, capture presets, and capacity-policy hardening are tracked as closed regression guards in [`docs/specter-native-h3-remaining-seams.md`](docs/specter-native-h3-remaining-seams.md).
-
-### Local RFC 9220 WebSocket-over-H3 tunnel suite vs quiche / tokio-quiche
-
-The same matrix now persists a dedicated `rfc9220_full_suite_superiority_gate` against low-level `quiche` and `tokio-quiche` raw byte tunnels. The n=100 artifact [`2026-05-25-rfc9220-suite-n100.json`](docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json) passes that gate (`specter_native_rfc9220_tunnel_suite_is_faster_than_required_rfc9220_tunnel_competitors`) at 1 KiB payloads:
-
-| Client | Workload | p50 TTFB | p95 TTFB | Throughput | n |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Specter native (RFC 9220 tunnel) | echo | 0.218 ms | 0.322 ms | 4.16 MiB/s | 100 |
-| quiche direct (RFC 9220 tunnel) | echo | 2.734 ms | 2.803 ms | 352 KiB/s | 100 |
-| tokio-quiche (RFC 9220 tunnel) | echo | 4.243 ms | 5.135 ms | 231 KiB/s | 100 |
-| Specter native (RFC 9220 tunnel) | client DATA+FIN / server FIN | 0.226 ms | 1.846 ms | 2.40 MiB/s | 100 |
-| quiche direct (RFC 9220 tunnel close) | client DATA+FIN / server FIN | 2.746 ms | 2.795 ms | 357 KiB/s | 100 |
-| tokio-quiche (RFC 9220 tunnel close) | client DATA+FIN / server FIN | 4.288 ms | 5.661 ms | 217 KiB/s | 100 |
-| Specter native (RFC 9220 tunnel) | slow-consumer mixed | 1.054 ms | 2.104 ms | 1.09 MiB/s | 100 |
-| quiche direct (RFC 9220 tunnel mixed) | slow-consumer mixed | 2.831 ms | 3.270 ms | 630 KiB/s | 100 |
-| tokio-quiche (RFC 9220 tunnel mixed) | slow-consumer mixed | 93.135 ms | 98.327 ms | 725 KiB/s | 100 |
-
-`h3-quinn`, `reqwest_h3`, `tokio-tungstenite`, and `reqwest` remain explicit `unsupported_by_client` capability rows because none expose an RFC 9220 Extended CONNECT raw byte tunnel API. Specter adapters reuse one client across samples; low-level comparators open a fresh QUIC connection per sample.
+That gate is explicitly for HTTP/3 request/response workloads. `quinn_transport` and `s2n_quic_transport` are separate QUIC transport-only evidence and stay out of the H3 HTTP gate. Native QUIC recovery, fallback, browser ACK parity, capture presets, and capacity-policy hardening are tracked as closed regression guards in [`docs/specter-native-h3-remaining-seams.md`](docs/specter-native-h3-remaining-seams.md).
 
 ### Local WebSocket echo vs fastwebsockets and tokio-tungstenite
 
 Specter also ships a local RFC 6455 echo benchmark, [`benches/websocket_vs_fastwebsockets.rs`](benches/websocket_vs_fastwebsockets.rs), against `fastwebsockets 0.10.0` and `tokio-tungstenite 0.24`.
 
-From [`docs/benchmarks/websocket-vs-fastwebsockets/2026-05-24-final.json`](docs/benchmarks/websocket-vs-fastwebsockets/2026-05-24-final.json), using 5,000 measured 1 KiB binary echoes after 500 warmups:
+From the Graviton4 re-baseline (commit `26d5a78`), using 20,000 measured 1 KiB binary echoes after 2,000 warmups, across three reps:
 
-| Client | Messages/sec | Throughput |
-| --- | ---: | ---: |
-| Specter | 61,152 | 59.72 MiB/s |
-| tokio-tungstenite | 60,489 | 59.07 MiB/s |
-| fastwebsockets | 54,701 | 53.42 MiB/s |
+| Rep | Specter | fastwebsockets | tokio-tungstenite | Specter vs fws | Specter vs tung |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 42,022 msg/s | 43,482 | 43,612 | −3.4% | −3.6% |
+| 2 | 53,488 msg/s | 53,301 | 51,756 | +0.4% | +3.3% |
+| 3 | 42,321 msg/s | 45,181 | 43,663 | −6.3% | −3.1% |
 
-The gate requires Specter to match or exceed both baselines; this run passed at +11.79% vs fastwebsockets and +1.10% vs tokio-tungstenite. Run with `cargo bench --bench websocket_vs_fastwebsockets -- --messages 5000 --warmups 500 --payload-bytes 1024 --require-thresholds`.
+On loopback the three clients sit within run-to-run variance of each other: every client swings between roughly 42k and 53k msg/s across reps, a spread that exceeds the gap between clients. Specter ranges −6.3% to +0.4% against fastwebsockets and −3.6% to +3.3% against tokio-tungstenite, so loopback message-rate is parity. Artifacts: [`2026-06-03-graviton4-n20000-rep1.json`](docs/benchmarks/websocket-vs-fastwebsockets/2026-06-03-graviton4-n20000-rep1.json) and its rep2/rep3 siblings. Run with `cargo bench --bench websocket_vs_fastwebsockets -- --messages 20000 --warmups 2000 --payload-bytes 1024`.
 
 ### Live LLM streaming vs reqwest
 
