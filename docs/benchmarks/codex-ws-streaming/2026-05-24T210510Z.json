@@ -30,7 +30,7 @@
       "status": "ok",
       "handshake_status": 101,
       "handshake_ms": 306.001167,
-      "ttft_ms": 1320.5225,
+      "ttfb_ms": 1320.5225,
       "total_wall_time_ms": 1320.661125,
       "total_chars": 48,
       "delta_count": 19,
@@ -48,7 +48,7 @@
       "status": "ok",
       "handshake_status": 101,
       "handshake_ms": 488.082,
-      "ttft_ms": 2784.504958,
+      "ttfb_ms": 2784.504958,
       "total_wall_time_ms": 2839.624958,
       "total_chars": 48,
       "delta_count": 19,
@@ -66,7 +66,7 @@
       "status": "ok",
       "handshake_status": 101,
       "handshake_ms": 275.67362499999996,
-      "ttft_ms": 502.76500000000004,
+      "ttfb_ms": 502.76500000000004,
       "total_wall_time_ms": 625.7247500000001,
       "total_chars": 48,
       "delta_count": 19,
@@ -84,7 +84,7 @@
       "status": "ok",
       "handshake_status": 101,
       "handshake_ms": 355.682792,
-      "ttft_ms": 1391.302875,
+      "ttfb_ms": 1391.302875,
       "total_wall_time_ms": 1433.9458330000002,
       "total_chars": 66,
       "delta_count": 19,
@@ -102,7 +102,7 @@
       "status": "ok",
       "handshake_status": 101,
       "handshake_ms": 320.951667,
-      "ttft_ms": 533.107875,
+      "ttfb_ms": 533.107875,
       "total_wall_time_ms": 679.186084,
       "total_chars": 48,
       "delta_count": 19,
@@ -120,7 +120,7 @@
       "status": "ok",
       "handshake_status": 101,
       "handshake_ms": 364.754084,
-      "ttft_ms": 554.8841669999999,
+      "ttfb_ms": 554.8841669999999,
       "total_wall_time_ms": 654.692042,
       "total_chars": 48,
       "delta_count": 19,
@@ -138,7 +138,7 @@
       "status": "ok",
       "handshake_status": 101,
       "handshake_ms": 366.322708,
-      "ttft_ms": 769.117666,
+      "ttfb_ms": 769.117666,
       "total_wall_time_ms": 802.097666,
       "total_chars": 48,
       "delta_count": 19,
@@ -156,7 +156,7 @@
       "status": "ok",
       "handshake_status": 101,
       "handshake_ms": 298.77379199999996,
-      "ttft_ms": 1047.0543750000002,
+      "ttfb_ms": 1047.0543750000002,
       "total_wall_time_ms": 1100.4073329999999,
       "total_chars": 66,
       "delta_count": 19,
@@ -168,8 +168,8 @@
   ],
   "summary": {
     "specter": {
-      "median_ttft_ms": 554.8841669999999,
-      "p95_ttft_ms": 747.6943160999999,
+      "median_ttfb_ms": 554.8841669999999,
+      "p95_ttfb_ms": 747.6943160999999,
       "median_total_wall_time_ms": 654.692042,
       "p95_total_wall_time_ms": 787.3571036,
       "median_handshake_ms": 364.754084,
@@ -177,8 +177,8 @@
       "passing_samples": 3
     },
     "tungstenite": {
-      "median_ttft_ms": 1047.0543750000002,
-      "p95_ttft_ms": 1356.878025,
+      "median_ttfb_ms": 1047.0543750000002,
+      "p95_ttfb_ms": 1356.878025,
       "median_total_wall_time_ms": 1100.4073329999999,
       "p95_total_wall_time_ms": 1400.591983,
       "median_handshake_ms": 320.951667,
@@ -186,12 +186,12 @@
       "passing_samples": 3
     },
     "comparison": {
-      "ttft_difference_ms": -381.5660973333334,
-      "ttft_ci_95": [
+      "ttfb_difference_ms": -381.5660973333334,
+      "ttfb_ci_95": [
         -1534.1015959041888,
         770.9694012375221
       ],
-      "ttft_ci_covers_zero": true,
+      "ttfb_ci_covers_zero": true,
       "wall_time_difference_ms": -377.00826400000005,
       "wall_time_ci_95": [
         -1365.1445987196953,
@@ -204,7 +204,7 @@
         207.2873449015613
       ],
       "handshake_ci_covers_zero": true,
-      "ttft_wilcoxon_p_value": 0.21133897748577657,
+      "ttfb_wilcoxon_p_value": 0.21133897748577657,
       "wall_time_wilcoxon_p_value": 0.09072466857072525,
       "interpretation": "All differences within network noise at n=3. Both clients streamed successfully from Codex WS."
     }

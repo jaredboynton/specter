@@ -72,7 +72,7 @@ Keep these under regression coverage; do not relist them as active gaps.
 
 Rows below are from `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json`.
 
-| Row | Samples | p50 TTFT ns | p95 TTFT ns | bytes/sec | Status |
+| Row | Samples | p50 TTFB ns | p95 TTFB ns | bytes/sec | Status |
 |---|---:|---:|---:|---:|---|
 | `specter_native_rfc9220_tunnel` | 100 | 218,250 | 321,500 | 4,365,962 | Echo suite row. |
 | `quiche_direct_rfc9220_tunnel` | 100 | 2,733,917 | 2,802,666 | 369,357 | Echo comparator. |
@@ -101,7 +101,7 @@ jq '{fixture_events: (.fixture_events|length), h3_gate: .superiority_gate.pass, 
 
 ```bash
 jq '.rows[] | select(.competitor_id|test("^(specter_native|quiche_direct|tokio_quiche|h3_quinn|reqwest_h3|quinn_transport|s2n_quic_transport|.*rfc9220.*)$")) |
-  {id:.competitor_id,status,samples:.sample_count,p50:.p50_ttft_ns,p95:.p95_ttft_ns,bps:.bytes_per_sec}' \
+  {id:.competitor_id,status,samples:.sample_count,p50:.p50_ttfb_ns,p95:.p95_ttfb_ns,bps:.bytes_per_sec}' \
   docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json
 ```
 

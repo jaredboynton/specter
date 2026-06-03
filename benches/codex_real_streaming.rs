@@ -1,7 +1,7 @@
 //! Real Codex backend SSE streaming benchmark: Specter vs reqwest.
 //!
 //! Hits POST https://chatgpt.com/backend-api/codex/responses with paired
-//! samples from both clients, measures TTFT and total end-to-end wall time
+//! samples from both clients, measures TTFB and total end-to-end wall time
 //! on a real production LLM streaming endpoint.
 //!
 //! Skips gracefully when ~/.codex/auth.json is absent.
@@ -41,7 +41,7 @@ struct Row {
     lead_in_pair: bool,
     status: &'static str,
     status_code: u16,
-    ttft_ms: f64,
+    ttfb_ms: f64,
     total_wall_time_ms: f64,
     total_chars: usize,
     delta_count: usize,
@@ -56,8 +56,8 @@ struct Row {
 
 #[derive(Serialize, Default)]
 struct ClientSummary {
-    median_ttft_ms: f64,
-    p95_ttft_ms: f64,
+    median_ttfb_ms: f64,
+    p95_ttfb_ms: f64,
     median_total_wall_time_ms: f64,
     p95_total_wall_time_ms: f64,
     median_chars_per_sec: f64,
@@ -66,13 +66,13 @@ struct ClientSummary {
 
 #[derive(Serialize)]
 struct Comparison {
-    ttft_difference_ms: f64,
-    ttft_ci_95: [f64; 2],
-    ttft_ci_covers_zero: bool,
+    ttfb_difference_ms: f64,
+    ttfb_ci_95: [f64; 2],
+    ttfb_ci_covers_zero: bool,
     wall_time_difference_ms: f64,
     wall_time_ci_95: [f64; 2],
     wall_time_ci_covers_zero: bool,
-    ttft_wilcoxon_p_value: f64,
+    ttfb_wilcoxon_p_value: f64,
     wall_time_wilcoxon_p_value: f64,
     interpretation: String,
 }
@@ -121,7 +121,7 @@ struct Artifact {
 struct SampleResult {
     status: &'static str,
     status_code: u16,
-    ttft_ms: f64,
+    ttfb_ms: f64,
     total_wall_time_ms: f64,
     total_chars: usize,
     delta_count: usize,
@@ -451,15 +451,15 @@ fn sample_summary_from(rows: &[Row], client: &str) -> ClientSummary {
     if passing.is_empty() {
         return ClientSummary::default();
     }
-    let ttfts: Vec<f64> = passing.iter().map(|r| r.ttft_ms).collect();
+    let ttfbs: Vec<f64> = passing.iter().map(|r| r.ttfb_ms).collect();
     let walls: Vec<f64> = passing.iter().map(|r| r.total_wall_time_ms).collect();
     let cps: Vec<f64> = passing.iter().map(|r| r.chars_per_sec).collect();
-    let (ttft_med, ttft_p95) = median_p95(&ttfts);
+    let (ttfb_med, ttfb_p95) = median_p95(&ttfbs);
     let (wall_med, wall_p95) = median_p95(&walls);
     let (cps_med, _) = median_p95(&cps);
     ClientSummary {
-        median_ttft_ms: ttft_med,
-        p95_ttft_ms: ttft_p95,
+        median_ttfb_ms: ttfb_med,
+        p95_ttfb_ms: ttfb_p95,
         median_total_wall_time_ms: wall_med,
         p95_total_wall_time_ms: wall_p95,
         median_chars_per_sec: cps_med,
@@ -524,7 +524,7 @@ async fn run_specter_sample(
             return Ok(SampleResult {
                 status: "error",
                 status_code: 0,
-                ttft_ms: 0.0,
+                ttfb_ms: 0.0,
                 total_wall_time_ms: 0.0,
                 total_chars: 0,
                 delta_count: 0,
@@ -561,7 +561,7 @@ async fn run_specter_sample(
         return Ok(SampleResult {
             status: "http_error",
             status_code,
-            ttft_ms: 0.0,
+            ttfb_ms: 0.0,
             total_wall_time_ms: 0.0,
             total_chars: 0,
             delta_count: 0,
@@ -600,7 +600,7 @@ async fn run_specter_sample(
         Ok(Err(e)) => Ok(SampleResult {
             status: "error",
             status_code,
-            ttft_ms: 0.0,
+            ttfb_ms: 0.0,
             total_wall_time_ms: 0.0,
             total_chars: obs.total_chars,
             delta_count: obs.delta_count,
@@ -612,7 +612,7 @@ async fn run_specter_sample(
         Err(_) => Ok(SampleResult {
             status: "timeout",
             status_code,
-            ttft_ms: 0.0,
+            ttfb_ms: 0.0,
             total_wall_time_ms: 0.0,
             total_chars: obs.total_chars,
             delta_count: obs.delta_count,
@@ -660,7 +660,7 @@ async fn run_reqwest_sample(
             return Ok(SampleResult {
                 status: "error",
                 status_code: 0,
-                ttft_ms: 0.0,
+                ttfb_ms: 0.0,
                 total_wall_time_ms: 0.0,
                 total_chars: 0,
                 delta_count: 0,
@@ -681,7 +681,7 @@ async fn run_reqwest_sample(
         return Ok(SampleResult {
             status: "http_error",
             status_code,
-            ttft_ms: 0.0,
+            ttfb_ms: 0.0,
             total_wall_time_ms: 0.0,
             total_chars: 0,
             delta_count: 0,
@@ -716,7 +716,7 @@ async fn run_reqwest_sample(
         Ok(Err(e)) => Ok(SampleResult {
             status: "error",
             status_code,
-            ttft_ms: 0.0,
+            ttfb_ms: 0.0,
             total_wall_time_ms: 0.0,
             total_chars: obs.total_chars,
             delta_count: obs.delta_count,
@@ -728,7 +728,7 @@ async fn run_reqwest_sample(
         Err(_) => Ok(SampleResult {
             status: "timeout",
             status_code,
-            ttft_ms: 0.0,
+            ttfb_ms: 0.0,
             total_wall_time_ms: 0.0,
             total_chars: obs.total_chars,
             delta_count: obs.delta_count,
@@ -761,7 +761,7 @@ fn finalize_sample(
     protocol_used: String,
     pool_reuse_delta: Option<u64>,
 ) -> Result<SampleResult, Box<dyn std::error::Error>> {
-    let ttft_ms = obs
+    let ttfb_ms = obs
         .first_delta
         .map(|t| t.duration_since(start).as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
@@ -789,7 +789,7 @@ fn finalize_sample(
     Ok(SampleResult {
         status,
         status_code,
-        ttft_ms,
+        ttfb_ms,
         total_wall_time_ms,
         total_chars: obs.total_chars,
         delta_count: obs.delta_count,
@@ -808,7 +808,7 @@ fn row_from_sample(
     pair_index: usize,
     lead_in_pair: bool,
 ) -> Row {
-    let cps_denom = (sample.total_wall_time_ms - sample.ttft_ms).max(1.0);
+    let cps_denom = (sample.total_wall_time_ms - sample.ttfb_ms).max(1.0);
     let chars_per_sec = if sample.delta_count >= 2 {
         (sample.total_chars as f64) / (cps_denom / 1000.0)
     } else {
@@ -822,7 +822,7 @@ fn row_from_sample(
         lead_in_pair,
         status: leak_status(sample.status),
         status_code: sample.status_code,
-        ttft_ms: sample.ttft_ms,
+        ttfb_ms: sample.ttfb_ms,
         total_wall_time_ms: sample.total_wall_time_ms,
         total_chars: sample.total_chars,
         delta_count: sample.delta_count,
@@ -1008,27 +1008,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let specter_summary = sample_summary_from(&rows, "specter");
     let reqwest_summary = sample_summary_from(&rows, "reqwest");
 
-    let ttft_diffs = paired_diffs(&rows, |r| r.ttft_ms);
+    let ttfb_diffs = paired_diffs(&rows, |r| r.ttfb_ms);
     let wall_diffs = paired_diffs(&rows, |r| r.total_wall_time_ms);
 
-    let (ttft_diff_mean, ttft_ci) = t_ci_95(&ttft_diffs);
+    let (ttfb_diff_mean, ttfb_ci) = t_ci_95(&ttfb_diffs);
     let (wall_diff_mean, wall_ci) = t_ci_95(&wall_diffs);
 
     // Wilcoxon needs paired vectors of the two clients, not the diff.
-    let specter_ttfts: Vec<f64> = (0..pair_count)
+    let specter_ttfbs: Vec<f64> = (0..pair_count)
         .filter_map(|p| {
             counted_rows
                 .iter()
                 .find(|r| r.pair_index == p && r.client == "specter" && r.status == "ok")
-                .map(|r| r.ttft_ms)
+                .map(|r| r.ttfb_ms)
         })
         .collect();
-    let reqwest_ttfts: Vec<f64> = (0..pair_count)
+    let reqwest_ttfbs: Vec<f64> = (0..pair_count)
         .filter_map(|p| {
             counted_rows
                 .iter()
                 .find(|r| r.pair_index == p && r.client == "reqwest" && r.status == "ok")
-                .map(|r| r.ttft_ms)
+                .map(|r| r.ttfb_ms)
         })
         .collect();
     let specter_walls: Vec<f64> = (0..pair_count)
@@ -1048,36 +1048,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let ttft_wilcoxon = paired_wilcoxon_signed_rank_p_value(&reqwest_ttfts, &specter_ttfts);
+    let ttfb_wilcoxon = paired_wilcoxon_signed_rank_p_value(&reqwest_ttfbs, &specter_ttfbs);
     let wall_wilcoxon = paired_wilcoxon_signed_rank_p_value(&reqwest_walls, &specter_walls);
 
-    let ttft_ci_covers_zero = ttft_ci[0] <= 0.0 && ttft_ci[1] >= 0.0;
+    let ttfb_ci_covers_zero = ttfb_ci[0] <= 0.0 && ttfb_ci[1] >= 0.0;
     let wall_ci_covers_zero = wall_ci[0] <= 0.0 && wall_ci[1] >= 0.0;
 
     let interpretation = if protocol_mismatch {
         format!(
             "Protocol mismatch: specter={proto_specter}, reqwest={proto_reqwest}. Comparison invalid."
         )
-    } else if ttft_ci_covers_zero && wall_ci_covers_zero {
+    } else if ttfb_ci_covers_zero && wall_ci_covers_zero {
         format!(
-            "Differences within network noise at n={pair_count} (TTFT 95% CI covers zero, wall 95% CI covers zero). Both clients streamed successfully from Codex over HTTP/2."
+            "Differences within network noise at n={pair_count} (TTFB 95% CI covers zero, wall 95% CI covers zero). Both clients streamed successfully from Codex over HTTP/2."
         )
-    } else if !ttft_ci_covers_zero && ttft_diff_mean < 0.0 {
+    } else if !ttfb_ci_covers_zero && ttfb_diff_mean < 0.0 {
         format!(
-            "Specter TTFT measurably faster: {ttft_diff_mean:.1} ms [{:.1}, {:.1}] (95% CI excludes zero). Wall-time CI {} zero.",
-            ttft_ci[0],
-            ttft_ci[1],
+            "Specter TTFB measurably faster: {ttfb_diff_mean:.1} ms [{:.1}, {:.1}] (95% CI excludes zero). Wall-time CI {} zero.",
+            ttfb_ci[0],
+            ttfb_ci[1],
             if wall_ci_covers_zero { "covers" } else { "excludes" }
         )
-    } else if !ttft_ci_covers_zero && ttft_diff_mean > 0.0 {
+    } else if !ttfb_ci_covers_zero && ttfb_diff_mean > 0.0 {
         format!(
-            "reqwest TTFT measurably faster by {:.1} ms [{:.1}, {:.1}]. Investigate Specter HTTP/2 read loop.",
-            ttft_diff_mean.abs(),
-            ttft_ci[0],
-            ttft_ci[1]
+            "reqwest TTFB measurably faster by {:.1} ms [{:.1}, {:.1}]. Investigate Specter HTTP/2 read loop.",
+            ttfb_diff_mean.abs(),
+            ttfb_ci[0],
+            ttfb_ci[1]
         )
     } else {
-        format!("Mixed: TTFT CI={:.1?}, wall CI={:.1?}", ttft_ci, wall_ci)
+        format!("Mixed: TTFB CI={:.1?}, wall CI={:.1?}", ttfb_ci, wall_ci)
     };
 
     let summary = Summary {
@@ -1087,13 +1087,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         protocol_used_reqwest: proto_reqwest,
         protocol_mismatch,
         comparison: Comparison {
-            ttft_difference_ms: ttft_diff_mean,
-            ttft_ci_95: ttft_ci,
-            ttft_ci_covers_zero,
+            ttfb_difference_ms: ttfb_diff_mean,
+            ttfb_ci_95: ttfb_ci,
+            ttfb_ci_covers_zero,
             wall_time_difference_ms: wall_diff_mean,
             wall_time_ci_95: wall_ci,
             wall_time_ci_covers_zero: wall_ci_covers_zero,
-            ttft_wilcoxon_p_value: ttft_wilcoxon,
+            ttfb_wilcoxon_p_value: ttfb_wilcoxon,
             wall_time_wilcoxon_p_value: wall_wilcoxon,
             interpretation,
         },

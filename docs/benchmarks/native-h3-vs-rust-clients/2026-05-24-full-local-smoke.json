@@ -72,64 +72,64 @@
     {
       "competitor_id": "specter_native",
       "status": "measured_pass",
-      "p50_ttft_ns": 154125.0,
-      "p95_ttft_ns": 172041.0,
+      "p50_ttfb_ns": 154125.0,
+      "p95_ttfb_ns": 172041.0,
       "bytes_per_sec": 10228067.680542188,
       "source": "specter_native_adapter"
     },
     {
       "competitor_id": "specter_native_rfc9220_tunnel",
       "status": "measured_pass",
-      "p50_ttft_ns": 344875.0,
-      "p95_ttft_ns": 406708.0,
+      "p50_ttfb_ns": 344875.0,
+      "p95_ttfb_ns": 406708.0,
       "bytes_per_sec": 2724915.2788181743,
       "source": "specter_native_rfc9220_tunnel_adapter"
     },
     {
       "competitor_id": "quiche_direct",
       "status": "measured_pass",
-      "p50_ttft_ns": 2969917.0,
-      "p95_ttft_ns": 3057666.0,
+      "p50_ttfb_ns": 2969917.0,
+      "p95_ttfb_ns": 3057666.0,
       "bytes_per_sec": 7257331.537131966,
       "source": "quiche_direct_adapter"
     },
     {
       "competitor_id": "tokio_quiche",
       "status": "measured_pass",
-      "p50_ttft_ns": 3068375.0,
-      "p95_ttft_ns": 3109833.0,
+      "p50_ttfb_ns": 3068375.0,
+      "p95_ttfb_ns": 3109833.0,
       "bytes_per_sec": 6351475.225486287,
       "source": "tokio_quiche_adapter"
     },
     {
       "competitor_id": "h3_quinn",
       "status": "measured_pass",
-      "p50_ttft_ns": 309500.0,
-      "p95_ttft_ns": 426375.0,
+      "p50_ttfb_ns": 309500.0,
+      "p95_ttfb_ns": 426375.0,
       "bytes_per_sec": 8666414.248888373,
       "source": "h3_quinn_adapter"
     },
     {
       "competitor_id": "reqwest_h3",
       "status": "measured_pass",
-      "p50_ttft_ns": 316500.0,
-      "p95_ttft_ns": 328333.0,
+      "p50_ttfb_ns": 316500.0,
+      "p95_ttfb_ns": 328333.0,
       "bytes_per_sec": 9570140.414240351,
       "source": "reqwest_h3_adapter"
     },
     {
       "competitor_id": "quinn_transport",
       "status": "measured_pass",
-      "p50_ttft_ns": 288625.0,
-      "p95_ttft_ns": 367709.0,
+      "p50_ttfb_ns": 288625.0,
+      "p95_ttfb_ns": 367709.0,
       "bytes_per_sec": 3120362.498362114,
       "source": "quinn_transport_adapter"
     },
     {
       "competitor_id": "s2n_quic_transport",
       "status": "pending_adapter",
-      "p50_ttft_ns": null,
-      "p95_ttft_ns": null,
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
       "bytes_per_sec": null,
       "source": "native_h3_vs_rust_clients_harness"
     }

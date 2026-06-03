@@ -30,7 +30,7 @@
       "lead_in_pair": true,
       "status": "ok",
       "status_code": 200,
-      "ttft_ms": 1468.54925,
+      "ttfb_ms": 1468.54925,
       "total_wall_time_ms": 1537.537875,
       "total_chars": 66,
       "delta_count": 19,
@@ -48,7 +48,7 @@
       "lead_in_pair": false,
       "status": "ok",
       "status_code": 200,
-      "ttft_ms": 624.352083,
+      "ttfb_ms": 624.352083,
       "total_wall_time_ms": 704.331958,
       "total_chars": 48,
       "delta_count": 19,
@@ -66,7 +66,7 @@
       "lead_in_pair": true,
       "status": "ok",
       "status_code": 200,
-      "ttft_ms": 959.1777500000001,
+      "ttfb_ms": 959.1777500000001,
       "total_wall_time_ms": 1007.719708,
       "total_chars": 66,
       "delta_count": 19,
@@ -84,7 +84,7 @@
       "lead_in_pair": false,
       "status": "ok",
       "status_code": 200,
-      "ttft_ms": 950.135708,
+      "ttfb_ms": 950.135708,
       "total_wall_time_ms": 1044.4032080000002,
       "total_chars": 66,
       "delta_count": 19,
@@ -102,7 +102,7 @@
       "lead_in_pair": true,
       "status": "ok",
       "status_code": 200,
-      "ttft_ms": 559.226792,
+      "ttfb_ms": 559.226792,
       "total_wall_time_ms": 658.8260839999999,
       "total_chars": 48,
       "delta_count": 19,
@@ -120,7 +120,7 @@
       "lead_in_pair": false,
       "status": "ok",
       "status_code": 200,
-      "ttft_ms": 612.644542,
+      "ttfb_ms": 612.644542,
       "total_wall_time_ms": 717.3969169999999,
       "total_chars": 48,
       "delta_count": 19,
@@ -138,7 +138,7 @@
       "lead_in_pair": true,
       "status": "ok",
       "status_code": 200,
-      "ttft_ms": 1143.314042,
+      "ttfb_ms": 1143.314042,
       "total_wall_time_ms": 1143.418375,
       "total_chars": 48,
       "delta_count": 19,
@@ -156,7 +156,7 @@
       "lead_in_pair": false,
       "status": "ok",
       "status_code": 200,
-      "ttft_ms": 1165.085833,
+      "ttfb_ms": 1165.085833,
       "total_wall_time_ms": 1206.160291,
       "total_chars": 66,
       "delta_count": 19,
@@ -169,16 +169,16 @@
   ],
   "summary": {
     "specter": {
-      "median_ttft_ms": 959.1777500000001,
-      "p95_ttft_ms": 1124.9004128,
+      "median_ttfb_ms": 959.1777500000001,
+      "p95_ttfb_ms": 1124.9004128,
       "median_total_wall_time_ms": 1007.719708,
       "p95_total_wall_time_ms": 1129.8485083,
       "median_chars_per_sec": 1359.6484921354042,
       "passing_samples": 3
     },
     "reqwest": {
-      "median_ttft_ms": 950.135708,
-      "p95_ttft_ms": 1143.5908205,
+      "median_ttfb_ms": 950.135708,
+      "p95_ttfb_ms": 1143.5908205,
       "median_total_wall_time_ms": 1044.4032080000002,
       "p95_total_wall_time_ms": 1189.9845827,
       "median_chars_per_sec": 700.1352534012241,
@@ -188,21 +188,21 @@
     "protocol_used_reqwest": "HTTP/2",
     "protocol_mismatch": false,
     "comparison": {
-      "ttft_difference_ms": 13.562666999999957,
-      "ttft_ci_95": [
+      "ttfb_difference_ms": 13.562666999999957,
+      "ttfb_ci_95": [
         -80.34051300489058,
         107.4658470048905
       ],
-      "ttft_ci_covers_zero": true,
+      "ttfb_ci_covers_zero": true,
       "wall_time_difference_ms": -13.618194333333387,
       "wall_time_ci_95": [
         -172.2700243577906,
         145.03363569112383
       ],
       "wall_time_ci_covers_zero": true,
-      "ttft_wilcoxon_p_value": 0.7886610225142234,
+      "ttfb_wilcoxon_p_value": 0.7886610225142234,
       "wall_time_wilcoxon_p_value": 0.3946340746214716,
-      "interpretation": "Differences within network noise at n=3 (TTFT 95% CI covers zero, wall 95% CI covers zero). Both clients streamed successfully from Codex over HTTP/2."
+      "interpretation": "Differences within network noise at n=3 (TTFB 95% CI covers zero, wall 95% CI covers zero). Both clients streamed successfully from Codex over HTTP/2."
     }
   }
 }

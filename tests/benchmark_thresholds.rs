@@ -12,12 +12,12 @@ use streaming_vs_reqwest::{
     DenominatorEvidence, Metrics,
 };
 
-fn metrics(ttft_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64) -> Metrics {
-    let ttft_samples_ns = vec![ttft_ns; 30];
+fn metrics(ttfb_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64) -> Metrics {
+    let ttfb_samples_ns = vec![ttfb_ns; 30];
     let bytes_per_sec_samples = vec![bytes_per_sec; 30];
 
     Metrics {
-        ttft_ns,
+        ttfb_ns,
         chunks_per_sec: 1_000.0,
         bytes_per_sec,
         p95_bytes_per_sec,
@@ -29,7 +29,7 @@ fn metrics(ttft_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64
         client_write_overhead_unclamped_duration_ns: None,
         client_write_overhead_denominator_floor_count: 0,
         upload_complete_fallback_count: 0,
-        p50_ns: ttft_ns,
+        p50_ns: ttfb_ns,
         p95_ns,
         p99_ns: p95_ns,
         warmup_count: 0,
@@ -37,7 +37,7 @@ fn metrics(ttft_ns: f64, bytes_per_sec: f64, p95_bytes_per_sec: f64, p95_ns: f64
         connection_reuse_count: 0,
         pass: true,
         actual_send_gap: ActualSendGap::empty(),
-        ttft_samples_ns,
+        ttfb_samples_ns,
         bytes_per_sec_samples,
         response_gap_overhead_by_index_ns: Vec::new(),
     }
@@ -59,10 +59,10 @@ fn comparable_threshold_fails_when_median_throughput_regresses() {
     let result = evaluate_comparable_threshold(&reqwest, &specter);
 
     assert!(!result.pass);
-    assert!(result.ttft_improvement_pct >= 5.0);
+    assert!(result.ttfb_improvement_pct >= 5.0);
     assert!(result.median_throughput_regression_pct > 5.0);
     assert!(result.p95_throughput_regression_pct <= 5.0);
-    assert!(result.p95_ttft_regression_pct <= 5.0);
+    assert!(result.p95_ttfb_regression_pct <= 5.0);
 }
 
 #[test]
@@ -73,11 +73,11 @@ fn comparable_threshold_fails_when_median_throughput_is_equal() {
     let result = evaluate_comparable_threshold(&reqwest, &specter);
 
     assert!(!result.pass);
-    assert!(result.ttft_improvement_pct >= 5.0);
+    assert!(result.ttfb_improvement_pct >= 5.0);
     assert_eq!(result.throughput_improvement_pct, 0.0);
     assert!(result.median_throughput_regression_pct <= 5.0);
     assert!(result.p95_throughput_regression_pct <= 5.0);
-    assert!(result.p95_ttft_regression_pct <= 5.0);
+    assert!(result.p95_ttfb_regression_pct <= 5.0);
 }
 
 #[test]
@@ -88,25 +88,25 @@ fn comparable_threshold_fails_when_median_throughput_win_is_under_five_percent()
     let result = evaluate_comparable_threshold(&reqwest, &specter);
 
     assert!(!result.pass);
-    assert!(result.ttft_improvement_pct >= 5.0);
+    assert!(result.ttfb_improvement_pct >= 5.0);
     assert!(result.throughput_improvement_pct < 5.0);
     assert!(result.median_throughput_regression_pct <= 5.0);
     assert!(result.p95_throughput_regression_pct <= 5.0);
-    assert!(result.p95_ttft_regression_pct <= 5.0);
+    assert!(result.p95_ttfb_regression_pct <= 5.0);
 }
 
 #[test]
-fn comparable_threshold_fails_when_median_ttft_win_is_under_five_percent() {
+fn comparable_threshold_fails_when_median_ttfb_win_is_under_five_percent() {
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
     let specter = metrics(951.0, 1_100.0, 1_100.0, 951.0);
 
     let result = evaluate_comparable_threshold(&reqwest, &specter);
 
     assert!(!result.pass);
-    assert!(result.ttft_improvement_pct < 5.0);
+    assert!(result.ttfb_improvement_pct < 5.0);
     assert!(result.throughput_improvement_pct >= 5.0);
     assert!(result.p95_throughput_regression_pct <= 5.0);
-    assert!(result.p95_ttft_regression_pct <= 5.0);
+    assert!(result.p95_ttfb_regression_pct <= 5.0);
 }
 
 #[test]
@@ -117,24 +117,24 @@ fn comparable_threshold_fails_when_p95_throughput_regresses() {
     let result = evaluate_comparable_threshold(&reqwest, &specter);
 
     assert!(!result.pass);
-    assert!(result.ttft_improvement_pct >= 5.0);
+    assert!(result.ttfb_improvement_pct >= 5.0);
     assert!(result.median_throughput_regression_pct <= 5.0);
     assert!(result.p95_throughput_regression_pct > 5.0);
-    assert!(result.p95_ttft_regression_pct <= 5.0);
+    assert!(result.p95_ttfb_regression_pct <= 5.0);
 }
 
 #[test]
-fn comparable_threshold_fails_when_p95_ttft_regresses_over_five_percent() {
+fn comparable_threshold_fails_when_p95_ttfb_regresses_over_five_percent() {
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
     let specter = metrics(900.0, 1_100.0, 1_100.0, 1_051.0);
 
     let result = evaluate_comparable_threshold(&reqwest, &specter);
 
     assert!(!result.pass);
-    assert!(result.ttft_improvement_pct >= 5.0);
+    assert!(result.ttfb_improvement_pct >= 5.0);
     assert!(result.throughput_improvement_pct >= 5.0);
     assert!(result.p95_throughput_regression_pct <= 5.0);
-    assert!(result.p95_ttft_regression_pct > 5.0);
+    assert!(result.p95_ttfb_regression_pct > 5.0);
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn comparable_threshold_emits_and_enforces_wilcoxon_p_values() {
     let result = evaluate_comparable_threshold(&reqwest, &specter);
 
     assert!(result.pass);
-    assert!(result.ttft_wilcoxon_signed_rank_p_value < 0.01);
+    assert!(result.ttfb_wilcoxon_signed_rank_p_value < 0.01);
     assert!(result.throughput_wilcoxon_signed_rank_p_value < 0.01);
 }
 
@@ -153,7 +153,7 @@ fn comparable_threshold_emits_and_enforces_wilcoxon_p_values() {
 fn comparable_threshold_fails_when_wilcoxon_p_values_are_not_significant() {
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
     let mut specter = metrics(900.0, 1_100.0, 1_100.0, 900.0);
-    specter.ttft_samples_ns = (0..30)
+    specter.ttfb_samples_ns = (0..30)
         .map(|idx| if idx < 16 { 900.0 } else { 2_000.0 })
         .collect();
     specter.bytes_per_sec_samples = (0..30)
@@ -163,15 +163,15 @@ fn comparable_threshold_fails_when_wilcoxon_p_values_are_not_significant() {
     let result = evaluate_comparable_threshold(&reqwest, &specter);
 
     assert!(!result.pass);
-    assert!(result.ttft_improvement_pct >= 5.0);
+    assert!(result.ttfb_improvement_pct >= 5.0);
     assert!(result.throughput_improvement_pct >= 5.0);
-    assert!(result.ttft_wilcoxon_signed_rank_p_value >= 0.01);
+    assert!(result.ttfb_wilcoxon_signed_rank_p_value >= 0.01);
     assert!(result.throughput_wilcoxon_signed_rank_p_value >= 0.01);
 }
 
 #[test]
 fn comparable_threshold_enforces_throughput_for_request_rows_too() {
-    // Specter wins TTFT by >5% but loses median throughput, p95 throughput,
+    // Specter wins TTFB by >5% but loses median throughput, p95 throughput,
     // and Wilcoxon throughput significance. The shared request/response gate
     // must still fail because throughput remains required.
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
@@ -180,20 +180,20 @@ fn comparable_threshold_enforces_throughput_for_request_rows_too() {
     let result = evaluate_comparable_threshold(&reqwest, &specter);
 
     assert!(!result.pass);
-    assert!(result.ttft_improvement_pct >= 5.0);
+    assert!(result.ttfb_improvement_pct >= 5.0);
     assert!(result.median_throughput_regression_pct > 5.0);
     assert!(result.p95_throughput_regression_pct > 5.0);
 }
 
 #[test]
-fn comparable_threshold_still_enforces_ttft_p95_and_wilcoxon() {
-    // p95 TTFT regresses past 5%, so the gate fails even when throughput wins.
+fn comparable_threshold_still_enforces_ttfb_p95_and_wilcoxon() {
+    // p95 TTFB regresses past 5%, so the gate fails even when throughput wins.
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
     let specter = metrics(900.0, 1_100.0, 1_100.0, 1_060.0);
 
     let result = evaluate_comparable_threshold(&reqwest, &specter);
     assert!(!result.pass);
-    assert!(result.p95_ttft_regression_pct > 5.0);
+    assert!(result.p95_ttfb_regression_pct > 5.0);
 }
 
 #[test]
@@ -209,8 +209,8 @@ fn paired_wilcoxon_signed_rank_uses_direction_for_metric_semantics() {
 }
 
 #[test]
-fn throughput_sample_uses_corrected_client_overhead_duration_not_ttft_or_raw_duration() {
-    let mut ttft_values = Vec::new();
+fn throughput_sample_uses_corrected_client_overhead_duration_not_ttfb_or_raw_duration() {
+    let mut ttfb_values = Vec::new();
     let mut throughput_values = Vec::new();
     let mut chunk_rates = Vec::new();
     let mut body_transfer_duration_values = Vec::new();
@@ -227,7 +227,7 @@ fn throughput_sample_uses_corrected_client_overhead_duration_not_ttft_or_raw_dur
         5 * 1024,
         5,
         &[1_250_000.0, 1_250_000.0, 1_250_000.0, 1_250_000.0],
-        &mut ttft_values,
+        &mut ttfb_values,
         &mut throughput_values,
         &mut chunk_rates,
         &mut body_transfer_duration_values,
@@ -237,7 +237,7 @@ fn throughput_sample_uses_corrected_client_overhead_duration_not_ttft_or_raw_dur
         &mut send_gap_samples_ns,
     );
 
-    assert_eq!(ttft_values, vec![2_000_000.0]);
+    assert_eq!(ttfb_values, vec![2_000_000.0]);
     assert_eq!(body_transfer_duration_values, vec![8_000_000.0]);
     assert_eq!(client_overhead_duration_values, vec![1_000_000.0]);
     assert_eq!(client_overhead_unclamped_duration_values, vec![1_000_000.0]);
@@ -264,7 +264,7 @@ fn response_gap_overhead_diagnostic_uses_per_gap_pacing_overage_with_floor_evide
 
 #[test]
 fn response_throughput_denominator_uses_supplied_delivery_evidence_not_decoded_gap_count() {
-    let mut ttft_values = Vec::new();
+    let mut ttfb_values = Vec::new();
     let mut throughput_values = Vec::new();
     let mut chunk_rates = Vec::new();
     let mut body_transfer_duration_values = Vec::new();
@@ -281,7 +281,7 @@ fn response_throughput_denominator_uses_supplied_delivery_evidence_not_decoded_g
         5 * 1024,
         5,
         &[900_000.0, 950_000.0, 980_000.0, 990_000.0, 995_000.0],
-        &mut ttft_values,
+        &mut ttfb_values,
         &mut throughput_values,
         &mut chunk_rates,
         &mut body_transfer_duration_values,
@@ -307,7 +307,7 @@ fn request_body_transfer_duration_uses_upload_complete_not_response_complete() {
 
 #[test]
 fn request_body_throughput_uses_upload_complete_denominator_and_emits_floor_evidence() {
-    let mut ttft_values = Vec::new();
+    let mut ttfb_values = Vec::new();
     let mut throughput_values = Vec::new();
     let mut chunk_rates = Vec::new();
     let mut body_transfer_duration_values = Vec::new();
@@ -327,7 +327,7 @@ fn request_body_throughput_uses_upload_complete_denominator_and_emits_floor_evid
         5 * 1024,
         5,
         &[2_000_000.0, 2_000_000.0, 2_000_000.0, 2_000_000.0],
-        &mut ttft_values,
+        &mut ttfb_values,
         &mut throughput_values,
         &mut chunk_rates,
         &mut body_transfer_duration_values,
@@ -340,7 +340,7 @@ fn request_body_throughput_uses_upload_complete_denominator_and_emits_floor_evid
         &mut send_gap_samples_ns,
     );
 
-    assert_eq!(ttft_values, vec![1.0]);
+    assert_eq!(ttfb_values, vec![1.0]);
     assert_eq!(body_transfer_duration_values, vec![8_000_000.0]);
     assert_eq!(client_overhead_unclamped_duration_values, vec![0.0]);
     assert_eq!(client_overhead_duration_values, vec![1.0]);
@@ -355,7 +355,7 @@ fn request_body_throughput_uses_upload_complete_denominator_and_emits_floor_evid
 
 #[test]
 fn request_body_gate_uses_write_overhead_not_first_to_header_window() {
-    let mut ttft_values = Vec::new();
+    let mut ttfb_values = Vec::new();
     let mut throughput_values = Vec::new();
     let mut chunk_rates = Vec::new();
     let mut body_transfer_duration_values = Vec::new();
@@ -375,7 +375,7 @@ fn request_body_gate_uses_write_overhead_not_first_to_header_window() {
         5 * 1024,
         5,
         &[],
-        &mut ttft_values,
+        &mut ttfb_values,
         &mut throughput_values,
         &mut chunk_rates,
         &mut body_transfer_duration_values,
@@ -388,7 +388,7 @@ fn request_body_gate_uses_write_overhead_not_first_to_header_window() {
         &mut send_gap_samples_ns,
     );
 
-    assert_eq!(ttft_values, vec![2_000_000.0]);
+    assert_eq!(ttfb_values, vec![2_000_000.0]);
     assert_eq!(client_overhead_duration_values, vec![2_000_000.0]);
     assert_eq!(client_overhead_unclamped_duration_values, vec![2_000_000.0]);
     assert_eq!(client_overhead_denominator_floor_count, 0);

@@ -79,7 +79,7 @@ Product-gated optional extensions are intentionally not active gaps: raw `h2`/`h
 |---|---|---|
 | `docs/benchmarks/2026-05-24-streaming/` | H1/H2 request and response streaming against reqwest. | Add raw `h2`/`hyper` only if deeper isolation is needed. |
 | `docs/benchmarks/websocket-vs-fastwebsockets/2026-05-24-final.json` | Local H1 RFC6455 echo against fastwebsockets and tokio-tungstenite. | Short local runs can be noisy. |
-| `docs/benchmarks/codex-ws-streaming/n50-postfix.json` | Live Codex WSS passes all samples and improves tail versus tokio-tungstenite. | Median TTFT remains noisy/close. |
+| `docs/benchmarks/codex-ws-streaming/n50-postfix.json` | Live Codex WSS passes all samples and improves tail versus tokio-tungstenite. | Median TTFB remains noisy/close. |
 | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json` | Current H3 HTTP gate, RFC9220 full-suite gate, echo/close/mixed rows at n=100, zero fixture events. | Specter adapters reuse one client across samples; low-level comparators open a fresh QUIC connection per sample. |
 | `docs/benchmarks/native-h3-vs-rust-clients/2026-05-24-quic-transport-local.json` | Transport-only `quinn`/`s2n-quic` echo baselines. | Not an H3 HTTP or RFC9220 comparator gate. |
 

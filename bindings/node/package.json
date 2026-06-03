@@ -1,7 +1,7 @@
 {
   "name": "specters",
   "version": "4.2.0",
-  "description": "Node.js bindings for Specter, a browser-fingerprint HTTP client with TLS, HTTP/1.1, HTTP/2, HTTP/3, and WebSocket support.",
+  "description": "Node.js bindings for Specter, a browser-fingerprint HTTP client with TLS, HTTP/1.1, HTTP/2, HTTP/3, and WebSocket support. Improved TTFT and TPS for LLMs.",
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
@@ -62,7 +62,7 @@
     "llm",
     "streaming",
     "sse",
-    "ttft"
+    "ttfb"
   ],
   "author": "Jared Boynton",
   "license": "MIT",

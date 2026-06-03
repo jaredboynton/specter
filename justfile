@@ -282,7 +282,7 @@ test-one binary filter="":
 # =============================================================================
 
 # Runs the default build (grpc OFF) and exits non-zero on a required-threshold
-# regression (TTFT >=5%, throughput >=5%, Wilcoxon p<0.01, p95 bounded). The
+# regression (TTFB >=5%, throughput >=5%, Wilcoxon p<0.01, p95 bounded). The
 # floor the gRPC work must not regress; run on final merged state before tagging.
 # H2 streaming perf gate (exits non-zero on a perf regression)
 [group('bench')]

@@ -12,7 +12,7 @@ Date: 2026-05-25
   - `specter_native_rfc9220_tunnel`, `specter_native_rfc9220_tunnel_close`, `specter_native_rfc9220_tunnel_mixed`
   - `quiche_direct_rfc9220_tunnel`, `quiche_direct_rfc9220_tunnel_close`, `quiche_direct_rfc9220_tunnel_mixed`
   - `tokio_quiche_rfc9220_tunnel`, `tokio_quiche_rfc9220_tunnel_close`, `tokio_quiche_rfc9220_tunnel_mixed`
-- Specter must beat each matching comparator row on p50 TTFT, p95 TTFT, and bytes/sec for every workload pair.
+- Specter must beat each matching comparator row on p50 TTFB, p95 TTFB, and bytes/sec for every workload pair.
 
 ## Current Proof
 
@@ -26,7 +26,7 @@ Date: 2026-05-25
 
 ## Tunnel And Non-Gate Rows
 
-- The Specter RFC 9220 mixed adapter now drives the concurrent H3 GET and tunnel CONNECT/send/drain from one start instant via `tokio::try_join!`, and measures mixed TTFT when streaming response headers arrive to match the low-level `quiche` adapter.
+- The Specter RFC 9220 mixed adapter now drives the concurrent H3 GET and tunnel CONNECT/send/drain from one start instant via `tokio::try_join!`, and measures mixed TTFB when streaming response headers arrive to match the low-level `quiche` adapter.
 - The Specter RFC 9220 tunnel adapters reuse one Specter `Client` across warmups and samples, while the `quiche_direct_rfc9220_tunnel*` and `tokio_quiche_rfc9220_tunnel*` adapters open a fresh QUIC connection per sample. Both are valid per-request comparators; cross-adapter throughput numbers should be read with that asymmetry in mind, and a connection-amortized RFC 9220 comparator is a future improvement.
 - `h3_quinn_rfc9220_tunnel`, `reqwest_h3_rfc9220_tunnel`, `tokio_tungstenite_rfc9220`, and `reqwest_rfc9220` remain `unsupported_by_client` capability-audit rows because their public APIs do not expose an RFC 9220 tunnel surface.
 - `quinn_transport` and `s2n_quic_transport` are measured in the current `2026-05-25-rfc9220-suite-n100.json` artifact, with older standalone transport artifacts retained as historical context.

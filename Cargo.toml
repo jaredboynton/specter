@@ -122,7 +122,7 @@ harness = false
 # capable of. Downstream consumers pick their own profile and ignore this.
 # We avoid `panic = "abort"` and `lto = "fat"`: empirical measurement
 # showed fat LTO + panic=abort regressed the H1 request-body bench on
-# this codebase by ~3pp on TTFT and throughput (LLVM's global codegen
+# this codebase by ~3pp on TTFB and throughput (LLVM's global codegen
 # decisions across all crates inlined this hot path less favourably).
 # Thin LTO with `codegen-units = 1` captures most of the inlining win
 # without the regression.

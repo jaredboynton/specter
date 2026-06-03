@@ -18,12 +18,12 @@ fn streaming_benchmark_declares_enforceable_h1_h2_threshold_gate() {
     let source = std::fs::read_to_string("benches/streaming_vs_reqwest.rs").unwrap();
 
     assert!(source.contains("fn evaluate_comparable_threshold"));
-    assert!(source.contains("ttft_improvement_pct >= 5.0"));
+    assert!(source.contains("ttfb_improvement_pct >= 5.0"));
     assert!(source.contains("throughput_improvement_required_pct: 5.0"));
     assert!(source.contains("throughput_improvement_pct >= 5.0"));
     assert!(source.contains("p95_throughput_regression_pct <= 5.0"));
-    assert!(source.contains("p95_ttft_regression_pct <= 5.0"));
-    assert!(source.contains("ttft_wilcoxon_signed_rank_p_value < 0.01"));
+    assert!(source.contains("p95_ttfb_regression_pct <= 5.0"));
+    assert!(source.contains("ttfb_wilcoxon_signed_rank_p_value < 0.01"));
     assert!(source.contains("throughput_wilcoxon_signed_rank_p_value < 0.01"));
     assert!(source.contains("const DEFAULT_SAMPLE_COUNT: usize = 30;"));
     assert!(source.contains("const DEFAULT_WARMUP_COUNT: usize = 5;"));
@@ -65,11 +65,11 @@ fn streaming_benchmark_declares_enforceable_request_body_streaming_gate() {
     assert!(source.contains("client_write_overhead_unclamped_duration_ns"));
     assert!(source.contains("client_write_overhead_denominator_floor_count"));
     assert!(source.contains("throughput_improvement_pct >= 5.0"));
-    assert!(source.contains("ttft_wilcoxon_signed_rank_p_value < 0.01"));
+    assert!(source.contains("ttfb_wilcoxon_signed_rank_p_value < 0.01"));
     assert!(source.contains("throughput_wilcoxon_signed_rank_p_value < 0.01"));
     assert!(source.contains("request_payload_schedule_ms()"));
     assert!(source.contains("BENCH_REQ_BODY_LEN"));
-    assert!(source.contains("corrected upload-complete TTFT"));
+    assert!(source.contains("corrected upload-complete TTFB"));
     assert!(source.contains("used as the request-row threshold denominator"));
     assert!(source.contains(".h2_direct_streaming_responses(protocol == \"h2\")"));
     assert!(

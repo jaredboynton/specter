@@ -66,8 +66,8 @@ struct CompetitorSpec {
 struct BenchmarkRow {
     competitor_id: String,
     status: String,
-    p50_ttft_ns: Option<f64>,
-    p95_ttft_ns: Option<f64>,
+    p50_ttfb_ns: Option<f64>,
+    p95_ttfb_ns: Option<f64>,
     bytes_per_sec: Option<f64>,
     source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,14 +152,14 @@ struct Rfc9220TunnelWorkloadSubGate {
 #[derive(Debug, Clone, Copy)]
 struct MeasuredMetrics {
     competitor_id: &'static str,
-    p50_ttft_ns: f64,
-    p95_ttft_ns: f64,
+    p50_ttfb_ns: f64,
+    p95_ttfb_ns: f64,
     bytes_per_sec: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct AdapterSample {
-    ttft_ns: f64,
+    ttfb_ns: f64,
     total_ns: f64,
     bytes: u64,
 }
@@ -173,9 +173,9 @@ struct RowContext {
 }
 
 impl AdapterSample {
-    fn new(ttft_ns: f64, total_ns: f64, bytes: u64) -> Self {
+    fn new(ttfb_ns: f64, total_ns: f64, bytes: u64) -> Self {
         Self {
-            ttft_ns,
+            ttfb_ns,
             total_ns,
             bytes,
         }
@@ -379,11 +379,11 @@ fn specter_row_from_streaming_artifact(artifact_json: &str) -> Option<BenchmarkR
         .get("pass")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let p50_ttft_ns = metrics
+    let p50_ttfb_ns = metrics
         .get("p50_ns")
-        .or_else(|| metrics.get("ttft_ns"))
+        .or_else(|| metrics.get("ttfb_ns"))
         .and_then(Value::as_f64);
-    let p95_ttft_ns = metrics.get("p95_ns").and_then(Value::as_f64);
+    let p95_ttfb_ns = metrics.get("p95_ns").and_then(Value::as_f64);
     let bytes_per_sec = metrics.get("bytes_per_sec").and_then(Value::as_f64);
 
     let mut row = BenchmarkRow {
@@ -394,8 +394,8 @@ fn specter_row_from_streaming_artifact(artifact_json: &str) -> Option<BenchmarkR
             "measured_fail"
         }
         .into(),
-        p50_ttft_ns,
-        p95_ttft_ns,
+        p50_ttfb_ns,
+        p95_ttfb_ns,
         bytes_per_sec,
         source: "streaming_vs_reqwest_h3_artifact".into(),
         ..BenchmarkRow::default()
@@ -420,11 +420,11 @@ fn adapter_row_from_samples(
     source: &'static str,
     samples: &[AdapterSample],
 ) -> BenchmarkRow {
-    let mut ttft_samples = samples
+    let mut ttfb_samples = samples
         .iter()
-        .map(|sample| sample.ttft_ns)
+        .map(|sample| sample.ttfb_ns)
         .collect::<Vec<_>>();
-    ttft_samples.sort_by(f64::total_cmp);
+    ttfb_samples.sort_by(f64::total_cmp);
     let total_bytes = samples.iter().map(|sample| sample.bytes).sum::<u64>();
     let total_ns = samples.iter().map(|sample| sample.total_ns).sum::<f64>();
 
@@ -436,8 +436,8 @@ fn adapter_row_from_samples(
             "measured_pass"
         }
         .into(),
-        p50_ttft_ns: percentile(&ttft_samples, 0.50),
-        p95_ttft_ns: percentile(&ttft_samples, 0.95),
+        p50_ttfb_ns: percentile(&ttfb_samples, 0.50),
+        p95_ttfb_ns: percentile(&ttfb_samples, 0.95),
         bytes_per_sec: if total_ns > 0.0 {
             Some((total_bytes as f64) * 1_000_000_000.0 / total_ns)
         } else {
@@ -600,7 +600,7 @@ fn row_context(competitor_id: &str) -> Option<RowContext> {
                 LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES
                     + LOCAL_FIXTURE_CHUNK_SIZE * LOCAL_FIXTURE_CHUNK_COUNT,
             ),
-            notes: Some("Measures a delayed-reader RFC9220 tunnel while a same-origin H3 streaming response completes. TTFT is captured when send_streaming() resolves on response HEADERS, matching quiche's H3 Headers event recording."),
+            notes: Some("Measures a delayed-reader RFC9220 tunnel while a same-origin H3 streaming response completes. TTFB is captured when send_streaming() resolves on response HEADERS, matching quiche's H3 Headers event recording."),
         }),
         "quiche_direct_rfc9220_tunnel" | "tokio_quiche_rfc9220_tunnel" => Some(RowContext {
             protocol: "h3_rfc9220",
@@ -624,7 +624,7 @@ fn row_context(competitor_id: &str) -> Option<RowContext> {
                     LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES
                         + LOCAL_FIXTURE_CHUNK_SIZE * LOCAL_FIXTURE_CHUNK_COUNT,
                 ),
-                notes: Some("RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes. TTFT is captured on the H3 Headers event so suite gate is metric-symmetric with specter_native_rfc9220_tunnel_mixed."),
+                notes: Some("RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes. TTFB is captured on the H3 Headers event so suite gate is metric-symmetric with specter_native_rfc9220_tunnel_mixed."),
             })
         }
         "h3_quinn_rfc9220_tunnel" => Some(RowContext {
@@ -770,8 +770,8 @@ fn placeholder_rows(
                     "pending_adapter"
                 }
                 .into(),
-                p50_ttft_ns: None,
-                p95_ttft_ns: None,
+                p50_ttfb_ns: None,
+                p95_ttfb_ns: None,
                 bytes_per_sec: None,
                 source: "native_h3_vs_rust_clients_harness".into(),
                 ..BenchmarkRow::default()
@@ -849,8 +849,8 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
         && (specter_metrics.is_none() || competitor_metrics.len() != required_h3_clients.len());
     let specter_beats_all_required = specter_metrics.is_some_and(|specter| {
         competitor_metrics.iter().all(|competitor| {
-            specter.p50_ttft_ns < competitor.p50_ttft_ns
-                && specter.p95_ttft_ns < competitor.p95_ttft_ns
+            specter.p50_ttfb_ns < competitor.p50_ttfb_ns
+                && specter.p95_ttfb_ns < competitor.p95_ttfb_ns
                 && specter.bytes_per_sec > competitor.bytes_per_sec
         })
     });
@@ -917,8 +917,8 @@ fn specter_beats_rfc9220_tunnel_comparator(
     specter: MeasuredMetrics,
     competitor: MeasuredMetrics,
 ) -> bool {
-    specter.p50_ttft_ns < competitor.p50_ttft_ns
-        && specter.p95_ttft_ns < competitor.p95_ttft_ns
+    specter.p50_ttfb_ns < competitor.p50_ttfb_ns
+        && specter.p95_ttfb_ns < competitor.p95_ttfb_ns
         && specter.bytes_per_sec > competitor.bytes_per_sec
 }
 
@@ -1023,7 +1023,8 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
     let missing_metrics = !missing_required_rfc9220_tunnel_metrics.is_empty();
     let pass = !missing_required_n100_rows
         && !missing_metrics
-        && comparator_metrics.len() == required_rfc9220_tunnel_clients.len() - rfc9220_tunnel_workloads().len()
+        && comparator_metrics.len()
+            == required_rfc9220_tunnel_clients.len() - rfc9220_tunnel_workloads().len()
         && specter_beats_all_required;
 
     Rfc9220TunnelSuperiorityGate {
@@ -1061,8 +1062,8 @@ fn measured_metrics(rows: &[BenchmarkRow], competitor_id: &'static str) -> Optio
         .find(|row| row.competitor_id == competitor_id && row.status == "measured_pass")?;
     Some(MeasuredMetrics {
         competitor_id,
-        p50_ttft_ns: row.p50_ttft_ns?,
-        p95_ttft_ns: row.p95_ttft_ns?,
+        p50_ttfb_ns: row.p50_ttfb_ns?,
+        p95_ttfb_ns: row.p95_ttfb_ns?,
         bytes_per_sec: row.bytes_per_sec?,
     })
 }
@@ -1080,8 +1081,8 @@ fn measured_metrics_with_min_sample_count(
     }
     Some(MeasuredMetrics {
         competitor_id,
-        p50_ttft_ns: row.p50_ttft_ns?,
-        p95_ttft_ns: row.p95_ttft_ns?,
+        p50_ttfb_ns: row.p50_ttfb_ns?,
+        p95_ttfb_ns: row.p95_ttfb_ns?,
         bytes_per_sec: row.bytes_per_sec?,
     })
 }
@@ -1089,9 +1090,9 @@ fn measured_metrics_with_min_sample_count(
 fn fastest_by_p50_then_p95_then_throughput(rows: &[MeasuredMetrics]) -> Option<&'static str> {
     rows.iter()
         .min_by(|left, right| {
-            left.p50_ttft_ns
-                .total_cmp(&right.p50_ttft_ns)
-                .then_with(|| left.p95_ttft_ns.total_cmp(&right.p95_ttft_ns))
+            left.p50_ttfb_ns
+                .total_cmp(&right.p50_ttfb_ns)
+                .then_with(|| left.p95_ttfb_ns.total_cmp(&right.p95_ttfb_ns))
                 .then_with(|| right.bytes_per_sec.total_cmp(&left.bytes_per_sec))
         })
         .map(|row| row.competitor_id)
@@ -1829,7 +1830,8 @@ async fn run_local_native_h3_fixture(
     use specter::transport::h3::quic::{split_long_header_datagram, LongHeaderType};
 
     let mut buf = [0u8; 65535];
-    let mut connections: HashMap<Vec<u8>, tokio::sync::mpsc::Sender<(Vec<u8>, SocketAddr)>> = HashMap::new();
+    let mut connections: HashMap<Vec<u8>, tokio::sync::mpsc::Sender<(Vec<u8>, SocketAddr)>> =
+        HashMap::new();
     let mut next_connection_index = 0u64;
 
     loop {
@@ -2080,7 +2082,9 @@ impl LocalNativeH3Connection {
             self.send_packet_to(packet.packet, peer).await?;
         }
 
-        let events = self.handshake.open_client_h3_event_packet_from(packet, peer)?;
+        let events = self
+            .handshake
+            .open_client_h3_event_packet_from(packet, peer)?;
         if self.handshake.is_server_path_address_validated(&peer) {
             self.peer = peer;
         }
@@ -2831,14 +2835,14 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
 
     let ((stream_first_byte_ns, stream_bytes), echoed) = tokio::try_join!(
         async {
-            stream_handle
-                .await
-                .map_err(|error| anyhow::anyhow!("specter_native RFC 9220 mixed stream task failed: {error}"))?
+            stream_handle.await.map_err(|error| {
+                anyhow::anyhow!("specter_native RFC 9220 mixed stream task failed: {error}")
+            })?
         },
         async {
-            tunnel_handle
-                .await
-                .map_err(|error| anyhow::anyhow!("specter_native RFC 9220 mixed tunnel task failed: {error}"))?
+            tunnel_handle.await.map_err(|error| {
+                anyhow::anyhow!("specter_native RFC 9220 mixed tunnel task failed: {error}")
+            })?
         }
     )?;
 
@@ -3659,7 +3663,7 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
     let tunnel_bytes = tunnel_bytes?;
 
     Ok(AdapterSample::new(
-        stream_sample.ttft_ns,
+        stream_sample.ttfb_ns,
         start.elapsed().as_nanos() as f64,
         stream_sample.bytes.saturating_add(tunnel_bytes),
     ))
@@ -4800,15 +4804,15 @@ async fn measure_reqwest_h3(
 mod tests {
     fn measured_row(
         competitor_id: &'static str,
-        p50_ttft_ns: f64,
-        p95_ttft_ns: f64,
+        p50_ttfb_ns: f64,
+        p95_ttfb_ns: f64,
         bytes_per_sec: f64,
     ) -> super::BenchmarkRow {
         let mut row = super::BenchmarkRow {
             competitor_id: competitor_id.into(),
             status: "measured_pass".into(),
-            p50_ttft_ns: Some(p50_ttft_ns),
-            p95_ttft_ns: Some(p95_ttft_ns),
+            p50_ttfb_ns: Some(p50_ttfb_ns),
+            p95_ttfb_ns: Some(p95_ttfb_ns),
             bytes_per_sec: Some(bytes_per_sec),
             source: "test_fixture".into(),
             ..super::BenchmarkRow::default()
@@ -4860,10 +4864,10 @@ mod tests {
         }"#;
         let competitor_artifact_json = r#"{
           "rows": [
-            { "competitor_id": "quiche_direct", "status": "measured_pass", "p50_ttft_ns": 1000.0, "p95_ttft_ns": 2000.0, "bytes_per_sec": 2000.0, "source": "quiche_adapter" },
-            { "competitor_id": "tokio_quiche", "status": "measured_pass", "p50_ttft_ns": 1100.0, "p95_ttft_ns": 2100.0, "bytes_per_sec": 1900.0, "source": "tokio_quiche_adapter" },
-            { "competitor_id": "h3_quinn", "status": "measured_pass", "p50_ttft_ns": 1200.0, "p95_ttft_ns": 2200.0, "bytes_per_sec": 1800.0, "source": "h3_quinn_adapter" },
-            { "competitor_id": "reqwest_h3", "status": "measured_pass", "p50_ttft_ns": 1300.0, "p95_ttft_ns": 2300.0, "bytes_per_sec": 1700.0, "source": "reqwest_h3_adapter" }
+            { "competitor_id": "quiche_direct", "status": "measured_pass", "p50_ttfb_ns": 1000.0, "p95_ttfb_ns": 2000.0, "bytes_per_sec": 2000.0, "source": "quiche_adapter" },
+            { "competitor_id": "tokio_quiche", "status": "measured_pass", "p50_ttfb_ns": 1100.0, "p95_ttfb_ns": 2100.0, "bytes_per_sec": 1900.0, "source": "tokio_quiche_adapter" },
+            { "competitor_id": "h3_quinn", "status": "measured_pass", "p50_ttfb_ns": 1200.0, "p95_ttfb_ns": 2200.0, "bytes_per_sec": 1800.0, "source": "h3_quinn_adapter" },
+            { "competitor_id": "reqwest_h3", "status": "measured_pass", "p50_ttfb_ns": 1300.0, "p95_ttfb_ns": 2300.0, "bytes_per_sec": 1700.0, "source": "reqwest_h3_adapter" }
           ]
         }"#;
 
@@ -4895,8 +4899,8 @@ mod tests {
         let specter_row = super::BenchmarkRow {
             competitor_id: "specter_native".into(),
             status: "measured_pass".into(),
-            p50_ttft_ns: Some(100.0),
-            p95_ttft_ns: Some(200.0),
+            p50_ttfb_ns: Some(100.0),
+            p95_ttfb_ns: Some(200.0),
             bytes_per_sec: Some(300.0),
             source: "specter_native_adapter".into(),
             ..super::BenchmarkRow::default()
@@ -4910,7 +4914,7 @@ mod tests {
             .find(|row| row.competitor_id == "specter_native")
             .expect("direct Specter native row should be present");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(100.0));
+        assert_eq!(row.p50_ttfb_ns, Some(100.0));
         assert_eq!(row.source, "specter_native_adapter");
         assert_eq!(
             artifact.superiority_gate.reason,
@@ -4922,12 +4926,12 @@ mod tests {
     fn artifact_import_prefers_measured_rows_over_pending_placeholders() {
         let pending_artifact_json = r#"{
           "rows": [
-            { "competitor_id": "s2n_quic_transport", "status": "pending_adapter", "p50_ttft_ns": null, "p95_ttft_ns": null, "bytes_per_sec": null, "source": "native_h3_vs_rust_clients_harness" }
+            { "competitor_id": "s2n_quic_transport", "status": "pending_adapter", "p50_ttfb_ns": null, "p95_ttfb_ns": null, "bytes_per_sec": null, "source": "native_h3_vs_rust_clients_harness" }
           ]
         }"#;
         let measured_artifact_json = r#"{
           "rows": [
-            { "competitor_id": "s2n_quic_transport", "status": "measured_pass", "p50_ttft_ns": 10.0, "p95_ttft_ns": 20.0, "bytes_per_sec": 30.0, "source": "s2n_quic_transport_adapter" }
+            { "competitor_id": "s2n_quic_transport", "status": "measured_pass", "p50_ttfb_ns": 10.0, "p95_ttfb_ns": 20.0, "bytes_per_sec": 30.0, "source": "s2n_quic_transport_adapter" }
           ]
         }"#;
 
@@ -4943,7 +4947,7 @@ mod tests {
             .expect("s2n row should exist");
 
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(10.0));
+        assert_eq!(row.p50_ttfb_ns, Some(10.0));
         assert_eq!(row.source, "s2n_quic_transport_adapter");
     }
 
@@ -5032,8 +5036,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "quiche_direct_rfc9220_tunnel".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(2_750_000.0),
-                p95_ttft_ns: Some(2_850_000.0),
+                p50_ttfb_ns: Some(2_750_000.0),
+                p95_ttfb_ns: Some(2_850_000.0),
                 bytes_per_sec: Some(372_000.0),
                 source: "quiche_direct_rfc9220_tunnel_adapter".into(),
                 sample_count: Some(100),
@@ -5042,8 +5046,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "tokio_quiche_rfc9220_tunnel".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(4_000_000.0),
-                p95_ttft_ns: Some(4_600_000.0),
+                p50_ttfb_ns: Some(4_000_000.0),
+                p95_ttfb_ns: Some(4_600_000.0),
                 bytes_per_sec: Some(236_000.0),
                 source: "tokio_quiche_rfc9220_tunnel_adapter".into(),
                 sample_count: Some(100),
@@ -5072,8 +5076,8 @@ mod tests {
                 "{competitor_id} row source should reflect the adapter, not the pending placeholder"
             );
             assert_eq!(row.sample_count, Some(100));
-            assert!(row.p50_ttft_ns.is_some());
-            assert!(row.p95_ttft_ns.is_some());
+            assert!(row.p50_ttfb_ns.is_some());
+            assert!(row.p95_ttfb_ns.is_some());
         }
     }
 
@@ -5120,8 +5124,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "specter_native_rfc9220_tunnel".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(200_000.0),
-                p95_ttft_ns: Some(350_000.0),
+                p50_ttfb_ns: Some(200_000.0),
+                p95_ttfb_ns: Some(350_000.0),
                 bytes_per_sec: Some(4_000_000.0),
                 source: "specter_native_rfc9220_tunnel_adapter".into(),
                 sample_count: Some(100),
@@ -5130,8 +5134,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "quiche_direct_rfc9220_tunnel".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(2_700_000.0),
-                p95_ttft_ns: Some(2_850_000.0),
+                p50_ttfb_ns: Some(2_700_000.0),
+                p95_ttfb_ns: Some(2_850_000.0),
                 bytes_per_sec: Some(370_000.0),
                 source: "quiche_direct_rfc9220_tunnel_adapter".into(),
                 sample_count: Some(100),
@@ -5140,8 +5144,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "tokio_quiche_rfc9220_tunnel".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(4_000_000.0),
-                p95_ttft_ns: Some(4_600_000.0),
+                p50_ttfb_ns: Some(4_000_000.0),
+                p95_ttfb_ns: Some(4_600_000.0),
                 bytes_per_sec: Some(235_000.0),
                 source: "tokio_quiche_rfc9220_tunnel_adapter".into(),
                 sample_count: Some(100),
@@ -5150,8 +5154,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "specter_native_rfc9220_tunnel_close".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(300_000.0),
-                p95_ttft_ns: Some(900_000.0),
+                p50_ttfb_ns: Some(300_000.0),
+                p95_ttfb_ns: Some(900_000.0),
                 bytes_per_sec: Some(2_000_000.0),
                 source: "specter_native_rfc9220_tunnel_close_adapter".into(),
                 sample_count: Some(100),
@@ -5160,8 +5164,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "quiche_direct_rfc9220_tunnel_close".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(2_900_000.0),
-                p95_ttft_ns: Some(4_200_000.0),
+                p50_ttfb_ns: Some(2_900_000.0),
+                p95_ttfb_ns: Some(4_200_000.0),
                 bytes_per_sec: Some(330_000.0),
                 source: "quiche_direct_rfc9220_tunnel_close_adapter".into(),
                 sample_count: Some(100),
@@ -5170,8 +5174,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "tokio_quiche_rfc9220_tunnel_close".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(3_300_000.0),
-                p95_ttft_ns: Some(3_600_000.0),
+                p50_ttfb_ns: Some(3_300_000.0),
+                p95_ttfb_ns: Some(3_600_000.0),
                 bytes_per_sec: Some(300_000.0),
                 source: "tokio_quiche_rfc9220_tunnel_close_adapter".into(),
                 sample_count: Some(100),
@@ -5180,8 +5184,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "specter_native_rfc9220_tunnel_mixed".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(2_000_000.0),
-                p95_ttft_ns: Some(3_000_000.0),
+                p50_ttfb_ns: Some(2_000_000.0),
+                p95_ttfb_ns: Some(3_000_000.0),
                 bytes_per_sec: Some(1_000_000.0),
                 source: "specter_native_rfc9220_tunnel_mixed_adapter".into(),
                 sample_count: Some(100),
@@ -5190,8 +5194,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "quiche_direct_rfc9220_tunnel_mixed".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(3_000_000.0),
-                p95_ttft_ns: Some(3_200_000.0),
+                p50_ttfb_ns: Some(3_000_000.0),
+                p95_ttfb_ns: Some(3_200_000.0),
                 bytes_per_sec: Some(660_000.0),
                 source: "quiche_direct_rfc9220_tunnel_mixed_adapter".into(),
                 sample_count: Some(100),
@@ -5200,8 +5204,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "tokio_quiche_rfc9220_tunnel_mixed".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(90_000_000.0),
-                p95_ttft_ns: Some(100_000_000.0),
+                p50_ttfb_ns: Some(90_000_000.0),
+                p95_ttfb_ns: Some(100_000_000.0),
                 bytes_per_sec: Some(960_000.0),
                 source: "tokio_quiche_rfc9220_tunnel_mixed_adapter".into(),
                 sample_count: Some(100),
@@ -5216,8 +5220,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "specter_native_rfc9220_tunnel".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(200_000.0),
-                p95_ttft_ns: Some(350_000.0),
+                p50_ttfb_ns: Some(200_000.0),
+                p95_ttfb_ns: Some(350_000.0),
                 bytes_per_sec: Some(4_000_000.0),
                 source: "specter_native_rfc9220_tunnel_adapter".into(),
                 sample_count: Some(100),
@@ -5226,8 +5230,8 @@ mod tests {
             super::BenchmarkRow {
                 competitor_id: "quiche_direct_rfc9220_tunnel".into(),
                 status: "measured_pass".into(),
-                p50_ttft_ns: Some(2_700_000.0),
-                p95_ttft_ns: Some(2_850_000.0),
+                p50_ttfb_ns: Some(2_700_000.0),
+                p95_ttfb_ns: Some(2_850_000.0),
                 bytes_per_sec: Some(370_000.0),
                 source: "quiche_direct_rfc9220_tunnel_adapter".into(),
                 sample_count: Some(99),
@@ -5378,8 +5382,8 @@ mod tests {
         let specter_row = super::BenchmarkRow {
             competitor_id: "specter_native".into(),
             status: "measured_pass".into(),
-            p50_ttft_ns: Some(100.0),
-            p95_ttft_ns: Some(200.0),
+            p50_ttfb_ns: Some(100.0),
+            p95_ttfb_ns: Some(200.0),
             bytes_per_sec: Some(300.0),
             source: "specter_native_adapter".into(),
             ..super::BenchmarkRow::default()
@@ -5569,8 +5573,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "reqwest_h3");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(20.0));
-        assert_eq!(row.p95_ttft_ns, Some(30.0));
+        assert_eq!(row.p50_ttfb_ns, Some(20.0));
+        assert_eq!(row.p95_ttfb_ns, Some(30.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "reqwest_h3_adapter");
     }
@@ -5587,8 +5591,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(20.0));
-        assert_eq!(row.p95_ttft_ns, Some(40.0));
+        assert_eq!(row.p50_ttfb_ns, Some(20.0));
+        assert_eq!(row.p95_ttfb_ns, Some(40.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "specter_native_rfc9220_tunnel_adapter");
     }
@@ -5605,8 +5609,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_close");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(30.0));
-        assert_eq!(row.p95_ttft_ns, Some(60.0));
+        assert_eq!(row.p50_ttfb_ns, Some(30.0));
+        assert_eq!(row.p95_ttfb_ns, Some(60.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "specter_native_rfc9220_tunnel_close_adapter");
     }
@@ -5623,8 +5627,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_mixed");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(40.0));
-        assert_eq!(row.p95_ttft_ns, Some(70.0));
+        assert_eq!(row.p50_ttfb_ns, Some(40.0));
+        assert_eq!(row.p95_ttfb_ns, Some(70.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "specter_native_rfc9220_tunnel_mixed_adapter");
     }
@@ -5641,8 +5645,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "quiche_direct_rfc9220_tunnel");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(20.0));
-        assert_eq!(row.p95_ttft_ns, Some(40.0));
+        assert_eq!(row.p50_ttfb_ns, Some(20.0));
+        assert_eq!(row.p95_ttfb_ns, Some(40.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "quiche_direct_rfc9220_tunnel_adapter");
         assert_eq!(row.protocol.as_deref(), Some("h3_rfc9220"));
@@ -5664,8 +5668,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "quiche_direct_rfc9220_tunnel_close");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(30.0));
-        assert_eq!(row.p95_ttft_ns, Some(60.0));
+        assert_eq!(row.p50_ttfb_ns, Some(30.0));
+        assert_eq!(row.p95_ttfb_ns, Some(60.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "quiche_direct_rfc9220_tunnel_close_adapter");
         assert_eq!(row.protocol.as_deref(), Some("h3_rfc9220"));
@@ -5687,8 +5691,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "quiche_direct_rfc9220_tunnel_mixed");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(50.0));
-        assert_eq!(row.p95_ttft_ns, Some(80.0));
+        assert_eq!(row.p50_ttfb_ns, Some(50.0));
+        assert_eq!(row.p95_ttfb_ns, Some(80.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "quiche_direct_rfc9220_tunnel_mixed_adapter");
         assert_eq!(row.protocol.as_deref(), Some("h3_rfc9220"));
@@ -5710,8 +5714,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "tokio_quiche_rfc9220_tunnel");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(30.0));
-        assert_eq!(row.p95_ttft_ns, Some(50.0));
+        assert_eq!(row.p50_ttfb_ns, Some(30.0));
+        assert_eq!(row.p95_ttfb_ns, Some(50.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "tokio_quiche_rfc9220_tunnel_adapter");
         assert_eq!(row.protocol.as_deref(), Some("h3_rfc9220"));
@@ -5733,8 +5737,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "tokio_quiche_rfc9220_tunnel_close");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(40.0));
-        assert_eq!(row.p95_ttft_ns, Some(70.0));
+        assert_eq!(row.p50_ttfb_ns, Some(40.0));
+        assert_eq!(row.p95_ttfb_ns, Some(70.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "tokio_quiche_rfc9220_tunnel_close_adapter");
         assert_eq!(row.protocol.as_deref(), Some("h3_rfc9220"));
@@ -5756,8 +5760,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "tokio_quiche_rfc9220_tunnel_mixed");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(60.0));
-        assert_eq!(row.p95_ttft_ns, Some(90.0));
+        assert_eq!(row.p50_ttfb_ns, Some(60.0));
+        assert_eq!(row.p95_ttfb_ns, Some(90.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "tokio_quiche_rfc9220_tunnel_mixed_adapter");
         assert_eq!(row.protocol.as_deref(), Some("h3_rfc9220"));
@@ -5779,8 +5783,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "quinn_transport");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(20.0));
-        assert_eq!(row.p95_ttft_ns, Some(40.0));
+        assert_eq!(row.p50_ttfb_ns, Some(20.0));
+        assert_eq!(row.p95_ttfb_ns, Some(40.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "quinn_transport_adapter");
     }
@@ -5797,8 +5801,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "s2n_quic_transport");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(20.0));
-        assert_eq!(row.p95_ttft_ns, Some(40.0));
+        assert_eq!(row.p50_ttfb_ns, Some(20.0));
+        assert_eq!(row.p95_ttfb_ns, Some(40.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "s2n_quic_transport_adapter");
     }
@@ -5843,8 +5847,8 @@ mod tests {
         assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "specter_native_rfc9220_tunnel_adapter");
-        assert!(row.p50_ttft_ns.is_some());
-        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.p50_ttfb_ns.is_some());
+        assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
@@ -5861,8 +5865,8 @@ mod tests {
         assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_close");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "specter_native_rfc9220_tunnel_close_adapter");
-        assert!(row.p50_ttft_ns.is_some());
-        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.p50_ttfb_ns.is_some());
+        assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
@@ -5884,8 +5888,8 @@ mod tests {
         assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_mixed");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "specter_native_rfc9220_tunnel_mixed_adapter");
-        assert!(row.p50_ttft_ns.is_some());
-        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.p50_ttfb_ns.is_some());
+        assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
@@ -5902,8 +5906,8 @@ mod tests {
         assert_eq!(row.competitor_id, "quiche_direct_rfc9220_tunnel");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "quiche_direct_rfc9220_tunnel_adapter");
-        assert!(row.p50_ttft_ns.is_some());
-        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.p50_ttfb_ns.is_some());
+        assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
@@ -5920,8 +5924,8 @@ mod tests {
         assert_eq!(row.competitor_id, "quiche_direct_rfc9220_tunnel_close");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "quiche_direct_rfc9220_tunnel_close_adapter");
-        assert!(row.p50_ttft_ns.is_some());
-        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.p50_ttfb_ns.is_some());
+        assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
@@ -5943,8 +5947,8 @@ mod tests {
         assert_eq!(row.competitor_id, "quiche_direct_rfc9220_tunnel_mixed");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "quiche_direct_rfc9220_tunnel_mixed_adapter");
-        assert!(row.p50_ttft_ns.is_some());
-        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.p50_ttfb_ns.is_some());
+        assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
@@ -5961,8 +5965,8 @@ mod tests {
         assert_eq!(row.competitor_id, "tokio_quiche_rfc9220_tunnel");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "tokio_quiche_rfc9220_tunnel_adapter");
-        assert!(row.p50_ttft_ns.is_some());
-        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.p50_ttfb_ns.is_some());
+        assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
@@ -5979,8 +5983,8 @@ mod tests {
         assert_eq!(row.competitor_id, "tokio_quiche_rfc9220_tunnel_close");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "tokio_quiche_rfc9220_tunnel_close_adapter");
-        assert!(row.p50_ttft_ns.is_some());
-        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.p50_ttfb_ns.is_some());
+        assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
@@ -6002,8 +6006,8 @@ mod tests {
         assert_eq!(row.competitor_id, "tokio_quiche_rfc9220_tunnel_mixed");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "tokio_quiche_rfc9220_tunnel_mixed_adapter");
-        assert!(row.p50_ttft_ns.is_some());
-        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.p50_ttfb_ns.is_some());
+        assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
@@ -6036,8 +6040,8 @@ mod tests {
         assert_eq!(row.competitor_id, "quinn_transport");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "quinn_transport_adapter");
-        assert!(row.p50_ttft_ns.is_some());
-        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.p50_ttfb_ns.is_some());
+        assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
@@ -6053,8 +6057,8 @@ mod tests {
         assert_eq!(row.competitor_id, "s2n_quic_transport");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.source, "s2n_quic_transport_adapter");
-        assert!(row.p50_ttft_ns.is_some());
-        assert!(row.p95_ttft_ns.is_some());
+        assert!(row.p50_ttfb_ns.is_some());
+        assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
@@ -6089,8 +6093,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "quiche_direct");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(20.0));
-        assert_eq!(row.p95_ttft_ns, Some(40.0));
+        assert_eq!(row.p50_ttfb_ns, Some(20.0));
+        assert_eq!(row.p95_ttfb_ns, Some(40.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "quiche_direct_adapter");
     }
@@ -6107,8 +6111,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "h3_quinn");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(30.0));
-        assert_eq!(row.p95_ttft_ns, Some(50.0));
+        assert_eq!(row.p50_ttfb_ns, Some(30.0));
+        assert_eq!(row.p95_ttfb_ns, Some(50.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "h3_quinn_adapter");
     }
@@ -6125,8 +6129,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "tokio_quiche");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(30.0));
-        assert_eq!(row.p95_ttft_ns, Some(60.0));
+        assert_eq!(row.p50_ttfb_ns, Some(30.0));
+        assert_eq!(row.p95_ttfb_ns, Some(60.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "tokio_quiche_adapter");
     }
@@ -6143,8 +6147,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "specter_native");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(40.0));
-        assert_eq!(row.p95_ttft_ns, Some(70.0));
+        assert_eq!(row.p50_ttfb_ns, Some(40.0));
+        assert_eq!(row.p95_ttfb_ns, Some(70.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
         assert_eq!(row.source, "specter_native_adapter");
     }
@@ -6171,8 +6175,8 @@ mod tests {
 
         assert_eq!(row.competitor_id, "specter_native");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.p50_ttft_ns, Some(1234.0));
-        assert_eq!(row.p95_ttft_ns, Some(2345.0));
+        assert_eq!(row.p50_ttfb_ns, Some(1234.0));
+        assert_eq!(row.p95_ttfb_ns, Some(2345.0));
         assert_eq!(row.bytes_per_sec, Some(3456.0));
     }
 }

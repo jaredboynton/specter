@@ -72,64 +72,64 @@
     {
       "competitor_id": "specter_native",
       "status": "pending_measurement",
-      "p50_ttft_ns": null,
-      "p95_ttft_ns": null,
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
       "bytes_per_sec": null,
       "source": "native_h3_vs_rust_clients_harness"
     },
     {
       "competitor_id": "specter_native_rfc9220_tunnel",
       "status": "pending_adapter",
-      "p50_ttft_ns": null,
-      "p95_ttft_ns": null,
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
       "bytes_per_sec": null,
       "source": "native_h3_vs_rust_clients_harness"
     },
     {
       "competitor_id": "quiche_direct",
       "status": "pending_adapter",
-      "p50_ttft_ns": null,
-      "p95_ttft_ns": null,
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
       "bytes_per_sec": null,
       "source": "native_h3_vs_rust_clients_harness"
     },
     {
       "competitor_id": "tokio_quiche",
       "status": "pending_adapter",
-      "p50_ttft_ns": null,
-      "p95_ttft_ns": null,
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
       "bytes_per_sec": null,
       "source": "native_h3_vs_rust_clients_harness"
     },
     {
       "competitor_id": "h3_quinn",
       "status": "pending_adapter",
-      "p50_ttft_ns": null,
-      "p95_ttft_ns": null,
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
       "bytes_per_sec": null,
       "source": "native_h3_vs_rust_clients_harness"
     },
     {
       "competitor_id": "reqwest_h3",
       "status": "pending_adapter",
-      "p50_ttft_ns": null,
-      "p95_ttft_ns": null,
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
       "bytes_per_sec": null,
       "source": "native_h3_vs_rust_clients_harness"
     },
     {
       "competitor_id": "quinn_transport",
       "status": "measured_pass",
-      "p50_ttft_ns": 163959.0,
-      "p95_ttft_ns": 327500.0,
+      "p50_ttfb_ns": 163959.0,
+      "p95_ttfb_ns": 327500.0,
       "bytes_per_sec": 4982163.465561768,
       "source": "quinn_transport_adapter"
     },
     {
       "competitor_id": "s2n_quic_transport",
       "status": "measured_pass",
-      "p50_ttft_ns": 297584.0,
-      "p95_ttft_ns": 346042.0,
+      "p50_ttfb_ns": 297584.0,
+      "p95_ttfb_ns": 346042.0,
       "bytes_per_sec": 3334688.0503537897,
       "source": "s2n_quic_transport_adapter"
     }

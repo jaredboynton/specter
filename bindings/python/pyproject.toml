@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "specters"
 version = "4.2.0"
-description = "Python bindings for Specter, a Chrome-accurate HTTP client with TLS, HTTP/1.1, HTTP/2, HTTP/3, and WebSocket fingerprinting. Improved TTFT/TPS over reqwest for LLM providers."
+description = "Python bindings for Specter, a Chrome-accurate HTTP client with TLS, HTTP/1.1, HTTP/2, HTTP/3, and WebSocket fingerprinting. Improved TTFT and TPS for LLMs."
 readme = "README_PYPI.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -23,7 +23,7 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-keywords = ["http", "http2", "http3", "tls", "fingerprint", "chrome", "browser", "impersonate", "websocket", "client", "async", "scraping", "llm", "streaming", "sse", "ttft"]
+keywords = ["http", "http2", "http3", "tls", "fingerprint", "chrome", "browser", "impersonate", "websocket", "client", "async", "scraping", "llm", "streaming", "sse", "ttfb"]
 
 [project.urls]
 Homepage = "https://github.com/jaredboynton/specter"

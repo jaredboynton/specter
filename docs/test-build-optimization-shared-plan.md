@@ -69,7 +69,7 @@ Remaining deferred work:
 
 - These were the pre-implementation corrections used to scope the work.
 - The overall optimization opportunity was real: tests contained many fixed waits/timeouts, and shared nextest/CI controls were minimal.
-- `tests/h1_pooling.rs` was not just four startup sleeps; mapped sleeps were at `tests/h1_pooling.rs:23`, `tests/h1_pooling.rs:54`, `tests/h1_pooling.rs:69`, `tests/h1_pooling.rs:87`, `tests/h1_pooling.rs:188`, and `tests/h1_pooling.rs:226`. Only the first few were startup-style waits.
+- `tests/h1_pooling.rs` had mapped sleeps at `tests/h1_pooling.rs:23`, `tests/h1_pooling.rs:54`, `tests/h1_pooling.rs:69`, `tests/h1_pooling.rs:87`, `tests/h1_pooling.rs:188`, and `tests/h1_pooling.rs:226`. Only the first few were startup-style waits.
 - `tests/h3_streaming_pool.rs` had 13 mapped settle sleeps, not 15.
 - `tests/validation_h2_streaming.rs` had 22 `timeout(Duration::from_secs(3), conn.read_frame())` guards, not roughly 30.
 - “CI/build has no caching in most matrix jobs” was overstated: the macOS CI test job already had sccache and Cargo registry/git cache, but Linux/Windows build jobs and release workflows still lacked equivalent Rust caching.

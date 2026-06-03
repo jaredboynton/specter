@@ -250,16 +250,16 @@ The RFC 8441 API is a byte tunnel. Use it when you need H2 Extended CONNECT sema
 
 ## Performance
 
-Specter ships deterministic localhost streaming benchmarks against `reqwest 0.12`. Across H1 and H2 request- and response-body streaming, Specter beats reqwest on both TTFT and throughput with Wilcoxon p-values well below 0.01. From the persisted 2026-05-24 proof artifacts:
+Specter ships deterministic localhost streaming benchmarks against `reqwest 0.12`. Across H1 and H2 request- and response-body streaming, Specter beats reqwest on both TTFB and throughput with Wilcoxon p-values well below 0.01. From the persisted 2026-05-24 proof artifacts:
 
-| Workload | Protocol | TTFT Improvement | Throughput Improvement | Throughput p-value | Artifact |
+| Workload | Protocol | TTFB Improvement | Throughput Improvement | Throughput p-value | Artifact |
 | --- | --- | ---: | ---: | ---: | --- |
 | Response-body streaming | H1 | +65.59% | +19.97% | 4.44e-16 | [`final2-h1-response-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h1-response-s100.json) |
 | Response-body streaming | H2 | +26.12% | +7.88% | 4.05e-8 | [`final2-h2-response-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h2-response-s100.json) |
 | Request-body streaming | H1 | +10.34% | +11.53% | 8.77e-13 | [`final2-h1-request-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h1-request-s100.json) |
 | Request-body streaming | H2 | +17.27% | +20.87% | 0 | [`final2-h2-request-s100.json`](docs/benchmarks/2026-05-24-streaming/final2-h2-request-s100.json) |
 
-CI gates require at least 5% median TTFT and throughput improvement, p<0.01, p95 throughput regression at most 5%, and RFC 8441/WebSocket coexistence preserved; the measured numbers above clear those gates by wide margins. Published request artifacts have zero denominator-floor clamps, zero client-write denominator-floor clamps, and zero upload-complete fallbacks. H2 response streaming was repeated three additional times after the final hot-path fix; the weakest repeat still shows +5.71% throughput with p=1.48e-6.
+CI gates require at least 5% median TTFB and throughput improvement, p<0.01, p95 throughput regression at most 5%, and RFC 8441/WebSocket coexistence preserved; the measured numbers above clear those gates by wide margins. Published request artifacts have zero denominator-floor clamps, zero client-write denominator-floor clamps, and zero upload-complete fallbacks. H2 response streaming was repeated three additional times after the final hot-path fix; the weakest repeat still shows +5.71% throughput with p=1.48e-6.
 
 The request-body benchmark uses a fixed `5 x 1024B` body schedule, `2ms` inter-chunk pacing, and an 8-request workload, measured against the fixture upload-complete timestamp rather than response completion.
 
@@ -269,7 +269,7 @@ See [`docs/benchmarks/2026-05-24-streaming/`](docs/benchmarks/2026-05-24-streami
 
 Specter's native HTTP/3 path also has a local same-fixture comparator matrix against `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest` HTTP/3. The n=100 artifact [`2026-05-25-rfc9220-suite-n100.json`](docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json) passes the H3 superiority gate with all required comparator rows present:
 
-| Client | Role | p50 TTFT | p95 TTFT | Throughput |
+| Client | Role | p50 TTFB | p95 TTFB | Throughput |
 | --- | --- | ---: | ---: | ---: |
 | Specter native H3 | HTTP/3 client | 0.300 ms | 0.808 ms | 9.48 MiB/s |
 | reqwest_h3 | HTTP/3 client | 1.149 ms | 3.317 ms | 7.48 MiB/s |
@@ -283,7 +283,7 @@ That gate is explicitly for HTTP/3 request/response workloads. `quinn_transport`
 
 The same matrix now persists a dedicated `rfc9220_full_suite_superiority_gate` against low-level `quiche` and `tokio-quiche` raw byte tunnels. The n=100 artifact [`2026-05-25-rfc9220-suite-n100.json`](docs/benchmarks/native-h3-vs-rust-clients/2026-05-25-rfc9220-suite-n100.json) passes that gate (`specter_native_rfc9220_tunnel_suite_is_faster_than_required_rfc9220_tunnel_competitors`) at 1 KiB payloads:
 
-| Client | Workload | p50 TTFT | p95 TTFT | Throughput | n |
+| Client | Workload | p50 TTFB | p95 TTFB | Throughput | n |
 | --- | --- | ---: | ---: | ---: | ---: |
 | Specter native (RFC 9220 tunnel) | echo | 0.218 ms | 0.322 ms | 4.16 MiB/s | 100 |
 | quiche direct (RFC 9220 tunnel) | echo | 2.734 ms | 2.803 ms | 352 KiB/s | 100 |
@@ -313,35 +313,35 @@ The gate requires Specter to match or exceed both baselines; this run passed at 
 
 ### Live LLM streaming vs reqwest
 
-The localhost results above hold up against a real production LLM endpoint. Specter ships a second bench, [`benches/codex_real_streaming.rs`](benches/codex_real_streaming.rs), that hits `POST https://chatgpt.com/backend-api/codex/responses` (the Codex backend, SSE over HTTP/2) and measures TTFT and end-to-end wall time for both Specter and reqwest with paired interleaved samples.
+The localhost results above hold up against a real production LLM endpoint. Specter ships a second bench, [`benches/codex_real_streaming.rs`](benches/codex_real_streaming.rs), that hits `POST https://chatgpt.com/backend-api/codex/responses` (the Codex backend, SSE over HTTP/2) and measures TTFB and end-to-end wall time for both Specter and reqwest with paired interleaved samples.
 
 Specter vs reqwest on `POST https://chatgpt.com/backend-api/codex/responses` (n=10, 5 pairs):
 
 | Metric | Specter | reqwest | Specter advantage |
 | --- | ---: | ---: | ---: |
-| Median TTFT | 558.8 ms | 924.4 ms | −365.6 ms (−40%) |
+| Median TTFB | 558.8 ms | 924.4 ms | −365.6 ms (−40%) |
 | Median wall time | 670.7 ms | 968.9 ms | −298.2 ms (−31%) |
 | Wall time 95% CI | [−419, −52] | (excludes zero) | statistically significant |
 | Wilcoxon p-value | 0.0295 | < 0.05 | significant |
 
-Both clients negotiated HTTP/2; all 10 samples passed the per-pair oracle (`status_code==200 AND delta_count>=1 AND response.completed`). All 5 paired samples showed Specter faster, with the wall-time 95% CI excluding zero — a real, measurable Specter advantage on a live LLM stream over the public internet, not just localhost fixtures.
+Both clients negotiated HTTP/2; all 10 samples passed the per-pair oracle (`status_code==200 AND delta_count>=1 AND response.completed`). All 5 paired samples showed Specter faster, with the wall-time 95% CI excluding zero — a real, measurable Specter advantage on a live LLM stream over the public internet.
 
 Run with `cargo bench --bench codex_real_streaming` (skips with exit 0 when `~/.codex/auth.json` is absent).
 
 ### Live LLM WebSocket streaming vs tokio-tungstenite
 
-reqwest doesn't natively support WebSockets, so the receive-side comparison is against [`tokio-tungstenite`](https://crates.io/crates/tokio-tungstenite) 0.24 — the canonical Rust WebSocket client. The companion bench [`benches/codex_ws_streaming.rs`](benches/codex_ws_streaming.rs) hits the same Codex backend over `wss://` and sends a `response.create` frame, then measures TTFT and wall time over the text-frame stream.
+reqwest doesn't natively support WebSockets, so the receive-side comparison is against [`tokio-tungstenite`](https://crates.io/crates/tokio-tungstenite) 0.24 — the canonical Rust WebSocket client. The companion bench [`benches/codex_ws_streaming.rs`](benches/codex_ws_streaming.rs) hits the same Codex backend over `wss://` and sends a `response.create` frame, then measures TTFB and wall time over the text-frame stream.
 
 Specter vs tokio-tungstenite 0.24 on `wss://chatgpt.com/backend-api/codex/responses` (n=50, 25 paired samples):
 
 | Metric | Specter | tokio-tungstenite | Specter advantage |
 | --- | ---: | ---: | ---: |
-| Median TTFT | 781.1 ms | 702.8 ms | +78 ms (tungstenite slightly faster at median) |
-| **p95 TTFT** | **1423.9 ms** | **4110.7 ms** | **−2687 ms (−65%)** |
+| Median TTFB | 781.1 ms | 702.8 ms | +78 ms (tungstenite slightly faster at median) |
+| **p95 TTFB** | **1423.9 ms** | **4110.7 ms** | **−2687 ms (−65%)** |
 | Median wall time | 827.6 ms | 789.6 ms | +38 ms (within noise) |
 | **p95 wall time** | **2835.0 ms** | **4494.5 ms** | **−1659 ms (−37%)** |
 
-The story isn't median — it's the tail. tokio-tungstenite has dramatically worse worst-case behavior on this endpoint: p95 TTFT is 2.9× higher and p95 wall time is 1.6× higher. For LLM-streaming applications where one slow request blocks the whole pipeline, this tail behavior matters more than median.
+The story is the tail. tokio-tungstenite has dramatically worse worst-case behavior on this endpoint: p95 TTFB is 2.9× higher and p95 wall time is 1.6× higher. For LLM-streaming applications where one slow request blocks the whole pipeline, this tail behavior matters more than median.
 
 Optimizations applied to win the tail/local echo gate: pre-allocated 16 KB read buffer on `WebSocket::new`, reused frame encode buffer, CSPRNG-backed mask key cache (one `getrandom` syscall per 64 outbound frames instead of per-frame), word-sized payload masking, and `#[inline]` on the frame decode hot path. Source: [`src/websocket/frame.rs`](src/websocket/frame.rs), [`src/websocket/connection.rs`](src/websocket/connection.rs).
 

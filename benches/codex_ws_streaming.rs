@@ -1,7 +1,7 @@
 //! Real Codex backend WebSocket streaming benchmark: Specter vs tokio-tungstenite.
 //!
 //! Hits wss://chatgpt.com/backend-api/codex/responses with paired samples
-//! from both clients. Measures TTFT (time to first response.output_text.delta
+//! from both clients. Measures TTFB (time to first response.output_text.delta
 //! text frame after sending response.create) and total wall time on a real
 //! production LLM WebSocket endpoint.
 //!
@@ -49,7 +49,7 @@ struct Row {
     status: &'static str,
     handshake_status: u16,
     handshake_ms: f64,
-    ttft_ms: f64,
+    ttfb_ms: f64,
     total_wall_time_ms: f64,
     total_chars: usize,
     delta_count: usize,
@@ -63,8 +63,8 @@ struct Row {
 
 #[derive(Serialize, Default)]
 struct ClientSummary {
-    median_ttft_ms: f64,
-    p95_ttft_ms: f64,
+    median_ttfb_ms: f64,
+    p95_ttfb_ms: f64,
     median_total_wall_time_ms: f64,
     p95_total_wall_time_ms: f64,
     median_handshake_ms: f64,
@@ -74,16 +74,16 @@ struct ClientSummary {
 
 #[derive(Serialize)]
 struct Comparison {
-    ttft_difference_ms: f64,
-    ttft_ci_95: [f64; 2],
-    ttft_ci_covers_zero: bool,
+    ttfb_difference_ms: f64,
+    ttfb_ci_95: [f64; 2],
+    ttfb_ci_covers_zero: bool,
     wall_time_difference_ms: f64,
     wall_time_ci_95: [f64; 2],
     wall_time_ci_covers_zero: bool,
     handshake_difference_ms: f64,
     handshake_ci_95: [f64; 2],
     handshake_ci_covers_zero: bool,
-    ttft_wilcoxon_p_value: f64,
+    ttfb_wilcoxon_p_value: f64,
     wall_time_wilcoxon_p_value: f64,
     interpretation: String,
 }
@@ -130,7 +130,7 @@ struct SampleResult {
     status: &'static str,
     handshake_status: u16,
     handshake_ms: f64,
-    ttft_ms: f64,
+    ttfb_ms: f64,
     total_wall_time_ms: f64,
     total_chars: usize,
     delta_count: usize,
@@ -468,7 +468,7 @@ async fn run_specter_sample(
                 status: "handshake_error",
                 handshake_status: 0,
                 handshake_ms: handshake_start.elapsed().as_secs_f64() * 1000.0,
-                ttft_ms: 0.0,
+                ttfb_ms: 0.0,
                 total_wall_time_ms: 0.0,
                 total_chars: 0,
                 delta_count: 0,
@@ -482,7 +482,7 @@ async fn run_specter_sample(
                 status: "handshake_timeout",
                 handshake_status: 0,
                 handshake_ms: HANDSHAKE_TIMEOUT.as_secs_f64() * 1000.0,
-                ttft_ms: 0.0,
+                ttfb_ms: 0.0,
                 total_wall_time_ms: 0.0,
                 total_chars: 0,
                 delta_count: 0,
@@ -501,7 +501,7 @@ async fn run_specter_sample(
             status: "send_error",
             handshake_status: 101,
             handshake_ms,
-            ttft_ms: 0.0,
+            ttfb_ms: 0.0,
             total_wall_time_ms: 0.0,
             total_chars: 0,
             delta_count: 0,
@@ -598,7 +598,7 @@ async fn run_tungstenite_sample(
                 status: "handshake_error",
                 handshake_status: status_code,
                 handshake_ms: handshake_start.elapsed().as_secs_f64() * 1000.0,
-                ttft_ms: 0.0,
+                ttfb_ms: 0.0,
                 total_wall_time_ms: 0.0,
                 total_chars: 0,
                 delta_count: 0,
@@ -612,7 +612,7 @@ async fn run_tungstenite_sample(
                 status: "handshake_timeout",
                 handshake_status: 0,
                 handshake_ms: HANDSHAKE_TIMEOUT.as_secs_f64() * 1000.0,
-                ttft_ms: 0.0,
+                ttfb_ms: 0.0,
                 total_wall_time_ms: 0.0,
                 total_chars: 0,
                 delta_count: 0,
@@ -632,7 +632,7 @@ async fn run_tungstenite_sample(
             status: "send_error",
             handshake_status,
             handshake_ms,
-            ttft_ms: 0.0,
+            ttfb_ms: 0.0,
             total_wall_time_ms: 0.0,
             total_chars: 0,
             delta_count: 0,
@@ -685,7 +685,7 @@ fn finalize_sample(
     send_start: Instant,
     timed: Result<Result<(), String>, tokio::time::error::Elapsed>,
 ) -> Result<SampleResult, Box<dyn std::error::Error>> {
-    let ttft_ms = obs
+    let ttfb_ms = obs
         .first_delta
         .map(|t| t.duration_since(send_start).as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
@@ -719,7 +719,7 @@ fn finalize_sample(
         status,
         handshake_status,
         handshake_ms,
-        ttft_ms,
+        ttfb_ms,
         total_wall_time_ms,
         total_chars: obs.total_chars,
         delta_count: obs.delta_count,
@@ -737,7 +737,7 @@ fn row_from_sample(
     pair_index: usize,
     lead_in_pair: bool,
 ) -> Row {
-    let cps_denom = (sample.total_wall_time_ms - sample.ttft_ms).max(1.0);
+    let cps_denom = (sample.total_wall_time_ms - sample.ttfb_ms).max(1.0);
     let chars_per_sec = if sample.delta_count >= 2 {
         (sample.total_chars as f64) / (cps_denom / 1000.0)
     } else {
@@ -752,7 +752,7 @@ fn row_from_sample(
         status: sample.status,
         handshake_status: sample.handshake_status,
         handshake_ms: sample.handshake_ms,
-        ttft_ms: sample.ttft_ms,
+        ttfb_ms: sample.ttfb_ms,
         total_wall_time_ms: sample.total_wall_time_ms,
         total_chars: sample.total_chars,
         delta_count: sample.delta_count,
@@ -808,15 +808,15 @@ fn sample_summary(rows: &[Row], client: &str) -> ClientSummary {
     if passing.is_empty() {
         return ClientSummary::default();
     }
-    let ttfts: Vec<f64> = passing.iter().map(|r| r.ttft_ms).collect();
+    let ttfbs: Vec<f64> = passing.iter().map(|r| r.ttfb_ms).collect();
     let walls: Vec<f64> = passing.iter().map(|r| r.total_wall_time_ms).collect();
     let hs: Vec<f64> = passing.iter().map(|r| r.handshake_ms).collect();
     let cps: Vec<f64> = passing.iter().map(|r| r.chars_per_sec).collect();
-    let (ttft_med, ttft_p95) = median_p95(&ttfts);
+    let (ttfb_med, ttfb_p95) = median_p95(&ttfbs);
     let (wall_med, wall_p95) = median_p95(&walls);
     ClientSummary {
-        median_ttft_ms: ttft_med,
-        p95_ttft_ms: ttft_p95,
+        median_ttfb_ms: ttfb_med,
+        p95_ttfb_ms: ttfb_p95,
         median_total_wall_time_ms: wall_med,
         p95_total_wall_time_ms: wall_p95,
         median_handshake_ms: median(&hs),
@@ -987,49 +987,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let specter_summary = sample_summary(&rows, "specter");
     let tungstenite_summary = sample_summary(&rows, "tungstenite");
 
-    let ttft_diffs = paired_diffs(&rows, "specter", "tungstenite", |r| r.ttft_ms);
+    let ttfb_diffs = paired_diffs(&rows, "specter", "tungstenite", |r| r.ttfb_ms);
     let wall_diffs = paired_diffs(&rows, "specter", "tungstenite", |r| r.total_wall_time_ms);
     let hs_diffs = paired_diffs(&rows, "specter", "tungstenite", |r| r.handshake_ms);
 
-    let (ttft_diff_mean, ttft_ci) = t_ci_95(&ttft_diffs);
+    let (ttfb_diff_mean, ttfb_ci) = t_ci_95(&ttfb_diffs);
     let (wall_diff_mean, wall_ci) = t_ci_95(&wall_diffs);
     let (hs_diff_mean, hs_ci) = t_ci_95(&hs_diffs);
 
-    let specter_ttfts = paired_values(&rows, "specter", pair_count, |r| r.ttft_ms);
-    let tung_ttfts = paired_values(&rows, "tungstenite", pair_count, |r| r.ttft_ms);
+    let specter_ttfbs = paired_values(&rows, "specter", pair_count, |r| r.ttfb_ms);
+    let tung_ttfbs = paired_values(&rows, "tungstenite", pair_count, |r| r.ttfb_ms);
     let specter_walls = paired_values(&rows, "specter", pair_count, |r| r.total_wall_time_ms);
     let tung_walls = paired_values(&rows, "tungstenite", pair_count, |r| r.total_wall_time_ms);
 
-    let ttft_wilcoxon = paired_wilcoxon_signed_rank_p_value(&tung_ttfts, &specter_ttfts);
+    let ttfb_wilcoxon = paired_wilcoxon_signed_rank_p_value(&tung_ttfbs, &specter_ttfbs);
     let wall_wilcoxon = paired_wilcoxon_signed_rank_p_value(&tung_walls, &specter_walls);
 
-    let ttft_ci_covers_zero = ttft_ci[0] <= 0.0 && ttft_ci[1] >= 0.0;
+    let ttfb_ci_covers_zero = ttfb_ci[0] <= 0.0 && ttfb_ci[1] >= 0.0;
     let wall_ci_covers_zero = wall_ci[0] <= 0.0 && wall_ci[1] >= 0.0;
     let hs_ci_covers_zero = hs_ci[0] <= 0.0 && hs_ci[1] >= 0.0;
 
-    let interpretation = if ttft_ci_covers_zero && wall_ci_covers_zero && hs_ci_covers_zero {
+    let interpretation = if ttfb_ci_covers_zero && wall_ci_covers_zero && hs_ci_covers_zero {
         format!(
             "All differences within network noise at n={pair_count}. Both clients streamed successfully from Codex WS."
         )
-    } else if !ttft_ci_covers_zero && ttft_diff_mean < 0.0 {
+    } else if !ttfb_ci_covers_zero && ttfb_diff_mean < 0.0 {
         format!(
-            "Specter WS TTFT measurably faster: {ttft_diff_mean:.1} ms [{:.1}, {:.1}] (95% CI excludes zero). Wall CI {}, handshake CI {}.",
-            ttft_ci[0],
-            ttft_ci[1],
+            "Specter WS TTFB measurably faster: {ttfb_diff_mean:.1} ms [{:.1}, {:.1}] (95% CI excludes zero). Wall CI {}, handshake CI {}.",
+            ttfb_ci[0],
+            ttfb_ci[1],
             if wall_ci_covers_zero { "covers zero" } else { "excludes zero" },
             if hs_ci_covers_zero { "covers zero" } else { "excludes zero" }
         )
-    } else if !ttft_ci_covers_zero && ttft_diff_mean > 0.0 {
+    } else if !ttfb_ci_covers_zero && ttfb_diff_mean > 0.0 {
         format!(
-            "tungstenite WS TTFT measurably faster by {:.1} ms [{:.1}, {:.1}]. Investigate Specter WS read loop.",
-            ttft_diff_mean.abs(),
-            ttft_ci[0],
-            ttft_ci[1]
+            "tungstenite WS TTFB measurably faster by {:.1} ms [{:.1}, {:.1}]. Investigate Specter WS read loop.",
+            ttfb_diff_mean.abs(),
+            ttfb_ci[0],
+            ttfb_ci[1]
         )
     } else {
         format!(
-            "Mixed: TTFT CI={:.1?}, wall CI={:.1?}, handshake CI={:.1?}",
-            ttft_ci, wall_ci, hs_ci
+            "Mixed: TTFB CI={:.1?}, wall CI={:.1?}, handshake CI={:.1?}",
+            ttfb_ci, wall_ci, hs_ci
         )
     };
 
@@ -1037,16 +1037,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         specter: specter_summary,
         tungstenite: tungstenite_summary,
         comparison: Comparison {
-            ttft_difference_ms: ttft_diff_mean,
-            ttft_ci_95: ttft_ci,
-            ttft_ci_covers_zero,
+            ttfb_difference_ms: ttfb_diff_mean,
+            ttfb_ci_95: ttfb_ci,
+            ttfb_ci_covers_zero,
             wall_time_difference_ms: wall_diff_mean,
             wall_time_ci_95: wall_ci,
             wall_time_ci_covers_zero: wall_ci_covers_zero,
             handshake_difference_ms: hs_diff_mean,
             handshake_ci_95: hs_ci,
             handshake_ci_covers_zero: hs_ci_covers_zero,
-            ttft_wilcoxon_p_value: ttft_wilcoxon,
+            ttfb_wilcoxon_p_value: ttfb_wilcoxon,
             wall_time_wilcoxon_p_value: wall_wilcoxon,
             interpretation,
         },

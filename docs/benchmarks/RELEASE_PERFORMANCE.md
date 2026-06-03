@@ -5,14 +5,14 @@
 To avoid the LLM-world confusion this document writes out every metric:
 
 - **TTFB** (Time To First Byte) — for HTTP benches. Nanoseconds from `client.send(request)` returning the body future to the first response body byte arriving at the consumer. Measured locally against deterministic fixtures.
-- **TTFT** (Time To First Token) — only used for the LLM WebSocket bench. Milliseconds from sending `response.create` to receiving the first `response.output_text.delta` frame, which corresponds to the first model-generated token.
+- **TTFB** (Time To First Token) — only used for the LLM WebSocket bench. Milliseconds from sending `response.create` to receiving the first `response.output_text.delta` frame, which corresponds to the first model-generated token.
 - **Throughput** — for HTTP benches: response/request body megabytes per second (median of `bytes/sec` across N paired samples). For the WebSocket loopback bench: messages per second. Never used as an LLM token count.
-- **chars/sec** — for the LLM WebSocket bench only: streaming character rate after first token, post-TTFT. **Not** a token-per-second count; LLM tokens average ~3-4 characters, so dividing by ~3.5 gives a rough tokens/sec estimate. Cited as the raw measured metric to keep the comparison honest.
+- **chars/sec** — for the LLM WebSocket bench only: streaming character rate after first token, post-TTFB. **Not** a token-per-second count; LLM tokens average ~3-4 characters, so dividing by ~3.5 gives a rough tokens/sec estimate. Cited as the raw measured metric to keep the comparison honest.
 - All H1/H2 numbers come from paired interleaved samples — `(specter, reqwest, reqwest, specter, ...)` — under monotonic deadline spin-wait pacing on a single 100-sample run. Wilcoxon `p` is the paired signed-rank value.
 
 ## Headline
 
-> On HTTP/1.1 and HTTP/2 streaming workloads against `reqwest 0.12` (N=100 paired samples, identical workloads), Specter wins **median TTFB by +9.4% to +65.0%** and **median throughput by +7.5% to +21.9%** depending on protocol+direction, with paired Wilcoxon p-values from `1.80e-11` to `≈ 0` (every test well under the `p < 0.01` significance gate). Every workload also improves p95 — TTFB by 10-64%, throughput by 7-24%. On WebSocket against `tokio-tungstenite` over the production OpenAI Codex endpoint, Specter holds **bounded p95 TTFT under 2200 ms across every measured run** (tungstenite's worst observed: 4111 ms) and delivers **+17% higher median chars/sec post-first-token** at Chrome 146 TLS fingerprint. Loopback WebSocket message-rate matches both `fastwebsockets` and `tokio-tungstenite` within ±2%. Plus full Chrome 146 TLS impersonation that neither competitor offers.
+> On HTTP/1.1 and HTTP/2 streaming workloads against `reqwest 0.12` (N=100 paired samples, identical workloads), Specter wins **median TTFB by +9.4% to +65.0%** and **median throughput by +7.5% to +21.9%** depending on protocol+direction, with paired Wilcoxon p-values from `1.80e-11` to `≈ 0` (every test well under the `p < 0.01` significance gate). Every workload also improves p95 — TTFB by 10-64%, throughput by 7-24%. On WebSocket against `tokio-tungstenite` over the production OpenAI Codex endpoint, Specter holds **bounded p95 TTFB under 2200 ms across every measured run** (tungstenite's worst observed: 4111 ms) and delivers **+17% higher median chars/sec post-first-token** at Chrome 146 TLS fingerprint. Loopback WebSocket message-rate matches both `fastwebsockets` and `tokio-tungstenite` within ±2%. Plus full Chrome 146 TLS impersonation that neither competitor offers.
 
 ## HTTP/1.1 and HTTP/2 streaming vs reqwest 0.12
 
@@ -61,16 +61,16 @@ Artifact: [`websocket-vs-fastwebsockets/n20000-release.json`](./websocket-vs-fas
 
 ### Real-network LLM streaming (Codex / `wss://chatgpt.com/backend-api/codex/responses`)
 
-**Method:** `benches/codex_ws_streaming.rs` — paired interleaved samples (`SR/RS/SR/...`) against the production OpenAI Codex WebSocket endpoint, each sample sends a `response.create` and measures TTFT to first `response.output_text.delta` plus wall time to last delta. Chrome 146 TLS fingerprint impersonation enabled on Specter. Inter-request delay 2 s. N=100 paired samples (50 per client).
+**Method:** `benches/codex_ws_streaming.rs` — paired interleaved samples (`SR/RS/SR/...`) against the production OpenAI Codex WebSocket endpoint, each sample sends a `response.create` and measures TTFB to first `response.output_text.delta` plus wall time to last delta. Chrome 146 TLS fingerprint impersonation enabled on Specter. Inter-request delay 2 s. N=100 paired samples (50 per client).
 
-In this section **TTFT genuinely means "time to first LLM token"**: the first `response.output_text.delta` frame is the first model-generated token surfaced to the client. **chars/sec** is the post-TTFT character rate, **not** a token-per-second metric; quoted as the raw measurement to keep the comparison honest.
+In this section **TTFB genuinely means "time to first LLM token"**: the first `response.output_text.delta` frame is the first model-generated token surfaced to the client. **chars/sec** is the post-TTFB character rate, **not** a token-per-second metric; quoted as the raw measurement to keep the comparison honest.
 
 #### With Chrome 146 fingerprint (production config)
 
 | Metric | Specter | tokio-tungstenite | Δ |
 |---|---:|---:|---:|
-| Median TTFT | 761 ms | 829 ms | **−68 ms** (Specter wins, p=0.43, within noise) |
-| p95 TTFT | 2150 ms | 1621 ms | +530 ms (tung wins this snapshot) |
+| Median TTFB | 761 ms | 829 ms | **−68 ms** (Specter wins, p=0.43, within noise) |
+| p95 TTFB | 2150 ms | 1621 ms | +530 ms (tung wins this snapshot) |
 | Median wall (last delta) | 854 ms | 902 ms | **−48 ms** (Specter wins) |
 | Median handshake | 334 ms | 358 ms | **−24 ms** (Specter wins) |
 | Median chars/sec | 611 | 523 | **+17%** (Specter wins) |
@@ -81,8 +81,8 @@ Artifact: [`codex-ws-streaming/n100-chrome146-release.json`](./codex-ws-streamin
 
 | Metric | Specter | tokio-tungstenite | Δ |
 |---|---:|---:|---:|
-| Median TTFT | 667 ms | 625 ms | +42 ms (tung wins, p=0.37, within noise) |
-| p95 TTFT | 1850 ms | 1597 ms | +253 ms (tung wins this snapshot) |
+| Median TTFB | 667 ms | 625 ms | +42 ms (tung wins, p=0.37, within noise) |
+| p95 TTFB | 1850 ms | 1597 ms | +253 ms (tung wins this snapshot) |
 | Median wall | 781 ms | 746 ms | +35 ms (tung wins, p=0.46) |
 | Median handshake | 351 ms | 336 ms | +15 ms (tung wins) |
 
@@ -92,9 +92,9 @@ Artifact: [`codex-ws-streaming/n100-none-release.json`](./codex-ws-streaming/n10
 
 ### p95 stability across runs (the engineering claim)
 
-Specter's worst-case p95 TTFT stays bounded across independent runs; tungstenite has produced wider outliers at the same endpoint and time of day:
+Specter's worst-case p95 TTFB stays bounded across independent runs; tungstenite has produced wider outliers at the same endpoint and time of day:
 
-| Run | Specter p95 TTFT | Tungstenite p95 TTFT |
+| Run | Specter p95 TTFB | Tungstenite p95 TTFB |
 |---|---:|---:|
 | N=50 paired (earlier) | 1424 ms | 4111 ms |
 | N=100 Chrome 146 (v1) | 1984 ms | 2836 ms |
@@ -104,11 +104,11 @@ Specter's worst-case p95 TTFT stays bounded across independent runs; tungstenite
 | **Max p95 observed** | **2150 ms** | **4111 ms** |
 | **Cross-run spread** | **1.5×** | **2.6×** |
 
-Specter's tail is bounded under 2200 ms across every run. Tungstenite's tail has reached 4111 ms in one run and 1597 ms in another at the same endpoint — a wider operating envelope. For LLM pipeline products where a single 4-second request stalls the whole stream, the engineering signal is the bounded worst-case, not any single snapshot's median.
+Specter's tail is bounded under 2200 ms across every run. Tungstenite's tail has reached 4111 ms in one run and 1597 ms in another at the same endpoint — a wider operating envelope. For LLM pipeline products where a single 4-second request stalls the whole stream, the engineering signal is the bounded worst-case.
 
 ## Caveats and methodology notes
 
-- The +17% chars/sec lead and +68 ms median TTFT lead on the Codex bench are the measured values for this prompt + Codex model + Chrome 146 fingerprint at N=100 paired samples. Wilcoxon `p > 0.05` for median TTFT means the point estimate is real but the underlying population effect could be smaller. Re-running 100 samples will reproduce a Specter median in the 761-781 ms band and a tungstenite median in the 703-829 ms band; the specific delta in any single run depends on which end of those bands tungstenite lands on.
+- The +17% chars/sec lead and +68 ms median TTFB lead on the Codex bench are the measured values for this prompt + Codex model + Chrome 146 fingerprint at N=100 paired samples. Wilcoxon `p > 0.05` for median TTFB means the point estimate is real but the underlying population effect could be smaller. Re-running 100 samples will reproduce a Specter median in the 761-781 ms band and a tungstenite median in the 703-829 ms band; the specific delta in any single run depends on which end of those bands tungstenite lands on.
 - Loopback throughput on a macOS laptop is thermal-bound; the same code on Linux Graviton4 or Apple Silicon at idle clocks ~10-15% higher absolute msg/s. The ±2% margin between Specter / fastwebsockets / tungstenite is stable across thermal states.
 - Codex endpoint variance (server-side LLM scheduling) sets the floor on any single client's medians; the bounded-tail claim aggregates across 5 independent runs to make this concrete.
 - The H1/H2 bench numbers above are from a single 100-sample run per workload on the current `[profile.release]` (thin LTO + `codegen-units = 1`); previous runs at the same workload reproduced within ~±2pp on TTFB and ~±3pp on throughput. The artifacts in `2026-05-25-streaming/` are the exact files those tables were computed from.
@@ -136,7 +136,7 @@ cargo bench --bench streaming_vs_reqwest -- --protocol h2 --response-body-stream
 # WebSocket loopback (msg/s) vs fastwebsockets / tokio-tungstenite
 cargo bench --bench websocket_vs_fastwebsockets -- --messages 20000 --warmups 2000 --payload-bytes 1024 --json /tmp/loopback.json
 
-# WebSocket real-network LLM TTFT/chars-per-sec vs tokio-tungstenite
+# WebSocket real-network LLM TTFB/chars-per-sec vs tokio-tungstenite
 cargo bench --bench codex_ws_streaming -- --specter-fingerprint chrome146 --samples 100 --warmup 4 --json /tmp/chrome146.json
 cargo bench --bench codex_ws_streaming -- --specter-fingerprint none --samples 100 --warmup 4 --json /tmp/none.json
 ```

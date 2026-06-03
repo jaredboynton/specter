@@ -306,7 +306,7 @@ struct ClientConfig {
 
 #[derive(Serialize, Clone)]
 pub(crate) struct Metrics {
-    pub(crate) ttft_ns: f64,
+    pub(crate) ttfb_ns: f64,
     pub(crate) chunks_per_sec: f64,
     pub(crate) bytes_per_sec: f64,
     pub(crate) p95_bytes_per_sec: f64,
@@ -330,7 +330,7 @@ pub(crate) struct Metrics {
     pub(crate) pass: bool,
     pub(crate) actual_send_gap: ActualSendGap,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) ttft_samples_ns: Vec<f64>,
+    pub(crate) ttfb_samples_ns: Vec<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) bytes_per_sec_samples: Vec<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -410,7 +410,7 @@ fn is_zero_f64(v: &f64) -> bool {
 impl Metrics {
     fn failed(warmup_count: usize, sample_count: usize) -> Self {
         Self {
-            ttft_ns: 0.0,
+            ttfb_ns: 0.0,
             chunks_per_sec: 0.0,
             bytes_per_sec: 0.0,
             p95_bytes_per_sec: 0.0,
@@ -430,7 +430,7 @@ impl Metrics {
             connection_reuse_count: 0,
             pass: false,
             actual_send_gap: ActualSendGap::empty(),
-            ttft_samples_ns: Vec::new(),
+            ttfb_samples_ns: Vec::new(),
             bytes_per_sec_samples: Vec::new(),
             response_gap_overhead_by_index_ns: Vec::new(),
         }
@@ -438,7 +438,7 @@ impl Metrics {
 
     fn not_applicable(warmup_count: usize, sample_count: usize) -> Self {
         Self {
-            ttft_ns: 0.0,
+            ttfb_ns: 0.0,
             chunks_per_sec: 0.0,
             bytes_per_sec: 0.0,
             p95_bytes_per_sec: 0.0,
@@ -458,7 +458,7 @@ impl Metrics {
             connection_reuse_count: 0,
             pass: true,
             actual_send_gap: ActualSendGap::empty(),
-            ttft_samples_ns: Vec::new(),
+            ttfb_samples_ns: Vec::new(),
             bytes_per_sec_samples: Vec::new(),
             response_gap_overhead_by_index_ns: Vec::new(),
         }
@@ -468,15 +468,15 @@ impl Metrics {
 #[derive(Serialize)]
 struct Threshold {
     required: bool,
-    ttft_improvement_required_pct: f64,
+    ttfb_improvement_required_pct: f64,
     throughput_improvement_required_pct: f64,
     throughput_regression_allowed_pct: f64,
     p95_regression_allowed_pct: f64,
     wilcoxon_p_value_required_less_than: f64,
-    reqwest_median_ttft_ns: Option<f64>,
-    specter_median_ttft_ns: Option<f64>,
-    ttft_improvement_pct: Option<f64>,
-    ttft_wilcoxon_signed_rank_p_value: Option<f64>,
+    reqwest_median_ttfb_ns: Option<f64>,
+    specter_median_ttfb_ns: Option<f64>,
+    ttfb_improvement_pct: Option<f64>,
+    ttfb_wilcoxon_signed_rank_p_value: Option<f64>,
     reqwest_median_bytes_per_sec: Option<f64>,
     specter_median_bytes_per_sec: Option<f64>,
     throughput_improvement_pct: Option<f64>,
@@ -485,9 +485,9 @@ struct Threshold {
     reqwest_p95_bytes_per_sec: Option<f64>,
     specter_p95_bytes_per_sec: Option<f64>,
     p95_throughput_regression_pct: Option<f64>,
-    reqwest_p95_ttft_ns: Option<f64>,
-    specter_p95_ttft_ns: Option<f64>,
-    p95_ttft_regression_pct: Option<f64>,
+    reqwest_p95_ttfb_ns: Option<f64>,
+    specter_p95_ttfb_ns: Option<f64>,
+    p95_ttfb_regression_pct: Option<f64>,
     status: &'static str,
     reason: &'static str,
 }
@@ -519,7 +519,7 @@ struct H3Gate {
 
 #[derive(Serialize)]
 struct H3RegressionThresholds {
-    max_median_ttft_p50_ns: f64,
+    max_median_ttfb_p50_ns: f64,
     min_median_bytes_per_sec: f64,
     min_median_chunks_per_sec: f64,
     min_connection_reuse_count: usize,
@@ -531,7 +531,7 @@ impl H3RegressionThresholds {
     /// `h3_gate.specter_thresholds` JSON section so the two cannot drift.
     fn default_specter_gate() -> Self {
         Self {
-            max_median_ttft_p50_ns: 2_000_000.0,
+            max_median_ttfb_p50_ns: 2_000_000.0,
             min_median_bytes_per_sec: 30_000.0,
             min_median_chunks_per_sec: 2_000.0,
             min_connection_reuse_count: 1,
@@ -539,10 +539,10 @@ impl H3RegressionThresholds {
     }
 
     /// Evaluate a metrics row against the configured H3 regression gate.
-    /// The TTFT check runs against `metrics.p50_ns` to match the
-    /// `max_median_ttft_p50_ns` field name.
+    /// The TTFB check runs against `metrics.p50_ns` to match the
+    /// `max_median_ttfb_p50_ns` field name.
     fn evaluate(&self, metrics: &Metrics) -> bool {
-        metrics.p50_ns <= self.max_median_ttft_p50_ns
+        metrics.p50_ns <= self.max_median_ttfb_p50_ns
             && metrics.bytes_per_sec >= self.min_median_bytes_per_sec
             && metrics.chunks_per_sec >= self.min_median_chunks_per_sec
             && metrics.connection_reuse_count >= self.min_connection_reuse_count
@@ -580,12 +580,12 @@ struct BenchmarkOptions {
 
 pub(crate) struct ComparableThresholdResult {
     pub(crate) pass: bool,
-    pub(crate) ttft_improvement_pct: f64,
+    pub(crate) ttfb_improvement_pct: f64,
     pub(crate) throughput_improvement_pct: f64,
     pub(crate) median_throughput_regression_pct: f64,
     pub(crate) p95_throughput_regression_pct: f64,
-    pub(crate) p95_ttft_regression_pct: f64,
-    pub(crate) ttft_wilcoxon_signed_rank_p_value: f64,
+    pub(crate) p95_ttfb_regression_pct: f64,
+    pub(crate) ttfb_wilcoxon_signed_rank_p_value: f64,
     pub(crate) throughput_wilcoxon_signed_rank_p_value: f64,
 }
 
@@ -1856,7 +1856,7 @@ async fn measure_specter_streaming(
         }
     }
 
-    let ttft = first_chunk_time.unwrap_or_else(|| start.elapsed());
+    let ttfb = first_chunk_time.unwrap_or_else(|| start.elapsed());
     let transfer_duration = body_transfer_duration(first_chunk_time, last_chunk_time);
     let gaps_ns = inter_chunk_gaps_ns(&chunk_offsets_ns);
     let fallback_overhead = DenominatorEvidence::from_duration_minus_duration(
@@ -1867,7 +1867,7 @@ async fn measure_specter_streaming(
         .map(DenominatorEvidence::from_unclamped_ns)
         .unwrap_or(fallback_overhead);
     Ok((
-        ttft,
+        ttfb,
         transfer_duration,
         delivery_overhead,
         bytes_received,
@@ -1916,7 +1916,7 @@ async fn measure_reqwest_streaming(
         chunk_offsets_ns.push(elapsed.as_nanos() as f64);
     }
 
-    let ttft = first_chunk_time.unwrap_or_else(|| start.elapsed());
+    let ttfb = first_chunk_time.unwrap_or_else(|| start.elapsed());
     let transfer_duration = body_transfer_duration(first_chunk_time, last_chunk_time);
     let gaps_ns = inter_chunk_gaps_ns(&chunk_offsets_ns);
     let fallback_overhead = DenominatorEvidence::from_duration_minus_duration(
@@ -1927,7 +1927,7 @@ async fn measure_reqwest_streaming(
         .map(DenominatorEvidence::from_unclamped_ns)
         .unwrap_or(fallback_overhead);
     Ok((
-        ttft,
+        ttfb,
         transfer_duration,
         delivery_overhead,
         bytes_received,
@@ -2057,7 +2057,7 @@ async fn measure_specter_streaming_batch(
     ),
     Box<dyn std::error::Error>,
 > {
-    let mut ttft_values = Vec::with_capacity(request_count);
+    let mut ttfb_values = Vec::with_capacity(request_count);
     let mut transfer_duration = Duration::ZERO;
     let mut delivery_overhead = DenominatorEvidence::zero();
     let mut bytes_received = 0;
@@ -2065,9 +2065,9 @@ async fn measure_specter_streaming_batch(
     let mut all_gaps_ns: Vec<f64> = Vec::with_capacity(request_count * BENCH_CHUNK_COUNT);
 
     for _ in 0..request_count {
-        let (ttft, request_duration, request_delivery_overhead, bytes, chunks, gaps_ns) =
+        let (ttfb, request_duration, request_delivery_overhead, bytes, chunks, gaps_ns) =
             measure_specter_streaming(protocol, client, url).await?;
-        ttft_values.push(ttft.as_nanos() as f64);
+        ttfb_values.push(ttfb.as_nanos() as f64);
         transfer_duration += request_duration;
         delivery_overhead = delivery_overhead.add(request_delivery_overhead);
         bytes_received += bytes;
@@ -2075,11 +2075,11 @@ async fn measure_specter_streaming_batch(
         all_gaps_ns.extend(gaps_ns);
     }
 
-    let median_ttft_ns = calculate_median(ttft_values);
-    let ttft = Duration::from_nanos(median_ttft_ns as u64);
+    let median_ttfb_ns = calculate_median(ttfb_values);
+    let ttfb = Duration::from_nanos(median_ttfb_ns as u64);
     let total_duration = transfer_duration;
     Ok((
-        ttft,
+        ttfb,
         total_duration,
         delivery_overhead,
         bytes_received,
@@ -2103,7 +2103,7 @@ async fn measure_reqwest_streaming_batch(
     ),
     Box<dyn std::error::Error>,
 > {
-    let mut ttft_values = Vec::with_capacity(request_count);
+    let mut ttfb_values = Vec::with_capacity(request_count);
     let mut transfer_duration = Duration::ZERO;
     let mut delivery_overhead = DenominatorEvidence::zero();
     let mut bytes_received = 0;
@@ -2111,9 +2111,9 @@ async fn measure_reqwest_streaming_batch(
     let mut all_gaps_ns: Vec<f64> = Vec::with_capacity(request_count * BENCH_CHUNK_COUNT);
 
     for _ in 0..request_count {
-        let (ttft, request_duration, request_delivery_overhead, bytes, chunks, gaps_ns) =
+        let (ttfb, request_duration, request_delivery_overhead, bytes, chunks, gaps_ns) =
             measure_reqwest_streaming(client, url).await?;
-        ttft_values.push(ttft.as_nanos() as f64);
+        ttfb_values.push(ttfb.as_nanos() as f64);
         transfer_duration += request_duration;
         delivery_overhead = delivery_overhead.add(request_delivery_overhead);
         bytes_received += bytes;
@@ -2121,11 +2121,11 @@ async fn measure_reqwest_streaming_batch(
         all_gaps_ns.extend(gaps_ns);
     }
 
-    let median_ttft_ns = calculate_median(ttft_values);
-    let ttft = Duration::from_nanos(median_ttft_ns as u64);
+    let median_ttfb_ns = calculate_median(ttfb_values);
+    let ttfb = Duration::from_nanos(median_ttfb_ns as u64);
     let total_duration = transfer_duration;
     Ok((
-        ttft,
+        ttfb,
         total_duration,
         delivery_overhead,
         bytes_received,
@@ -2345,7 +2345,7 @@ async fn measure_specter_request_streaming_batch(
     ),
     Box<dyn std::error::Error>,
 > {
-    let mut ttft_values = Vec::with_capacity(request_count);
+    let mut ttfb_values = Vec::with_capacity(request_count);
     let mut transfer_duration = Duration::ZERO;
     let mut write_overhead_total = DenominatorEvidence::zero();
     let mut bytes_sent = 0;
@@ -2354,9 +2354,9 @@ async fn measure_specter_request_streaming_batch(
     let mut all_gaps_ns: Vec<f64> = Vec::with_capacity(request_count * BENCH_REQ_CHUNK_COUNT);
 
     for _ in 0..request_count {
-        let (ttft, request_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns) =
+        let (ttfb, request_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns) =
             measure_specter_request_streaming(protocol, client, url).await?;
-        ttft_values.push(ttft.as_nanos() as f64);
+        ttfb_values.push(ttfb.as_nanos() as f64);
         transfer_duration += request_duration;
         write_overhead_total = write_overhead_total.add(write_overhead);
         bytes_sent += bytes;
@@ -2365,9 +2365,9 @@ async fn measure_specter_request_streaming_batch(
         all_gaps_ns.extend(gaps_ns);
     }
 
-    let median_ttft_ns = calculate_median(ttft_values);
+    let median_ttfb_ns = calculate_median(ttfb_values);
     Ok((
-        Duration::from_nanos(median_ttft_ns as u64),
+        Duration::from_nanos(median_ttfb_ns as u64),
         transfer_duration,
         write_overhead_total,
         bytes_sent,
@@ -2393,7 +2393,7 @@ async fn measure_reqwest_request_streaming_batch(
     ),
     Box<dyn std::error::Error>,
 > {
-    let mut ttft_values = Vec::with_capacity(request_count);
+    let mut ttfb_values = Vec::with_capacity(request_count);
     let mut transfer_duration = Duration::ZERO;
     let mut write_overhead_total = DenominatorEvidence::zero();
     let mut bytes_sent = 0;
@@ -2402,9 +2402,9 @@ async fn measure_reqwest_request_streaming_batch(
     let mut all_gaps_ns: Vec<f64> = Vec::with_capacity(request_count * BENCH_REQ_CHUNK_COUNT);
 
     for _ in 0..request_count {
-        let (ttft, request_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns) =
+        let (ttfb, request_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns) =
             measure_reqwest_request_streaming(client, url).await?;
-        ttft_values.push(ttft.as_nanos() as f64);
+        ttfb_values.push(ttfb.as_nanos() as f64);
         transfer_duration += request_duration;
         write_overhead_total = write_overhead_total.add(write_overhead);
         bytes_sent += bytes;
@@ -2413,9 +2413,9 @@ async fn measure_reqwest_request_streaming_batch(
         all_gaps_ns.extend(gaps_ns);
     }
 
-    let median_ttft_ns = calculate_median(ttft_values);
+    let median_ttfb_ns = calculate_median(ttfb_values);
     Ok((
-        Duration::from_nanos(median_ttft_ns as u64),
+        Duration::from_nanos(median_ttfb_ns as u64),
         transfer_duration,
         write_overhead_total,
         bytes_sent,
@@ -2597,7 +2597,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
 
             if options.force_comparable_threshold_failure && is_comparable && client == "specter" {
                 measurement_source = "self_test_induced_threshold_failure";
-                metrics.ttft_ns = 1_100_000.0;
+                metrics.ttfb_ns = 1_100_000.0;
                 metrics.chunks_per_sec = 2000.0;
                 metrics.bytes_per_sec = 25_000.0;
                 metrics.p95_bytes_per_sec = 24_000.0;
@@ -2605,13 +2605,13 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 metrics.p95_ns = 1_350_000.0;
                 metrics.p99_ns = 1_450_000.0;
                 metrics.pass = false;
-                metrics.ttft_samples_ns = vec![1_100_000.0; options.sample_count];
+                metrics.ttfb_samples_ns = vec![1_100_000.0; options.sample_count];
                 metrics.bytes_per_sec_samples = vec![25_000.0; options.sample_count];
             }
 
             if options.force_h3_threshold_failure && protocol == "h3" && client == "specter" {
                 measurement_source = "self_test_induced_h3_threshold_failure";
-                metrics.ttft_ns = 5_000_000.0;
+                metrics.ttfb_ns = 5_000_000.0;
                 metrics.chunks_per_sec = 100.0;
                 metrics.bytes_per_sec = 1_000.0;
                 metrics.p95_bytes_per_sec = 1_000.0;
@@ -2697,23 +2697,23 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 metrics,
                 threshold: Threshold {
                     required: row_threshold_required,
-                    ttft_improvement_required_pct: 5.0,
+                    ttfb_improvement_required_pct: 5.0,
                     throughput_improvement_required_pct: 5.0,
                     throughput_regression_allowed_pct: 5.0,
                     p95_regression_allowed_pct: 5.0,
                     wilcoxon_p_value_required_less_than: 0.01,
-                    reqwest_median_ttft_ns: comparable_threshold
+                    reqwest_median_ttfb_ns: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["reqwest"].ttft_ns),
-                    specter_median_ttft_ns: comparable_threshold
+                        .map(|_| protocol_metrics["reqwest"].ttfb_ns),
+                    specter_median_ttfb_ns: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["specter"].ttft_ns),
-                    ttft_improvement_pct: comparable_threshold
+                        .map(|_| protocol_metrics["specter"].ttfb_ns),
+                    ttfb_improvement_pct: comparable_threshold
                         .as_ref()
-                        .map(|result| result.ttft_improvement_pct),
-                    ttft_wilcoxon_signed_rank_p_value: comparable_threshold
+                        .map(|result| result.ttfb_improvement_pct),
+                    ttfb_wilcoxon_signed_rank_p_value: comparable_threshold
                         .as_ref()
-                        .map(|result| result.ttft_wilcoxon_signed_rank_p_value),
+                        .map(|result| result.ttfb_wilcoxon_signed_rank_p_value),
                     reqwest_median_bytes_per_sec: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].bytes_per_sec),
@@ -2738,20 +2738,20 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     p95_throughput_regression_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.p95_throughput_regression_pct),
-                    reqwest_p95_ttft_ns: comparable_threshold
+                    reqwest_p95_ttfb_ns: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].p95_ns),
-                    specter_p95_ttft_ns: comparable_threshold
+                    specter_p95_ttfb_ns: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["specter"].p95_ns),
-                    p95_ttft_regression_pct: comparable_threshold
+                    p95_ttfb_regression_pct: comparable_threshold
                         .as_ref()
-                        .map(|result| result.p95_ttft_regression_pct),
+                        .map(|result| result.p95_ttfb_regression_pct),
                     status: if is_row_pass { "pass" } else { "fail" },
                     reason: match (protocol, client) {
-                        ("h3", "specter") => "reqwest H3 comparison unavailable; Specter H3 row is gated by explicit TTFT, throughput, chunk-rate, and pool-reuse regression thresholds",
+                        ("h3", "specter") => "reqwest H3 comparison unavailable; Specter H3 row is gated by explicit TTFB, throughput, chunk-rate, and pool-reuse regression thresholds",
                         ("h3", "reqwest") => "reqwest H3 comparison unavailable and excluded from threshold math",
-                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable threshold: Specter median TTFT must improve by >=5%, median throughput must improve by >=5% using final fixture DATA write-stamp delivery overhead for response rows, paired Wilcoxon signed-rank p-values for TTFT and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 TTFT must not regress by more than 5%",
+                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable threshold: Specter median TTFB must improve by >=5%, median throughput must improve by >=5% using final fixture DATA write-stamp delivery overhead for response rows, paired Wilcoxon signed-rank p-values for TTFB and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 TTFB must not regress by more than 5%",
                         ("h1" | "h2", "reqwest") => "deterministic localhost reqwest baseline row; excluded as a failing threshold subject but included in threshold math",
                         _ => "non-comparable deterministic row excluded from primary H1/H2 reqwest threshold math",
                     },
@@ -2853,7 +2853,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
             // row identically to the response row.
             if options.force_request_threshold_failure && client == "specter" {
                 measurement_source = "self_test_induced_threshold_failure";
-                metrics.ttft_ns = 1_100_000.0;
+                metrics.ttfb_ns = 1_100_000.0;
                 metrics.chunks_per_sec = 1000.0;
                 metrics.bytes_per_sec = 25_000.0;
                 metrics.p95_bytes_per_sec = 24_000.0;
@@ -2861,7 +2861,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 metrics.p95_ns = 1_350_000.0;
                 metrics.p99_ns = 1_450_000.0;
                 metrics.pass = false;
-                metrics.ttft_samples_ns = vec![1_100_000.0; options.sample_count];
+                metrics.ttfb_samples_ns = vec![1_100_000.0; options.sample_count];
                 metrics.bytes_per_sec_samples = vec![25_000.0; options.sample_count];
             }
 
@@ -2922,23 +2922,23 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 metrics,
                 threshold: Threshold {
                     required: row_threshold_required,
-                    ttft_improvement_required_pct: 5.0,
+                    ttfb_improvement_required_pct: 5.0,
                     throughput_improvement_required_pct: 5.0,
                     throughput_regression_allowed_pct: 5.0,
                     p95_regression_allowed_pct: 5.0,
                     wilcoxon_p_value_required_less_than: 0.01,
-                    reqwest_median_ttft_ns: comparable_threshold
+                    reqwest_median_ttfb_ns: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["reqwest"].ttft_ns),
-                    specter_median_ttft_ns: comparable_threshold
+                        .map(|_| protocol_metrics["reqwest"].ttfb_ns),
+                    specter_median_ttfb_ns: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["specter"].ttft_ns),
-                    ttft_improvement_pct: comparable_threshold
+                        .map(|_| protocol_metrics["specter"].ttfb_ns),
+                    ttfb_improvement_pct: comparable_threshold
                         .as_ref()
-                        .map(|result| result.ttft_improvement_pct),
-                    ttft_wilcoxon_signed_rank_p_value: comparable_threshold
+                        .map(|result| result.ttfb_improvement_pct),
+                    ttfb_wilcoxon_signed_rank_p_value: comparable_threshold
                         .as_ref()
-                        .map(|result| result.ttft_wilcoxon_signed_rank_p_value),
+                        .map(|result| result.ttfb_wilcoxon_signed_rank_p_value),
                     reqwest_median_bytes_per_sec: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].bytes_per_sec),
@@ -2963,18 +2963,18 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     p95_throughput_regression_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.p95_throughput_regression_pct),
-                    reqwest_p95_ttft_ns: comparable_threshold
+                    reqwest_p95_ttfb_ns: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].p95_ns),
-                    specter_p95_ttft_ns: comparable_threshold
+                    specter_p95_ttfb_ns: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["specter"].p95_ns),
-                    p95_ttft_regression_pct: comparable_threshold
+                    p95_ttfb_regression_pct: comparable_threshold
                         .as_ref()
-                        .map(|result| result.p95_ttft_regression_pct),
+                        .map(|result| result.p95_ttfb_regression_pct),
                     status: if is_row_pass { "pass" } else { "fail" },
                     reason: match (protocol, client) {
-                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable request-body streaming threshold: Specter median corrected upload-complete TTFT must improve by >=5% using per-chunk yielded/consumed timestamps with the fixture upload-complete timestamp as the final endpoint, median upload throughput must improve by >=5% measured against the same corrected upload-complete write-overhead denominator, paired Wilcoxon signed-rank p-values for corrected upload-complete TTFT and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 corrected upload-complete TTFT must not regress by more than 5%; client_write_overhead_duration_ns is retained as duplicate denominator-floor evidence for request rows",
+                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable request-body streaming threshold: Specter median corrected upload-complete TTFB must improve by >=5% using per-chunk yielded/consumed timestamps with the fixture upload-complete timestamp as the final endpoint, median upload throughput must improve by >=5% measured against the same corrected upload-complete write-overhead denominator, paired Wilcoxon signed-rank p-values for corrected upload-complete TTFB and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 corrected upload-complete TTFB must not regress by more than 5%; client_write_overhead_duration_ns is retained as duplicate denominator-floor evidence for request rows",
                         ("h1" | "h2", "reqwest") => "deterministic localhost reqwest baseline request-body streaming row; excluded as a failing threshold subject but included in threshold math",
                         _ => "non-comparable deterministic request-body row excluded from primary H1/H2 reqwest threshold math",
                     },
@@ -3001,7 +3001,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
 
     let h3_selected = options.protocols.contains(&"h3");
     let h3_metrics = h3_specter_metrics.unwrap_or(Metrics {
-        ttft_ns: 0.0,
+        ttfb_ns: 0.0,
         chunks_per_sec: 0.0,
         bytes_per_sec: 0.0,
         p95_bytes_per_sec: 0.0,
@@ -3021,7 +3021,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
         connection_reuse_count: 0,
         pass: !h3_selected,
         actual_send_gap: ActualSendGap::empty(),
-        ttft_samples_ns: Vec::new(),
+        ttfb_samples_ns: Vec::new(),
         bytes_per_sec_samples: Vec::new(),
         response_gap_overhead_by_index_ns: Vec::new(),
     });
@@ -3164,24 +3164,24 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
 /// Shared threshold evaluation for comparable H1/H2 response and request rows.
 ///
 /// Both response and request rows require Specter to beat reqwest by at least
-/// 5% on median TTFT and median throughput, paired Wilcoxon p-values below
-/// 0.01 for both distributions, and no p95 throughput or TTFT regression
+/// 5% on median TTFB and median throughput, paired Wilcoxon p-values below
+/// 0.01 for both distributions, and no p95 throughput or TTFB regression
 /// above 5%.
 pub(crate) fn evaluate_comparable_threshold(
     reqwest: &Metrics,
     specter: &Metrics,
 ) -> ComparableThresholdResult {
-    let ttft_improvement_pct = pct_lower_is_better(reqwest.ttft_ns, specter.ttft_ns);
+    let ttfb_improvement_pct = pct_lower_is_better(reqwest.ttfb_ns, specter.ttfb_ns);
     let throughput_improvement_pct =
         pct_higher_is_better(reqwest.bytes_per_sec, specter.bytes_per_sec);
     let median_throughput_regression_pct =
         pct_lower_is_worse(reqwest.bytes_per_sec, specter.bytes_per_sec);
     let p95_throughput_regression_pct =
         pct_lower_is_worse(reqwest.p95_bytes_per_sec, specter.p95_bytes_per_sec);
-    let p95_ttft_regression_pct = pct_higher_is_worse(reqwest.p95_ns, specter.p95_ns);
-    let ttft_wilcoxon_signed_rank_p_value = paired_wilcoxon_signed_rank_p_value(
-        &reqwest.ttft_samples_ns,
-        &specter.ttft_samples_ns,
+    let p95_ttfb_regression_pct = pct_higher_is_worse(reqwest.p95_ns, specter.p95_ns);
+    let ttfb_wilcoxon_signed_rank_p_value = paired_wilcoxon_signed_rank_p_value(
+        &reqwest.ttfb_samples_ns,
+        &specter.ttfb_samples_ns,
         true,
     );
     let throughput_wilcoxon_signed_rank_p_value = paired_wilcoxon_signed_rank_p_value(
@@ -3189,21 +3189,21 @@ pub(crate) fn evaluate_comparable_threshold(
         &specter.bytes_per_sec_samples,
         false,
     );
-    let pass = ttft_improvement_pct >= 5.0
+    let pass = ttfb_improvement_pct >= 5.0
         && throughput_improvement_pct >= 5.0
-        && ttft_wilcoxon_signed_rank_p_value < 0.01
+        && ttfb_wilcoxon_signed_rank_p_value < 0.01
         && throughput_wilcoxon_signed_rank_p_value < 0.01
         && p95_throughput_regression_pct <= 5.0
-        && p95_ttft_regression_pct <= 5.0;
+        && p95_ttfb_regression_pct <= 5.0;
 
     ComparableThresholdResult {
         pass,
-        ttft_improvement_pct,
+        ttfb_improvement_pct,
         throughput_improvement_pct,
         median_throughput_regression_pct,
         p95_throughput_regression_pct,
-        p95_ttft_regression_pct,
-        ttft_wilcoxon_signed_rank_p_value,
+        p95_ttfb_regression_pct,
+        ttfb_wilcoxon_signed_rank_p_value,
         throughput_wilcoxon_signed_rank_p_value,
     }
 }
@@ -3316,7 +3316,7 @@ fn pct_lower_is_worse(baseline: f64, candidate: f64) -> f64 {
 
 #[derive(Default)]
 struct ResponseSampleSet {
-    ttft_values: Vec<f64>,
+    ttfb_values: Vec<f64>,
     throughput_values: Vec<f64>,
     chunk_rates: Vec<f64>,
     body_transfer_duration_values: Vec<f64>,
@@ -3331,7 +3331,7 @@ impl ResponseSampleSet {
     #[allow(clippy::too_many_arguments)]
     fn record(
         &mut self,
-        ttft: Duration,
+        ttfb: Duration,
         body_transfer_duration: Duration,
         payload_schedule_duration: Duration,
         client_overhead: DenominatorEvidence,
@@ -3344,14 +3344,14 @@ impl ResponseSampleSet {
             &mut self.gap_overhead_by_index_ns,
         );
         record_sample(
-            ttft,
+            ttfb,
             body_transfer_duration,
             payload_schedule_duration,
             client_overhead,
             bytes,
             chunks,
             inter_chunk_send_gaps_ns,
-            &mut self.ttft_values,
+            &mut self.ttfb_values,
             &mut self.throughput_values,
             &mut self.chunk_rates,
             &mut self.body_transfer_duration_values,
@@ -3368,11 +3368,11 @@ impl ResponseSampleSet {
         warmup_count: usize,
         sample_count: usize,
     ) -> Result<Metrics, Box<dyn std::error::Error>> {
-        if self.ttft_values.is_empty() {
+        if self.ttfb_values.is_empty() {
             return Err("No successful samples".into());
         }
 
-        let (p50, p95, p99) = calculate_percentiles(self.ttft_values.clone());
+        let (p50, p95, p99) = calculate_percentiles(self.ttfb_values.clone());
         let (_, p95_throughput, _) = calculate_percentiles(self.throughput_values.clone());
         let median_throughput = calculate_median(self.throughput_values.clone());
         let median_chunk_rate = calculate_median(self.chunk_rates);
@@ -3389,7 +3389,7 @@ impl ResponseSampleSet {
             .collect();
 
         Ok(Metrics {
-            ttft_ns: p50,
+            ttfb_ns: p50,
             chunks_per_sec: median_chunk_rate,
             bytes_per_sec: median_throughput,
             p95_bytes_per_sec: p95_throughput,
@@ -3418,7 +3418,7 @@ impl ResponseSampleSet {
             },
             pass: true,
             actual_send_gap,
-            ttft_samples_ns: self.ttft_values,
+            ttfb_samples_ns: self.ttfb_values,
             bytes_per_sec_samples: self.throughput_values,
             response_gap_overhead_by_index_ns,
         })
@@ -3427,7 +3427,7 @@ impl ResponseSampleSet {
 
 #[derive(Default)]
 struct RequestSampleSet {
-    ttft_values: Vec<f64>,
+    ttfb_values: Vec<f64>,
     throughput_values: Vec<f64>,
     chunk_rates: Vec<f64>,
     body_transfer_duration_values: Vec<f64>,
@@ -3445,7 +3445,7 @@ impl RequestSampleSet {
     #[allow(clippy::too_many_arguments)]
     fn record(
         &mut self,
-        ttft: Duration,
+        ttfb: Duration,
         body_transfer_duration: Duration,
         payload_schedule_duration: Duration,
         client_write_overhead: DenominatorEvidence,
@@ -3456,14 +3456,14 @@ impl RequestSampleSet {
     ) {
         self.upload_complete_fallback_count += upload_complete_fallback_count;
         record_request_sample(
-            ttft,
+            ttfb,
             body_transfer_duration,
             payload_schedule_duration,
             client_write_overhead,
             bytes,
             chunks,
             inter_chunk_send_gaps_ns,
-            &mut self.ttft_values,
+            &mut self.ttfb_values,
             &mut self.throughput_values,
             &mut self.chunk_rates,
             &mut self.body_transfer_duration_values,
@@ -3483,11 +3483,11 @@ impl RequestSampleSet {
         warmup_count: usize,
         sample_count: usize,
     ) -> Result<Metrics, Box<dyn std::error::Error>> {
-        if self.ttft_values.is_empty() {
+        if self.ttfb_values.is_empty() {
             return Err("No successful request-body samples".into());
         }
 
-        let (p50, p95, p99) = calculate_percentiles(self.ttft_values.clone());
+        let (p50, p95, p99) = calculate_percentiles(self.ttfb_values.clone());
         let (_, p95_throughput, _) = calculate_percentiles(self.throughput_values.clone());
         let median_throughput = calculate_median(self.throughput_values.clone());
         let median_chunk_rate = calculate_median(self.chunk_rates);
@@ -3503,7 +3503,7 @@ impl RequestSampleSet {
         let actual_send_gap = summarize_send_gaps(&self.all_send_gaps_ns, BENCH_REQ_CHUNK_DELAY_MS);
 
         Ok(Metrics {
-            ttft_ns: p50,
+            ttfb_ns: p50,
             chunks_per_sec: median_chunk_rate,
             bytes_per_sec: median_throughput,
             p95_bytes_per_sec: p95_throughput,
@@ -3535,7 +3535,7 @@ impl RequestSampleSet {
             },
             pass: true,
             actual_send_gap,
-            ttft_samples_ns: self.ttft_values,
+            ttfb_samples_ns: self.ttfb_values,
             bytes_per_sec_samples: self.throughput_values,
             response_gap_overhead_by_index_ns: Vec::new(),
         })
@@ -3581,12 +3581,12 @@ async fn run_real_measurement(
             } else {
                 &specter_client
             };
-            if let Ok((ttft, total_duration, delivery_overhead, bytes, chunks, gaps_ns)) =
+            if let Ok((ttfb, total_duration, delivery_overhead, bytes, chunks, gaps_ns)) =
                 measure_specter_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT)
                     .await
             {
                 samples.record(
-                    ttft,
+                    ttfb,
                     total_duration,
                     scheduled_duration,
                     delivery_overhead,
@@ -3616,11 +3616,11 @@ async fn run_real_measurement(
             } else {
                 &reqwest_client
             };
-            if let Ok((ttft, total_duration, delivery_overhead, bytes, chunks, gaps_ns)) =
+            if let Ok((ttfb, total_duration, delivery_overhead, bytes, chunks, gaps_ns)) =
                 measure_reqwest_streaming_batch(client_ref, url, BENCH_REQUEST_COUNT).await
             {
                 samples.record(
-                    ttft,
+                    ttfb,
                     total_duration,
                     scheduled_duration,
                     delivery_overhead,
@@ -3733,11 +3733,11 @@ async fn record_reqwest_response_sample(
         pooled_client
     };
 
-    if let Ok((ttft, total_duration, delivery_overhead, bytes, chunks, gaps_ns)) =
+    if let Ok((ttfb, total_duration, delivery_overhead, bytes, chunks, gaps_ns)) =
         measure_reqwest_streaming_batch(client_ref, url, BENCH_REQUEST_COUNT).await
     {
         samples.record(
-            ttft,
+            ttfb,
             total_duration,
             scheduled_duration,
             delivery_overhead,
@@ -3769,11 +3769,11 @@ async fn record_specter_response_sample(
         pooled_client
     };
 
-    if let Ok((ttft, total_duration, delivery_overhead, bytes, chunks, gaps_ns)) =
+    if let Ok((ttfb, total_duration, delivery_overhead, bytes, chunks, gaps_ns)) =
         measure_specter_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT).await
     {
         samples.record(
-            ttft,
+            ttfb,
             total_duration,
             scheduled_duration,
             delivery_overhead,
@@ -3882,11 +3882,11 @@ async fn record_reqwest_request_sample(
         pooled_client
     };
 
-    if let Ok((ttft, total_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns)) =
+    if let Ok((ttfb, total_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns)) =
         measure_reqwest_request_streaming_batch(client_ref, url, BENCH_REQUEST_COUNT).await
     {
         samples.record(
-            ttft,
+            ttfb,
             total_duration,
             scheduled_duration,
             write_overhead,
@@ -3919,12 +3919,12 @@ async fn record_specter_request_sample(
         pooled_client
     };
 
-    if let Ok((ttft, total_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns)) =
+    if let Ok((ttfb, total_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns)) =
         measure_specter_request_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT)
             .await
     {
         samples.record(
-            ttft,
+            ttfb,
             total_duration,
             scheduled_duration,
             write_overhead,
@@ -3944,7 +3944,7 @@ async fn run_real_request_body_measurement(
     sample_count: usize,
     payload_schedule_ms: &[u64],
 ) -> Result<Metrics, Box<dyn std::error::Error>> {
-    let mut ttft_values = Vec::new();
+    let mut ttfb_values = Vec::new();
     let mut throughput_values = Vec::new();
     let mut chunk_rates = Vec::new();
     let mut body_transfer_duration_values = Vec::new();
@@ -3986,7 +3986,7 @@ async fn run_real_request_body_measurement(
                 &specter_client
             };
             if let Ok((
-                ttft,
+                ttfb,
                 total_duration,
                 write_overhead,
                 bytes,
@@ -4003,14 +4003,14 @@ async fn run_real_request_body_measurement(
             {
                 upload_complete_fallback_count += fallback_count;
                 record_request_sample(
-                    ttft,
+                    ttfb,
                     total_duration,
                     scheduled_duration,
                     write_overhead,
                     bytes,
                     chunks,
                     &gaps_ns,
-                    &mut ttft_values,
+                    &mut ttfb_values,
                     &mut throughput_values,
                     &mut chunk_rates,
                     &mut body_transfer_duration_values,
@@ -4049,7 +4049,7 @@ async fn run_real_request_body_measurement(
                 &reqwest_client
             };
             if let Ok((
-                ttft,
+                ttfb,
                 total_duration,
                 write_overhead,
                 bytes,
@@ -4061,14 +4061,14 @@ async fn run_real_request_body_measurement(
             {
                 upload_complete_fallback_count += fallback_count;
                 record_request_sample(
-                    ttft,
+                    ttfb,
                     total_duration,
                     scheduled_duration,
                     write_overhead,
                     bytes,
                     chunks,
                     &gaps_ns,
-                    &mut ttft_values,
+                    &mut ttfb_values,
                     &mut throughput_values,
                     &mut chunk_rates,
                     &mut body_transfer_duration_values,
@@ -4084,11 +4084,11 @@ async fn run_real_request_body_measurement(
         }
     }
 
-    if ttft_values.is_empty() {
+    if ttfb_values.is_empty() {
         return Err("No successful request-body samples".into());
     }
 
-    let (p50, p95, p99) = calculate_percentiles(ttft_values.clone());
+    let (p50, p95, p99) = calculate_percentiles(ttfb_values.clone());
     let (_, p95_throughput, _) = calculate_percentiles(throughput_values.clone());
     let median_throughput = calculate_median(throughput_values.clone());
     let median_chunk_rate = calculate_median(chunk_rates);
@@ -4103,7 +4103,7 @@ async fn run_real_request_body_measurement(
     let actual_send_gap = summarize_send_gaps(&all_send_gaps_ns, BENCH_REQ_CHUNK_DELAY_MS);
 
     Ok(Metrics {
-        ttft_ns: p50,
+        ttfb_ns: p50,
         chunks_per_sec: median_chunk_rate,
         bytes_per_sec: median_throughput,
         p95_bytes_per_sec: p95_throughput,
@@ -4132,7 +4132,7 @@ async fn run_real_request_body_measurement(
         },
         pass: true,
         actual_send_gap,
-        ttft_samples_ns: ttft_values,
+        ttfb_samples_ns: ttfb_values,
         bytes_per_sec_samples: throughput_values,
         response_gap_overhead_by_index_ns: Vec::new(),
     })
@@ -4159,14 +4159,14 @@ pub(crate) fn record_response_gap_overheads_by_index(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_sample(
-    ttft: Duration,
+    ttfb: Duration,
     body_transfer_duration: Duration,
     _payload_schedule_duration: Duration,
     client_overhead: DenominatorEvidence,
     bytes: usize,
     chunks: usize,
     inter_chunk_send_gaps_ns: &[f64],
-    ttft_values: &mut Vec<f64>,
+    ttfb_values: &mut Vec<f64>,
     throughput_values: &mut Vec<f64>,
     chunk_rates: &mut Vec<f64>,
     body_transfer_duration_values: &mut Vec<f64>,
@@ -4175,9 +4175,9 @@ pub(crate) fn record_sample(
     client_overhead_denominator_floor_count: &mut usize,
     send_gap_samples_ns: &mut Vec<f64>,
 ) {
-    let ttft_ns = ttft.as_nanos() as f64;
+    let ttfb_ns = ttfb.as_nanos() as f64;
     let denominator = client_overhead.duration.as_secs_f64().max(1e-9);
-    ttft_values.push(ttft_ns);
+    ttfb_values.push(ttfb_ns);
     send_gap_samples_ns.extend_from_slice(inter_chunk_send_gaps_ns);
     throughput_values.push(bytes as f64 / denominator);
     chunk_rates.push(chunks as f64 / denominator);
@@ -4187,19 +4187,19 @@ pub(crate) fn record_sample(
     *client_overhead_denominator_floor_count += client_overhead.floor_count;
 }
 
-// Request-row variant: threshold TTFT and throughput use corrected
+// Request-row variant: threshold TTFB and throughput use corrected
 // upload-complete write-overhead. The raw first-yielded-chunk through fixture
 // upload-complete duration remains serialized as body_transfer_duration_ns.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_request_sample(
-    _ttft: Duration,
+    _ttfb: Duration,
     body_transfer_duration: Duration,
     _payload_schedule_duration: Duration,
     client_write_overhead: DenominatorEvidence,
     bytes: usize,
     chunks: usize,
     inter_chunk_send_gaps_ns: &[f64],
-    ttft_values: &mut Vec<f64>,
+    ttfb_values: &mut Vec<f64>,
     throughput_values: &mut Vec<f64>,
     chunk_rates: &mut Vec<f64>,
     body_transfer_duration_values: &mut Vec<f64>,
@@ -4212,7 +4212,7 @@ pub(crate) fn record_request_sample(
     send_gap_samples_ns: &mut Vec<f64>,
 ) {
     let denominator = client_write_overhead.duration.as_secs_f64().max(1e-9);
-    ttft_values.push(client_write_overhead.duration.as_nanos() as f64);
+    ttfb_values.push(client_write_overhead.duration.as_nanos() as f64);
     send_gap_samples_ns.extend_from_slice(inter_chunk_send_gaps_ns);
     throughput_values.push(bytes as f64 / denominator);
     chunk_rates.push(chunks as f64 / denominator);
@@ -4254,7 +4254,7 @@ fn git() -> Git {
 fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
         (
-            "ttft_ns",
+            "ttfb_ns",
             "response rows: elapsed nanoseconds from request start until first response body byte is observable; request rows: corrected upload-complete write-overhead in nanoseconds using per-chunk yielded/consumed timestamps and the fixture upload-complete timestamp as the final endpoint",
         ),
         (
@@ -4275,7 +4275,7 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "client_overhead_duration_ns",
-            "median corrected client-overhead duration denominator in nanoseconds; gates response-row bytes_per_sec and chunks_per_sec using final fixture DATA write-stamp delivery overhead, and gates request-row TTFT, bytes_per_sec, and chunks_per_sec using the corrected upload-complete write-overhead timing window",
+            "median corrected client-overhead duration denominator in nanoseconds; gates response-row bytes_per_sec and chunks_per_sec using final fixture DATA write-stamp delivery overhead, and gates request-row TTFB, bytes_per_sec, and chunks_per_sec using the corrected upload-complete write-overhead timing window",
         ),
         (
             "client_overhead_unclamped_duration_ns",
@@ -4303,15 +4303,15 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "p50_ns",
-            "nearest-rank 50th percentile over sample TTFT values",
+            "nearest-rank 50th percentile over sample TTFB values",
         ),
         (
             "p95_ns",
-            "nearest-rank 95th percentile over sample TTFT values",
+            "nearest-rank 95th percentile over sample TTFB values",
         ),
         (
             "p99_ns",
-            "nearest-rank 99th percentile over sample TTFT values",
+            "nearest-rank 99th percentile over sample TTFB values",
         ),
         (
             "connection_reuse_count",
@@ -4319,11 +4319,11 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "p95_regression_allowed_pct",
-            "5 means additive p95 budgets allow Specter p95 throughput or p95 TTFT to regress versus reqwest by at most 5%; median TTFT and median throughput still must each improve by at least 5%",
+            "5 means additive p95 budgets allow Specter p95 throughput or p95 TTFB to regress versus reqwest by at most 5%; median TTFB and median throughput still must each improve by at least 5%",
         ),
         (
             "wilcoxon_signed_rank_p_value",
-            "one-sided paired Wilcoxon signed-rank normal-approximation p-value over matched reqwest/Specter samples; TTFT ranks baseline minus Specter as improvement, corrected-overhead throughput ranks Specter minus baseline as improvement, and threshold rows require p < 0.01 for both median deltas",
+            "one-sided paired Wilcoxon signed-rank normal-approximation p-value over matched reqwest/Specter samples; TTFB ranks baseline minus Specter as improvement, corrected-overhead throughput ranks Specter minus baseline as improvement, and threshold rows require p < 0.01 for both median deltas",
         ),
         (
             "actual_send_gap.median_ns",

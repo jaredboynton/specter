@@ -8,15 +8,15 @@ These results cover the `benches/streaming_vs_reqwest.rs` localhost fixtures for
 
 Gate requirements:
 
-- Specter median TTFT improves by at least 5% over reqwest.
+- Specter median TTFB improves by at least 5% over reqwest.
 - Specter median throughput improves by at least 5% over reqwest.
-- Paired Wilcoxon signed-rank p-values are below 0.01 for TTFT and throughput.
-- p95 TTFT and p95 throughput regress by at most 5%.
+- Paired Wilcoxon signed-rank p-values are below 0.01 for TTFB and throughput.
+- p95 TTFB and p95 throughput regress by at most 5%.
 - RFC 8441/WebSocket coexistence does not regress.
 
 ## Results
 
-| Workload | Protocol | Samples | TTFT Improvement | Throughput Improvement | TTFT p-value | Throughput p-value | p95 TTFT Regression | p95 Throughput Regression | Status |
+| Workload | Protocol | Samples | TTFB Improvement | Throughput Improvement | TTFB p-value | Throughput p-value | p95 TTFB Regression | p95 Throughput Regression | Status |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | Response-body streaming | H1 | 100 | +65.59% | +19.97% | 0 | 4.44e-16 | -63.82% | -16.87% | pass |
 | Response-body streaming | H2 | 100 | +26.12% | +7.88% | 0 | 4.05e-8 | -27.74% | -3.47% | pass |

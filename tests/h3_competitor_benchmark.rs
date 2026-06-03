@@ -87,7 +87,7 @@ fn current_native_h3_suite_artifact_keeps_transport_baselines_measured() {
         assert_eq!(row["status"], "measured_pass");
         assert_eq!(row["source"], expected_source);
         assert!(
-            row["p50_ttft_ns"].as_f64().is_some(),
+            row["p50_ttfb_ns"].as_f64().is_some(),
             "{competitor_id} must carry measured p50"
         );
         assert!(

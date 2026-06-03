@@ -187,7 +187,7 @@ impl H2Handle {
         let (headers_tx, headers_rx) = oneshot::channel();
         // Allocate the trailer side channel ONLY when the caller requested
         // trailers (`te: trailers`). A warm non-gRPC streaming request - the
-        // gate's TTFT path - constructs zero extra channels here.
+        // gate's TTFB path - constructs zero extra channels here.
         let (trailers_tx, trailers_rx) = if wants_trailers(headers) {
             let (tx, rx) = oneshot::channel();
             (Some(tx), Some(rx))
