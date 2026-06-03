@@ -928,7 +928,7 @@ impl<'a> RequestBuilder<'a> {
         }
 
         client
-            .apply_cookie_header_for_url(request.url.as_str().to_string(), &mut request.headers)
+            .apply_cookie_header_for_url(request.url.as_str(), &mut request.headers)
             .await;
 
         let version = request.version.unwrap_or(client.default_version);
@@ -972,12 +972,10 @@ impl<'a> RequestBuilder<'a> {
             };
 
             let request_url = request.url.clone();
-            let response = response.with_url(request_url.clone());
-
-            let response_headers = response.headers().clone();
             client
-                .store_cookies_from_headers(response_headers, request_url.as_str().to_string())
+                .store_cookies_from_headers(response.headers(), request_url.as_str())
                 .await;
+            let response = response.with_url(request_url);
 
             if let Some(enc) = response.content_encoding() {
                 let enc_lc = enc.to_lowercase();
@@ -1092,9 +1090,8 @@ impl<'a> RequestBuilder<'a> {
                 send_fut.await?
             };
 
-            let response_headers = response.headers().clone();
             client
-                .store_cookies_from_headers(response_headers, request_url.as_str().to_string())
+                .store_cookies_from_headers(response.headers(), request_url.as_str())
                 .await;
             let response = response.with_url(request_url);
             reject_compressed_streaming(&response)?;
@@ -1153,12 +1150,8 @@ impl<'a> RequestBuilder<'a> {
                 match res {
                     Ok(response) => {
                         let response = response.with_url(request_url.clone());
-                        let response_headers = response.headers().clone();
                         client
-                            .store_cookies_from_headers(
-                                response_headers,
-                                request_url.as_str().to_string(),
-                            )
+                            .store_cookies_from_headers(response.headers(), request_url.as_str())
                             .await;
                         response
                     }
@@ -1230,12 +1223,8 @@ impl<'a> RequestBuilder<'a> {
                         };
 
                         let response = response.with_url(request_url.clone());
-                        let response_headers = response.headers().clone();
                         client
-                            .store_cookies_from_headers(
-                                response_headers,
-                                request_url.as_str().to_string(),
-                            )
+                            .store_cookies_from_headers(response.headers(), request_url.as_str())
                             .await;
                         response
                     }
@@ -1252,12 +1241,10 @@ impl<'a> RequestBuilder<'a> {
                     )
                     .await?;
 
-                let response = response.with_url(request_url.clone());
-                let response_headers = response.headers().clone();
                 client
-                    .store_cookies_from_headers(response_headers, request_url.as_str().to_string())
+                    .store_cookies_from_headers(response.headers(), request_url.as_str())
                     .await;
-                response
+                response.with_url(request_url)
             } else {
                 let connector = client.connector_for_uri(&uri);
                 let connect_fut = connector.connect(&uri);
@@ -1316,12 +1303,10 @@ impl<'a> RequestBuilder<'a> {
                     send_fut.await?
                 };
 
-                let response = response.with_url(request_url.clone());
-                let response_headers = response.headers().clone();
                 client
-                    .store_cookies_from_headers(response_headers, request_url.as_str().to_string())
+                    .store_cookies_from_headers(response.headers(), request_url.as_str())
                     .await;
-                response
+                response.with_url(request_url)
             }
         };
 
@@ -1368,7 +1353,7 @@ impl Client {
         loop {
             let mut headers = request.headers.clone();
             let cookie_injected = self
-                .apply_cookie_header_for_url(request.url.as_str().to_string(), &mut headers)
+                .apply_cookie_header_for_url(request.url.as_str(), &mut headers)
                 .await;
             request.headers = headers;
 
@@ -1383,8 +1368,7 @@ impl Client {
                 .into_buffered()
                 .await?;
 
-            let response_headers = response.headers().clone();
-            self.store_cookies_from_headers(response_headers, request.url.as_str().to_string())
+            self.store_cookies_from_headers(response.headers(), request.url.as_str())
                 .await;
 
             if matches!(policy, RedirectPolicy::None) || !response.is_redirect() {
@@ -1842,11 +1826,7 @@ impl Client {
         })
     }
 
-    async fn apply_cookie_header_for_url(
-        &self,
-        request_url: String,
-        headers: &mut Headers,
-    ) -> bool {
+    async fn apply_cookie_header_for_url(&self, request_url: &str, headers: &mut Headers) -> bool {
         let Some(jar) = &self.cookie_store else {
             return false;
         };
@@ -1854,7 +1834,7 @@ impl Client {
             return false;
         }
 
-        let cookie_header = jar.read().await.build_cookie_header(&request_url);
+        let cookie_header = jar.read().await.build_cookie_header(request_url);
         if let Some(cookie_header) = cookie_header {
             headers.insert("Cookie", cookie_header);
             return true;
@@ -1862,9 +1842,9 @@ impl Client {
         false
     }
 
-    async fn store_cookies_from_headers(&self, headers: Headers, request_url: String) {
+    async fn store_cookies_from_headers(&self, headers: &Headers, request_url: &str) {
         if let Some(jar) = &self.cookie_store {
-            jar.write().await.store_from_headers(&headers, &request_url);
+            jar.write().await.store_from_headers(headers, request_url);
         }
     }
 
