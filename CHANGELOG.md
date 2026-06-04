@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.2] - 2026-06-03
+
+### Changed
+
+- Republished the crate, npm, and PyPI packages so the bundled README cites the reachable benchmark-provenance commit `25395a8`. The 4.2.1 packages shipped a README citing `26d5a78`, a pre-cherry-pick commit unreachable from `main`; this release corrects that citation in the published artifacts. Documentation-only release with no library, API, or benchmarked behavior change from 4.2.1.
+
 ## [4.2.1] - 2026-06-03
 
 ### Changed
