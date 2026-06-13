@@ -1,14 +1,14 @@
 //! Connect-path performance fixes: session cache, happy eyeballs, H2 keepalive bridge.
 
-use specter::fingerprint::FingerprintProfile;
-use specter::transport::connector::BoringConnector;
-use specter::transport::dns::{DnsConfig, Resolve, ResolveFuture};
-use specter::transport::session::SessionCache;
-use specter::Client;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+use warpsock::fingerprint::FingerprintProfile;
+use warpsock::transport::connector::BoringConnector;
+use warpsock::transport::dns::{DnsConfig, Resolve, ResolveFuture};
+use warpsock::transport::session::SessionCache;
+use warpsock::Client;
 
 struct StaticAddrsResolver {
     addrs: Vec<SocketAddr>,

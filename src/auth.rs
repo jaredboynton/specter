@@ -66,7 +66,7 @@ pub fn digest_auth(
             hex::encode(res)
         } else {
             // Default to MD5 for "MD5" and unknown
-            // Note: Specter doesn't have md5 crate dependency yet, assuming MD5 for legacy compliance
+            // Note: Warpsock doesn't have md5 crate dependency yet, assuming MD5 for legacy compliance
             // But RFC 7616 prefers SHA-256.
             // If MD5 needed, we'd need to add `md5` crate.
             // For this stub, we'll error or use a placeholder if SHA-256 is not used,

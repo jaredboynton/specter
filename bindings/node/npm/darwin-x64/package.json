@@ -1,14 +1,14 @@
 {
-  "name": "specters-darwin-x64",
-  "version": "4.2.3",
+  "name": "warpsock-darwin-x64",
+  "version": "4.2.4",
   "cpu": [
     "x64"
   ],
-  "main": "specter.darwin-x64.node",
+  "main": "warpsock.darwin-x64.node",
   "files": [
-    "specter.darwin-x64.node"
+    "warpsock.darwin-x64.node"
   ],
-  "description": "Node.js bindings for Specter HTTP client with TLS/HTTP2/HTTP3 fingerprint control",
+  "description": "Node.js bindings for Warpsock HTTP client with TLS/HTTP2/HTTP3 fingerprint control",
   "keywords": [
     "http",
     "http3",
@@ -22,7 +22,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jaredboynton/specter.git",
+    "url": "https://github.com/jaredboynton/warpsock.git",
     "directory": "bindings/node"
   },
   "publishConfig": {

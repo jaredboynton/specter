@@ -1,4 +1,4 @@
-name: Specter CI
+name: Warpsock CI
 
 on:
   push:

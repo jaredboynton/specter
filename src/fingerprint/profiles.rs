@@ -133,7 +133,7 @@ impl FingerprintProfile {
             Self::Firefox133 => {
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0"
             }
-            Self::None => "specter/0.1",
+            Self::None => "warpsock/0.1",
             Self::Firefox134 => {
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0"
             }

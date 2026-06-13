@@ -10,13 +10,13 @@
 //! Run with: cargo test --test fingerprint_integration
 
 use http::{Method, Uri};
-use specter::fingerprint::http2::Http2Settings;
-use specter::fingerprint::profiles::FingerprintProfile;
-use specter::fingerprint::tls::TlsFingerprint;
-use specter::transport::connector::BoringConnector;
-use specter::transport::h2::{H2Connection, PseudoHeaderOrder};
-use specter::transport::h3::H3Client;
 use tracing::warn;
+use warpsock::fingerprint::http2::Http2Settings;
+use warpsock::fingerprint::profiles::FingerprintProfile;
+use warpsock::fingerprint::tls::TlsFingerprint;
+use warpsock::transport::connector::BoringConnector;
+use warpsock::transport::h2::{H2Connection, PseudoHeaderOrder};
+use warpsock::transport::h3::H3Client;
 
 /// Known automation tool fingerprints that we MUST NOT match
 const KNOWN_JA3_PYTHON_REQUESTS: &str = "8d9f7747675e24454cd9b7ed35c58707";
@@ -313,7 +313,7 @@ async fn test_http3_fingerprint_works() {
 
 #[test]
 fn test_settings_frame_serialization() {
-    use specter::transport::h2::{SettingsFrame, SettingsId};
+    use warpsock::transport::h2::{SettingsFrame, SettingsId};
 
     let settings = Http2Settings::default();
     let mut frame = SettingsFrame::new();
@@ -344,7 +344,7 @@ fn test_settings_frame_serialization() {
 #[test]
 fn test_goaway_graceful_shutdown() {
     use bytes::Bytes;
-    use specter::transport::h2::{ErrorCode, GoAwayFrame, FRAME_HEADER_SIZE};
+    use warpsock::transport::h2::{ErrorCode, GoAwayFrame, FRAME_HEADER_SIZE};
 
     // Server sends GOAWAY with NoError and last_stream_id=1
     let goaway = GoAwayFrame::new(1, ErrorCode::NoError);

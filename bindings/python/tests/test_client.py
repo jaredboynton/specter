@@ -1,4 +1,4 @@
-"""Tests for Specter Python bindings."""
+"""Tests for Warpsock Python bindings."""
 
 import json
 import threading
@@ -7,7 +7,7 @@ from urllib.parse import parse_qsl
 
 import asyncio
 import pytest
-import specter
+import warpsock
 
 
 class LocalHttpHandler(BaseHTTPRequestHandler):
@@ -111,60 +111,60 @@ class TestClientBuilder:
     """Test ClientBuilder configuration."""
 
     def test_builder_creation(self):
-        builder = specter.Client.builder()
+        builder = warpsock.Client.builder()
         assert builder is not None
 
     def test_build_client(self):
-        builder = specter.Client.builder()
+        builder = warpsock.Client.builder()
         client = builder.build()
-        assert isinstance(client, specter.Client)
+        assert isinstance(client, warpsock.Client)
 
     def test_fingerprint_profiles(self):
         for profile in (
-            specter.FingerprintProfile.Chrome142,
-            specter.FingerprintProfile.Chrome143,
-            specter.FingerprintProfile.Chrome144,
-            specter.FingerprintProfile.Chrome145,
-            specter.FingerprintProfile.Chrome146,
-            specter.FingerprintProfile.Chrome147,
-            specter.FingerprintProfile.Chrome148,
-            specter.FingerprintProfile.Firefox133,
-            specter.FingerprintProfile.NoFingerprint,
-            specter.FingerprintProfile.Firefox134,
-            specter.FingerprintProfile.Firefox135,
-            specter.FingerprintProfile.Firefox136,
-            specter.FingerprintProfile.Firefox137,
-            specter.FingerprintProfile.Firefox138,
-            specter.FingerprintProfile.Firefox139,
-            specter.FingerprintProfile.Firefox140,
-            specter.FingerprintProfile.Firefox141,
-            specter.FingerprintProfile.Firefox142,
-            specter.FingerprintProfile.Firefox143,
-            specter.FingerprintProfile.Firefox144,
-            specter.FingerprintProfile.Firefox145,
-            specter.FingerprintProfile.Firefox146,
-            specter.FingerprintProfile.Firefox147,
-            specter.FingerprintProfile.Firefox148,
-            specter.FingerprintProfile.Firefox149,
-            specter.FingerprintProfile.Firefox150,
-            specter.FingerprintProfile.Firefox151,
-            specter.FingerprintProfile.FirefoxEsr115,
-            specter.FingerprintProfile.FirefoxEsr128,
-            specter.FingerprintProfile.FirefoxEsr140,
+            warpsock.FingerprintProfile.Chrome142,
+            warpsock.FingerprintProfile.Chrome143,
+            warpsock.FingerprintProfile.Chrome144,
+            warpsock.FingerprintProfile.Chrome145,
+            warpsock.FingerprintProfile.Chrome146,
+            warpsock.FingerprintProfile.Chrome147,
+            warpsock.FingerprintProfile.Chrome148,
+            warpsock.FingerprintProfile.Firefox133,
+            warpsock.FingerprintProfile.NoFingerprint,
+            warpsock.FingerprintProfile.Firefox134,
+            warpsock.FingerprintProfile.Firefox135,
+            warpsock.FingerprintProfile.Firefox136,
+            warpsock.FingerprintProfile.Firefox137,
+            warpsock.FingerprintProfile.Firefox138,
+            warpsock.FingerprintProfile.Firefox139,
+            warpsock.FingerprintProfile.Firefox140,
+            warpsock.FingerprintProfile.Firefox141,
+            warpsock.FingerprintProfile.Firefox142,
+            warpsock.FingerprintProfile.Firefox143,
+            warpsock.FingerprintProfile.Firefox144,
+            warpsock.FingerprintProfile.Firefox145,
+            warpsock.FingerprintProfile.Firefox146,
+            warpsock.FingerprintProfile.Firefox147,
+            warpsock.FingerprintProfile.Firefox148,
+            warpsock.FingerprintProfile.Firefox149,
+            warpsock.FingerprintProfile.Firefox150,
+            warpsock.FingerprintProfile.Firefox151,
+            warpsock.FingerprintProfile.FirefoxEsr115,
+            warpsock.FingerprintProfile.FirefoxEsr128,
+            warpsock.FingerprintProfile.FirefoxEsr140,
         ):
-            builder = specter.Client.builder()
+            builder = warpsock.Client.builder()
             builder.fingerprint(profile)
             assert builder.build() is not None
 
     def test_fingerprint_profile_numeric_values(self):
-        assert specter.FingerprintProfile.Chrome142 == 0
-        assert specter.FingerprintProfile.Firefox133 == 7
-        assert specter.FingerprintProfile.NoFingerprint == 8
-        assert specter.FingerprintProfile.Firefox140 != specter.FingerprintProfile.FirefoxEsr140
+        assert warpsock.FingerprintProfile.Chrome142 == 0
+        assert warpsock.FingerprintProfile.Firefox133 == 7
+        assert warpsock.FingerprintProfile.NoFingerprint == 8
+        assert warpsock.FingerprintProfile.Firefox140 != warpsock.FingerprintProfile.FirefoxEsr140
 
     def test_protocol_and_cookie_options(self):
-        jar = specter.CookieJar()
-        builder = specter.Client.builder()
+        jar = warpsock.CookieJar()
+        builder = warpsock.Client.builder()
         builder.prefer_http2(True)
         builder.http2_prior_knowledge(False)
         builder.cookie_store(True)
@@ -173,24 +173,24 @@ class TestClientBuilder:
         assert client is not None
 
     def test_h3_upgrade(self):
-        builder = specter.Client.builder()
+        builder = warpsock.Client.builder()
         builder.h3_upgrade(True)
         assert builder.build() is not None
 
     def test_timeout_presets(self):
         for configure in ("api_timeouts", "streaming_timeouts"):
-            builder = specter.Client.builder()
+            builder = warpsock.Client.builder()
             getattr(builder, configure)()
             assert builder.build() is not None
 
     def test_custom_timeouts(self):
-        timeouts = specter.Timeouts().connect(5.0).ttfb(10.0).total(30.0)
-        builder = specter.Client.builder()
+        timeouts = warpsock.Timeouts().connect(5.0).ttfb(10.0).total(30.0)
+        builder = warpsock.Client.builder()
         builder.timeouts(timeouts)
         assert builder.build() is not None
 
     def test_individual_timeouts(self):
-        builder = specter.Client.builder()
+        builder = warpsock.Client.builder()
         builder.total_timeout(30.0)
         builder.connect_timeout(5.0)
         builder.ttfb_timeout(10.0)
@@ -198,7 +198,7 @@ class TestClientBuilder:
         assert builder.build() is not None
 
     def test_tls_root_options(self):
-        builder = specter.Client.builder()
+        builder = warpsock.Client.builder()
         builder.localhost_allows_invalid_certs(True)
         builder.with_platform_roots(True)
         assert builder.build() is not None
@@ -208,27 +208,27 @@ class TestRequestBuilder:
     """Test RequestBuilder for headers and body."""
 
     def test_request_builder_creation(self):
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         request = client.get("http://127.0.0.1/get")
-        assert isinstance(request, specter.RequestBuilder)
+        assert isinstance(request, warpsock.RequestBuilder)
 
     def test_request_builder_methods(self):
-        client = specter.Client.builder().build()
-        assert isinstance(client.get("http://127.0.0.1/get"), specter.RequestBuilder)
-        assert isinstance(client.post("http://127.0.0.1/post"), specter.RequestBuilder)
-        assert isinstance(client.put("http://127.0.0.1/put"), specter.RequestBuilder)
-        assert isinstance(client.delete("http://127.0.0.1/delete"), specter.RequestBuilder)
-        assert isinstance(client.patch("http://127.0.0.1/patch"), specter.RequestBuilder)
-        assert isinstance(client.head("http://127.0.0.1/get"), specter.RequestBuilder)
-        assert isinstance(client.options("http://127.0.0.1/anything"), specter.RequestBuilder)
+        client = warpsock.Client.builder().build()
+        assert isinstance(client.get("http://127.0.0.1/get"), warpsock.RequestBuilder)
+        assert isinstance(client.post("http://127.0.0.1/post"), warpsock.RequestBuilder)
+        assert isinstance(client.put("http://127.0.0.1/put"), warpsock.RequestBuilder)
+        assert isinstance(client.delete("http://127.0.0.1/delete"), warpsock.RequestBuilder)
+        assert isinstance(client.patch("http://127.0.0.1/patch"), warpsock.RequestBuilder)
+        assert isinstance(client.head("http://127.0.0.1/get"), warpsock.RequestBuilder)
+        assert isinstance(client.options("http://127.0.0.1/anything"), warpsock.RequestBuilder)
 
     def test_request_arbitrary_method(self):
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         request = client.request("PURGE", "http://127.0.0.1/cache")
-        assert isinstance(request, specter.RequestBuilder)
+        assert isinstance(request, warpsock.RequestBuilder)
 
     def test_request_mutators(self):
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         client.get("http://127.0.0.1/get").header("X-Custom-Header", "test-value")
         client.get("http://127.0.0.1/get").headers(
             [("Authorization", "Bearer token"), ("X-Request-ID", "123")]
@@ -242,13 +242,13 @@ class TestTimeouts:
     """Test Timeouts configuration."""
 
     def test_timeouts_new_and_presets(self):
-        assert specter.Timeouts() is not None
-        assert specter.Timeouts.api_defaults() is not None
-        assert specter.Timeouts.streaming_defaults() is not None
+        assert warpsock.Timeouts() is not None
+        assert warpsock.Timeouts.api_defaults() is not None
+        assert warpsock.Timeouts.streaming_defaults() is not None
 
     def test_timeouts_builder_pattern(self):
         timeouts = (
-            specter.Timeouts()
+            warpsock.Timeouts()
             .connect(10.0)
             .ttfb(30.0)
             .read_idle(60.0)
@@ -261,25 +261,25 @@ class TestTimeouts:
 
 class TestEnumsAndCookieJar:
     def test_fingerprint_profiles_exist(self):
-        assert specter.FingerprintProfile.Chrome142 is not None
-        assert specter.FingerprintProfile.Chrome143 is not None
-        assert specter.FingerprintProfile.Chrome144 is not None
-        assert specter.FingerprintProfile.Chrome145 is not None
-        assert specter.FingerprintProfile.Chrome146 is not None
-        assert specter.FingerprintProfile.Chrome147 is not None
-        assert specter.FingerprintProfile.Chrome148 is not None
-        assert specter.FingerprintProfile.Firefox133 is not None
-        assert specter.FingerprintProfile.NoFingerprint is not None
+        assert warpsock.FingerprintProfile.Chrome142 is not None
+        assert warpsock.FingerprintProfile.Chrome143 is not None
+        assert warpsock.FingerprintProfile.Chrome144 is not None
+        assert warpsock.FingerprintProfile.Chrome145 is not None
+        assert warpsock.FingerprintProfile.Chrome146 is not None
+        assert warpsock.FingerprintProfile.Chrome147 is not None
+        assert warpsock.FingerprintProfile.Chrome148 is not None
+        assert warpsock.FingerprintProfile.Firefox133 is not None
+        assert warpsock.FingerprintProfile.NoFingerprint is not None
 
     def test_http_versions_exist(self):
-        assert specter.HttpVersion.Http1_1 is not None
-        assert specter.HttpVersion.Http2 is not None
-        assert specter.HttpVersion.Http3 is not None
-        assert specter.HttpVersion.Http3Only is not None
-        assert specter.HttpVersion.Auto is not None
+        assert warpsock.HttpVersion.Http1_1 is not None
+        assert warpsock.HttpVersion.Http2 is not None
+        assert warpsock.HttpVersion.Http3 is not None
+        assert warpsock.HttpVersion.Http3Only is not None
+        assert warpsock.HttpVersion.Auto is not None
 
     def test_cookie_jar_new(self):
-        jar = specter.CookieJar()
+        jar = warpsock.CookieJar()
         assert len(jar) == 0
         assert jar.is_empty
 
@@ -289,13 +289,13 @@ class TestAsyncRequests:
     """Test async HTTP requests against a local fixture."""
 
     async def test_get_request(self, http_server):
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         response = await client.get(f"{http_server}/get").send()
         assert response.status == 200
         assert response.is_success
 
     async def test_get_with_headers(self, http_server):
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         request = client.get(f"{http_server}/get")
         request.header("X-Custom-Header", "test-value")
         response = await request.send()
@@ -303,12 +303,12 @@ class TestAsyncRequests:
         assert body["headers"]["X-Custom-Header"] == "test-value"
 
     async def test_post_request(self, http_server):
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         response = await client.post(f"{http_server}/post").send()
         assert response.status == 200
 
     async def test_post_with_json(self, http_server):
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         request = client.post(f"{http_server}/post")
         request.json('{"name": "test", "value": 123}')
         response = await request.send()
@@ -317,7 +317,7 @@ class TestAsyncRequests:
         assert body["json"]["value"] == 123
 
     async def test_post_with_form(self, http_server):
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         request = client.post(f"{http_server}/post")
         request.form("field1=value1&field2=value2")
         response = await request.send()
@@ -326,7 +326,7 @@ class TestAsyncRequests:
         assert body["form"]["field2"] == "value2"
 
     async def test_other_http_methods(self, http_server):
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         assert (await client.put(f"{http_server}/put").send()).status == 200
         assert (await client.delete(f"{http_server}/delete").send()).status == 200
         patch = client.patch(f"{http_server}/patch")
@@ -336,7 +336,7 @@ class TestAsyncRequests:
         assert (await client.options(f"{http_server}/anything").send()).status == 200
 
     async def test_response_properties_and_body_helpers(self, http_server):
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         response = await client.get(f"{http_server}/get").send()
         assert isinstance(response.status, int)
         assert isinstance(response.is_success, bool)
@@ -347,7 +347,7 @@ class TestAsyncRequests:
         assert (await response.json())["url"] == f"{http_server}/get"
 
     async def test_response_body_async_iterator(self, http_server):
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         response = await client.get(f"{http_server}/stream").send()
         chunks = []
         async for chunk in response.body:
@@ -361,9 +361,9 @@ class TestAsyncRequests:
             yield b"two-"
             yield b"three"
 
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         request = client.post(f"{http_server}/post")
-        request.version(specter.HttpVersion.Http1_1)
+        request.version(warpsock.HttpVersion.Http1_1)
         request.body_stream(chunks())
         response = await request.send()
         response_chunks = []
@@ -380,7 +380,7 @@ class TestSyncRequests:
         with pytest.raises(RuntimeError):
             asyncio.get_running_loop()
 
-        client = specter.SyncClient.builder().build()
+        client = warpsock.SyncClient.builder().build()
         response = client.get(f"{http_server}/get").send()
 
         assert response.status == 200
@@ -388,7 +388,7 @@ class TestSyncRequests:
         assert response.json()["url"] == f"{http_server}/get"
 
     def test_sync_client_post_json_and_text_helpers_are_sync(self, http_server):
-        client = specter.SyncClient.builder().build()
+        client = warpsock.SyncClient.builder().build()
         request = client.post(f"{http_server}/post")
         request.json('{"name": "sync", "value": 456}')
 
@@ -401,4 +401,4 @@ class TestSyncRequests:
         assert isinstance(response.bytes(), bytes)
 
     def test_async_client_alias_preserves_existing_client(self):
-        assert specter.AsyncClient is specter.Client
+        assert warpsock.AsyncClient is warpsock.Client

@@ -3,11 +3,11 @@
 //! Tests client behavior when server violates the HTTP/2 state machine,
 //! such as sending DATA frames on closed streams or using invalid stream IDs.
 
-use specter::Client;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::timeout;
+use warpsock::Client;
 
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};

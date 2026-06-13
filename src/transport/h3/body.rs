@@ -461,12 +461,6 @@ mod tests {
 
     #[test]
     fn h3_body_reports_released_recv_bytes_when_consumer_takes_data() {
-        struct NoopWake;
-
-        impl std::task::Wake for NoopWake {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let shared = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 2);
         assert!(matches!(
             shared.push_data(Bytes::from(vec![0x41; 63])),
@@ -478,8 +472,8 @@ mod tests {
         ));
 
         let mut body = H3Body::new(shared.clone(), H3BodyTimeouts::default());
-        let waker = std::task::Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
 
         assert_eq!(shared.take_released_recv_bytes(), 0);
         let frame = Pin::new(&mut body).poll_frame(&mut context);

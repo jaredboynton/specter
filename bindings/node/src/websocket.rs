@@ -6,8 +6,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use specter::{Client as RustClient, Message as RustWebSocketMessage};
 use tokio::sync::Mutex;
+use warpsock::{Client as RustClient, Message as RustWebSocketMessage};
 
 use crate::ws_types::{WebSocketCloseFrame, WebSocketMessage};
 use crate::Client;
@@ -21,7 +21,7 @@ pub struct WebSocketBuilder {
 /// Node.js wrapper for an RFC 6455 WebSocket connection.
 #[napi]
 pub struct WebSocket {
-    inner: Arc<Mutex<specter::WebSocket>>,
+    inner: Arc<Mutex<warpsock::WebSocket>>,
     url: String,
     protocol: Option<String>,
 }
@@ -169,7 +169,7 @@ struct WebSocketBuilderState {
 }
 
 impl WebSocketBuilderState {
-    async fn connect(self) -> specter::WebSocketResult<specter::WebSocket> {
+    async fn connect(self) -> warpsock::WebSocketResult<warpsock::WebSocket> {
         let mut builder = self.client.websocket(self.url);
         for (key, value) in self.headers {
             builder = builder.header(key, value);
@@ -296,6 +296,6 @@ impl WebSocket {
     }
 }
 
-fn to_napi_err(error: specter::WebSocketError) -> Error {
+fn to_napi_err(error: warpsock::WebSocketError) -> Error {
     Error::new(Status::GenericFailure, error.to_string())
 }

@@ -5,18 +5,18 @@
 
 use bytes::Bytes;
 use serde_json::json;
-use specter::{Client, CookieJar};
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::timeout;
+use warpsock::{Client, CookieJar};
 
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};
 use helpers::tls::generate_cert_bundle;
-use specter::transport::h2::hpack_impl::Encoder;
+use warpsock::transport::h2::hpack_impl::Encoder;
 
 fn init_validation_dir() {
     fs::create_dir_all("target/validation/h2").unwrap();
@@ -662,7 +662,7 @@ async fn regular_h2_requests_coexist_with_streaming_on_one_connection() {
             conn.read_preface().await.unwrap();
             let mut settings_sent = false;
             let mut encoder = Encoder::new();
-            let mut decoder = specter::transport::h2::HpackDecoder::new();
+            let mut decoder = warpsock::transport::h2::HpackDecoder::new();
             loop {
                 let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
                     Ok(Ok(f)) => f,
@@ -1252,7 +1252,7 @@ async fn rst_stream_error_is_scoped_to_reset_stream() {
             conn.read_preface().await.unwrap();
             let mut settings_sent = false;
             let mut encoder = Encoder::new();
-            let mut decoder = specter::transport::h2::HpackDecoder::new();
+            let mut decoder = warpsock::transport::h2::HpackDecoder::new();
             loop {
                 let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
                     Ok(Ok(f)) => f,
@@ -2016,7 +2016,7 @@ async fn streaming_timeouts_are_enforced_per_phase() {
         conn.read_preface().await.unwrap();
         let mut settings_sent = false;
         let mut encoder = Encoder::new();
-        let mut decoder = specter::transport::h2::HpackDecoder::new();
+        let mut decoder = warpsock::transport::h2::HpackDecoder::new();
         loop {
             let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
                 Ok(Ok(f)) => f,
@@ -2075,7 +2075,7 @@ async fn streaming_timeouts_are_enforced_per_phase() {
         .get(format!("{}/ttfb-delayed", url))
         .send_streaming()
         .await;
-    let ttfb_failed = matches!(res1, Err(specter::Error::TtfbTimeout(_)));
+    let ttfb_failed = matches!(res1, Err(warpsock::Error::TtfbTimeout(_)));
     assert!(ttfb_failed, "Should fail with TtfbTimeout");
 
     // 2. ReadIdle Timeout test
@@ -2104,7 +2104,7 @@ async fn streaming_timeouts_are_enforced_per_phase() {
         Bytes::from("chunk-1")
     );
     let res2_chunk2 = resp2.body_mut().frame().await;
-    let read_idle_failed = matches!(res2_chunk2, Some(Err(specter::Error::ReadIdleTimeout(_))));
+    let read_idle_failed = matches!(res2_chunk2, Some(Err(warpsock::Error::ReadIdleTimeout(_))));
     assert!(read_idle_failed, "Should fail with ReadIdleTimeout");
 
     // 3. Verify sibling stream is unaffected and reusable
@@ -2290,7 +2290,7 @@ async fn stale_h2_pool_entries_are_evicted_before_reuse() {
             conn.read_preface().await.unwrap();
             let mut settings_sent = false;
             let mut encoder = Encoder::new();
-            let mut decoder = specter::transport::h2::HpackDecoder::new();
+            let mut decoder = warpsock::transport::h2::HpackDecoder::new();
             loop {
                 let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
                     Ok(Ok(f)) => f,
@@ -2413,7 +2413,7 @@ async fn stale_h2_pool_retry_response_is_finalized() {
             conn.read_preface().await.unwrap();
             let mut settings_sent = false;
             let mut encoder = Encoder::new();
-            let mut decoder = specter::transport::h2::HpackDecoder::new();
+            let mut decoder = warpsock::transport::h2::HpackDecoder::new();
             loop {
                 let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
                     Ok(Ok(f)) => f,
@@ -2580,7 +2580,7 @@ async fn rfc8441_tunnel_coexists_with_streaming_on_one_connection() {
             conn.read_preface().await.unwrap();
             let mut settings_sent = false;
             let mut encoder = Encoder::new();
-            let mut decoder = specter::transport::h2::HpackDecoder::new();
+            let mut decoder = warpsock::transport::h2::HpackDecoder::new();
             loop {
                 let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
                     Ok(Ok(f)) => f,
@@ -2734,7 +2734,7 @@ async fn rfc8441_and_streaming_data_routing_remains_independent() {
             conn.read_preface().await.unwrap();
             let mut settings_sent = false;
             let mut encoder = Encoder::new();
-            let mut decoder = specter::transport::h2::HpackDecoder::new();
+            let mut decoder = warpsock::transport::h2::HpackDecoder::new();
             let mut tunnel_stream_id = None;
             loop {
                 let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
@@ -2950,7 +2950,7 @@ async fn h2_pool_reuse_preserves_fingerprint_settings() {
     let client_firefox = Client::builder()
         .add_root_certificate(ca_cert.clone())
         .prefer_http2(true)
-        .fingerprint(specter::fingerprint::FingerprintProfile::Firefox133)
+        .fingerprint(warpsock::fingerprint::FingerprintProfile::Firefox133)
         .build()
         .unwrap();
 
@@ -2994,7 +2994,7 @@ async fn h2_pool_reuse_preserves_fingerprint_settings() {
     let client_chrome = Client::builder()
         .add_root_certificate(ca_cert)
         .prefer_http2(true)
-        .fingerprint(specter::fingerprint::FingerprintProfile::Chrome142)
+        .fingerprint(warpsock::fingerprint::FingerprintProfile::Chrome142)
         .build()
         .unwrap();
 
@@ -3065,7 +3065,7 @@ async fn rfc8441_failures_are_isolated_from_streaming() {
             conn.read_preface().await.unwrap();
             let mut settings_sent = false;
             let mut encoder = Encoder::new();
-            let mut decoder = specter::transport::h2::HpackDecoder::new();
+            let mut decoder = warpsock::transport::h2::HpackDecoder::new();
             loop {
                 let frame = match timeout(Duration::from_secs(3), conn.read_frame()).await {
                     Ok(Ok(f)) => f,

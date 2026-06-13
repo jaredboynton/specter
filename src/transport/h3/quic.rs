@@ -1,4 +1,4 @@
-//! Native QUIC packet primitives for Specter's HTTP/3 transport.
+//! Native QUIC packet primitives for Warpsock's HTTP/3 transport.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;

@@ -11,9 +11,9 @@ mod helpers;
 
 use bytes::Bytes;
 use helpers::mock_server::MockHttpServer;
-use specter::Client;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use warpsock::Client;
 
 // =============================================================================
 // Basic HTTP/1.1 Tests with MockHttpServer

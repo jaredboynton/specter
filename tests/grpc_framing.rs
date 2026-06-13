@@ -1,4 +1,4 @@
-//! Integration test exercising the PUBLIC `specter::grpc` framing API.
+//! Integration test exercising the PUBLIC `warpsock::grpc` framing API.
 //!
 //! Proves the codec is reachable through the crate's public surface (not just
 //! the in-module unit tests). The `just test` recipe builds with
@@ -8,7 +8,7 @@
 #![cfg(feature = "grpc")]
 
 use bytes::Bytes;
-use specter::grpc::{encode_message, GrpcEncoding, GrpcFramer};
+use warpsock::grpc::{encode_message, GrpcEncoding, GrpcFramer};
 
 fn drain(framer: &mut GrpcFramer) -> Vec<Bytes> {
     let mut out = Vec::new();

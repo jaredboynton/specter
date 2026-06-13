@@ -17,13 +17,13 @@ use quinn::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, U
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use specter::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
+use warpsock::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
 
 const QUICHE_MAX_DATAGRAM_SIZE: usize = 1350;
 const LOCAL_FIXTURE_MAX_STREAMS: u64 = 10_000;
 const DEFAULT_ADAPTER_TIMEOUT_SECS: u64 = 30;
 fn adapter_timeout() -> Duration {
-    let secs = std::env::var("SPECTER_BENCH_ADAPTER_TIMEOUT_SECS")
+    let secs = std::env::var("WARPSOCK_BENCH_ADAPTER_TIMEOUT_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(DEFAULT_ADAPTER_TIMEOUT_SECS);
@@ -39,7 +39,7 @@ const LOCAL_FIXTURE_TUNNEL_SLOW_CONSUMER_DELAY_MS: u64 = 25;
 const LOCAL_FIXTURE_TUNNEL_SLOW_READ_DELAY_MS: u64 = 1;
 const LOCAL_FIXTURE_TRANSPORT_PAYLOAD_SIZE: usize = 1_024;
 const RFC9220_TUNNEL_MIN_SAMPLE_COUNT: usize = 100;
-const QUINN_TRANSPORT_ALPN: &[u8] = b"specter-transport-bench";
+const QUINN_TRANSPORT_ALPN: &[u8] = b"warpsock-transport-bench";
 
 fn local_fixture_stream_chunk() -> Bytes {
     static CHUNK: OnceLock<Bytes> = OnceLock::new();
@@ -49,10 +49,10 @@ fn local_fixture_stream_chunk() -> Bytes {
 }
 
 fn local_native_h3_fixture_ledger_path(client: &str) -> anyhow::Result<Option<PathBuf>> {
-    if let Some(path) = std::env::var_os("SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_PATH") {
+    if let Some(path) = std::env::var_os("WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_PATH") {
         return Ok(Some(PathBuf::from(path)));
     }
-    let Some(dir) = std::env::var_os("SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR") else {
+    let Some(dir) = std::env::var_os("WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR") else {
         return Ok(None);
     };
     let dir = PathBuf::from(dir);
@@ -205,13 +205,13 @@ fn fixture_ledger_summary(
     })
 }
 
-fn specter_direct_get_epoch_enabled() -> bool {
-    std::env::var("SPECTER_NATIVE_H3_DIRECT_GET_EPOCH")
+fn warpsock_direct_get_epoch_enabled() -> bool {
+    std::env::var("WARPSOCK_NATIVE_H3_DIRECT_GET_EPOCH")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
-// When `BENCH_TUNNEL_STEADYSTATE=1` is set, the Specter and tokio-quiche tunnel
+// When `BENCH_TUNNEL_STEADYSTATE=1` is set, the Warpsock and tokio-quiche tunnel
 // comparators open ONE warm Extended-CONNECT tunnel and measure per-message
 // round-trip latency for N sequential send-1/recv-1 echoes on that established
 // tunnel, instead of opening a fresh tunnel per sample. The tunnel open (CONNECT
@@ -227,26 +227,26 @@ fn rfc9220_tunnel_steadystate_enabled() -> bool {
         .unwrap_or(false)
 }
 
-fn specter_direct_rfc9220_tunnel_enabled() -> bool {
-    std::env::var("SPECTER_NATIVE_H3_DIRECT_RFC9220_TUNNEL")
+fn warpsock_direct_rfc9220_tunnel_enabled() -> bool {
+    std::env::var("WARPSOCK_NATIVE_H3_DIRECT_RFC9220_TUNNEL")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
-fn specter_direct_rfc9220_fused_echo_enabled() -> bool {
-    std::env::var("SPECTER_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO")
+fn warpsock_direct_rfc9220_fused_echo_enabled() -> bool {
+    std::env::var("WARPSOCK_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
-fn specter_direct_rfc9220_mixed_enabled() -> bool {
-    std::env::var("SPECTER_NATIVE_H3_DIRECT_RFC9220_MIXED")
+fn warpsock_direct_rfc9220_mixed_enabled() -> bool {
+    std::env::var("WARPSOCK_NATIVE_H3_DIRECT_RFC9220_MIXED")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
-fn specter_direct_rfc9220_close_epoch_enabled() -> bool {
-    std::env::var("SPECTER_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH")
+fn warpsock_direct_rfc9220_close_epoch_enabled() -> bool {
+    std::env::var("WARPSOCK_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -413,7 +413,7 @@ struct SuperiorityGate {
     status: &'static str,
     pass: bool,
     reason: &'static str,
-    fastest_non_specter_h3_client: Option<&'static str>,
+    fastest_non_warpsock_h3_client: Option<&'static str>,
     no_h3_superiority_claim_without_all_required_rows: bool,
     required_h3_clients: Vec<&'static str>,
     missing_required_rows: Vec<&'static str>,
@@ -426,7 +426,7 @@ struct Rfc9220TunnelSuperiorityGate {
     status: &'static str,
     pass: bool,
     reason: &'static str,
-    fastest_non_specter_rfc9220_tunnel_client: Option<&'static str>,
+    fastest_non_warpsock_rfc9220_tunnel_client: Option<&'static str>,
     no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows: bool,
     minimum_sample_count: usize,
     required_rfc9220_tunnel_clients: Vec<&'static str>,
@@ -443,7 +443,7 @@ struct Rfc9220TunnelSuperiorityGate {
 #[derive(Debug, Serialize)]
 struct Rfc9220TunnelWorkloadSubGate {
     workload: &'static str,
-    specter_id: &'static str,
+    warpsock_id: &'static str,
     pass: bool,
     reason: &'static str,
     failing_comparators: Vec<&'static str>,
@@ -509,7 +509,7 @@ struct PhaseTraceSample {
 impl PhaseTraceSample {
     fn with_native_trace(
         mut self,
-        trace: specter::transport::h3::NativeH3PhaseTraceSnapshot,
+        trace: warpsock::transport::h3::NativeH3PhaseTraceSnapshot,
     ) -> Self {
         fn f(value: Option<u64>) -> Option<f64> {
             value.map(|value| value as f64)
@@ -563,13 +563,13 @@ impl AdapterSample {
 fn phase_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        env::var("SPECTER_BENCH_PHASE_TRACE")
+        env::var("WARPSOCK_BENCH_PHASE_TRACE")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
     })
 }
 
-fn specter_package_version() -> &'static str {
+fn warpsock_package_version() -> &'static str {
     include_str!("../../../Cargo.toml")
         .lines()
         .find_map(|line| line.trim().strip_prefix("version = "))
@@ -580,38 +580,38 @@ fn specter_package_version() -> &'static str {
 fn competitor_specs() -> Vec<CompetitorSpec> {
     vec![
         CompetitorSpec {
-            id: "specter_native",
-            crate_name: "specters",
-            version: specter_package_version(),
+            id: "warpsock_native",
+            crate_name: "warpsock",
+            version: warpsock_package_version(),
             role: "candidate",
             required_for_superiority: true,
-            invocation_notes: "Specter native H3 backend; no quiche in the package graph.",
+            invocation_notes: "Warpsock native H3 backend; no quiche in the package graph.",
         },
         CompetitorSpec {
-            id: "specter_native_rfc9220_tunnel",
-            crate_name: "specters",
-            version: specter_package_version(),
+            id: "warpsock_native_rfc9220_tunnel",
+            crate_name: "warpsock",
+            version: warpsock_package_version(),
             role: "h3_tunnel_workload",
             required_for_superiority: false,
-            invocation_notes: "Specter native RFC 9220 WebSocket-over-H3 tunnel echo workload.",
+            invocation_notes: "Warpsock native RFC 9220 WebSocket-over-H3 tunnel echo workload.",
         },
         CompetitorSpec {
-            id: "specter_native_rfc9220_tunnel_close",
-            crate_name: "specters",
-            version: specter_package_version(),
-            role: "h3_tunnel_workload",
-            required_for_superiority: false,
-            invocation_notes:
-                "Specter native RFC 9220 tunnel echo with client FIN and server FIN timing.",
-        },
-        CompetitorSpec {
-            id: "specter_native_rfc9220_tunnel_mixed",
-            crate_name: "specters",
-            version: specter_package_version(),
+            id: "warpsock_native_rfc9220_tunnel_close",
+            crate_name: "warpsock",
+            version: warpsock_package_version(),
             role: "h3_tunnel_workload",
             required_for_superiority: false,
             invocation_notes:
-                "Specter native RFC 9220 slow-consumer tunnel plus concurrent H3 streaming workload.",
+                "Warpsock native RFC 9220 tunnel echo with client FIN and server FIN timing.",
+        },
+        CompetitorSpec {
+            id: "warpsock_native_rfc9220_tunnel_mixed",
+            crate_name: "warpsock",
+            version: warpsock_package_version(),
+            role: "h3_tunnel_workload",
+            required_for_superiority: false,
+            invocation_notes:
+                "Warpsock native RFC 9220 slow-consumer tunnel plus concurrent H3 streaming workload.",
         },
         CompetitorSpec {
             id: "quiche_direct_rfc9220_tunnel",
@@ -755,11 +755,11 @@ fn competitor_specs() -> Vec<CompetitorSpec> {
     ]
 }
 
-fn specter_row_from_streaming_artifact(artifact_json: &str) -> Option<BenchmarkRow> {
+fn warpsock_row_from_streaming_artifact(artifact_json: &str) -> Option<BenchmarkRow> {
     let artifact: Value = serde_json::from_str(artifact_json).ok()?;
     let row = artifact.get("rows")?.as_array()?.iter().find(|row| {
         row.get("protocol").and_then(Value::as_str) == Some("h3")
-            && row.get("client").and_then(Value::as_str) == Some("specter")
+            && row.get("client").and_then(Value::as_str) == Some("warpsock")
     })?;
     let metrics = row.get("metrics")?;
     let pass = metrics
@@ -774,7 +774,7 @@ fn specter_row_from_streaming_artifact(artifact_json: &str) -> Option<BenchmarkR
     let bytes_per_sec = metrics.get("bytes_per_sec").and_then(Value::as_f64);
 
     let mut row = BenchmarkRow {
-        competitor_id: "specter_native".into(),
+        competitor_id: "warpsock_native".into(),
         status: if pass {
             "measured_pass"
         } else {
@@ -855,7 +855,7 @@ fn adapter_row_from_samples(
 }
 
 fn apply_row_measurement_contract(row: &mut BenchmarkRow, completed_samples: usize) {
-    let Some(raw) = env::var("SPECTER_BENCH_RUN_PROVENANCE").ok() else {
+    let Some(raw) = env::var("WARPSOCK_BENCH_RUN_PROVENANCE").ok() else {
         return;
     };
     let Ok(provenance) = serde_json::from_str::<RunProvenance>(&raw) else {
@@ -881,30 +881,34 @@ fn quiche_direct_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
 }
 
 #[cfg(test)]
-fn specter_native_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
-    adapter_row_from_samples("specter_native", "specter_native_adapter", samples)
+fn warpsock_native_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
+    adapter_row_from_samples("warpsock_native", "warpsock_native_adapter", samples)
 }
 
-fn specter_native_rfc9220_tunnel_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
+fn warpsock_native_rfc9220_tunnel_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
     adapter_row_from_samples(
-        "specter_native_rfc9220_tunnel",
-        "specter_native_rfc9220_tunnel_adapter",
+        "warpsock_native_rfc9220_tunnel",
+        "warpsock_native_rfc9220_tunnel_adapter",
         samples,
     )
 }
 
-fn specter_native_rfc9220_tunnel_close_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
+fn warpsock_native_rfc9220_tunnel_close_row_from_samples(
+    samples: &[AdapterSample],
+) -> BenchmarkRow {
     adapter_row_from_samples(
-        "specter_native_rfc9220_tunnel_close",
-        "specter_native_rfc9220_tunnel_close_adapter",
+        "warpsock_native_rfc9220_tunnel_close",
+        "warpsock_native_rfc9220_tunnel_close_adapter",
         samples,
     )
 }
 
-fn specter_native_rfc9220_tunnel_mixed_row_from_samples(samples: &[AdapterSample]) -> BenchmarkRow {
+fn warpsock_native_rfc9220_tunnel_mixed_row_from_samples(
+    samples: &[AdapterSample],
+) -> BenchmarkRow {
     adapter_row_from_samples(
-        "specter_native_rfc9220_tunnel_mixed",
-        "specter_native_rfc9220_tunnel_mixed_adapter",
+        "warpsock_native_rfc9220_tunnel_mixed",
+        "warpsock_native_rfc9220_tunnel_mixed_adapter",
         samples,
     )
 }
@@ -1021,7 +1025,7 @@ fn paced_tail_overhead_samples(samples: &[AdapterSample]) -> Vec<f64> {
 
 fn row_context(competitor_id: &str) -> Option<RowContext> {
     match competitor_id {
-        "specter_native" | "quiche_direct" | "tokio_quiche" | "h3_quinn" | "reqwest_h3" => {
+        "warpsock_native" | "quiche_direct" | "tokio_quiche" | "h3_quinn" | "reqwest_h3" => {
             Some(RowContext {
                 protocol: "h3",
                 workload: "http3_streaming_get",
@@ -1029,19 +1033,19 @@ fn row_context(competitor_id: &str) -> Option<RowContext> {
                 notes: None,
             })
         }
-        "specter_native_rfc9220_tunnel" => Some(RowContext {
+        "warpsock_native_rfc9220_tunnel" => Some(RowContext {
             protocol: "h3_rfc9220",
             workload: "websocket_over_h3_raw_tunnel_echo",
             default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
-            notes: Some("Measured Specter raw byte tunnel over RFC9220 Extended CONNECT; not RFC6455 frame parsing."),
+            notes: Some("Measured Warpsock raw byte tunnel over RFC9220 Extended CONNECT; not RFC6455 frame parsing."),
         }),
-        "specter_native_rfc9220_tunnel_close" => Some(RowContext {
+        "warpsock_native_rfc9220_tunnel_close" => Some(RowContext {
             protocol: "h3_rfc9220",
             workload: "websocket_over_h3_raw_tunnel_close_fin",
             default_payload_bytes: Some(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE),
             notes: Some("Measures client DATA+FIN through echoed DATA and server FIN delivery on an RFC9220 tunnel."),
         }),
-        "specter_native_rfc9220_tunnel_mixed" => Some(RowContext {
+        "warpsock_native_rfc9220_tunnel_mixed" => Some(RowContext {
             protocol: "h3_rfc9220",
             workload: "slow_consumer_tunnel_plus_http3_streaming",
             default_payload_bytes: Some(
@@ -1072,7 +1076,7 @@ fn row_context(competitor_id: &str) -> Option<RowContext> {
                     LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES
                         + LOCAL_FIXTURE_CHUNK_SIZE * LOCAL_FIXTURE_CHUNK_COUNT,
                 ),
-                notes: Some("RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes. TTFB is captured on the H3 Headers event so suite gate is metric-symmetric with specter_native_rfc9220_tunnel_mixed."),
+                notes: Some("RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes. TTFB is captured on the H3 Headers event so suite gate is metric-symmetric with warpsock_native_rfc9220_tunnel_mixed."),
             })
         }
         "h3_quinn_rfc9220_tunnel" => Some(RowContext {
@@ -1135,7 +1139,7 @@ fn apply_row_context(row: &mut BenchmarkRow, sample_count: Option<usize>) {
 
 fn local_native_fixture_measurement_plan() -> Vec<&'static str> {
     let mut plan = vec![
-        "specter_native",
+        "warpsock_native",
         "quiche_direct",
         "tokio_quiche",
         "h3_quinn",
@@ -1149,9 +1153,9 @@ fn local_native_fixture_measurement_plan() -> Vec<&'static str> {
     {
         plan.push("s2n_quic_transport");
     }
-    plan.push("specter_native_rfc9220_tunnel");
-    plan.push("specter_native_rfc9220_tunnel_close");
-    plan.push("specter_native_rfc9220_tunnel_mixed");
+    plan.push("warpsock_native_rfc9220_tunnel");
+    plan.push("warpsock_native_rfc9220_tunnel_close");
+    plan.push("warpsock_native_rfc9220_tunnel_mixed");
     plan.push("quiche_direct_rfc9220_tunnel");
     plan.push("tokio_quiche_rfc9220_tunnel");
     plan.push("quiche_direct_rfc9220_tunnel_close");
@@ -1179,7 +1183,7 @@ fn local_native_fixture_measurement_plan_for(
 }
 
 fn placeholder_rows(
-    imported_specter_row: Option<BenchmarkRow>,
+    imported_warpsock_row: Option<BenchmarkRow>,
     imported_competitor_rows: &[BenchmarkRow],
 ) -> Vec<BenchmarkRow> {
     competitor_specs()
@@ -1201,8 +1205,8 @@ fn placeholder_rows(
                 apply_row_context(&mut row, None);
                 return row;
             }
-            if spec.id == "specter_native" {
-                if let Some(row) = imported_specter_row.as_ref() {
+            if spec.id == "warpsock_native" {
+                if let Some(row) = imported_warpsock_row.as_ref() {
                     let mut row = row.clone();
                     apply_row_context(&mut row, None);
                     return row;
@@ -1213,7 +1217,7 @@ fn placeholder_rows(
             }
             let mut row = BenchmarkRow {
                 competitor_id: spec.id.into(),
-                status: if spec.id == "specter_native" {
+                status: if spec.id == "warpsock_native" {
                     "pending_measurement"
                 } else if matches!(
                     spec.id,
@@ -1294,7 +1298,7 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
         .filter(|spec| spec.required_for_superiority && spec.role != "candidate")
         .map(|spec| spec.id)
         .collect::<Vec<_>>();
-    let required_h3_measurement_rows = std::iter::once("specter_native")
+    let required_h3_measurement_rows = std::iter::once("warpsock_native")
         .chain(required_h3_clients.iter().copied())
         .collect::<Vec<_>>();
     let missing_required_rows = required_h3_measurement_rows
@@ -1310,30 +1314,30 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
     let duplicate_required_rows =
         duplicate_measured_pass_required_rows(rows, &required_h3_measurement_rows);
 
-    let specter_metrics = measured_metrics(rows, "specter_native");
+    let warpsock_metrics = measured_metrics(rows, "warpsock_native");
     let competitor_metrics = required_h3_clients
         .iter()
         .filter_map(|id| measured_metrics(rows, id))
         .collect::<Vec<_>>();
-    let fastest_non_specter_h3_client =
+    let fastest_non_warpsock_h3_client =
         fastest_by_p50_then_p95_then_throughput(&competitor_metrics);
 
     let missing_metrics = missing_required_rows.is_empty()
         && invalid_required_rows.is_empty()
         && duplicate_required_rows.is_empty()
-        && (specter_metrics.is_none() || competitor_metrics.len() != required_h3_clients.len());
-    let specter_beats_all_required = specter_metrics.is_some_and(|specter| {
+        && (warpsock_metrics.is_none() || competitor_metrics.len() != required_h3_clients.len());
+    let warpsock_beats_all_required = warpsock_metrics.is_some_and(|warpsock| {
         competitor_metrics.iter().all(|competitor| {
-            specter.p50_ttfb_ns < competitor.p50_ttfb_ns
-                && specter.p95_ttfb_ns < competitor.p95_ttfb_ns
-                && specter.bytes_per_sec > competitor.bytes_per_sec
+            warpsock.p50_ttfb_ns < competitor.p50_ttfb_ns
+                && warpsock.p95_ttfb_ns < competitor.p95_ttfb_ns
+                && warpsock.bytes_per_sec > competitor.bytes_per_sec
         })
     });
     let pass = missing_required_rows.is_empty()
         && invalid_required_rows.is_empty()
         && duplicate_required_rows.is_empty()
         && !missing_metrics
-        && specter_beats_all_required;
+        && warpsock_beats_all_required;
 
     SuperiorityGate {
         status: if pass {
@@ -1349,7 +1353,7 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
         },
         pass,
         reason: if pass {
-            "specter_native_is_faster_than_required_h3_competitors"
+            "warpsock_native_is_faster_than_required_h3_competitors"
         } else if !invalid_required_rows.is_empty() || !duplicate_required_rows.is_empty() {
             "invalid_required_h3_rows"
         } else if !missing_required_rows.is_empty() {
@@ -1357,9 +1361,9 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
         } else if missing_metrics {
             "missing_required_h3_performance_metrics"
         } else {
-            "specter_native_not_faster_than_required_h3_competitors"
+            "warpsock_native_not_faster_than_required_h3_competitors"
         },
-        fastest_non_specter_h3_client,
+        fastest_non_warpsock_h3_client,
         no_h3_superiority_claim_without_all_required_rows: true,
         required_h3_clients,
         missing_required_rows,
@@ -1369,24 +1373,24 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
 }
 
 /// Workload entries in the RFC 9220 suite gate. Tuple shape is
-/// `(workload_label, specter_id, quiche_id, tokio_quiche_id)`.
+/// `(workload_label, warpsock_id, quiche_id, tokio_quiche_id)`.
 fn rfc9220_tunnel_workloads() -> [(&'static str, &'static str, &'static str, &'static str); 3] {
     [
         (
             "echo",
-            "specter_native_rfc9220_tunnel",
+            "warpsock_native_rfc9220_tunnel",
             "quiche_direct_rfc9220_tunnel",
             "tokio_quiche_rfc9220_tunnel",
         ),
         (
             "close_fin",
-            "specter_native_rfc9220_tunnel_close",
+            "warpsock_native_rfc9220_tunnel_close",
             "quiche_direct_rfc9220_tunnel_close",
             "tokio_quiche_rfc9220_tunnel_close",
         ),
         (
             "mixed",
-            "specter_native_rfc9220_tunnel_mixed",
+            "warpsock_native_rfc9220_tunnel_mixed",
             "quiche_direct_rfc9220_tunnel_mixed",
             "tokio_quiche_rfc9220_tunnel_mixed",
         ),
@@ -1396,17 +1400,17 @@ fn rfc9220_tunnel_workloads() -> [(&'static str, &'static str, &'static str, &'s
 fn required_rfc9220_tunnel_clients() -> Vec<&'static str> {
     rfc9220_tunnel_workloads()
         .into_iter()
-        .flat_map(|(_workload, specter, quiche, tokio_quiche)| [specter, quiche, tokio_quiche])
+        .flat_map(|(_workload, warpsock, quiche, tokio_quiche)| [warpsock, quiche, tokio_quiche])
         .collect()
 }
 
-fn specter_beats_rfc9220_tunnel_comparator(
-    specter: MeasuredMetrics,
+fn warpsock_beats_rfc9220_tunnel_comparator(
+    warpsock: MeasuredMetrics,
     competitor: MeasuredMetrics,
 ) -> bool {
-    specter.p50_ttfb_ns < competitor.p50_ttfb_ns
-        && specter.p95_ttfb_ns < competitor.p95_ttfb_ns
-        && specter.bytes_per_sec > competitor.bytes_per_sec
+    warpsock.p50_ttfb_ns < competitor.p50_ttfb_ns
+        && warpsock.p95_ttfb_ns < competitor.p95_ttfb_ns
+        && warpsock.bytes_per_sec > competitor.bytes_per_sec
 }
 
 fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperiorityGate {
@@ -1452,20 +1456,20 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
     };
 
     let mut comparator_metrics = Vec::new();
-    let mut specter_beats_all_required = true;
+    let mut warpsock_beats_all_required = true;
     let mut workload_sub_gates = Vec::new();
-    for (workload, specter_id, quiche_id, tokio_quiche_id) in rfc9220_tunnel_workloads() {
-        let Some(specter_metrics) = measured_metrics_with_min_sample_count(
+    for (workload, warpsock_id, quiche_id, tokio_quiche_id) in rfc9220_tunnel_workloads() {
+        let Some(warpsock_metrics) = measured_metrics_with_min_sample_count(
             rows,
-            specter_id,
+            warpsock_id,
             RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
         ) else {
-            specter_beats_all_required = false;
+            warpsock_beats_all_required = false;
             workload_sub_gates.push(Rfc9220TunnelWorkloadSubGate {
                 workload,
-                specter_id,
+                warpsock_id,
                 pass: false,
-                reason: "missing_specter_workload_metrics",
+                reason: "missing_warpsock_workload_metrics",
                 failing_comparators: vec![quiche_id, tokio_quiche_id],
             });
             continue;
@@ -1479,34 +1483,34 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
                 comparator_id,
                 RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
             ) else {
-                specter_beats_all_required = false;
+                warpsock_beats_all_required = false;
                 workload_pass = false;
                 missing_comparator = true;
                 failing_comparators.push(comparator_id);
                 continue;
             };
             comparator_metrics.push(competitor_metrics);
-            if !specter_beats_rfc9220_tunnel_comparator(specter_metrics, competitor_metrics) {
-                specter_beats_all_required = false;
+            if !warpsock_beats_rfc9220_tunnel_comparator(warpsock_metrics, competitor_metrics) {
+                warpsock_beats_all_required = false;
                 workload_pass = false;
                 failing_comparators.push(comparator_id);
             }
         }
         workload_sub_gates.push(Rfc9220TunnelWorkloadSubGate {
             workload,
-            specter_id,
+            warpsock_id,
             pass: workload_pass,
             reason: if workload_pass {
-                "specter_workload_faster_than_required_comparators"
+                "warpsock_workload_faster_than_required_comparators"
             } else if missing_comparator {
                 "missing_required_comparator_workload_metrics"
             } else {
-                "specter_workload_not_faster_than_required_comparators"
+                "warpsock_workload_not_faster_than_required_comparators"
             },
             failing_comparators,
         });
     }
-    let fastest_non_specter_rfc9220_tunnel_client =
+    let fastest_non_warpsock_rfc9220_tunnel_client =
         fastest_by_p50_then_p95_then_throughput(&comparator_metrics);
 
     let missing_required_n100_rows = !missing_required_rfc9220_tunnel_rows.is_empty()
@@ -1519,7 +1523,7 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
         && !missing_metrics
         && comparator_metrics.len()
             == required_rfc9220_tunnel_clients.len() - rfc9220_tunnel_workloads().len()
-        && specter_beats_all_required;
+        && warpsock_beats_all_required;
 
     Rfc9220TunnelSuperiorityGate {
         status: if pass {
@@ -1531,7 +1535,7 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
         },
         pass,
         reason: if pass {
-            "specter_native_rfc9220_tunnel_suite_is_faster_than_required_rfc9220_tunnel_competitors"
+            "warpsock_native_rfc9220_tunnel_suite_is_faster_than_required_rfc9220_tunnel_competitors"
         } else if invalid_required_rows {
             "invalid_required_rfc9220_tunnel_rows"
         } else if missing_required_n100_rows {
@@ -1539,9 +1543,9 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
         } else if missing_metrics {
             "missing_required_rfc9220_tunnel_performance_metrics"
         } else {
-            "specter_native_rfc9220_tunnel_suite_not_faster_than_required_rfc9220_tunnel_competitors"
+            "warpsock_native_rfc9220_tunnel_suite_not_faster_than_required_rfc9220_tunnel_competitors"
         },
-        fastest_non_specter_rfc9220_tunnel_client,
+        fastest_non_warpsock_rfc9220_tunnel_client,
         no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows: true,
         minimum_sample_count: RFC9220_TUNNEL_MIN_SAMPLE_COUNT,
         required_rfc9220_tunnel_clients,
@@ -1636,11 +1640,11 @@ fn fastest_by_p50_then_p95_then_throughput(rows: &[MeasuredMetrics]) -> Option<&
 
 #[cfg(test)]
 fn artifact_with_competitor_artifacts<S: AsRef<str>>(
-    specter_streaming_artifact_json: Option<&str>,
+    warpsock_streaming_artifact_json: Option<&str>,
     competitor_artifact_jsons: &[S],
 ) -> Artifact {
     artifact_with_competitor_rows(
-        specter_streaming_artifact_json,
+        warpsock_streaming_artifact_json,
         competitor_artifact_jsons,
         &[],
     )
@@ -1648,12 +1652,12 @@ fn artifact_with_competitor_artifacts<S: AsRef<str>>(
 
 #[cfg(test)]
 fn artifact_with_competitor_rows<S: AsRef<str>>(
-    specter_streaming_artifact_json: Option<&str>,
+    warpsock_streaming_artifact_json: Option<&str>,
     competitor_artifact_jsons: &[S],
     measured_competitor_rows: &[BenchmarkRow],
 ) -> Artifact {
     artifact_with_competitor_rows_and_fixture_events(
-        specter_streaming_artifact_json,
+        warpsock_streaming_artifact_json,
         competitor_artifact_jsons,
         measured_competitor_rows,
         Vec::new(),
@@ -1661,7 +1665,7 @@ fn artifact_with_competitor_rows<S: AsRef<str>>(
 }
 
 fn artifact_with_competitor_rows_and_fixture_events<S: AsRef<str>>(
-    specter_streaming_artifact_json: Option<&str>,
+    warpsock_streaming_artifact_json: Option<&str>,
     competitor_artifact_jsons: &[S],
     measured_competitor_rows: &[BenchmarkRow],
     fixture_events: Vec<FixtureEvent>,
@@ -1676,7 +1680,7 @@ fn artifact_with_competitor_rows_and_fixture_events<S: AsRef<str>>(
         .chain(measured_competitor_rows.iter().cloned())
         .collect::<Vec<_>>();
     let rows = placeholder_rows(
-        specter_streaming_artifact_json.and_then(specter_row_from_streaming_artifact),
+        warpsock_streaming_artifact_json.and_then(warpsock_row_from_streaming_artifact),
         &imported_competitor_rows,
     );
     Artifact {
@@ -1701,12 +1705,12 @@ fn requirement_failed(args: &[String], artifact: &Artifact) -> bool {
 }
 
 fn run_provenance_from_env() -> anyhow::Result<Option<RunProvenance>> {
-    let Some(raw) = env::var("SPECTER_BENCH_RUN_PROVENANCE").ok() else {
+    let Some(raw) = env::var("WARPSOCK_BENCH_RUN_PROVENANCE").ok() else {
         return Ok(None);
     };
     serde_json::from_str(&raw)
         .map(Some)
-        .context("invalid SPECTER_BENCH_RUN_PROVENANCE JSON")
+        .context("invalid WARPSOCK_BENCH_RUN_PROVENANCE JSON")
 }
 
 fn option_value(args: &[String], name: &str) -> Option<String> {
@@ -1738,11 +1742,11 @@ async fn main() -> anyhow::Result<()> {
         .any(|arg| arg == "--serve-local-native-h3-fixture")
     {
         let client = option_value(&args, "--serve-local-native-h3-fixture-client")
-            .unwrap_or_else(|| "specter_native".to_string());
+            .unwrap_or_else(|| "warpsock_native".to_string());
         return serve_local_native_h3_fixture_process(client).await;
     }
 
-    let specter_streaming_artifact_json = option_value(&args, "--specter-streaming-artifact")
+    let warpsock_streaming_artifact_json = option_value(&args, "--warpsock-streaming-artifact")
         .map(fs::read_to_string)
         .transpose()?;
     let competitor_artifact_jsons = option_values(&args, "--competitor-artifact")
@@ -1764,9 +1768,9 @@ async fn main() -> anyhow::Result<()> {
         measured_competitor_rows.extend(measurements.rows);
         fixture_events.extend(measurements.fixture_events);
     }
-    if let Some(url) = option_value(&args, "--measure-specter-native-url") {
+    if let Some(url) = option_value(&args, "--measure-warpsock-native-url") {
         measured_competitor_rows.push(
-            measure_specter_native(
+            measure_warpsock_native(
                 &url,
                 option_usize(&args, "--warmups", 3)?,
                 option_usize(&args, "--samples", 30)?,
@@ -1774,9 +1778,9 @@ async fn main() -> anyhow::Result<()> {
             .await?,
         );
     }
-    if let Some(url) = option_value(&args, "--measure-specter-native-rfc9220-tunnel-url") {
+    if let Some(url) = option_value(&args, "--measure-warpsock-native-rfc9220-tunnel-url") {
         measured_competitor_rows.push(
-            measure_specter_native_rfc9220_tunnel(
+            measure_warpsock_native_rfc9220_tunnel(
                 &url,
                 option_usize(&args, "--warmups", 3)?,
                 option_usize(&args, "--samples", 30)?,
@@ -1867,9 +1871,9 @@ async fn main() -> anyhow::Result<()> {
             .await?,
         );
     }
-    if let Some(url) = option_value(&args, "--measure-specter-native-rfc9220-tunnel-close-url") {
+    if let Some(url) = option_value(&args, "--measure-warpsock-native-rfc9220-tunnel-close-url") {
         measured_competitor_rows.push(
-            measure_specter_native_rfc9220_tunnel_close(
+            measure_warpsock_native_rfc9220_tunnel_close(
                 &url,
                 option_usize(&args, "--warmups", 3)?,
                 option_usize(&args, "--samples", 30)?,
@@ -1878,19 +1882,19 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     if let Some(tunnel_url) =
-        option_value(&args, "--measure-specter-native-rfc9220-tunnel-mixed-url")
+        option_value(&args, "--measure-warpsock-native-rfc9220-tunnel-mixed-url")
     {
         let stream_url = option_value(
             &args,
-            "--measure-specter-native-rfc9220-tunnel-mixed-stream-url",
+            "--measure-warpsock-native-rfc9220-tunnel-mixed-stream-url",
         )
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "--measure-specter-native-rfc9220-tunnel-mixed-url requires --measure-specter-native-rfc9220-tunnel-mixed-stream-url"
+                "--measure-warpsock-native-rfc9220-tunnel-mixed-url requires --measure-warpsock-native-rfc9220-tunnel-mixed-stream-url"
             )
         })?;
         measured_competitor_rows.push(
-            measure_specter_native_rfc9220_tunnel_mixed(
+            measure_warpsock_native_rfc9220_tunnel_mixed(
                 &stream_url,
                 &tunnel_url,
                 option_usize(&args, "--warmups", 3)?,
@@ -1963,7 +1967,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let mut artifact = artifact_with_competitor_rows_and_fixture_events(
-        specter_streaming_artifact_json.as_deref(),
+        warpsock_streaming_artifact_json.as_deref(),
         &competitor_artifact_jsons,
         &measured_competitor_rows,
         fixture_events,
@@ -2007,7 +2011,7 @@ async fn measure_local_native_fixture(
         let fixture = LocalNativeH3Fixture::start(client).await?;
         let url = fixture.stream_url();
         let mut row = match client {
-            "specter_native" => measure_specter_native(url, warmups, samples).await,
+            "warpsock_native" => measure_warpsock_native(url, warmups, samples).await,
             "quiche_direct" => measure_quiche_direct(url, warmups, samples),
             "tokio_quiche" => measure_tokio_quiche(url, warmups, samples).await,
             "h3_quinn" => measure_h3_quinn(url, warmups, samples).await,
@@ -2023,17 +2027,17 @@ async fn measure_local_native_fixture(
             }
             #[cfg(feature = "reqwest-h3")]
             "reqwest_h3" => measure_reqwest_h3(url, warmups, samples).await,
-            "specter_native_rfc9220_tunnel" => {
+            "warpsock_native_rfc9220_tunnel" => {
                 let tunnel_url = fixture.tunnel_url();
-                measure_specter_native_rfc9220_tunnel(&tunnel_url, warmups, samples).await
+                measure_warpsock_native_rfc9220_tunnel(&tunnel_url, warmups, samples).await
             }
-            "specter_native_rfc9220_tunnel_close" => {
+            "warpsock_native_rfc9220_tunnel_close" => {
                 let tunnel_url = fixture.tunnel_url();
-                measure_specter_native_rfc9220_tunnel_close(&tunnel_url, warmups, samples).await
+                measure_warpsock_native_rfc9220_tunnel_close(&tunnel_url, warmups, samples).await
             }
-            "specter_native_rfc9220_tunnel_mixed" => {
+            "warpsock_native_rfc9220_tunnel_mixed" => {
                 let tunnel_url = fixture.tunnel_url();
-                measure_specter_native_rfc9220_tunnel_mixed(
+                measure_warpsock_native_rfc9220_tunnel_mixed(
                     fixture.stream_url(),
                     &tunnel_url,
                     warmups,
@@ -2104,7 +2108,7 @@ enum LocalNativeH3FixtureGuard {
 
 impl LocalNativeH3Fixture {
     async fn start(client: &str) -> anyhow::Result<Self> {
-        if std::env::var("SPECTER_LOCAL_NATIVE_H3_FIXTURE_MODE")
+        if std::env::var("WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_MODE")
             .map(|value| value == "process")
             .unwrap_or(false)
         {
@@ -2136,7 +2140,7 @@ impl LocalNativeH3Fixture {
         let current_exe = std::env::current_exe()?;
         let ledger_path = local_native_h3_fixture_ledger_path(client)?;
         let mut command =
-            if let Ok(core) = std::env::var("SPECTER_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE") {
+            if let Ok(core) = std::env::var("WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE") {
                 let mut command = Command::new("taskset");
                 command.arg("-c").arg(core).arg(&current_exe);
                 command
@@ -2144,7 +2148,7 @@ impl LocalNativeH3Fixture {
                 Command::new(&current_exe)
             };
         if let Some(path) = &ledger_path {
-            command.env("SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_PATH", path);
+            command.env("WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_PATH", path);
         }
         let mut child = command
             .arg("--serve-local-native-h3-fixture")
@@ -2278,7 +2282,7 @@ async fn serve_local_native_h3_fixture_process(client: String) -> anyhow::Result
     let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await?);
     let port = socket.local_addr()?.port();
     let ledger_path =
-        std::env::var_os("SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_PATH").map(PathBuf::from);
+        std::env::var_os("WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_PATH").map(PathBuf::from);
     println!(
         "{}",
         serde_json::json!({
@@ -2340,7 +2344,7 @@ struct LocalS2nQuicTransportFixture {
 #[cfg(feature = "s2n-quic-transport")]
 impl LocalS2nQuicTransportFixture {
     async fn start() -> anyhow::Result<Self> {
-        let (cert_path, key_path) = write_local_fixture_cert_files("specter_s2n_transport")?;
+        let (cert_path, key_path) = write_local_fixture_cert_files("warpsock_s2n_transport")?;
         let mut server = s2n_quic::Server::builder()
             .with_tls((cert_path.as_path(), key_path.as_path()))?
             .with_io("127.0.0.1:0")?
@@ -2432,8 +2436,8 @@ fn generate_local_fixture_cert_pem() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let cert_path = std::env::temp_dir().join(format!("specter_native_h3_{stamp}.crt"));
-    let key_path = std::env::temp_dir().join(format!("specter_native_h3_{stamp}.key"));
+    let cert_path = std::env::temp_dir().join(format!("warpsock_native_h3_{stamp}.crt"));
+    let key_path = std::env::temp_dir().join(format!("warpsock_native_h3_{stamp}.key"));
     let output = Command::new("openssl")
         .args([
             "req",
@@ -2494,7 +2498,7 @@ async fn run_local_native_h3_fixture(
     events: Arc<Mutex<Vec<FixtureEvent>>>,
     ledger_path: Option<PathBuf>,
 ) {
-    use specter::transport::h3::quic::{split_long_header_datagram, LongHeaderType};
+    use warpsock::transport::h3::quic::{split_long_header_datagram, LongHeaderType};
 
     let ledger_writer = match ledger_path {
         Some(path) => match LocalNativeH3LedgerWriter::create(path) {
@@ -2584,15 +2588,15 @@ fn spawn_local_native_h3_connection(
     client: String,
     events: Arc<Mutex<Vec<FixtureEvent>>>,
     ledger_writer: Option<LocalNativeH3LedgerWriter>,
-    client_destination_cid: specter::transport::h3::quic::ConnectionId,
-    client_source_cid: specter::transport::h3::quic::ConnectionId,
-    server_source_cid: specter::transport::h3::quic::ConnectionId,
-    server_migration_cid: specter::transport::h3::quic::ConnectionId,
+    client_destination_cid: warpsock::transport::h3::quic::ConnectionId,
+    client_source_cid: warpsock::transport::h3::quic::ConnectionId,
+    server_source_cid: warpsock::transport::h3::quic::ConnectionId,
+    server_migration_cid: warpsock::transport::h3::quic::ConnectionId,
 ) {
-    let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
+    let mut fingerprint = warpsock::fingerprint::Http3Fingerprint::chrome();
     fingerprint.transport.initial_max_streams_bidi = LOCAL_FIXTURE_MAX_STREAMS;
     fingerprint.transport.initial_max_streams_uni = LOCAL_FIXTURE_MAX_STREAMS;
-    let Ok(handshake) = specter::transport::h3::handshake::NativeQuicServerHandshake::new(
+    let Ok(handshake) = warpsock::transport::h3::handshake::NativeQuicServerHandshake::new(
         &fingerprint,
         &cert_pem,
         &key_pem,
@@ -2678,8 +2682,8 @@ impl LocalNativeH3LedgerWriter {
 struct LocalNativeH3Connection {
     socket: Arc<tokio::net::UdpSocket>,
     peer: SocketAddr,
-    handshake: specter::transport::h3::handshake::NativeQuicServerHandshake,
-    fingerprint: specter::fingerprint::Http3Fingerprint,
+    handshake: warpsock::transport::h3::handshake::NativeQuicServerHandshake,
+    fingerprint: warpsock::fingerprint::Http3Fingerprint,
     handshake_done_sent: bool,
     new_connection_id_sent: bool,
     settings_sent: bool,
@@ -2692,7 +2696,7 @@ struct LocalNativeH3Connection {
     ledger_writer: Option<LocalNativeH3LedgerWriter>,
     tunnel_streams: HashSet<u64>,
     scheduled_stream_responses: VecDeque<LocalNativeH3ScheduledResponse>,
-    server_migration_cid: specter::transport::h3::quic::ConnectionId,
+    server_migration_cid: warpsock::transport::h3::quic::ConnectionId,
     next_server_path_challenge: u64,
     next_stream_response_id: u64,
 }
@@ -2863,7 +2867,7 @@ impl LocalNativeH3Connection {
     }
 
     async fn process_datagram(&mut self, packet: &[u8], peer: SocketAddr) -> anyhow::Result<()> {
-        use specter::transport::h3::quic::{split_long_header_datagram, LongHeaderType};
+        use warpsock::transport::h3::quic::{split_long_header_datagram, LongHeaderType};
 
         if packet.first().is_some_and(|first| first & 0x80 != 0) {
             let packets = split_long_header_datagram(packet)?;
@@ -2935,7 +2939,7 @@ impl LocalNativeH3Connection {
         }
         for event in events {
             match event {
-                specter::transport::h3::handshake::ClientH3Event::PathChallenge(data) => {
+                warpsock::transport::h3::handshake::ClientH3Event::PathChallenge(data) => {
                     let packet = self.handshake.build_server_path_response_packet(data)?;
                     self.send_packet_to(packet.packet, peer).await?;
                 }
@@ -3038,21 +3042,21 @@ impl LocalNativeH3Connection {
 
     async fn apply_client_event(
         &mut self,
-        event: specter::transport::h3::handshake::ClientH3Event,
+        event: warpsock::transport::h3::handshake::ClientH3Event,
     ) -> anyhow::Result<()> {
-        let specter::transport::h3::handshake::ClientH3Event::Stream(event) = event else {
+        let warpsock::transport::h3::handshake::ClientH3Event::Stream(event) = event else {
             return Ok(());
         };
 
         for frame in event.frames {
             match frame {
-                specter::transport::h3::native::H3Frame::Headers(block) => {
+                warpsock::transport::h3::native::H3Frame::Headers(block) => {
                     let headers =
-                        specter::transport::h3::native::decode_header_block(block.as_ref())?;
+                        warpsock::transport::h3::native::decode_header_block(block.as_ref())?;
                     self.handle_request_headers(event.stream_id, headers)
                         .await?;
                 }
-                specter::transport::h3::native::H3Frame::Data(bytes) => {
+                warpsock::transport::h3::native::H3Frame::Data(bytes) => {
                     self.handle_request_data(event.stream_id, bytes, event.fin)
                         .await?;
                 }
@@ -3065,7 +3069,7 @@ impl LocalNativeH3Connection {
     async fn handle_request_headers(
         &mut self,
         stream_id: u64,
-        headers: Vec<specter::transport::h3::native::H3Header>,
+        headers: Vec<warpsock::transport::h3::native::H3Header>,
     ) -> anyhow::Result<()> {
         let path = headers
             .iter()
@@ -3153,8 +3157,8 @@ impl LocalNativeH3Connection {
         fin: bool,
     ) -> anyhow::Result<()> {
         let headers = vec![
-            specter::transport::h3::native::H3Header::new(":status", "200"),
-            specter::transport::h3::native::H3Header::new("content-type", content_type),
+            warpsock::transport::h3::native::H3Header::new(":status", "200"),
+            warpsock::transport::h3::native::H3Header::new("content-type", content_type),
         ];
         let packet = self
             .handshake
@@ -3163,8 +3167,8 @@ impl LocalNativeH3Connection {
     }
 
     async fn send_response_data(&mut self, response: LocalNativeH3Response) -> anyhow::Result<()> {
-        let encoded_data = specter::transport::h3::native::encode_frame(
-            &specter::transport::h3::native::H3Frame::Data(response.bytes),
+        let encoded_data = warpsock::transport::h3::native::encode_frame(
+            &warpsock::transport::h3::native::H3Frame::Data(response.bytes),
         );
         let stream_id = response.stream_id;
         let response_fin = response.fin;
@@ -3274,7 +3278,7 @@ impl LocalNativeH3Connection {
 
 fn route_local_native_h3_connection_id(
     packet: &[u8],
-    long_packets: Option<&[specter::transport::h3::quic::LongHeaderDatagramPacket]>,
+    long_packets: Option<&[warpsock::transport::h3::quic::LongHeaderDatagramPacket]>,
     registered_server_cids: &[Vec<u8>],
 ) -> Option<Vec<u8>> {
     if let Some(first) = long_packets.and_then(|packets| packets.first()) {
@@ -3291,8 +3295,8 @@ fn route_local_native_h3_connection_id(
     None
 }
 
-fn local_native_h3_server_connection_id(index: u64) -> specter::transport::h3::quic::ConnectionId {
-    specter::transport::h3::quic::ConnectionId::from_bytes(Bytes::from(format!(
+fn local_native_h3_server_connection_id(index: u64) -> warpsock::transport::h3::quic::ConnectionId {
+    warpsock::transport::h3::quic::ConnectionId::from_bytes(Bytes::from(format!(
         "bench-h3-{index:08x}"
     )))
     .expect("local fixture server connection id must fit QUIC CID limits")
@@ -3301,15 +3305,15 @@ fn local_native_h3_server_connection_id(index: u64) -> specter::transport::h3::q
 fn local_native_h3_server_migration_connection_id(
     connection_index: u64,
     sequence_number: u64,
-) -> specter::transport::h3::quic::ConnectionId {
-    specter::transport::h3::quic::ConnectionId::from_bytes(Bytes::from(format!(
+) -> warpsock::transport::h3::quic::ConnectionId {
+    warpsock::transport::h3::quic::ConnectionId::from_bytes(Bytes::from(format!(
         "bench-m{connection_index:08x}-{sequence_number:02x}"
     )))
     .expect("local fixture migration connection id must fit QUIC CID limits")
 }
 
 fn local_native_h3_stateless_reset_token(
-    connection_id: &specter::transport::h3::quic::ConnectionId,
+    connection_id: &warpsock::transport::h3::quic::ConnectionId,
     sequence_number: u64,
 ) -> [u8; 16] {
     let mut token = [0u8; 16];
@@ -3322,7 +3326,7 @@ fn local_native_h3_stateless_reset_token(
 }
 
 fn describe_local_native_h3_datagram(packet: &[u8]) -> String {
-    use specter::transport::h3::quic::split_long_header_datagram;
+    use warpsock::transport::h3::quic::split_long_header_datagram;
 
     if packet.first().is_some_and(|first| first & 0x80 != 0) {
         return match split_long_header_datagram(packet) {
@@ -3435,22 +3439,22 @@ fn should_record_local_native_h3_fixture_event(event: &FixtureEvent) -> bool {
     event.kind != "packet_noise"
 }
 
-async fn measure_specter_native(
+async fn measure_warpsock_native(
     url: &str,
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
+    let mut fingerprint = warpsock::fingerprint::Http3Fingerprint::chrome();
     fingerprint.transport.initial_max_streams_bidi = LOCAL_FIXTURE_MAX_STREAMS;
     fingerprint.transport.initial_max_streams_uni = LOCAL_FIXTURE_MAX_STREAMS;
-    let client = specter::H3Client::new()
+    let client = warpsock::H3Client::new()
         .danger_accept_invalid_certs(true)
         .with_http3_fingerprint(fingerprint)
         .with_max_idle_timeout(adapter_timeout().as_millis() as u64);
     let handle = client.handle(url).await?;
     let uri: http::Uri = url.parse()?;
 
-    if specter_direct_get_epoch_enabled() {
+    if warpsock_direct_get_epoch_enabled() {
         let result = handle
             .run_native_get_benchmark_epoch(
                 uri.clone(),
@@ -3468,30 +3472,30 @@ async fn measure_specter_native(
             })
             .collect::<Vec<_>>();
         return Ok(adapter_row_from_samples(
-            "specter_native",
-            "specter_native_adapter",
+            "warpsock_native",
+            "warpsock_native_adapter",
             &measured,
         ));
     }
 
     for _ in 0..warmups {
-        let _ = measure_specter_native_once(&handle, &uri).await?;
+        let _ = measure_warpsock_native_once(&handle, &uri).await?;
     }
 
     let mut measured = Vec::with_capacity(samples);
     for _ in 0..samples {
-        measured.push(measure_specter_native_once(&handle, &uri).await?);
+        measured.push(measure_warpsock_native_once(&handle, &uri).await?);
     }
 
     Ok(adapter_row_from_samples(
-        "specter_native",
-        "specter_native_adapter",
+        "warpsock_native",
+        "warpsock_native_adapter",
         &measured,
     ))
 }
 
-async fn measure_specter_native_once(
-    handle: &specter::transport::h3::H3Handle,
+async fn measure_warpsock_native_once(
+    handle: &warpsock::transport::h3::H3Handle,
     uri: &http::Uri,
 ) -> anyhow::Result<AdapterSample> {
     let start = Instant::now();
@@ -3502,7 +3506,7 @@ async fn measure_specter_native_once(
                 http::Method::GET,
                 uri,
                 Vec::new(),
-                specter::RequestBody::empty(),
+                warpsock::RequestBody::empty(),
                 start,
             )
             .await?;
@@ -3513,7 +3517,7 @@ async fn measure_specter_native_once(
                 http::Method::GET,
                 uri,
                 Vec::new(),
-                specter::RequestBody::empty(),
+                warpsock::RequestBody::empty(),
             )
             .await?;
         (status, headers, body, None)
@@ -3533,7 +3537,7 @@ async fn measure_specter_native_once(
     let mut first_byte_ns = Some(headers_ready_ns);
     let mut first_body_ns = None;
     if !(200..300).contains(&status) {
-        anyhow::bail!("specter_native received non-success status {}", status);
+        anyhow::bail!("warpsock_native received non-success status {}", status);
     }
 
     let mut bytes = 0u64;
@@ -3566,14 +3570,14 @@ async fn measure_specter_native_once(
     })
 }
 
-async fn measure_specter_native_rfc9220_tunnel(
+async fn measure_warpsock_native_rfc9220_tunnel(
     url: &str,
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    let client = specter_rfc9220_client()?;
-    let direct_handle = if specter_direct_rfc9220_tunnel_enabled() {
-        Some(specter_rfc9220_handle(&client, url).await?)
+    let client = warpsock_rfc9220_client()?;
+    let direct_handle = if warpsock_direct_rfc9220_tunnel_enabled() {
+        Some(warpsock_rfc9220_handle(&client, url).await?)
     } else {
         None
     };
@@ -3588,22 +3592,23 @@ async fn measure_specter_native_rfc9220_tunnel(
         let payload = rfc9220_tunnel_payload(b's');
         let open = async {
             if let Some(handle) = direct_handle.as_ref() {
-                open_specter_rfc9220_tunnel_with_handle(handle, url).await
+                open_warpsock_rfc9220_tunnel_with_handle(handle, url).await
             } else {
-                open_specter_rfc9220_tunnel(&client, url).await
+                open_warpsock_rfc9220_tunnel(&client, url).await
             }
         };
         let mut tunnel = tokio::time::timeout(adapter_timeout(), open)
             .await
             .map_err(|_| {
-                anyhow::anyhow!("specter_native RFC 9220 steady-state tunnel open timed out")
+                anyhow::anyhow!("warpsock_native RFC 9220 steady-state tunnel open timed out")
             })??;
 
         let total = warmups + samples;
         let mut measured = Vec::with_capacity(samples);
         for i in 0..total {
             let start = Instant::now();
-            let echoed = if direct_handle.is_some() && specter_direct_rfc9220_fused_echo_enabled() {
+            let echoed = if direct_handle.is_some() && warpsock_direct_rfc9220_fused_echo_enabled()
+            {
                 tunnel.round_trip_bytes_owned(payload.clone()).await?.len()
             } else if direct_handle.is_some() {
                 tunnel.send_bytes_owned(payload.clone(), false).await?;
@@ -3612,11 +3617,11 @@ async fn measure_specter_native_rfc9220_tunnel(
                     let chunk = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
                         .await
                         .map_err(|_| {
-                            anyhow::anyhow!("specter_native RFC 9220 steady-state echo timed out")
+                            anyhow::anyhow!("warpsock_native RFC 9220 steady-state echo timed out")
                         })?
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                                "specter_native RFC 9220 steady-state tunnel closed after {echoed} of {} bytes",
+                                "warpsock_native RFC 9220 steady-state tunnel closed after {echoed} of {} bytes",
                                 payload.len()
                             )
                         })??;
@@ -3630,11 +3635,11 @@ async fn measure_specter_native_rfc9220_tunnel(
                     let chunk = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
                         .await
                         .map_err(|_| {
-                            anyhow::anyhow!("specter_native RFC 9220 steady-state echo timed out")
+                            anyhow::anyhow!("warpsock_native RFC 9220 steady-state echo timed out")
                         })?
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                                "specter_native RFC 9220 steady-state tunnel closed after {echoed} of {} bytes",
+                                "warpsock_native RFC 9220 steady-state tunnel closed after {echoed} of {} bytes",
                                 payload.len()
                             )
                         })??;
@@ -3644,7 +3649,7 @@ async fn measure_specter_native_rfc9220_tunnel(
             };
             if echoed != payload.len() {
                 anyhow::bail!(
-                    "specter_native RFC 9220 steady-state echo length mismatch: expected {}, got {echoed}",
+                    "warpsock_native RFC 9220 steady-state echo length mismatch: expected {}, got {echoed}",
                     payload.len()
                 );
             }
@@ -3654,47 +3659,47 @@ async fn measure_specter_native_rfc9220_tunnel(
             }
         }
 
-        return Ok(specter_native_rfc9220_tunnel_row_from_samples(&measured));
+        return Ok(warpsock_native_rfc9220_tunnel_row_from_samples(&measured));
     }
 
     for _ in 0..warmups {
-        let _ = measure_specter_native_rfc9220_tunnel_once(&client, direct_handle.as_ref(), url)
+        let _ = measure_warpsock_native_rfc9220_tunnel_once(&client, direct_handle.as_ref(), url)
             .await?;
     }
 
     let mut measured = Vec::with_capacity(samples);
     for _ in 0..samples {
         measured.push(
-            measure_specter_native_rfc9220_tunnel_once(&client, direct_handle.as_ref(), url)
+            measure_warpsock_native_rfc9220_tunnel_once(&client, direct_handle.as_ref(), url)
                 .await?,
         );
     }
 
-    Ok(specter_native_rfc9220_tunnel_row_from_samples(&measured))
+    Ok(warpsock_native_rfc9220_tunnel_row_from_samples(&measured))
 }
 
-fn specter_rfc9220_client() -> anyhow::Result<specter::H3Client> {
-    let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
+fn warpsock_rfc9220_client() -> anyhow::Result<warpsock::H3Client> {
+    let mut fingerprint = warpsock::fingerprint::Http3Fingerprint::chrome();
     fingerprint.transport.initial_max_streams_bidi = LOCAL_FIXTURE_MAX_STREAMS;
     fingerprint.transport.initial_max_streams_uni = LOCAL_FIXTURE_MAX_STREAMS;
-    Ok(specter::H3Client::new()
+    Ok(warpsock::H3Client::new()
         .danger_accept_invalid_certs(true)
-        .with_h3_backend(specter::H3Backend::Native)
+        .with_h3_backend(warpsock::H3Backend::Native)
         .with_http3_fingerprint(fingerprint)
         .with_max_idle_timeout(adapter_timeout().as_millis() as u64))
 }
 
-async fn open_specter_rfc9220_tunnel(
-    client: &specter::H3Client,
+async fn open_warpsock_rfc9220_tunnel(
+    client: &warpsock::H3Client,
     url: &str,
-) -> anyhow::Result<specter::H3Tunnel> {
-    let h3_url = specter_rfc9220_h3_url(url)?;
+) -> anyhow::Result<warpsock::H3Tunnel> {
+    let h3_url = warpsock_rfc9220_h3_url(url)?;
     Ok(client
         .open_websocket_tunnel(&h3_url, Vec::<(String, String)>::new())
         .await?)
 }
 
-fn specter_rfc9220_h3_url(url: &str) -> anyhow::Result<String> {
+fn warpsock_rfc9220_h3_url(url: &str) -> anyhow::Result<String> {
     let mut h3_url = url::Url::parse(url)?;
     if h3_url.scheme() == "wss" {
         h3_url
@@ -3704,66 +3709,66 @@ fn specter_rfc9220_h3_url(url: &str) -> anyhow::Result<String> {
     Ok(h3_url.to_string())
 }
 
-async fn specter_rfc9220_handle(
-    client: &specter::H3Client,
+async fn warpsock_rfc9220_handle(
+    client: &warpsock::H3Client,
     url: &str,
-) -> anyhow::Result<specter::transport::h3::H3Handle> {
-    let h3_url = specter_rfc9220_h3_url(url)?;
+) -> anyhow::Result<warpsock::transport::h3::H3Handle> {
+    let h3_url = warpsock_rfc9220_h3_url(url)?;
     Ok(client.handle(&h3_url).await?)
 }
 
-async fn open_specter_rfc9220_tunnel_with_handle(
-    handle: &specter::transport::h3::H3Handle,
+async fn open_warpsock_rfc9220_tunnel_with_handle(
+    handle: &warpsock::transport::h3::H3Handle,
     url: &str,
-) -> anyhow::Result<specter::H3Tunnel> {
-    let h3_url = specter_rfc9220_h3_url(url)?;
+) -> anyhow::Result<warpsock::H3Tunnel> {
+    let h3_url = warpsock_rfc9220_h3_url(url)?;
     let uri: http::Uri = h3_url.parse()?;
     Ok(handle
         .open_websocket_tunnel(uri, Vec::<(String, String)>::new())
         .await?)
 }
 
-async fn measure_specter_native_rfc9220_tunnel_close(
+async fn measure_warpsock_native_rfc9220_tunnel_close(
     url: &str,
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    let client = specter_rfc9220_client()?;
-    let direct_handle = if specter_direct_rfc9220_tunnel_enabled() {
-        Some(specter_rfc9220_handle(&client, url).await?)
+    let client = warpsock_rfc9220_client()?;
+    let direct_handle = if warpsock_direct_rfc9220_tunnel_enabled() {
+        Some(warpsock_rfc9220_handle(&client, url).await?)
     } else {
         None
     };
     for _ in 0..warmups {
         let _ =
-            measure_specter_native_rfc9220_tunnel_close_once(&client, direct_handle.as_ref(), url)
+            measure_warpsock_native_rfc9220_tunnel_close_once(&client, direct_handle.as_ref(), url)
                 .await?;
     }
 
     let mut measured = Vec::with_capacity(samples);
     for _ in 0..samples {
         measured.push(
-            measure_specter_native_rfc9220_tunnel_close_once(&client, direct_handle.as_ref(), url)
+            measure_warpsock_native_rfc9220_tunnel_close_once(&client, direct_handle.as_ref(), url)
                 .await?,
         );
     }
 
-    Ok(specter_native_rfc9220_tunnel_close_row_from_samples(
+    Ok(warpsock_native_rfc9220_tunnel_close_row_from_samples(
         &measured,
     ))
 }
 
-async fn measure_specter_native_rfc9220_tunnel_mixed(
+async fn measure_warpsock_native_rfc9220_tunnel_mixed(
     stream_url: &str,
     tunnel_url: &str,
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    let client = specter_rfc9220_client()?;
+    let client = warpsock_rfc9220_client()?;
     let stream_handle = client.handle(stream_url).await?;
     let stream_uri: http::Uri = stream_url.parse()?;
     for _ in 0..warmups {
-        let _ = measure_specter_native_rfc9220_tunnel_mixed_once(
+        let _ = measure_warpsock_native_rfc9220_tunnel_mixed_once(
             &client,
             &stream_handle,
             &stream_uri,
@@ -3775,7 +3780,7 @@ async fn measure_specter_native_rfc9220_tunnel_mixed(
     let mut measured = Vec::with_capacity(samples);
     for _ in 0..samples {
         measured.push(
-            measure_specter_native_rfc9220_tunnel_mixed_once(
+            measure_warpsock_native_rfc9220_tunnel_mixed_once(
                 &client,
                 &stream_handle,
                 &stream_uri,
@@ -3785,28 +3790,28 @@ async fn measure_specter_native_rfc9220_tunnel_mixed(
         );
     }
 
-    Ok(specter_native_rfc9220_tunnel_mixed_row_from_samples(
+    Ok(warpsock_native_rfc9220_tunnel_mixed_row_from_samples(
         &measured,
     ))
 }
 
-async fn measure_specter_native_rfc9220_tunnel_once(
-    client: &specter::H3Client,
-    direct_handle: Option<&specter::transport::h3::H3Handle>,
+async fn measure_warpsock_native_rfc9220_tunnel_once(
+    client: &warpsock::H3Client,
+    direct_handle: Option<&warpsock::transport::h3::H3Handle>,
     url: &str,
 ) -> anyhow::Result<AdapterSample> {
     let payload = Bytes::from(vec![b'w'; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE]);
     let start = Instant::now();
     let open = async {
         if let Some(handle) = direct_handle {
-            open_specter_rfc9220_tunnel_with_handle(handle, url).await
+            open_warpsock_rfc9220_tunnel_with_handle(handle, url).await
         } else {
-            open_specter_rfc9220_tunnel(client, url).await
+            open_warpsock_rfc9220_tunnel(client, url).await
         }
     };
     let mut tunnel = tokio::time::timeout(adapter_timeout(), open)
         .await
-        .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel open timed out"))??;
+        .map_err(|_| anyhow::anyhow!("warpsock_native RFC 9220 tunnel open timed out"))??;
 
     if direct_handle.is_some() {
         tunnel.send_bytes_owned(payload.clone(), false).await?;
@@ -3816,11 +3821,11 @@ async fn measure_specter_native_rfc9220_tunnel_once(
 
     let echoed = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
         .await
-        .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel echo timed out"))?
-        .ok_or_else(|| anyhow::anyhow!("specter_native RFC 9220 tunnel closed before echo"))??;
+        .map_err(|_| anyhow::anyhow!("warpsock_native RFC 9220 tunnel echo timed out"))?
+        .ok_or_else(|| anyhow::anyhow!("warpsock_native RFC 9220 tunnel closed before echo"))??;
     if echoed.len() != payload.len() {
         anyhow::bail!(
-            "specter_native RFC 9220 tunnel echo length mismatch: expected {}, got {}",
+            "warpsock_native RFC 9220 tunnel echo length mismatch: expected {}, got {}",
             payload.len(),
             echoed.len()
         );
@@ -3830,17 +3835,17 @@ async fn measure_specter_native_rfc9220_tunnel_once(
     Ok(AdapterSample::new(total_ns, total_ns, echoed.len() as u64))
 }
 
-async fn measure_specter_native_rfc9220_tunnel_close_once(
-    client: &specter::H3Client,
-    direct_handle: Option<&specter::transport::h3::H3Handle>,
+async fn measure_warpsock_native_rfc9220_tunnel_close_once(
+    client: &warpsock::H3Client,
+    direct_handle: Option<&warpsock::transport::h3::H3Handle>,
     url: &str,
 ) -> anyhow::Result<AdapterSample> {
     let payload = Bytes::from(vec![b'c'; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE]);
-    if specter_direct_rfc9220_close_epoch_enabled() {
+    if warpsock_direct_rfc9220_close_epoch_enabled() {
         let handle = direct_handle.ok_or_else(|| {
-            anyhow::anyhow!("specter_native RFC 9220 direct close epoch requires direct handle")
+            anyhow::anyhow!("warpsock_native RFC 9220 direct close epoch requires direct handle")
         })?;
-        let tunnel_uri: http::Uri = specter_rfc9220_h3_url(url)?.parse()?;
+        let tunnel_uri: http::Uri = warpsock_rfc9220_h3_url(url)?.parse()?;
         let result = handle
             .run_native_rfc9220_tunnel_close_benchmark_epoch(
                 tunnel_uri,
@@ -3857,14 +3862,14 @@ async fn measure_specter_native_rfc9220_tunnel_close_once(
     let start = Instant::now();
     let open = async {
         if let Some(handle) = direct_handle {
-            open_specter_rfc9220_tunnel_with_handle(handle, url).await
+            open_warpsock_rfc9220_tunnel_with_handle(handle, url).await
         } else {
-            open_specter_rfc9220_tunnel(client, url).await
+            open_warpsock_rfc9220_tunnel(client, url).await
         }
     };
     let mut tunnel = tokio::time::timeout(adapter_timeout(), open)
         .await
-        .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel close open timed out"))??;
+        .map_err(|_| anyhow::anyhow!("warpsock_native RFC 9220 tunnel close open timed out"))??;
 
     if direct_handle.is_some() {
         tunnel.send_bytes_owned(payload.clone(), true).await?;
@@ -3874,11 +3879,11 @@ async fn measure_specter_native_rfc9220_tunnel_close_once(
 
     let echoed = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
         .await
-        .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel close echo timed out"))?
-        .ok_or_else(|| anyhow::anyhow!("specter_native RFC 9220 tunnel close before echo"))??;
+        .map_err(|_| anyhow::anyhow!("warpsock_native RFC 9220 tunnel close echo timed out"))?
+        .ok_or_else(|| anyhow::anyhow!("warpsock_native RFC 9220 tunnel close before echo"))??;
     if echoed.len() != payload.len() {
         anyhow::bail!(
-            "specter_native RFC 9220 close echo length mismatch: expected {}, got {}",
+            "warpsock_native RFC 9220 close echo length mismatch: expected {}, got {}",
             payload.len(),
             echoed.len()
         );
@@ -3886,11 +3891,11 @@ async fn measure_specter_native_rfc9220_tunnel_close_once(
 
     let end = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
         .await
-        .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel server FIN timed out"))?;
+        .map_err(|_| anyhow::anyhow!("warpsock_native RFC 9220 tunnel server FIN timed out"))?;
     if let Some(extra) = end {
         let extra = extra?;
         anyhow::bail!(
-            "specter_native RFC 9220 tunnel expected server FIN, got {} extra bytes",
+            "warpsock_native RFC 9220 tunnel expected server FIN, got {} extra bytes",
             extra.len()
         );
     }
@@ -3899,17 +3904,17 @@ async fn measure_specter_native_rfc9220_tunnel_close_once(
     Ok(AdapterSample::new(total_ns, total_ns, echoed.len() as u64))
 }
 
-async fn measure_specter_native_rfc9220_tunnel_mixed_once(
-    client: &specter::H3Client,
-    stream_handle: &specter::transport::h3::H3Handle,
+async fn measure_warpsock_native_rfc9220_tunnel_mixed_once(
+    client: &warpsock::H3Client,
+    stream_handle: &warpsock::transport::h3::H3Handle,
     stream_uri: &http::Uri,
     tunnel_url: &str,
 ) -> anyhow::Result<AdapterSample> {
     let payload = Bytes::from(vec![b'm'; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE]);
     let expected_tunnel_bytes =
         LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES;
-    if specter_direct_rfc9220_mixed_enabled() {
-        let tunnel_uri: http::Uri = specter_rfc9220_h3_url(tunnel_url)?.parse()?;
+    if warpsock_direct_rfc9220_mixed_enabled() {
+        let tunnel_uri: http::Uri = warpsock_rfc9220_h3_url(tunnel_url)?.parse()?;
         let result = stream_handle
             .run_native_rfc9220_mixed_benchmark_epoch(
                 stream_uri.clone(),
@@ -3923,7 +3928,7 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
             )
             .await?
             .ok_or_else(|| {
-                anyhow::anyhow!("specter_native RFC 9220 direct mixed epoch unavailable")
+                anyhow::anyhow!("warpsock_native RFC 9220 direct mixed epoch unavailable")
             })?;
         return Ok(AdapterSample::new(
             result.stream_first_byte_ns,
@@ -3939,7 +3944,7 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
         let handle = stream_handle.clone();
         let uri = stream_uri.clone();
         tokio::spawn(async move {
-            measure_specter_native_http3_stream_with_handle(&handle, &uri, start).await
+            measure_warpsock_native_http3_stream_with_handle(&handle, &uri, start).await
         })
     };
 
@@ -3949,11 +3954,11 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
         tokio::spawn(async move {
             let mut tunnel = tokio::time::timeout(
                 adapter_timeout(),
-                open_specter_rfc9220_tunnel(&client, &tunnel_url),
+                open_warpsock_rfc9220_tunnel(&client, &tunnel_url),
             )
             .await
             .map_err(|_| {
-                anyhow::anyhow!("specter_native RFC 9220 mixed tunnel open timed out")
+                anyhow::anyhow!("warpsock_native RFC 9220 mixed tunnel open timed out")
             })??;
 
             for index in 0..LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES {
@@ -3978,18 +3983,18 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
                 let chunk = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
                     .await
                     .map_err(|_| {
-                        anyhow::anyhow!("specter_native RFC 9220 mixed tunnel drain timed out")
+                        anyhow::anyhow!("warpsock_native RFC 9220 mixed tunnel drain timed out")
                     })?
                     .ok_or_else(|| {
                         anyhow::anyhow!(
-                            "specter_native RFC 9220 mixed tunnel ended after {echoed} of {expected_tunnel_bytes} bytes"
+                            "warpsock_native RFC 9220 mixed tunnel ended after {echoed} of {expected_tunnel_bytes} bytes"
                         )
                     })??;
                 echoed = echoed.saturating_add(chunk.len());
             }
             if echoed != expected_tunnel_bytes {
                 anyhow::bail!(
-                    "specter_native RFC 9220 mixed tunnel echo length mismatch: expected {expected_tunnel_bytes}, got {echoed}"
+                    "warpsock_native RFC 9220 mixed tunnel echo length mismatch: expected {expected_tunnel_bytes}, got {echoed}"
                 );
             }
 
@@ -4001,12 +4006,12 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
     let ((stream_first_byte_ns, stream_bytes), echoed) = tokio::try_join!(
         async {
             stream_handle.await.map_err(|error| {
-                anyhow::anyhow!("specter_native RFC 9220 mixed stream task failed: {error}")
+                anyhow::anyhow!("warpsock_native RFC 9220 mixed stream task failed: {error}")
             })?
         },
         async {
             tunnel_handle.await.map_err(|error| {
-                anyhow::anyhow!("specter_native RFC 9220 mixed tunnel task failed: {error}")
+                anyhow::anyhow!("warpsock_native RFC 9220 mixed tunnel task failed: {error}")
             })?
         }
     )?;
@@ -4018,8 +4023,8 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
     ))
 }
 
-async fn measure_specter_native_http3_stream_with_handle(
-    handle: &specter::transport::h3::H3Handle,
+async fn measure_warpsock_native_http3_stream_with_handle(
+    handle: &warpsock::transport::h3::H3Handle,
     uri: &http::Uri,
     start: Instant,
 ) -> anyhow::Result<(f64, u64)> {
@@ -4028,13 +4033,13 @@ async fn measure_specter_native_http3_stream_with_handle(
             http::Method::GET,
             uri,
             Vec::new(),
-            specter::RequestBody::Empty,
+            warpsock::RequestBody::Empty,
         )
         .await?;
     let stream_first_byte_ns = start.elapsed().as_nanos() as f64;
     if !(200..300).contains(&status) {
         anyhow::bail!(
-            "specter_native mixed stream received non-success status {}",
+            "warpsock_native mixed stream received non-success status {}",
             status
         );
     }
@@ -4593,7 +4598,7 @@ async fn measure_tokio_quiche_rfc9220_tunnel(
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
     // Bind+connect ONE QUIC connection (controller) before the warmup/sample
-    // loops, keep it alive across all warmups+samples (matching Specter, which
+    // loops, keep it alive across all warmups+samples (matching Warpsock, which
     // reuses one Client/connection), and open a fresh Extended-CONNECT stream per
     // sample. The QUIC handshake is paid once, outside the per-sample timer; each
     // sample times only stream-open + send + echo-recv. `_conn` is kept alive for
@@ -4657,7 +4662,7 @@ async fn measure_tokio_quiche_rfc9220_tunnel(
 // established tunnel. fin stays false so the stream stays open across echoes,
 // and only one frame is ever in flight (send one, fully read its echo, then
 // send the next), so the bounded inbound forward channel never fills and there
-// is no flow-control stall. Symmetric with the Specter steady-state driver,
+// is no flow-control stall. Symmetric with the Warpsock steady-state driver,
 // which opens one tunnel and echoes N times on it.
 async fn measure_tokio_quiche_rfc9220_tunnel_steadystate(
     controller: &mut tokio_quiche::ClientH3Controller,
@@ -4801,11 +4806,11 @@ async fn measure_tokio_quiche_rfc9220_tunnel_steadystate(
 // (warm) controller, await the CONNECT :status 200, then send the payload with
 // the fin in-band, drain the echo. Times stream-open + await-200 + send +
 // echo-recv, excluding the QUIC handshake. Mirrors
-// `measure_specter_native_rfc9220_tunnel_once`, which calls
+// `measure_warpsock_native_rfc9220_tunnel_once`, which calls
 // `client.websocket_h3(url).open().await` (awaiting the CONNECT 200, 1 RTT)
 // before `send_bytes` (1 RTT) = 2 RTT total. Sending the payload before
 // IncomingHeaders would pipeline CONNECT+payload into 1 RTT and understate
-// tokio's latency relative to Specter.
+// tokio's latency relative to Warpsock.
 async fn measure_tokio_quiche_rfc9220_tunnel_echo_once(
     controller: &mut tokio_quiche::ClientH3Controller,
     headers: &[tokio_quiche::quiche::h3::Header],
@@ -4838,7 +4843,7 @@ async fn measure_tokio_quiche_rfc9220_tunnel_echo_once(
         .ok_or_else(|| anyhow::anyhow!("tokio_quiche RFC 9220 body sender unavailable"))?
         .clone();
     // Do NOT send payload yet. Await IncomingHeaders (CONNECT :status 200) first,
-    // then send, so tokio pays the same 2-RTT sequence as Specter's .open().
+    // then send, so tokio pays the same 2-RTT sequence as Warpsock's .open().
 
     loop {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -4860,7 +4865,7 @@ async fn measure_tokio_quiche_rfc9220_tunnel_echo_once(
         match event {
             ClientH3Event::Core(H3Event::IncomingHeaders(headers)) => {
                 // CONNECT 200 received: tunnel open. Now send payload (mirroring
-                // Specter's send_bytes after .open() returns) then drain echo.
+                // Warpsock's send_bytes after .open() returns) then drain echo.
                 raw_sender
                     .try_send(OutboundFrame::Body(payload.clone(), true))
                     .map_err(|error| {
@@ -4895,16 +4900,16 @@ async fn measure_tokio_quiche_rfc9220_tunnel_close(
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    // Warm-vs-warm with measure_specter_native_rfc9220_tunnel_close: bind+connect
+    // Warm-vs-warm with measure_warpsock_native_rfc9220_tunnel_close: bind+connect
     // ONE QUIC connection before the loops and reuse it for every warmup+sample,
     // opening a fresh Extended-CONNECT stream per sample that sends fin=true and
     // reads the echo through the server's stream FIN (the fixture echoes with fin
     // set, so the read consumes the full stream-close lifecycle). The QUIC
-    // handshake is paid once, outside the per-sample timer -- Specter close
+    // handshake is paid once, outside the per-sample timer -- Warpsock close
     // reuses one Client and amortizes its handshake into warmups the same way.
     // The prior per-sample tokio_quiche::quic::connect timed a full handshake
     // inside every sample (warm-vs-cold), which is why this row read ~1.9ms
-    // against Specter's ~0.15ms; that asymmetry is removed here. The per-sample
+    // against Warpsock's ~0.15ms; that asymmetry is removed here. The per-sample
     // body is shared with the echo path because a one-shot fin=true CONNECT
     // stream IS the close lifecycle; only the payload tag and row builder differ.
     let url = parse_rfc9220_network_url(url)?;
@@ -5037,7 +5042,7 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
 
     // Issue the H3 stream request immediately on the warm connection, then wait
     // for both response header events before sending tunnel DATA. That matches
-    // Specter's mixed adapter shape: the stream request and Extended-CONNECT
+    // Warpsock's mixed adapter shape: the stream request and Extended-CONNECT
     // open race from t=0, but tunnel DATA is sent only after open().await
     // receives CONNECT 200.
     controller
@@ -5310,7 +5315,7 @@ async fn read_tokio_quiche_rfc9220_tunnel_echo(
 
 fn rfc9220_tunnel_payload(byte: u8) -> Bytes {
     // Steady-state-only payload size knob for the latency-vs-size discriminator:
-    // does the Specter-vs-tokio per-echo gap stay constant (fixed per-frame
+    // does the Warpsock-vs-tokio per-echo gap stay constant (fixed per-frame
     // overhead, vanishes at real frame sizes) or grow with size (per-byte cost)?
     // Both steady-state loops draw from this one function and terminate on the
     // returned length, so a single env var sweeps both clients symmetrically.
@@ -5577,9 +5582,9 @@ fn generate_local_fixture_cert_der() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let cert_path = std::env::temp_dir().join(format!("specter_native_h3_{stamp}.der"));
-    let key_pem_path = std::env::temp_dir().join(format!("specter_native_h3_{stamp}.key.pem"));
-    let key_der_path = std::env::temp_dir().join(format!("specter_native_h3_{stamp}.key.der"));
+    let cert_path = std::env::temp_dir().join(format!("warpsock_native_h3_{stamp}.der"));
+    let key_pem_path = std::env::temp_dir().join(format!("warpsock_native_h3_{stamp}.key.pem"));
+    let key_der_path = std::env::temp_dir().join(format!("warpsock_native_h3_{stamp}.key.der"));
     let output = Command::new("openssl")
         .args([
             "req",
@@ -5652,7 +5657,7 @@ async fn measure_tokio_quiche(
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
     // Establish ONE QUIC connection (controller) before the warmup/sample loops
-    // and reuse it warm across every sample, matching Specter's GET driver which
+    // and reuse it warm across every sample, matching Warpsock's GET driver which
     // reuses one Client/connection. The QUIC handshake is therefore paid once,
     // outside the per-sample timer; each sample sends a fresh request on the
     // warm controller and times only request -> first byte (and full body),
@@ -5697,7 +5702,7 @@ async fn measure_tokio_quiche(
 
 // Send ONE fresh GET request on an already-connected (warm) controller and time
 // only request -> first byte -> full body, excluding the QUIC handshake. Mirrors
-// `measure_specter_native_once`. Requests are strictly sequential (the full body
+// `measure_warpsock_native_once`. Requests are strictly sequential (the full body
 // is drained before the next sample), so only one stream is ever outstanding and
 // the first `IncomingHeaders` received IS this request's response; stale events
 // from the prior stream are `StreamClosed`/`BodyBytesReceived`, already ignored.
@@ -5987,7 +5992,7 @@ fn measure_quiche_direct(
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
     // Establish ONE quiche connection + h3 conn before the warmup/sample loops
-    // and reuse it warm across every sample, matching Specter's GET driver which
+    // and reuse it warm across every sample, matching Warpsock's GET driver which
     // reuses one Client/connection. The QUIC handshake is therefore paid once,
     // outside the per-sample timer; each sample sends a fresh GET request on the
     // warm connection and times only request -> first byte -> full body,
@@ -6136,7 +6141,7 @@ fn connect_quiche_direct_warm(url: &str) -> anyhow::Result<QuicheDirectWarmConn>
 
 // Send ONE fresh GET request on the already-connected (warm) quiche connection
 // and time only request -> first byte -> full body, excluding the QUIC
-// handshake. Mirrors `measure_specter_native_once`. Requests are strictly
+// handshake. Mirrors `measure_warpsock_native_once`. Requests are strictly
 // sequential (the full body is drained before returning), so only one stream is
 // ever outstanding per call; quiche's h3 client allocates a fresh stream id for
 // each `send_request`. Blocks on `recv_from` with the per-sample read deadline
@@ -6392,9 +6397,9 @@ mod tests {
     }
 
     #[test]
-    fn superiority_gate_rejects_measured_competitors_when_specter_is_slower() {
+    fn superiority_gate_rejects_measured_competitors_when_warpsock_is_slower() {
         let rows = vec![
-            measured_row("specter_native", 2_000.0, 3_000.0, 1_000.0),
+            measured_row("warpsock_native", 2_000.0, 3_000.0, 1_000.0),
             measured_row("quiche_direct", 1_000.0, 2_000.0, 2_000.0),
             measured_row("tokio_quiche", 1_500.0, 2_500.0, 1_500.0),
             measured_row("h3_quinn", 1_600.0, 2_600.0, 1_400.0),
@@ -6405,24 +6410,24 @@ mod tests {
 
         assert!(
             !gate.pass,
-            "slower Specter row must not pass superiority gate"
+            "slower Warpsock row must not pass superiority gate"
         );
         assert_eq!(gate.status, "fail");
-        assert_eq!(gate.fastest_non_specter_h3_client, Some("quiche_direct"));
+        assert_eq!(gate.fastest_non_warpsock_h3_client, Some("quiche_direct"));
         assert_eq!(gate.missing_required_rows, Vec::<&'static str>::new());
         assert_eq!(
             gate.reason,
-            "specter_native_not_faster_than_required_h3_competitors"
+            "warpsock_native_not_faster_than_required_h3_competitors"
         );
     }
 
     #[test]
     fn artifact_imports_competitor_rows_and_can_prove_superiority() {
-        let specter_artifact_json = r#"{
+        let warpsock_artifact_json = r#"{
           "rows": [
             {
               "protocol": "h3",
-              "client": "specter",
+              "client": "warpsock",
               "metrics": {
                 "p50_ns": 900.0,
                 "p95_ns": 1900.0,
@@ -6442,7 +6447,7 @@ mod tests {
         }"#;
 
         let artifact = super::artifact_with_competitor_artifacts(
-            Some(specter_artifact_json),
+            Some(warpsock_artifact_json),
             &[competitor_artifact_json],
         );
 
@@ -6450,10 +6455,10 @@ mod tests {
         assert_eq!(artifact.superiority_gate.status, "pass");
         assert_eq!(
             artifact.superiority_gate.reason,
-            "specter_native_is_faster_than_required_h3_competitors"
+            "warpsock_native_is_faster_than_required_h3_competitors"
         );
         assert_eq!(
-            artifact.superiority_gate.fastest_non_specter_h3_client,
+            artifact.superiority_gate.fastest_non_warpsock_h3_client,
             Some("quiche_direct")
         );
         assert!(artifact
@@ -6465,27 +6470,27 @@ mod tests {
     }
 
     #[test]
-    fn artifact_accepts_direct_specter_native_measurement_row() {
-        let specter_row = super::BenchmarkRow {
-            competitor_id: "specter_native".into(),
+    fn artifact_accepts_direct_warpsock_native_measurement_row() {
+        let warpsock_row = super::BenchmarkRow {
+            competitor_id: "warpsock_native".into(),
             status: "measured_pass".into(),
             p50_ttfb_ns: Some(100.0),
             p95_ttfb_ns: Some(200.0),
             bytes_per_sec: Some(300.0),
-            source: "specter_native_adapter".into(),
+            source: "warpsock_native_adapter".into(),
             ..super::BenchmarkRow::default()
         };
         let artifact =
-            super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &[specter_row]);
+            super::artifact_with_competitor_rows(None, &Vec::<&str>::new(), &[warpsock_row]);
 
         let row = artifact
             .rows
             .iter()
-            .find(|row| row.competitor_id == "specter_native")
-            .expect("direct Specter native row should be present");
+            .find(|row| row.competitor_id == "warpsock_native")
+            .expect("direct Warpsock native row should be present");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.p50_ttfb_ns, Some(100.0));
-        assert_eq!(row.source, "specter_native_adapter");
+        assert_eq!(row.source, "warpsock_native_adapter");
         assert_eq!(
             artifact.superiority_gate.reason,
             "no_h3_superiority_claim_without_all_required_rows"
@@ -6663,13 +6668,13 @@ mod tests {
         assert_eq!(
             tunnel_gate["required_rfc9220_tunnel_clients"],
             serde_json::json!([
-                "specter_native_rfc9220_tunnel",
+                "warpsock_native_rfc9220_tunnel",
                 "quiche_direct_rfc9220_tunnel",
                 "tokio_quiche_rfc9220_tunnel",
-                "specter_native_rfc9220_tunnel_close",
+                "warpsock_native_rfc9220_tunnel_close",
                 "quiche_direct_rfc9220_tunnel_close",
                 "tokio_quiche_rfc9220_tunnel_close",
-                "specter_native_rfc9220_tunnel_mixed",
+                "warpsock_native_rfc9220_tunnel_mixed",
                 "quiche_direct_rfc9220_tunnel_mixed",
                 "tokio_quiche_rfc9220_tunnel_mixed",
             ])
@@ -6680,11 +6685,11 @@ mod tests {
         assert_eq!(
             tunnel_gate["reason"],
             serde_json::json!(
-                "specter_native_rfc9220_tunnel_suite_is_faster_than_required_rfc9220_tunnel_competitors"
+                "warpsock_native_rfc9220_tunnel_suite_is_faster_than_required_rfc9220_tunnel_competitors"
             )
         );
         assert_eq!(
-            tunnel_gate["fastest_non_specter_rfc9220_tunnel_client"],
+            tunnel_gate["fastest_non_warpsock_rfc9220_tunnel_client"],
             serde_json::json!("quiche_direct_rfc9220_tunnel")
         );
     }
@@ -6692,12 +6697,12 @@ mod tests {
     fn rfc9220_full_suite_passing_rows() -> Vec<super::BenchmarkRow> {
         vec![
             super::BenchmarkRow {
-                competitor_id: "specter_native_rfc9220_tunnel".into(),
+                competitor_id: "warpsock_native_rfc9220_tunnel".into(),
                 status: "measured_pass".into(),
                 p50_ttfb_ns: Some(200_000.0),
                 p95_ttfb_ns: Some(350_000.0),
                 bytes_per_sec: Some(4_000_000.0),
-                source: "specter_native_rfc9220_tunnel_adapter".into(),
+                source: "warpsock_native_rfc9220_tunnel_adapter".into(),
                 sample_count: Some(100),
                 ..super::BenchmarkRow::default()
             },
@@ -6722,12 +6727,12 @@ mod tests {
                 ..super::BenchmarkRow::default()
             },
             super::BenchmarkRow {
-                competitor_id: "specter_native_rfc9220_tunnel_close".into(),
+                competitor_id: "warpsock_native_rfc9220_tunnel_close".into(),
                 status: "measured_pass".into(),
                 p50_ttfb_ns: Some(300_000.0),
                 p95_ttfb_ns: Some(900_000.0),
                 bytes_per_sec: Some(2_000_000.0),
-                source: "specter_native_rfc9220_tunnel_close_adapter".into(),
+                source: "warpsock_native_rfc9220_tunnel_close_adapter".into(),
                 sample_count: Some(100),
                 ..super::BenchmarkRow::default()
             },
@@ -6752,12 +6757,12 @@ mod tests {
                 ..super::BenchmarkRow::default()
             },
             super::BenchmarkRow {
-                competitor_id: "specter_native_rfc9220_tunnel_mixed".into(),
+                competitor_id: "warpsock_native_rfc9220_tunnel_mixed".into(),
                 status: "measured_pass".into(),
                 p50_ttfb_ns: Some(2_000_000.0),
                 p95_ttfb_ns: Some(3_000_000.0),
                 bytes_per_sec: Some(1_000_000.0),
-                source: "specter_native_rfc9220_tunnel_mixed_adapter".into(),
+                source: "warpsock_native_rfc9220_tunnel_mixed_adapter".into(),
                 sample_count: Some(100),
                 ..super::BenchmarkRow::default()
             },
@@ -6788,12 +6793,12 @@ mod tests {
     fn rfc9220_tunnel_superiority_gate_requires_all_rows_at_n100() {
         let measured_rows = vec![
             super::BenchmarkRow {
-                competitor_id: "specter_native_rfc9220_tunnel".into(),
+                competitor_id: "warpsock_native_rfc9220_tunnel".into(),
                 status: "measured_pass".into(),
                 p50_ttfb_ns: Some(200_000.0),
                 p95_ttfb_ns: Some(350_000.0),
                 bytes_per_sec: Some(4_000_000.0),
-                source: "specter_native_rfc9220_tunnel_adapter".into(),
+                source: "warpsock_native_rfc9220_tunnel_adapter".into(),
                 sample_count: Some(100),
                 ..super::BenchmarkRow::default()
             },
@@ -6833,10 +6838,10 @@ mod tests {
             tunnel_gate["missing_required_rfc9220_tunnel_rows"],
             serde_json::json!([
                 "tokio_quiche_rfc9220_tunnel",
-                "specter_native_rfc9220_tunnel_close",
+                "warpsock_native_rfc9220_tunnel_close",
                 "quiche_direct_rfc9220_tunnel_close",
                 "tokio_quiche_rfc9220_tunnel_close",
-                "specter_native_rfc9220_tunnel_mixed",
+                "warpsock_native_rfc9220_tunnel_mixed",
                 "quiche_direct_rfc9220_tunnel_mixed",
                 "tokio_quiche_rfc9220_tunnel_mixed",
             ])
@@ -6866,7 +6871,7 @@ mod tests {
     #[test]
     fn local_native_fixture_plan_includes_feature_enabled_clients() {
         let mut expected = vec![
-            "specter_native",
+            "warpsock_native",
             "quiche_direct",
             "tokio_quiche",
             "h3_quinn",
@@ -6876,9 +6881,9 @@ mod tests {
         expected.push("quinn_transport");
         #[cfg(feature = "s2n-quic-transport")]
         expected.push("s2n_quic_transport");
-        expected.push("specter_native_rfc9220_tunnel");
-        expected.push("specter_native_rfc9220_tunnel_close");
-        expected.push("specter_native_rfc9220_tunnel_mixed");
+        expected.push("warpsock_native_rfc9220_tunnel");
+        expected.push("warpsock_native_rfc9220_tunnel_close");
+        expected.push("warpsock_native_rfc9220_tunnel_mixed");
         expected.push("quiche_direct_rfc9220_tunnel");
         expected.push("tokio_quiche_rfc9220_tunnel");
         expected.push("quiche_direct_rfc9220_tunnel_close");
@@ -6949,13 +6954,13 @@ mod tests {
 
     #[test]
     fn artifact_emits_fixture_events_for_packet_error_audit() {
-        let specter_row = super::BenchmarkRow {
-            competitor_id: "specter_native".into(),
+        let warpsock_row = super::BenchmarkRow {
+            competitor_id: "warpsock_native".into(),
             status: "measured_pass".into(),
             p50_ttfb_ns: Some(100.0),
             p95_ttfb_ns: Some(200.0),
             bytes_per_sec: Some(300.0),
-            source: "specter_native_adapter".into(),
+            source: "warpsock_native_adapter".into(),
             ..super::BenchmarkRow::default()
         };
         let event = super::FixtureEvent {
@@ -6973,7 +6978,7 @@ mod tests {
         let artifact = super::artifact_with_competitor_rows_and_fixture_events(
             None,
             &Vec::<String>::new(),
-            &[specter_row],
+            &[warpsock_row],
             vec![event],
         );
 
@@ -7072,7 +7077,7 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let cert_path =
-            std::env::temp_dir().join(format!("specter_native_h3_cert_test_{stamp}.crt"));
+            std::env::temp_dir().join(format!("warpsock_native_h3_cert_test_{stamp}.crt"));
         std::fs::write(&cert_path, cert_pem).unwrap();
         let output = std::process::Command::new("openssl")
             .args([
@@ -7150,57 +7155,57 @@ mod tests {
     }
 
     #[test]
-    fn specter_native_rfc9220_tunnel_adapter_row_uses_measured_samples() {
+    fn warpsock_native_rfc9220_tunnel_adapter_row_uses_measured_samples() {
         let samples = vec![
             super::AdapterSample::new(40.0, 400.0, 4_000),
             super::AdapterSample::new(10.0, 100.0, 1_000),
             super::AdapterSample::new(20.0, 200.0, 2_000),
         ];
 
-        let row = super::specter_native_rfc9220_tunnel_row_from_samples(&samples);
+        let row = super::warpsock_native_rfc9220_tunnel_row_from_samples(&samples);
 
-        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel");
+        assert_eq!(row.competitor_id, "warpsock_native_rfc9220_tunnel");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.p50_ttfb_ns, Some(20.0));
         assert_eq!(row.p95_ttfb_ns, Some(40.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
-        assert_eq!(row.source, "specter_native_rfc9220_tunnel_adapter");
+        assert_eq!(row.source, "warpsock_native_rfc9220_tunnel_adapter");
     }
 
     #[test]
-    fn specter_native_rfc9220_tunnel_close_adapter_row_uses_measured_samples() {
+    fn warpsock_native_rfc9220_tunnel_close_adapter_row_uses_measured_samples() {
         let samples = vec![
             super::AdapterSample::new(60.0, 600.0, 6_000),
             super::AdapterSample::new(10.0, 100.0, 1_000),
             super::AdapterSample::new(30.0, 300.0, 3_000),
         ];
 
-        let row = super::specter_native_rfc9220_tunnel_close_row_from_samples(&samples);
+        let row = super::warpsock_native_rfc9220_tunnel_close_row_from_samples(&samples);
 
-        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_close");
+        assert_eq!(row.competitor_id, "warpsock_native_rfc9220_tunnel_close");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.p50_ttfb_ns, Some(30.0));
         assert_eq!(row.p95_ttfb_ns, Some(60.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
-        assert_eq!(row.source, "specter_native_rfc9220_tunnel_close_adapter");
+        assert_eq!(row.source, "warpsock_native_rfc9220_tunnel_close_adapter");
     }
 
     #[test]
-    fn specter_native_rfc9220_tunnel_mixed_adapter_row_uses_measured_samples() {
+    fn warpsock_native_rfc9220_tunnel_mixed_adapter_row_uses_measured_samples() {
         let samples = vec![
             super::AdapterSample::new(70.0, 700.0, 7_000),
             super::AdapterSample::new(10.0, 100.0, 1_000),
             super::AdapterSample::new(40.0, 400.0, 4_000),
         ];
 
-        let row = super::specter_native_rfc9220_tunnel_mixed_row_from_samples(&samples);
+        let row = super::warpsock_native_rfc9220_tunnel_mixed_row_from_samples(&samples);
 
-        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_mixed");
+        assert_eq!(row.competitor_id, "warpsock_native_rfc9220_tunnel_mixed");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.p50_ttfb_ns, Some(40.0));
         assert_eq!(row.p95_ttfb_ns, Some(70.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
-        assert_eq!(row.source, "specter_native_rfc9220_tunnel_mixed_adapter");
+        assert_eq!(row.source, "warpsock_native_rfc9220_tunnel_mixed_adapter");
     }
 
     #[test]
@@ -7378,13 +7383,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn specter_native_local_fixture_reuses_streaming_connection_for_multiple_samples() {
-        let fixture = super::LocalNativeH3Fixture::start("specter_native")
+    async fn warpsock_native_local_fixture_reuses_streaming_connection_for_multiple_samples() {
+        let fixture = super::LocalNativeH3Fixture::start("warpsock_native")
             .await
             .unwrap();
-        let client = specter::Client::builder()
+        let client = warpsock::Client::builder()
             .danger_accept_invalid_certs(true)
-            .h3_backend(specter::H3Backend::Native)
+            .h3_backend(warpsock::H3Backend::Native)
             .prefer_http2(false)
             .h3_upgrade(false)
             .total_timeout(std::time::Duration::from_secs(2))
@@ -7392,7 +7397,7 @@ mod tests {
             .unwrap();
 
         for index in 0..8 {
-            let bytes = specter_native_fixture_stream_bytes(&client, fixture.stream_url())
+            let bytes = warpsock_native_fixture_stream_bytes(&client, fixture.stream_url())
                 .await
                 .unwrap_or_else(|error| panic!("request {index} failed: {error:?}"));
             assert_eq!(
@@ -7405,48 +7410,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn specter_native_local_fixture_measures_rfc9220_tunnel_echo() {
-        let fixture = super::LocalNativeH3Fixture::start("specter_native_rfc9220_tunnel")
+    async fn warpsock_native_local_fixture_measures_rfc9220_tunnel_echo() {
+        let fixture = super::LocalNativeH3Fixture::start("warpsock_native_rfc9220_tunnel")
             .await
             .unwrap();
 
-        let row = super::measure_specter_native_rfc9220_tunnel(&fixture.tunnel_url(), 0, 1)
+        let row = super::measure_warpsock_native_rfc9220_tunnel(&fixture.tunnel_url(), 0, 1)
             .await
             .unwrap();
 
-        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel");
+        assert_eq!(row.competitor_id, "warpsock_native_rfc9220_tunnel");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.source, "specter_native_rfc9220_tunnel_adapter");
+        assert_eq!(row.source, "warpsock_native_rfc9220_tunnel_adapter");
         assert!(row.p50_ttfb_ns.is_some());
         assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
     #[tokio::test]
-    async fn specter_native_local_fixture_measures_rfc9220_tunnel_close_fin() {
-        let fixture = super::LocalNativeH3Fixture::start("specter_native_rfc9220_tunnel_close")
+    async fn warpsock_native_local_fixture_measures_rfc9220_tunnel_close_fin() {
+        let fixture = super::LocalNativeH3Fixture::start("warpsock_native_rfc9220_tunnel_close")
             .await
             .unwrap();
 
-        let row = super::measure_specter_native_rfc9220_tunnel_close(&fixture.tunnel_url(), 0, 1)
+        let row = super::measure_warpsock_native_rfc9220_tunnel_close(&fixture.tunnel_url(), 0, 1)
             .await
             .unwrap();
 
-        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_close");
+        assert_eq!(row.competitor_id, "warpsock_native_rfc9220_tunnel_close");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.source, "specter_native_rfc9220_tunnel_close_adapter");
+        assert_eq!(row.source, "warpsock_native_rfc9220_tunnel_close_adapter");
         assert!(row.p50_ttfb_ns.is_some());
         assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
     #[tokio::test]
-    async fn specter_native_local_fixture_measures_rfc9220_tunnel_slow_consumer_mixed_workload() {
-        let fixture = super::LocalNativeH3Fixture::start("specter_native_rfc9220_tunnel_mixed")
+    async fn warpsock_native_local_fixture_measures_rfc9220_tunnel_slow_consumer_mixed_workload() {
+        let fixture = super::LocalNativeH3Fixture::start("warpsock_native_rfc9220_tunnel_mixed")
             .await
             .unwrap();
 
-        let row = super::measure_specter_native_rfc9220_tunnel_mixed(
+        let row = super::measure_warpsock_native_rfc9220_tunnel_mixed(
             fixture.stream_url(),
             &fixture.tunnel_url(),
             0,
@@ -7455,9 +7460,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(row.competitor_id, "specter_native_rfc9220_tunnel_mixed");
+        assert_eq!(row.competitor_id, "warpsock_native_rfc9220_tunnel_mixed");
         assert_eq!(row.status, "measured_pass");
-        assert_eq!(row.source, "specter_native_rfc9220_tunnel_mixed_adapter");
+        assert_eq!(row.source, "warpsock_native_rfc9220_tunnel_mixed_adapter");
         assert!(row.p50_ttfb_ns.is_some());
         assert!(row.p95_ttfb_ns.is_some());
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
@@ -7632,13 +7637,13 @@ mod tests {
         assert!(row.bytes_per_sec.is_some_and(|throughput| throughput > 0.0));
     }
 
-    async fn specter_native_fixture_stream_bytes(
-        client: &specter::Client,
+    async fn warpsock_native_fixture_stream_bytes(
+        client: &warpsock::Client,
         url: &str,
     ) -> anyhow::Result<u64> {
         let mut response = client
             .get(url)
-            .version(specter::HttpVersion::Http3Only)
+            .version(warpsock::HttpVersion::Http3Only)
             .send_streaming()
             .await?;
         let mut bytes = 0u64;
@@ -7706,30 +7711,30 @@ mod tests {
     }
 
     #[test]
-    fn specter_native_adapter_row_uses_measured_samples() {
+    fn warpsock_native_adapter_row_uses_measured_samples() {
         let samples = vec![
             super::AdapterSample::new(70.0, 700.0, 7_000),
             super::AdapterSample::new(10.0, 100.0, 1_000),
             super::AdapterSample::new(40.0, 400.0, 4_000),
         ];
 
-        let row = super::specter_native_row_from_samples(&samples);
+        let row = super::warpsock_native_row_from_samples(&samples);
 
-        assert_eq!(row.competitor_id, "specter_native");
+        assert_eq!(row.competitor_id, "warpsock_native");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.p50_ttfb_ns, Some(40.0));
         assert_eq!(row.p95_ttfb_ns, Some(70.0));
         assert_eq!(row.bytes_per_sec, Some(10_000_000_000.0));
-        assert_eq!(row.source, "specter_native_adapter");
+        assert_eq!(row.source, "warpsock_native_adapter");
     }
 
     #[test]
-    fn imports_specter_native_h3_row_from_streaming_artifact() {
+    fn imports_warpsock_native_h3_row_from_streaming_artifact() {
         let artifact_json = r#"{
           "rows": [
             {
               "protocol": "h3",
-              "client": "specter",
+              "client": "warpsock",
               "metrics": {
                 "p50_ns": 1234.0,
                 "p95_ns": 2345.0,
@@ -7740,10 +7745,10 @@ mod tests {
           ]
         }"#;
 
-        let row = super::specter_row_from_streaming_artifact(artifact_json)
-            .expect("Specter native H3 row should import");
+        let row = super::warpsock_row_from_streaming_artifact(artifact_json)
+            .expect("Warpsock native H3 row should import");
 
-        assert_eq!(row.competitor_id, "specter_native");
+        assert_eq!(row.competitor_id, "warpsock_native");
         assert_eq!(row.status, "measured_pass");
         assert_eq!(row.p50_ttfb_ns, Some(1234.0));
         assert_eq!(row.p95_ttfb_ns, Some(2345.0));

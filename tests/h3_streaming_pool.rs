@@ -1,11 +1,11 @@
 use bytes::Bytes;
-use specter::pool::multiplexer::{OriginFairQueue, PoolKey};
-use specter::transport::h3::{H3Backend, H3Client};
-use specter::{FingerprintProfile, PseudoHeaderOrder, RequestBody};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
+use warpsock::pool::multiplexer::{OriginFairQueue, PoolKey};
+use warpsock::transport::h3::{H3Backend, H3Client};
+use warpsock::{FingerprintProfile, PseudoHeaderOrder, RequestBody};
 
 mod helpers;
 use helpers::mock_h3_server::{MockEvent, MockH3Server};

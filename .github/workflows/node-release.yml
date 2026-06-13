@@ -180,10 +180,10 @@ jobs:
         include:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary: specter.linux-x64-gnu.node
+            binary: warpsock.linux-x64-gnu.node
           - host: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            binary: specter.linux-arm64-gnu.node
+            binary: warpsock.linux-arm64-gnu.node
     runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@v4
@@ -270,6 +270,22 @@ jobs:
             test -f "${package_dir}/${binary}"
             (cd "$package_dir" && npm pack --dry-run)
           done
+
+      - name: Install packed npm package smoke
+        working-directory: bindings/node
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          root_tgz="$(npm pack --pack-destination "$tmp" | tail -1)"
+          native_tgz="$(
+            cd npm/linux-x64-gnu
+            npm pack --pack-destination "$tmp" | tail -1
+          )"
+          mkdir "$tmp/install"
+          cd "$tmp/install"
+          npm init -y >/dev/null
+          npm install --ignore-scripts "$tmp/$native_tgz" "$tmp/$root_tgz"
+          NAPI_RS_ENFORCE_VERSION_CHECK=1 node -e "require('warpsock')"
 
       - name: Publish
         run: |

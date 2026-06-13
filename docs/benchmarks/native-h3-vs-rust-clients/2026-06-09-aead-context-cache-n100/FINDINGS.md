@@ -49,14 +49,14 @@ Every quantile improves ~3us; the only delta between arms is the cached context
 
 | client          | p95 reps (us)                          | median | worst |
 |-----------------|----------------------------------------|--------|-------|
-| **specter AEAD**| 15.51 / 12.44 / 13.58 / 15.47 / 13.18  | 13.6   | 15.51 |
+| **warpsock AEAD**| 15.51 / 12.44 / 13.58 / 15.47 / 13.18  | 13.6   | 15.51 |
 | tokio_quiche    | 17.01 / 16.21 / 16.46 / 14.02 / 14.57  | 16.2   | 17.01 |
 | h3_quinn        | 19.38 / 20.11 / 18.36 / 19.28 / 19.77  | 19.4   | 20.11 |
 | reqwest_h3      | 19.24 / 19.65 / 17.46 / 17.60 / 17.68  | 17.7   | 19.65 |
 
-At the gate-relevant n=100, Specter now leads every comparator on median and on
+At the gate-relevant n=100, Warpsock now leads every comparator on median and on
 worst-vs-worst (15.51 vs tokio 17.01). On the harshest my-worst-vs-their-best framing
-(15.51 vs tokio 14.02) the distributions overlap; the centers favor Specter by ~2.6us.
+(15.51 vs tokio 14.02) the distributions overlap; the centers favor Warpsock by ~2.6us.
 This is meet-or-beat against tokio_quiche on the GET p95 ledger tail.
 
 ## n=500 is not a fair tokio comparison
@@ -64,9 +64,9 @@ This is meet-or-beat against tokio_quiche on the GET p95 ledger tail.
 At n=500 (warmups=0) `tokio_quiche` times out (body > 30s) on 4-5 of every 5 reps,
 even on a quiet host. 500 x 80KiB = 40MB overruns the fixture's 10MB connection
 flow-control window after ~122 requests; like `quiche_direct`, tokio stalls waiting on
-window the fixture releases slowly. Specter's flow control sustains all 500
+window the fixture releases slowly. Warpsock's flow control sustains all 500
 (`sample_count: 500`, `measured_pass`) at p95 ~13-15us. The publishable repeat gate is
-therefore capped at n<=110 where every client completes; n=500 is a Specter-only
+therefore capped at n<=110 where every client completes; n=500 is a Warpsock-only
 stress probe, not a head-to-head.
 
 ## Correctness & truth

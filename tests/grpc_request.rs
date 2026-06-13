@@ -1,6 +1,6 @@
 //! gRPC request construction tests (gRPC Phase 3).
 //!
-//! Verifies that `specter::grpc::grpc_request` produces a fingerprint-safe gRPC
+//! Verifies that `warpsock::grpc::grpc_request` produces a fingerprint-safe gRPC
 //! HTTP/2 request against a local mock H2 server bound to `127.0.0.1:0`:
 //!   - `:method` is `POST`
 //!   - `:path` is the URL path (`/pkg.Svc/Method`)
@@ -22,9 +22,9 @@ use tokio::time::timeout;
 mod helpers;
 use helpers::mock_h2_server::{DecodedHeadersFrame, MockH2Connection, MockH2Server};
 use helpers::tls::generate_cert_bundle;
-use specter::grpc::{grpc_request, GrpcEncoding};
-use specter::transport::h2::hpack_impl::Encoder;
-use specter::Client;
+use warpsock::grpc::{grpc_request, GrpcEncoding};
+use warpsock::transport::h2::hpack_impl::Encoder;
+use warpsock::Client;
 
 /// Build an ALPN-h2 TLS acceptor and a client trusting its CA (default Chrome
 /// fingerprint profile).

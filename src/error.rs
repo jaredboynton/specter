@@ -1,4 +1,4 @@
-//! Error types for specter crate.
+//! Error types for warpsock crate.
 
 use std::io;
 

@@ -2,10 +2,10 @@
 //!
 //! Validates shared Firefox TLS, HTTP/2, and header fingerprints match expected values.
 
-use specter::fingerprint::http2::Http2Settings;
-use specter::fingerprint::profiles::FingerprintProfile;
-use specter::fingerprint::tls::TlsFingerprint;
-use specter::headers::{firefox_133_ajax_headers, firefox_133_form_headers, firefox_133_headers};
+use warpsock::fingerprint::http2::Http2Settings;
+use warpsock::fingerprint::profiles::FingerprintProfile;
+use warpsock::fingerprint::tls::TlsFingerprint;
+use warpsock::headers::{firefox_133_ajax_headers, firefox_133_form_headers, firefox_133_headers};
 
 const FIREFOX_PROFILES: &[FingerprintProfile] = &[
     FingerprintProfile::Firefox133,
@@ -70,7 +70,7 @@ fn test_all_firefox_profiles_use_shared_firefox_transport_invariants() {
         assert!(!tls.grease, "{profile:?} should not use GREASE");
         assert_eq!(
             tls.cert_compression,
-            specter::fingerprint::tls::CertCompression::None
+            warpsock::fingerprint::tls::CertCompression::None
         );
         assert!(!tls.enable_kyber, "{profile:?} should not enable Kyber");
 
@@ -166,7 +166,7 @@ fn test_firefox_headers_no_client_hints() {
 
 #[test]
 fn test_firefox_http2_pseudo_header_order() {
-    use specter::transport::h2::PseudoHeaderOrder;
+    use warpsock::transport::h2::PseudoHeaderOrder;
 
     // Firefox uses m,p,a,s order
     assert_eq!(format!("{:?}", PseudoHeaderOrder::Firefox), "Firefox");

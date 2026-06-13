@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use futures_core::Stream;
-use specter::{Client, Error, HttpVersion, RedirectPolicy};
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -10,6 +9,7 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use warpsock::{Client, Error, HttpVersion, RedirectPolicy};
 
 #[derive(Clone, Debug)]
 struct CapturedRequest {
@@ -228,7 +228,7 @@ async fn read_chunked_request_body(
     }
 }
 
-async fn collect(mut response: specter::Response) -> Vec<u8> {
+async fn collect(mut response: warpsock::Response) -> Vec<u8> {
     let mut body = Vec::new();
     while let Some(frame) = response.body_mut().frame().await {
         body.extend_from_slice(&frame.unwrap().into_data().unwrap());

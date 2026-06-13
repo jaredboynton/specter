@@ -1,10 +1,10 @@
 [package]
-name = "specters"
-version = "4.2.3"
+name = "warpsock"
+version = "4.2.4"
 edition = "2021"
 license = "MIT"
 description = "Rust HTTP client with browser-like Chrome and Firefox fingerprints across TLS, HTTP/1.1, HTTP/2, HTTP/3, and WebSockets"
-repository = "https://github.com/jaredboynton/specter"
+repository = "https://github.com/jaredboynton/warpsock"
 keywords = ["http-client", "chrome", "tls", "fingerprint", "llm"]
 categories = ["network-programming", "web-programming::http-client"]
 authors = ["Jared Boynton"]
@@ -12,6 +12,7 @@ readme = "README.md"
 exclude = [
     "lib/boringssl/",
     "bindings/",
+    "deprecated/",
     "scripts/",
     ".github/",
     ".cargo/",
@@ -21,7 +22,7 @@ exclude = [
 ]
 
 [lib]
-name = "specter"
+name = "warpsock"
 
 [features]
 default = []
@@ -162,4 +163,7 @@ codegen-units = 16
 members = [
     "bindings/node",
     "bindings/python",
+]
+exclude = [
+    "deprecated/crates/specters",
 ]

@@ -1,6 +1,6 @@
 use bytes::Bytes;
-use specter::fingerprint::{QuicTransportParams, RawQuicTransportParameter};
-use specter::transport::h3::quic::{
+use warpsock::fingerprint::{QuicTransportParams, RawQuicTransportParameter};
+use warpsock::transport::h3::quic::{
     decode_transport_parameters, encode_server_transport_parameters, encode_transport_parameters,
     encode_transport_parameters_with_initial_source_connection_id, ConnectionId,
     TransportParameter,

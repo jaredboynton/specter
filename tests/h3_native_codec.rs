@@ -1,8 +1,8 @@
 use bytes::Bytes;
-use specter::fingerprint::{
+use warpsock::fingerprint::{
     H3Settings, Http3Fingerprint, QpackHeaderBlockStrategy, QpackStringEncodingStrategy,
 };
-use specter::transport::h3::native::{
+use warpsock::transport::h3::native::{
     build_request_headers, build_websocket_connect_headers, decode_frame, decode_frames,
     decode_header_block, decode_unidirectional_stream, encode_client_preface_streams,
     encode_fingerprint_settings_payload, encode_frame, encode_header_block, encode_request_stream,
@@ -109,7 +109,7 @@ fn native_h3_request_header_builder_filters_hop_by_hop_headers() {
         &http::Method::GET,
         &uri,
         &[
-            ("User-Agent".into(), "specter".into()),
+            ("User-Agent".into(), "warpsock".into()),
             ("Connection".into(), "keep-alive".into()),
             ("X-Trace".into(), "one".into()),
         ],
@@ -130,7 +130,7 @@ fn native_h3_request_header_builder_filters_hop_by_hop_headers() {
             (":path".into(), "/search?q=rust".into()),
         ]
     );
-    assert!(pairs.contains(&("user-agent".into(), "specter".into())));
+    assert!(pairs.contains(&("user-agent".into(), "warpsock".into())));
     assert!(pairs.contains(&("x-trace".into(), "one".into())));
     assert!(!pairs.iter().any(|(name, _)| name == "connection"));
 }

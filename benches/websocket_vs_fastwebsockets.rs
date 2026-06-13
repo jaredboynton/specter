@@ -6,9 +6,9 @@ use bytes::Bytes;
 use fastwebsockets::{Frame, OpCode, Payload, Role};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use specter::{Client, Message};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use warpsock::{Client, Message};
 
 const DEFAULT_MESSAGES: usize = 2_000;
 const DEFAULT_WARMUP_MESSAGES: usize = 200;
@@ -43,8 +43,8 @@ struct Row {
 
 #[derive(Serialize)]
 struct Comparison {
-    specter_vs_fastwebsockets_messages_per_sec_pct: f64,
-    specter_vs_tungstenite_messages_per_sec_pct: f64,
+    warpsock_vs_fastwebsockets_messages_per_sec_pct: f64,
+    warpsock_vs_tungstenite_messages_per_sec_pct: f64,
     pass_match_or_exceed: bool,
     pass_tungstenite_match_or_exceed: bool,
 }
@@ -70,15 +70,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let payload = Bytes::from(vec![0x5a; payload_bytes]);
     let fast = run_fastwebsockets(addr, warmup_messages, messages, &payload).await?;
     let tungstenite = run_tungstenite(addr, warmup_messages, messages, &payload).await?;
-    let specter = run_specter(addr, warmup_messages, messages, payload.clone()).await?;
+    let warpsock = run_warpsock(addr, warmup_messages, messages, payload.clone()).await?;
 
-    let fast_pct = percentage_delta(specter.messages_per_sec, fast.messages_per_sec);
-    let tungstenite_pct = percentage_delta(specter.messages_per_sec, tungstenite.messages_per_sec);
+    let fast_pct = percentage_delta(warpsock.messages_per_sec, fast.messages_per_sec);
+    let tungstenite_pct = percentage_delta(warpsock.messages_per_sec, tungstenite.messages_per_sec);
     let comparison = Comparison {
-        specter_vs_fastwebsockets_messages_per_sec_pct: fast_pct,
-        specter_vs_tungstenite_messages_per_sec_pct: tungstenite_pct,
-        pass_match_or_exceed: specter.messages_per_sec >= fast.messages_per_sec,
-        pass_tungstenite_match_or_exceed: specter.messages_per_sec >= tungstenite.messages_per_sec,
+        warpsock_vs_fastwebsockets_messages_per_sec_pct: fast_pct,
+        warpsock_vs_tungstenite_messages_per_sec_pct: tungstenite_pct,
+        pass_match_or_exceed: warpsock.messages_per_sec >= fast.messages_per_sec,
+        pass_tungstenite_match_or_exceed: warpsock.messages_per_sec >= tungstenite.messages_per_sec,
     };
 
     let artifact = Artifact {
@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             payload_bytes,
             echo_server: "fastwebsockets::WebSocket<Role::Server>",
         },
-        rows: vec![fast, tungstenite, specter],
+        rows: vec![fast, tungstenite, warpsock],
         comparison,
     };
 
@@ -194,7 +194,7 @@ fn websocket_accept(key: &str) -> String {
     BASE64_STANDARD.encode(boring::sha::sha1(&input))
 }
 
-async fn run_specter(
+async fn run_warpsock(
     addr: std::net::SocketAddr,
     warmup_messages: usize,
     messages: usize,
@@ -216,12 +216,12 @@ async fn run_specter(
         ws.send_binary(payload.clone()).await?;
         match ws.next().await? {
             Some(Message::Binary(bytes)) if bytes == payload => {}
-            other => return Err(format!("unexpected Specter echo frame: {other:?}").into()),
+            other => return Err(format!("unexpected Warpsock echo frame: {other:?}").into()),
         }
     }
     let elapsed = started.elapsed();
     ws.close(None).await?;
-    Ok(row("specter", elapsed, messages, payload.len()))
+    Ok(row("warpsock", elapsed, messages, payload.len()))
 }
 
 async fn run_fastwebsockets(

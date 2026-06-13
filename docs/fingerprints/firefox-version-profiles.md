@@ -1,10 +1,10 @@
 # Firefox Version Fingerprint Profiles
 
-This document records the source evidence and modeling boundary for Specter's Firefox desktop macOS fingerprint profiles.
+This document records the source evidence and modeling boundary for Warpsock's Firefox desktop macOS fingerprint profiles.
 
 ## Scope
 
-Specter implements:
+Warpsock implements:
 
 - Stable Firefox profiles `Firefox133` through `Firefox151`.
 - ESR profiles `FirefoxEsr115`, `FirefoxEsr128`, and `FirefoxEsr140`.
@@ -15,7 +15,7 @@ Specter implements:
 
 ## Certification Boundary
 
-This is source-level certification against Mozilla release metadata, release notes, and UA documentation. The version-specific pieces are the Firefox User-Agent token and the static request header helpers. The transport pieces are intentionally shared across all Firefox profiles because Specter does not have capture-backed evidence that TLS, HTTP/2, or HTTP/3 settings drift across Firefox 133-151 or the modeled ESR lines.
+This is source-level certification against Mozilla release metadata, release notes, and UA documentation. The version-specific pieces are the Firefox User-Agent token and the static request header helpers. The transport pieces are intentionally shared across all Firefox profiles because Warpsock does not have capture-backed evidence that TLS, HTTP/2, or HTTP/3 settings drift across Firefox 133-151 or the modeled ESR lines.
 
 All Firefox profiles map to:
 

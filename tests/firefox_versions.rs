@@ -6,11 +6,11 @@
 
 use std::collections::HashSet;
 
-use specter::fingerprint::http2::Http2Settings;
-use specter::fingerprint::http3::Http3Fingerprint;
-use specter::fingerprint::profiles::FingerprintProfile;
-use specter::fingerprint::tls::{CertCompression, TlsFingerprint};
-use specter::headers::{
+use warpsock::fingerprint::http2::Http2Settings;
+use warpsock::fingerprint::http3::Http3Fingerprint;
+use warpsock::fingerprint::profiles::FingerprintProfile;
+use warpsock::fingerprint::tls::{CertCompression, TlsFingerprint};
+use warpsock::headers::{
     firefox_133_ajax_headers, firefox_133_form_headers, firefox_133_headers,
     firefox_134_ajax_headers, firefox_134_form_headers, firefox_134_headers,
     firefox_135_ajax_headers, firefox_135_form_headers, firefox_135_headers,
@@ -35,8 +35,8 @@ use specter::headers::{
     firefox_esr_140_ajax_headers, firefox_esr_140_form_headers, firefox_esr_140_headers,
     OrderedHeaders,
 };
-use specter::transport::h2::PseudoHeaderOrder;
-use specter::PoolKey;
+use warpsock::transport::h2::PseudoHeaderOrder;
+use warpsock::PoolKey;
 
 type HeaderFactory = fn() -> Vec<(&'static str, &'static str)>;
 

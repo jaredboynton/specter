@@ -2,7 +2,7 @@
 """Non-publishable paired-repeat scout for the native H3 GET bottleneck.
 
 This parser is intentionally stricter than the one-shot SCOUT_GATE stamp:
-Specter's worst repeat must meet or beat quiche_direct's best repeat on p50,
+Warpsock's worst repeat must meet or beat quiche_direct's best repeat on p50,
 p95, and ledger-paced throughput. It is also intentionally non-publishable; a candidate
 stamp only authorizes a full selected-row publication gate run.
 """
@@ -38,7 +38,7 @@ def _canonical_path(value: Any) -> Any:
     return value
 
 
-PAIR_CLIENTS = ("specter_native", "quiche_direct")
+PAIR_CLIENTS = ("warpsock_native", "quiche_direct")
 WORKLOAD = "http3_streaming_get"
 
 
@@ -372,37 +372,37 @@ def evaluate_manifests(
 
     edges: dict[str, Any] = {}
     if not failures and len(runs) == len(manifest_paths):
-        specter_rows = [run["rows"]["specter_native"] for run in runs]
+        warpsock_rows = [run["rows"]["warpsock_native"] for run in runs]
         quiche_rows = [run["rows"]["quiche_direct"] for run in runs]
         ledger_gate = one.fixture_ledger_gate_enabled(runs[0]["manifest"]) or one.fixture_ledger_required(
             runs[0]["manifest"]
         )
         throughput_metric = "ledger_paced_bytes_per_sec" if ledger_gate else "bytes_per_sec"
         throughput_label = "ledger_paced_throughput" if ledger_gate else "throughput"
-        sp_p50 = max(float(row["p50_ttfb_ns"]) for row in specter_rows)
-        sp_p95 = max(float(row["p95_ttfb_ns"]) for row in specter_rows)
-        sp_tput = min(float(row[throughput_metric]) for row in specter_rows)
+        sp_p50 = max(float(row["p50_ttfb_ns"]) for row in warpsock_rows)
+        sp_p95 = max(float(row["p95_ttfb_ns"]) for row in warpsock_rows)
+        sp_tput = min(float(row[throughput_metric]) for row in warpsock_rows)
         q_p50 = min(float(row["p50_ttfb_ns"]) for row in quiche_rows)
         q_p95 = min(float(row["p95_ttfb_ns"]) for row in quiche_rows)
         q_tput = max(float(row[throughput_metric]) for row in quiche_rows)
         edges = {
-            "specter_worst_p50_ttfb_ns": sp_p50,
+            "warpsock_worst_p50_ttfb_ns": sp_p50,
             "quiche_direct_best_p50_ttfb_ns": q_p50,
-            "specter_worst_p95_ttfb_ns": sp_p95,
+            "warpsock_worst_p95_ttfb_ns": sp_p95,
             "quiche_direct_best_p95_ttfb_ns": q_p95,
             "throughput_metric": throughput_metric,
-            "specter_worst_bytes_per_sec": sp_tput,
+            "warpsock_worst_bytes_per_sec": sp_tput,
             "quiche_direct_best_bytes_per_sec": q_tput,
             "p50_margin_ns": q_p50 - sp_p50,
             "p95_margin_ns": q_p95 - sp_p95,
             "throughput_margin_bytes_per_sec": sp_tput - q_tput,
         }
         if sp_p50 > q_p50:
-            failures.append(f"FAIL_PAIR p50 specter_worst={sp_p50:.0f} quiche_best={q_p50:.0f}")
+            failures.append(f"FAIL_PAIR p50 warpsock_worst={sp_p50:.0f} quiche_best={q_p50:.0f}")
         if sp_p95 > q_p95:
-            failures.append(f"FAIL_PAIR p95 specter_worst={sp_p95:.0f} quiche_best={q_p95:.0f}")
+            failures.append(f"FAIL_PAIR p95 warpsock_worst={sp_p95:.0f} quiche_best={q_p95:.0f}")
         if sp_tput < q_tput:
-            failures.append(f"FAIL_PAIR {throughput_label} specter_worst={sp_tput:.6f} quiche_best={q_tput:.6f}")
+            failures.append(f"FAIL_PAIR {throughput_label} warpsock_worst={sp_tput:.6f} quiche_best={q_tput:.6f}")
 
     candidate = not failures
     return failures, runs, edges, candidate

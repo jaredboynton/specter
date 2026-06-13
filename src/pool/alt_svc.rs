@@ -99,7 +99,7 @@ impl AltSvcCache {
 /// # Examples
 ///
 /// ```
-/// use specter::pool::alt_svc::parse_alt_svc;
+/// use warpsock::pool::alt_svc::parse_alt_svc;
 ///
 /// let header = r#"h3=":443"; ma=86400, h3-29="alt.com:8443"; persist=1"#;
 /// let entries = parse_alt_svc(header, 3600);

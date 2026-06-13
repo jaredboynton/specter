@@ -1,0 +1,146 @@
+name: Deprecation Bridge Release
+
+on:
+  workflow_run:
+    workflows: ['Node Release', 'Python Release', 'Crates Release']
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Publish old-name bridge packages
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Verify renamed package workflows passed
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force
+          tag="$(git tag --points-at "$HEAD_SHA" --list 'v*' | sort -V | tail -1)"
+          if [[ -z "$tag" ]]; then
+            echo "No v* tag points at $HEAD_SHA" >&2
+            exit 1
+          fi
+
+          for attempt in {1..30}; do
+            ready=true
+            for workflow in "Node Release" "Python Release" "Crates Release"; do
+              run_state="$(
+                gh run list \
+                  --workflow "$workflow" \
+                  --commit "$HEAD_SHA" \
+                  --event push \
+                  --json databaseId,status,conclusion \
+                  --jq '[.[] | select(.status == "completed")] | .[0] | if . == null then "missing" else "\(.databaseId):\(.conclusion)" end'
+              )"
+              case "$run_state" in
+                *:success)
+                  echo "$workflow succeeded in run ${run_state%%:*}"
+                  ;;
+                *:failure|*:cancelled|*:timed_out|*:action_required)
+                  echo "$workflow completed without success for $tag ($HEAD_SHA): $run_state" >&2
+                  exit 1
+                  ;;
+                *)
+                  ready=false
+                  echo "$workflow is not completed successfully yet for $tag ($HEAD_SHA): $run_state"
+                  ;;
+              esac
+            done
+
+            if [[ "$ready" == "true" ]]; then
+              break
+            fi
+
+            if [[ "$attempt" -eq 30 ]]; then
+              echo "Renamed package workflows are still pending; waiting for another workflow_run event"
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          version="${tag#v}"
+          root_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          if [[ "$version" != "$root_version" ]]; then
+            echo "Tag $tag does not match root package version $root_version" >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "ready=true"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        if: steps.release.outputs.ready == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install prebuilt BoringSSL
+        if: steps.release.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          chmod +x scripts/install-boringssl-prebuilt.sh
+          ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml x86_64-unknown-linux-gnu
+
+      - name: Publish Rust specters bridge
+        if: steps.release.outputs.ready == 'true'
+        env:
+          BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/x86_64-unknown-linux-gnu/build
+          BORING_BSSL_INCLUDE_PATH: ${{ github.workspace }}/lib/boringssl/include
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          publish_log="$(mktemp)"
+          if cargo publish --manifest-path deprecated/crates/specters/Cargo.toml 2>&1 | tee "$publish_log"; then
+            exit 0
+          fi
+          if grep -Eiq 'already (uploaded|exists)|crate version .*already' "$publish_log"; then
+            echo "specters bridge version is already published; treating as success"
+            exit 0
+          fi
+          exit 1
+
+      - name: Publish PyPI specters bridge
+        if: steps.release.outputs.ready == 'true'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build twine
+          python -m build deprecated/python/specters
+          python -m twine upload --skip-existing deprecated/python/specters/dist/*
+
+      - name: Deprecate old npm package names
+        if: steps.release.outputs.ready == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN"
+          message="Renamed to Warpsock. Install warpsock instead."
+          npm deprecate 'specters@*' "$message"
+          for package in specters-darwin-arm64 specters-darwin-x64 specters-linux-arm64-gnu specters-linux-x64-gnu; do
+            npm deprecate "$package@*" "$message"
+          done

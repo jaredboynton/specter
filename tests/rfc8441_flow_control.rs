@@ -1,13 +1,13 @@
 use bytes::Bytes;
 use http::Uri;
-use specter::fingerprint::http2::Http2Settings;
-use specter::transport::h2::{
-    flags, FrameHeader, FrameType, H2TunnelOutbound, PseudoHeaderOrder, RawH2Connection,
-    SettingsFrame, CONNECTION_PREFACE, FRAME_HEADER_SIZE,
-};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
+use warpsock::fingerprint::http2::Http2Settings;
+use warpsock::transport::h2::{
+    flags, FrameHeader, FrameType, H2TunnelOutbound, PseudoHeaderOrder, RawH2Connection,
+    SettingsFrame, CONNECTION_PREFACE, FRAME_HEADER_SIZE,
+};
 
 async fn read_client_preface_and_settings(server: &mut DuplexStream) {
     let mut preface = vec![0; CONNECTION_PREFACE.len()];
@@ -68,7 +68,7 @@ async fn write_headers(
     end_stream: bool,
 ) {
     let headers =
-        specter::transport::h2::HeadersFrame::new(stream_id, Bytes::copy_from_slice(header_block))
+        warpsock::transport::h2::HeadersFrame::new(stream_id, Bytes::copy_from_slice(header_block))
             .end_headers(true)
             .end_stream(end_stream);
     server.write_all(&headers.serialize()).await.unwrap();
@@ -78,7 +78,7 @@ async fn write_headers(
 async fn rfc8441_tunnel_send_bytes_preserves_end_stream_for_driver_flush() {
     let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
     let (_inbound_tx, inbound_rx) = mpsc::channel(4);
-    let tunnel = specter::transport::h2::H2Tunnel::new(outbound_tx, inbound_rx);
+    let tunnel = warpsock::transport::h2::H2Tunnel::new(outbound_tx, inbound_rx);
 
     tunnel
         .send_bytes(Bytes::from_static(b"final"), true)
@@ -94,7 +94,7 @@ async fn rfc8441_tunnel_send_bytes_preserves_end_stream_for_driver_flush() {
 async fn rfc8441_tunnel_close_send_queues_empty_end_stream() {
     let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
     let (_inbound_tx, inbound_rx) = mpsc::channel(4);
-    let tunnel = specter::transport::h2::H2Tunnel::new(outbound_tx, inbound_rx);
+    let tunnel = warpsock::transport::h2::H2Tunnel::new(outbound_tx, inbound_rx);
 
     tunnel.close_send().await.expect("close queued");
 

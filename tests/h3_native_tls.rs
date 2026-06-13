@@ -1,14 +1,14 @@
 use bytes::Bytes;
-use specter::fingerprint::tls::{NativeH3TlsFeatureStatus, TlsExtensionOrderBehavior};
-use specter::fingerprint::{
+use warpsock::fingerprint::tls::{NativeH3TlsFeatureStatus, TlsExtensionOrderBehavior};
+use warpsock::fingerprint::{
     CertCompression, Http3Fingerprint, RawQuicTransportParameter, TlsFingerprint,
 };
-use specter::transport::h3::quic::{
+use warpsock::transport::h3::quic::{
     decode_frames, decode_long_header, decode_transport_parameters, derive_initial_key_material,
     derive_packet_key_material_from_secret, encode_transport_parameters, open_initial_packet,
     ConnectionId, LongHeaderType, QuicFrame, TransportParameter,
 };
-use specter::transport::h3::tls::{
+use warpsock::transport::h3::tls::{
     build_client_initial_packet, capture_client_initial_crypto, native_h3_tls_capabilities,
     NativeQuicTlsSession, QuicEncryptionLevel, QuicSecretDirection, QuicTlsSecret,
 };

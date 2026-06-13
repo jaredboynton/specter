@@ -12,11 +12,11 @@
 
 use bytes::Bytes;
 use futures_core::Stream;
-use specter::{Error, RequestBody};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use warpsock::{Error, RequestBody};
 
 struct CountingStream {
     chunks: Vec<Bytes>,
@@ -127,7 +127,7 @@ async fn streaming_bodies_are_not_materialized_by_into_bytes() {
 
 #[test]
 fn builder_body_stream_methods_do_not_pre_buffer_producer() {
-    let client = specter::Client::new().expect("client");
+    let client = warpsock::Client::new().expect("client");
     let polls = Arc::new(AtomicUsize::new(0));
     let stream = CountingStream {
         chunks: vec![Bytes::from_static(b"x"), Bytes::from_static(b"y")],

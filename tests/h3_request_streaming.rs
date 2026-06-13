@@ -1,11 +1,11 @@
 use bytes::Bytes;
 use futures_core::Stream;
-use specter::{Client, Error, H3Backend, HttpVersion};
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use warpsock::{Client, Error, H3Backend, HttpVersion};
 
 mod helpers;
 use helpers::mock_h3_server::{MockEvent, MockH3Server};

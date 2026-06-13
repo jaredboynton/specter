@@ -1,6 +1,5 @@
 use boring::ssl::SslAcceptor;
 use bytes::{Bytes, BytesMut};
-use specter::transport::h2::HpackDecoder;
 use std::future::Future;
 use std::io;
 use std::sync::Arc;
@@ -9,6 +8,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::timeout;
+use warpsock::transport::h2::HpackDecoder;
 
 const TEST_IO_TIMEOUT: Duration = Duration::from_secs(1);
 

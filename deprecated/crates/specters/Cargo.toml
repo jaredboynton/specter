@@ -1,0 +1,19 @@
+[package]
+name = "specters"
+version = "4.2.4"
+edition = "2021"
+license = "MIT"
+description = "Deprecated package name for Warpsock. Depend on warpsock instead."
+repository = "https://github.com/jaredboynton/warpsock"
+readme = "README.md"
+keywords = ["http-client", "chrome", "tls", "fingerprint", "llm"]
+categories = ["network-programming", "web-programming::http-client"]
+authors = ["Jared Boynton"]
+build = "build.rs"
+
+[lib]
+name = "specter"
+path = "src/lib.rs"
+
+[dependencies]
+warpsock = "4.2.4"

@@ -2228,7 +2228,7 @@ impl ClientBuilder {
         self.h1_max_connections_per_origin(max)
     }
 
-    /// Enable Specter's built-in cached async DNS resolver.
+    /// Enable Warpsock's built-in cached async DNS resolver.
     ///
     /// Enabled by default. Pass `false` to resolve on every connection attempt.
     pub fn hickory_dns(mut self, enable: bool) -> Self {
@@ -2323,7 +2323,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Toggle adaptive HTTP/2 windows. Stored for API parity; Specter's HTTP/2
+    /// Toggle adaptive HTTP/2 windows. Stored for API parity; Warpsock's HTTP/2
     /// fingerprinting uses explicit window settings from `Http2Settings`.
     pub fn http2_adaptive_window(self, _enabled: bool) -> Self {
         self

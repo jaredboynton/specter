@@ -1,7 +1,7 @@
 #!/bin/bash
 # Extract prebuilt BoringSSL libraries from cargo build cache
 #
-# This script runs cargo build for specter and extracts the BoringSSL libraries
+# This script runs cargo build for warpsock and extracts the BoringSSL libraries
 # that boring-sys builds. This ensures ABI compatibility with boring-sys.
 #
 # Usage:
@@ -71,7 +71,7 @@ build_and_extract() {
     
     case "$target" in
         *-apple-darwin)
-            cargo build --release --target "$target" -p specter 2>&1 | tail -5
+            cargo build --release --target "$target" -p warpsock 2>&1 | tail -5
             ;;
         *-unknown-linux-gnu|*-unknown-linux-musl)
             # Use zigbuild for Linux cross-compilation
@@ -79,7 +79,7 @@ build_and_extract() {
                 log "Installing cargo-zigbuild..."
                 cargo install cargo-zigbuild
             fi
-            cargo zigbuild --release --target "$target" -p specter 2>&1 | tail -5
+            cargo zigbuild --release --target "$target" -p warpsock 2>&1 | tail -5
             ;;
         *-pc-windows-msvc)
             # Use cargo-xwin for Windows
@@ -87,7 +87,7 @@ build_and_extract() {
                 log "Installing cargo-xwin..."
                 cargo install cargo-xwin
             fi
-            cargo xwin build --release --target "$target" -p specter 2>&1 | tail -5
+            cargo xwin build --release --target "$target" -p warpsock 2>&1 | tail -5
             ;;
         *)
             error "Unknown target: $target"

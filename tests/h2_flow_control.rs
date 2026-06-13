@@ -3,9 +3,9 @@
 //! Verifies that the client correctly respects flow control windows
 //! and waits for WINDOW_UPDATE frames during large uploads.
 
-use specter::Client;
 use std::time::Duration;
 use tokio::time::timeout;
+use warpsock::Client;
 
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};
@@ -212,7 +212,7 @@ async fn test_large_upload_flow_control() {
 
                     tracing::info!("Server: Sending Window Update");
                     // Update both Stream and Connection windows
-                    // Wait, Specter checks BOTH.
+                    // Wait, Warpsock checks BOTH.
                     // Example: We consumed 65535.
                     // We need to give credit back.
 

@@ -11,7 +11,7 @@
 #   1. BORING_BSSL_PATH already exported in the environment (e.g. from
 #      ~/.zshrc) - used as-is, no rewrite.
 #   2. ${BORING_BSSL_PREBUILT_ROOT:-$HOME/boringssl}/<target>/build/
-#      Default user-wide vendored location. This is where the specter
+#      Default user-wide vendored location. This is where the warpsock
 #      prebuilts were moved on 2026-05-20.
 #   3. <repo>/lib/boringssl/<target>/build/  (legacy in-repo location;
 #      kept for fresh clones that still ship libs in-tree).

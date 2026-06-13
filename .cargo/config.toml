@@ -1,4 +1,4 @@
-# Cargo configuration for specter
+# Cargo configuration for warpsock
 # Uses prebuilt BoringSSL libraries from lib/boringssl/
 
 # Note: Environment variables for boring-sys are set via:

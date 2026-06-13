@@ -1864,78 +1864,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "specter-node"
-version = "4.2.3"
-dependencies = [
- "bytes",
- "futures-core",
- "http",
- "napi",
- "napi-build",
- "napi-derive",
- "serde_json",
- "specters",
- "tokio",
-]
-
-[[package]]
-name = "specter-python"
-version = "4.2.3"
-dependencies = [
- "bytes",
- "futures-core",
- "http",
- "pyo3",
- "pyo3-async-runtimes",
- "specters",
- "tokio",
-]
-
-[[package]]
-name = "specters"
-version = "4.2.3"
-dependencies = [
- "atomic-waker",
- "base64",
- "boring",
- "boring-sys",
- "brotli",
- "bytes",
- "chrono",
- "fastwebsockets",
- "flate2",
- "foreign-types-shared",
- "futures-core",
- "futures-util",
- "getrandom 0.3.4",
- "hex",
- "http",
- "http-body",
- "httparse",
- "libc",
- "mimalloc",
- "parking_lot",
- "pin-project-lite",
- "psl",
- "rcgen",
- "reqwest",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha2",
- "socket2",
- "thiserror 2.0.18",
- "tokio",
- "tokio-boring",
- "tokio-test",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "zstd",
-]
-
-[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2392,6 +2320,78 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfa7760aed19e106de2c7c0b581b509f2f25d3dacaf737cb82ac61bc6d760b0e"
 dependencies = [
  "try-lock",
+]
+
+[[package]]
+name = "warpsock"
+version = "4.2.4"
+dependencies = [
+ "atomic-waker",
+ "base64",
+ "boring",
+ "boring-sys",
+ "brotli",
+ "bytes",
+ "chrono",
+ "fastwebsockets",
+ "flate2",
+ "foreign-types-shared",
+ "futures-core",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "http",
+ "http-body",
+ "httparse",
+ "libc",
+ "mimalloc",
+ "parking_lot",
+ "pin-project-lite",
+ "psl",
+ "rcgen",
+ "reqwest",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2",
+ "socket2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-boring",
+ "tokio-test",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "zstd",
+]
+
+[[package]]
+name = "warpsock-node"
+version = "4.2.4"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "http",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "serde_json",
+ "tokio",
+ "warpsock",
+]
+
+[[package]]
+name = "warpsock-python"
+version = "4.2.4"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "http",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "tokio",
+ "warpsock",
 ]
 
 [[package]]

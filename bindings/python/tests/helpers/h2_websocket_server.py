@@ -12,7 +12,7 @@ from __future__ import annotations
 
 
 RUST_H2_FIXTURE_FALLBACK = {
-    "name": "specter-h2-ws-fixture",
+    "name": "warpsock-h2-ws-fixture",
     "transport": "h2c prior knowledge on 127.0.0.1:0",
     "accept": {
         ":method": "CONNECT",

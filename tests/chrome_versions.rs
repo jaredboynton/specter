@@ -3,10 +3,10 @@
 //! Validates Chrome 142-148 fingerprint profiles produce correct
 //! User-Agent strings, Sec-Ch-Ua headers, and shared TLS/HTTP/2/HTTP/3 config.
 
-use specter::fingerprint::profiles::FingerprintProfile;
-use specter::fingerprint::tls::{CertCompression, TlsFingerprint};
-use specter::fingerprint::Http3Fingerprint;
-use specter::headers::{
+use warpsock::fingerprint::profiles::FingerprintProfile;
+use warpsock::fingerprint::tls::{CertCompression, TlsFingerprint};
+use warpsock::fingerprint::Http3Fingerprint;
+use warpsock::headers::{
     chrome_142_ajax_headers, chrome_142_form_headers, chrome_142_headers, chrome_143_ajax_headers,
     chrome_143_form_headers, chrome_143_headers, chrome_144_ajax_headers, chrome_144_form_headers,
     chrome_144_headers, chrome_145_ajax_headers, chrome_145_form_headers, chrome_145_headers,

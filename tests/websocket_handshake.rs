@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use boring::ssl::{select_next_proto, AlpnError, SslAcceptor};
-use specter::{Client, CookieJar, Message};
 use tokio::sync::RwLock;
+use warpsock::{Client, CookieJar, Message};
 
 #[path = "helpers/mock_ws_server.rs"]
 mod mock_ws_server;

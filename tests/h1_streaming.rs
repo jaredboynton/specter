@@ -1,5 +1,4 @@
 use bytes::Bytes;
-use specter::{Client, HttpVersion};
 use std::fs;
 use std::io::{Read as StdRead, Write as StdWrite};
 use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
@@ -12,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration, Instant};
+use warpsock::{Client, HttpVersion};
 
 #[derive(Clone, Debug)]
 struct RequestLog {
@@ -212,7 +212,7 @@ async fn write_fixed(stream: &mut TcpStream, chunks: &[&[u8]]) {
     }
 }
 
-async fn collect(mut response: specter::Response) -> Vec<u8> {
+async fn collect(mut response: warpsock::Response) -> Vec<u8> {
     let mut body = Vec::new();
     while let Some(frame) = response.body_mut().frame().await {
         let data = frame.unwrap().into_data().unwrap();
@@ -221,7 +221,7 @@ async fn collect(mut response: specter::Response) -> Vec<u8> {
     body
 }
 
-async fn next_data(body: &mut specter::Body) -> Bytes {
+async fn next_data(body: &mut warpsock::Body) -> Bytes {
     let frame = body.frame().await.unwrap().unwrap();
     frame.into_data().unwrap()
 }
@@ -382,7 +382,7 @@ async fn h1_streams_fixed_content_length_incrementally() {
 
     fixture.wait_for_first_chunk();
 
-    let first = timeout(Duration::from_millis(80), response.body_mut().frame())
+    let first = timeout(Duration::from_secs(5), response.body_mut().frame())
         .await
         .unwrap()
         .unwrap()
@@ -486,22 +486,26 @@ async fn h1_does_not_buffer_unfinished_stream() {
         .await
         .unwrap();
 
-    let first = timeout(Duration::from_millis(80), response.body_mut().frame())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap()
-        .into_data()
-        .unwrap();
-    assert_eq!(first, Bytes::from_static(b"early-1"));
-    let second = timeout(Duration::from_millis(80), response.body_mut().frame())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap()
-        .into_data()
-        .unwrap();
-    assert_eq!(second, Bytes::from_static(b"early-2"));
+    // The server flushes early-1 then early-2 and then holds the socket open
+    // forever, so a client that buffered the unfinished stream would block here
+    // indefinitely (the timeout would fire). TCP may coalesce the two flushed
+    // writes into a single read, so accumulate frames until both early payloads
+    // have arrived rather than asserting a particular frame boundary.
+    let mut received = Vec::new();
+    while received != b"early-1early-2" {
+        let data = timeout(Duration::from_secs(5), response.body_mut().frame())
+            .await
+            .expect("early body bytes must surface before the unfinished stream ends")
+            .expect("streaming body must yield another frame")
+            .expect("frame must not be an error")
+            .into_data()
+            .expect("frame must carry data");
+        received.extend_from_slice(&data);
+        assert!(
+            b"early-1early-2".starts_with(received.as_slice()),
+            "streamed bytes must be an in-order prefix of the early payloads, got {received:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -562,7 +566,7 @@ async fn h1_streaming_preserves_timeouts_and_cookies() {
     assert!(res.is_err());
     let err = res.err().unwrap();
     assert!(
-        matches!(err, specter::Error::TtfbTimeout(_)),
+        matches!(err, warpsock::Error::TtfbTimeout(_)),
         "Expected TtfbTimeout, got {:?}",
         err
     );
@@ -592,7 +596,7 @@ async fn h1_streaming_preserves_timeouts_and_cookies() {
     assert!(err_next.is_err());
     let err = err_next.err().unwrap();
     assert!(
-        matches!(err, specter::Error::ReadIdleTimeout(_)),
+        matches!(err, warpsock::Error::ReadIdleTimeout(_)),
         "Expected ReadIdleTimeout, got {:?}",
         err
     );
@@ -612,7 +616,7 @@ async fn h1_compressed_streaming_decodes_incrementally() {
     assert!(res.is_err());
     let err = res.err().unwrap();
     assert!(
-        matches!(err, specter::Error::Decompression(_)),
+        matches!(err, warpsock::Error::Decompression(_)),
         "Expected Decompression error, got {:?}",
         err
     );

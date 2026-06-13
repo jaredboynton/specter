@@ -189,10 +189,11 @@ jobs:
           . .venv/bin/activate
           pip install --upgrade pip
           pip install maturin pytest pytest-asyncio
-      - name: Build and install (maturin develop)
+      - name: Build and install wheel
         run: |
           . .venv/bin/activate
-          maturin develop --release --locked -m bindings/python/Cargo.toml
+          maturin build --release --locked --out dist -m bindings/python/Cargo.toml
+          pip install dist/*.whl
         env:
           MACOSX_DEPLOYMENT_TARGET: '11.0'
           BORING_BSSL_PATH: ${{ github.workspace }}/lib/boringssl/aarch64-apple-darwin/build
@@ -233,9 +234,9 @@ jobs:
           unset PYTHONPATH
           pip install --upgrade pip pytest pytest-asyncio
           pip install dist/*.whl
-          # Distribution name is `specters` (pyproject.toml project.name);
-          # module name is `specter` ([tool.maturin] module-name = "specter").
-          python -c "import specter; print('loaded:', specter.__file__)"
+          # Distribution name is `warpsock`; the native extension installs as
+          # `warpsock.warpsock` behind the Python package shim.
+          python -c "import warpsock; print('loaded:', warpsock.__file__)"
           test_dir="$(mktemp -d)"
           cp -R bindings/python/tests "$test_dir/tests"
           (cd "$test_dir" && python -m pytest tests/ -v)

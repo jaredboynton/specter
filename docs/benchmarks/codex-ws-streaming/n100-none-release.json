@@ -17,13 +17,13 @@
   "environment": {
     "os": "macos",
     "arch": "aarch64",
-    "specter_version": "4.0.1",
-    "specter_fingerprint": "none",
+    "warpsock_version": "4.0.1",
+    "warpsock_fingerprint": "none",
     "tokio_tungstenite_version": "0.24"
   },
   "rows": [
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": true,
       "sample_index": 0,
       "pair_index": 0,
@@ -77,7 +77,7 @@
       "epoch_ms": 1779676084991
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": true,
       "sample_index": 3,
       "pair_index": 1,
@@ -95,7 +95,7 @@
       "epoch_ms": 1779676088095
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": true,
       "sample_index": 4,
       "pair_index": 2,
@@ -149,7 +149,7 @@
       "epoch_ms": 1779676099096
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": true,
       "sample_index": 7,
       "pair_index": 3,
@@ -167,7 +167,7 @@
       "epoch_ms": 1779676102182
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 0,
       "pair_index": 0,
@@ -221,7 +221,7 @@
       "epoch_ms": 1779676112072
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 3,
       "pair_index": 1,
@@ -239,7 +239,7 @@
       "epoch_ms": 1779676116137
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 4,
       "pair_index": 2,
@@ -293,7 +293,7 @@
       "epoch_ms": 1779676125310
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 7,
       "pair_index": 3,
@@ -311,7 +311,7 @@
       "epoch_ms": 1779676128771
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 8,
       "pair_index": 4,
@@ -365,7 +365,7 @@
       "epoch_ms": 1779676138308
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 11,
       "pair_index": 5,
@@ -383,7 +383,7 @@
       "epoch_ms": 1779676141760
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 12,
       "pair_index": 6,
@@ -437,7 +437,7 @@
       "epoch_ms": 1779676150957
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 15,
       "pair_index": 7,
@@ -455,7 +455,7 @@
       "epoch_ms": 1779676154041
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 16,
       "pair_index": 8,
@@ -509,7 +509,7 @@
       "epoch_ms": 1779676164736
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 19,
       "pair_index": 9,
@@ -527,7 +527,7 @@
       "epoch_ms": 1779676169547
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 20,
       "pair_index": 10,
@@ -581,7 +581,7 @@
       "epoch_ms": 1779676179842
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 23,
       "pair_index": 11,
@@ -599,7 +599,7 @@
       "epoch_ms": 1779676184494
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 24,
       "pair_index": 12,
@@ -653,7 +653,7 @@
       "epoch_ms": 1779676193889
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 27,
       "pair_index": 13,
@@ -671,7 +671,7 @@
       "epoch_ms": 1779676197006
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 28,
       "pair_index": 14,
@@ -725,7 +725,7 @@
       "epoch_ms": 1779676206322
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 31,
       "pair_index": 15,
@@ -743,7 +743,7 @@
       "epoch_ms": 1779676217115
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 32,
       "pair_index": 16,
@@ -797,7 +797,7 @@
       "epoch_ms": 1779676226188
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 35,
       "pair_index": 17,
@@ -815,7 +815,7 @@
       "epoch_ms": 1779676229574
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 36,
       "pair_index": 18,
@@ -869,7 +869,7 @@
       "epoch_ms": 1779676239433
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 39,
       "pair_index": 19,
@@ -887,7 +887,7 @@
       "epoch_ms": 1779676242435
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 40,
       "pair_index": 20,
@@ -941,7 +941,7 @@
       "epoch_ms": 1779676252485
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 43,
       "pair_index": 21,
@@ -959,7 +959,7 @@
       "epoch_ms": 1779676255765
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 44,
       "pair_index": 22,
@@ -1013,7 +1013,7 @@
       "epoch_ms": 1779676266012
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 47,
       "pair_index": 23,
@@ -1031,7 +1031,7 @@
       "epoch_ms": 1779676269158
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 48,
       "pair_index": 24,
@@ -1085,7 +1085,7 @@
       "epoch_ms": 1779676278623
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 51,
       "pair_index": 25,
@@ -1103,7 +1103,7 @@
       "epoch_ms": 1779676282158
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 52,
       "pair_index": 26,
@@ -1157,7 +1157,7 @@
       "epoch_ms": 1779676291178
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 55,
       "pair_index": 27,
@@ -1175,7 +1175,7 @@
       "epoch_ms": 1779676294354
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 56,
       "pair_index": 28,
@@ -1229,7 +1229,7 @@
       "epoch_ms": 1779676303759
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 59,
       "pair_index": 29,
@@ -1247,7 +1247,7 @@
       "epoch_ms": 1779676306728
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 60,
       "pair_index": 30,
@@ -1301,7 +1301,7 @@
       "epoch_ms": 1779676315986
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 63,
       "pair_index": 31,
@@ -1319,7 +1319,7 @@
       "epoch_ms": 1779676318972
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 64,
       "pair_index": 32,
@@ -1373,7 +1373,7 @@
       "epoch_ms": 1779676329661
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 67,
       "pair_index": 33,
@@ -1391,7 +1391,7 @@
       "epoch_ms": 1779676332797
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 68,
       "pair_index": 34,
@@ -1445,7 +1445,7 @@
       "epoch_ms": 1779676343916
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 71,
       "pair_index": 35,
@@ -1463,7 +1463,7 @@
       "epoch_ms": 1779676346966
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 72,
       "pair_index": 36,
@@ -1517,7 +1517,7 @@
       "epoch_ms": 1779676356186
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 75,
       "pair_index": 37,
@@ -1535,7 +1535,7 @@
       "epoch_ms": 1779676359242
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 76,
       "pair_index": 38,
@@ -1589,7 +1589,7 @@
       "epoch_ms": 1779676369303
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 79,
       "pair_index": 39,
@@ -1607,7 +1607,7 @@
       "epoch_ms": 1779676373486
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 80,
       "pair_index": 40,
@@ -1661,7 +1661,7 @@
       "epoch_ms": 1779676382760
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 83,
       "pair_index": 41,
@@ -1679,7 +1679,7 @@
       "epoch_ms": 1779676387693
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 84,
       "pair_index": 42,
@@ -1733,7 +1733,7 @@
       "epoch_ms": 1779676397960
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 87,
       "pair_index": 43,
@@ -1751,7 +1751,7 @@
       "epoch_ms": 1779676401129
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 88,
       "pair_index": 44,
@@ -1805,7 +1805,7 @@
       "epoch_ms": 1779676410711
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 91,
       "pair_index": 45,
@@ -1823,7 +1823,7 @@
       "epoch_ms": 1779676415155
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 92,
       "pair_index": 46,
@@ -1877,7 +1877,7 @@
       "epoch_ms": 1779676424540
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 95,
       "pair_index": 47,
@@ -1895,7 +1895,7 @@
       "epoch_ms": 1779676427548
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 96,
       "pair_index": 48,
@@ -1949,7 +1949,7 @@
       "epoch_ms": 1779676437616
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "warmup": false,
       "sample_index": 99,
       "pair_index": 49,
@@ -1968,7 +1968,7 @@
     }
   ],
   "summary": {
-    "specter": {
+    "warpsock": {
       "median_ttfb_ms": 666.6777500000001,
       "p95_ttfb_ms": 1850.273220349999,
       "median_total_wall_time_ms": 780.5720005,

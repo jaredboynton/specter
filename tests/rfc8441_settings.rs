@@ -1,5 +1,5 @@
-use specter::fingerprint::http2::Http2Settings;
-use specter::transport::h2::{SettingsFrame, SettingsId};
+use warpsock::fingerprint::http2::Http2Settings;
+use warpsock::transport::h2::{SettingsFrame, SettingsId};
 
 #[test]
 fn rfc8441_settings_id_supports_enable_connect_protocol() {

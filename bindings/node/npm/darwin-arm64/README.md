@@ -1,3 +1,3 @@
-# `specters-darwin-arm64`
+# `warpsock-darwin-arm64`
 
-This is the **aarch64-apple-darwin** binary for `specters`
+This is the **aarch64-apple-darwin** binary for `warpsock`

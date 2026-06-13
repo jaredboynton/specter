@@ -15,10 +15,10 @@
 //! Note: Some TCP options (MSS, window scaling, SACK, timestamps) are negotiated
 //! during TCP handshake and cannot be directly set via socket2 on all platforms.
 
-use specter::fingerprint::tls::TlsFingerprint;
-use specter::transport::connector::BoringConnector;
-use specter::transport::tcp::{TcpFingerprint, TcpSocketBuffers};
 use tracing::info;
+use warpsock::fingerprint::tls::TlsFingerprint;
+use warpsock::transport::connector::BoringConnector;
+use warpsock::transport::tcp::{TcpFingerprint, TcpSocketBuffers};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("[SUCCESS] Connection established with TCP fingerprint");
 
             // Verify connection properties
-            if let specter::transport::connector::MaybeHttpsStream::Https(ssl_stream) = &stream {
+            if let warpsock::transport::connector::MaybeHttpsStream::Https(ssl_stream) = &stream {
                 info!("  - TLS Version: {:?}", ssl_stream.ssl().version_str());
                 if let Some(cipher) = ssl_stream.ssl().current_cipher() {
                     info!("  - Cipher: {}", cipher.name());

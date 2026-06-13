@@ -1,3 +1,3 @@
-# `specters-linux-x64-gnu`
+# `warpsock-linux-x64-gnu`
 
-This is the **x86_64-unknown-linux-gnu** binary for `specters`
+This is the **x86_64-unknown-linux-gnu** binary for `warpsock`

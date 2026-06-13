@@ -1,5 +1,5 @@
 /**
- * Specter - Node.js bindings for the Specter HTTP client.
+ * Warpsock - Node.js bindings for the Warpsock HTTP client.
  *
  * A high-performance async HTTP client with full TLS, HTTP/2, and HTTP/3
  * fingerprint control for browser impersonation.
@@ -8,24 +8,24 @@
 const { execSync } = require('node:child_process');
 const { readFileSync } = require('node:fs');
 
-const PACKAGE_VERSION = '4.2.3';
+const PACKAGE_VERSION = '4.2.4';
 
 const targets = {
   'darwin-x64': {
-    local: './specter.darwin-x64.node',
-    package: 'specters-darwin-x64',
+    local: './warpsock.darwin-x64.node',
+    package: 'warpsock-darwin-x64',
   },
   'darwin-arm64': {
-    local: './specter.darwin-arm64.node',
-    package: 'specters-darwin-arm64',
+    local: './warpsock.darwin-arm64.node',
+    package: 'warpsock-darwin-arm64',
   },
   'linux-x64-gnu': {
-    local: './specter.linux-x64-gnu.node',
-    package: 'specters-linux-x64-gnu',
+    local: './warpsock.linux-x64-gnu.node',
+    package: 'warpsock-linux-x64-gnu',
   },
   'linux-arm64-gnu': {
-    local: './specter.linux-arm64-gnu.node',
-    package: 'specters-linux-arm64-gnu',
+    local: './warpsock.linux-arm64-gnu.node',
+    package: 'warpsock-linux-arm64-gnu',
   },
 };
 
@@ -99,7 +99,7 @@ function loadNativeBinding() {
 
   if (!target) {
     throw new Error(
-      `Unsupported Specter native target: ${key}. ` +
+      `Unsupported Warpsock native target: ${key}. ` +
       `Supported targets: ${Object.keys(targets).join(', ')}.`
     );
   }
@@ -118,7 +118,7 @@ function loadNativeBinding() {
   }
 
   throw new Error(
-    `Failed to load Specter native binding for ${key}. ` +
+    `Failed to load Warpsock native binding for ${key}. ` +
     `Expected optional package "${target.package}" or local binary "${target.local}".\n` +
     loadErrors.map((error) => `- ${error.message}`).join('\n')
   );
@@ -172,7 +172,7 @@ binding.RequestBuilder.prototype.bodyStream = function bodyStream(asyncIterable)
 
   const bridge = new binding.BodyStreamBridge();
   requestBuilderBodyStreamBridge.call(this, bridge);
-  Object.defineProperty(this, '__specterBodyStream', {
+  Object.defineProperty(this, '__warpsockBodyStream', {
     value: { asyncIterable, bridge },
     configurable: true,
   });
@@ -180,7 +180,7 @@ binding.RequestBuilder.prototype.bodyStream = function bodyStream(asyncIterable)
 };
 
 binding.RequestBuilder.prototype.send = function send() {
-  const streamState = this.__specterBodyStream;
+  const streamState = this.__warpsockBodyStream;
   if (!streamState) {
     return requestBuilderSend.call(this);
   }

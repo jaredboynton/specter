@@ -2,7 +2,7 @@
 //!
 //! https://www.rfc-editor.org/rfc/rfc7617
 
-use specter::auth::{basic_auth, parse_basic_auth};
+use warpsock::auth::{basic_auth, parse_basic_auth};
 
 #[test]
 fn test_basic_auth_encoding_rfc7617_section_2() {

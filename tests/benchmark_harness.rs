@@ -1,5 +1,5 @@
-use specter::{Client, HttpVersion};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use warpsock::{Client, HttpVersion};
 
 #[test]
 fn streaming_benchmark_declares_enforceable_h3_gate() {
@@ -8,9 +8,9 @@ fn streaming_benchmark_declares_enforceable_h3_gate() {
     assert!(source.contains("struct H3Gate"));
     assert!(source.contains("fixture_address: \"127.0.0.1:3203/udp\""));
     assert!(source.contains("const H3_BENCH_STREAM_SEGMENT_SIZE: usize = 8192;"));
-    assert!(source.contains("reqwest_h3_unavailable_specter_regression_gate"));
+    assert!(source.contains("reqwest_h3_unavailable_warpsock_regression_gate"));
     assert!(source.contains("--self-test-h3-threshold-failure"));
-    assert!(!source.contains("SPECTER_BENCH_FORCE_H3_THRESHOLD_FAIL"));
+    assert!(!source.contains("WARPSOCK_BENCH_FORCE_H3_THRESHOLD_FAIL"));
 }
 
 #[test]
@@ -31,8 +31,8 @@ fn streaming_benchmark_declares_enforceable_h1_h2_threshold_gate() {
     assert!(source.contains(".unwrap_or_else(|| vec![\"h1\", \"h2\"]);"));
     assert!(source.contains("public_provider_threshold_inputs: Vec::new()"));
     assert!(source.contains("--self-test-threshold-failure"));
-    assert!(!source.contains("SPECTER_BENCH_FORCE_THRESHOLD_FAIL"));
-    assert!(!source.contains("SPECTER_BENCH_REAL"));
+    assert!(!source.contains("WARPSOCK_BENCH_FORCE_THRESHOLD_FAIL"));
+    assert!(!source.contains("WARPSOCK_BENCH_REAL"));
     assert!(source.contains("\"localhost_real_measurement\""));
     assert!(source.contains("\"localhost_paired_real_measurement\""));
     assert!(source.contains("run_paired_real_measurements"));
@@ -73,7 +73,7 @@ fn streaming_benchmark_declares_enforceable_request_body_streaming_gate() {
     assert!(source.contains("used as the request-row threshold denominator"));
     assert!(source.contains(".h2_direct_streaming_responses(protocol == \"h2\")"));
     assert!(
-        source.contains("PacingRequestBodyStream::<specter::Error>::new(\n        stream_anchor")
+        source.contains("PacingRequestBodyStream::<warpsock::Error>::new(\n        stream_anchor")
     );
     assert!(source.contains("PacingRequestBodyStream::<io::Error>::new(\n        stream_anchor"));
     assert!(source.contains("response headers only as an emitted fallback count"));
@@ -109,7 +109,7 @@ fn thresholded_streaming_benchmark_uses_delayed_multi_chunk_workload() {
     assert!(source.contains("body_transfer_duration_ns"));
     assert!(source.contains("client_overhead_duration_ns"));
     assert!(source.contains("paired Wilcoxon signed-rank"));
-    assert!(source.contains("applied identically to reqwest and Specter"));
+    assert!(source.contains("applied identically to reqwest and Warpsock"));
     assert!(!source.contains("const BENCH_CHUNK_COUNT: usize = 1;"));
     assert!(!source.contains("const BENCH_CHUNK_DELAY_MS: u64 = 0;"));
 }
@@ -186,8 +186,8 @@ fn websocket_benchmark_declares_fastwebsockets_gate() {
     assert!(source.contains("tokio_tungstenite_version: \"0.24\""));
     assert!(source.contains("pass_match_or_exceed"));
     assert!(source.contains("pass_tungstenite_match_or_exceed"));
-    assert!(source.contains("specter.messages_per_sec >= fast.messages_per_sec"));
-    assert!(source.contains("specter.messages_per_sec >= tungstenite.messages_per_sec"));
+    assert!(source.contains("warpsock.messages_per_sec >= fast.messages_per_sec"));
+    assert!(source.contains("warpsock.messages_per_sec >= tungstenite.messages_per_sec"));
     assert!(source.contains("--require-thresholds"));
     assert!(source.contains("DEFAULT_WARMUP_MESSAGES"));
     assert!(source.contains("fastwebsockets::WebSocket::after_handshake(stream, Role::Server)"));

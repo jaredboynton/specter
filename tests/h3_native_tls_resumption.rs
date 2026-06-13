@@ -9,10 +9,10 @@
 //! and RFC 8446 section 4.6.1.
 
 use bytes::Bytes;
-use specter::fingerprint::tls::TlsExtensionOrderBehavior;
-use specter::fingerprint::{Http3Fingerprint, TlsFingerprint};
-use specter::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
-use specter::transport::h3::tls::{
+use warpsock::fingerprint::tls::TlsExtensionOrderBehavior;
+use warpsock::fingerprint::{Http3Fingerprint, TlsFingerprint};
+use warpsock::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
+use warpsock::transport::h3::tls::{
     NativeH3HandshakeStatus, NativeQuicTlsSession, QuicEncryptionLevel, NATIVE_H3_TICKET_KEY_LEN,
 };
 

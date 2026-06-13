@@ -3,9 +3,9 @@
 //! Verifies client correctly handles (or rejects) PUSH_PROMISE frames
 //! based on SETTINGS_ENABLE_PUSH configuration.
 
-use specter::Client;
 use std::time::Duration;
 use tokio::time::timeout;
+use warpsock::Client;
 
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};

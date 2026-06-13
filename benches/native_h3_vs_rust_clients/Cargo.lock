@@ -3188,7 +3188,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "specter-native-h3-vs-rust-clients"
+name = "warpsock-native-h3-vs-rust-clients"
 version = "0.0.0"
 dependencies = [
  "anyhow",
@@ -3205,15 +3205,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "socket2",
- "specters",
+ "warpsock",
  "tokio",
  "tokio-quiche",
  "url",
 ]
 
 [[package]]
-name = "specters"
-version = "4.2.3"
+name = "warpsock"
+version = "4.2.4"
 dependencies = [
  "atomic-waker",
  "base64",

@@ -5,8 +5,8 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use ::specter::transport::h2::{H2Tunnel, H2TunnelEvent as RustH2TunnelEvent};
-use ::specter::{Client as RustClient, Error as RustError};
+use ::warpsock::transport::h2::{H2Tunnel, H2TunnelEvent as RustH2TunnelEvent};
+use ::warpsock::{Client as RustClient, Error as RustError};
 
 const H1_WEBSOCKET_ONLY_HEADERS: &[&str] = &[
     "sec-websocket-key",
@@ -84,7 +84,7 @@ impl WebSocketH2Builder {
     }
 
     fn __repr__(&self) -> String {
-        format!("<specter.WebSocketH2Builder url={}>", self.url)
+        format!("<warpsock.WebSocketH2Builder url={}>", self.url)
     }
 }
 
@@ -152,7 +152,7 @@ impl WebSocketH2Tunnel {
     }
 
     fn __repr__(&self) -> String {
-        "<specter.WebSocketH2Tunnel>".to_string()
+        "<warpsock.WebSocketH2Tunnel>".to_string()
     }
 }
 
@@ -167,7 +167,7 @@ impl H2TunnelEvent {
 
     fn __repr__(&self) -> String {
         format!(
-            "<specter.H2TunnelEvent kind={} last_stream_id={:?}>",
+            "<warpsock.H2TunnelEvent kind={} last_stream_id={:?}>",
             self.kind, self.last_stream_id
         )
     }

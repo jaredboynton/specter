@@ -63,13 +63,13 @@ fn native_h3_direct_idle_get_is_env_gated_and_body_owned() {
     let response = std::fs::read_to_string("src/response.rs").expect("response body source");
 
     assert!(
-        h3_mod.contains("SPECTER_NATIVE_H3_DIRECT_IDLE_GET")
+        h3_mod.contains("WARPSOCK_NATIVE_H3_DIRECT_IDLE_GET")
             && h3_mod.contains("connect_direct_start")
             && h3_mod.contains("into_direct_handle"),
         "direct idle GET scout must use the production direct-start hook, env-gated"
     );
     let direct_branch = handle
-        .split("SPECTER_NATIVE_H3_DIRECT_IDLE_GET")
+        .split("WARPSOCK_NATIVE_H3_DIRECT_IDLE_GET")
         .nth(1)
         .expect("handle must try the direct path before command enqueue")
         .split("self.send_command(DriverCommand::SendStreamingRequest")

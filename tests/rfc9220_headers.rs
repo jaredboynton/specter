@@ -1,6 +1,6 @@
-use specter::{Client, Error};
 use std::time::Duration;
 use tokio::time::timeout;
+use warpsock::{Client, Error};
 
 mod helpers;
 use helpers::mock_h3_server::{MockEvent, MockH3Connection, MockH3Server};

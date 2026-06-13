@@ -16,14 +16,14 @@
 //! Chrome 142 values: 1:65536;2:0;3:1000;4:6291456;5:16384;6:262144|15663105|0|m,s,a,p
 //! Note: Chrome also sends GREASE settings (random IDs) which vary per connection
 
-use specter::error::Result;
-use specter::fingerprint::{
+use warpsock::error::Result;
+use warpsock::fingerprint::{
     http2::Http2Settings, profiles::FingerprintProfile, tls::TlsFingerprint,
 };
-use specter::headers::OrderedHeaders;
-use specter::transport::connector::{BoringConnector, MaybeHttpsStream};
-use specter::transport::h2::{H2Connection, PseudoHeaderOrder};
-use specter::transport::h3::H3Client;
+use warpsock::headers::OrderedHeaders;
+use warpsock::transport::connector::{BoringConnector, MaybeHttpsStream};
+use warpsock::transport::h2::{H2Connection, PseudoHeaderOrder};
+use warpsock::transport::h3::H3Client;
 
 use http::{Method, Uri};
 use tracing::{error, info, warn};
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    info!("=== Specter Fingerprint Validation ===");
+    info!("=== Warpsock Fingerprint Validation ===");
     info!("");
 
     let mut test_results = Vec::new();

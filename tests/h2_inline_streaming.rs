@@ -9,13 +9,13 @@
 //! - RFC 8441 tunnels coexist with subsequent inline streaming requests.
 
 use bytes::Bytes;
-use specter::transport::h2::hpack_impl::Encoder;
-use specter::Client;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::timeout;
+use warpsock::transport::h2::hpack_impl::Encoder;
+use warpsock::Client;
 
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};
@@ -453,12 +453,12 @@ async fn inline_path_handles_dropped_receiver() {
 #[tokio::test]
 async fn large_streaming_body_avoids_driver_backpressure_stalls() {
     use http::Method;
-    use specter::fingerprint::http2::Http2Settings;
-    use specter::transport::connector::BoringConnector;
-    use specter::transport::h2::{
+    use warpsock::fingerprint::http2::Http2Settings;
+    use warpsock::transport::connector::BoringConnector;
+    use warpsock::transport::h2::{
         H2BodyTimeouts, H2Connection, H2PooledConnection, PseudoHeaderOrder,
     };
-    use specter::RequestBody;
+    use warpsock::RequestBody;
 
     const BODY_LEN: usize = 6 * 1024 * 1024;
     const CHUNK_SIZE: usize = 16 * 1024;
@@ -470,7 +470,7 @@ async fn large_streaming_body_avoids_driver_backpressure_stalls() {
     server.start_tls(acceptor, move |conn: MockH2Connection| async move {
         conn.read_preface().await.unwrap();
         let mut settings_sent = false;
-        let mut encoder = specter::transport::h2::hpack_impl::Encoder::new();
+        let mut encoder = warpsock::transport::h2::hpack_impl::Encoder::new();
         let mut request_stream_id: Option<u32> = None;
 
         loop {
@@ -509,7 +509,7 @@ async fn large_streaming_body_avoids_driver_backpressure_stalls() {
         }
     });
 
-    let fp = specter::fingerprint::tls::TlsFingerprint::chrome_142();
+    let fp = warpsock::fingerprint::tls::TlsFingerprint::chrome_142();
     let connector = BoringConnector::with_fingerprint(fp).with_root_certificates(vec![ca_cert]);
     let uri: http::Uri = format!("https://127.0.0.1:{server_port}/stream")
         .parse()

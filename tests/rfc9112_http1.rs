@@ -1,9 +1,9 @@
 use bytes::Bytes;
 use http::{Method, Uri};
-use specter::transport::connector::MaybeHttpsStream;
-use specter::transport::h1::H1Connection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use warpsock::transport::connector::MaybeHttpsStream;
+use warpsock::transport::h1::H1Connection;
 
 async fn start_test_server<F>(handler: F) -> String
 where

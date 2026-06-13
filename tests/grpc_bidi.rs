@@ -41,9 +41,6 @@
 
 use bytes::Bytes;
 use futures_core::Stream;
-use specter::grpc::{encode_message, grpc_request, GrpcEncoding, GrpcFramer};
-use specter::transport::h2::hpack_impl::Encoder;
-use specter::{Client, Error};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -51,6 +48,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use warpsock::grpc::{encode_message, grpc_request, GrpcEncoding, GrpcFramer};
+use warpsock::transport::h2::hpack_impl::Encoder;
+use warpsock::{Client, Error};
 
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};

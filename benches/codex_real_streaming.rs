@@ -1,4 +1,4 @@
-//! Real Codex backend SSE streaming benchmark: Specter vs reqwest.
+//! Real Codex backend SSE streaming benchmark: Warpsock vs reqwest.
 //!
 //! Hits POST https://chatgpt.com/backend-api/codex/responses with paired
 //! samples from both clients, measures TTFB and total end-to-end wall time
@@ -47,7 +47,7 @@ struct Row {
     delta_count: usize,
     completed: bool,
     chars_per_sec: f64,
-    pool_reuse_delta_specter: Option<u64>,
+    pool_reuse_delta_warpsock: Option<u64>,
     protocol_used: String,
     epoch_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,9 +79,9 @@ struct Comparison {
 
 #[derive(Serialize)]
 struct Summary {
-    specter: ClientSummary,
+    warpsock: ClientSummary,
     reqwest: ClientSummary,
-    protocol_used_specter: String,
+    protocol_used_warpsock: String,
     protocol_used_reqwest: String,
     protocol_mismatch: bool,
     comparison: Comparison,
@@ -91,7 +91,7 @@ struct Summary {
 struct Environment {
     os: &'static str,
     arch: &'static str,
-    specter_version: &'static str,
+    warpsock_version: &'static str,
 }
 
 #[derive(Serialize)]
@@ -468,12 +468,12 @@ fn sample_summary_from(rows: &[Row], client: &str) -> ClientSummary {
 }
 
 fn paired_diffs(rows: &[Row], field: impl Fn(&Row) -> f64) -> Vec<f64> {
-    let mut by_pair_specter: std::collections::BTreeMap<usize, f64> = Default::default();
+    let mut by_pair_warpsock: std::collections::BTreeMap<usize, f64> = Default::default();
     let mut by_pair_reqwest: std::collections::BTreeMap<usize, f64> = Default::default();
     for r in rows.iter().filter(|r| !r.warmup && r.status == "ok") {
         match r.client {
-            "specter" => {
-                by_pair_specter.insert(r.pair_index, field(r));
+            "warpsock" => {
+                by_pair_warpsock.insert(r.pair_index, field(r));
             }
             "reqwest" => {
                 by_pair_reqwest.insert(r.pair_index, field(r));
@@ -481,16 +481,16 @@ fn paired_diffs(rows: &[Row], field: impl Fn(&Row) -> f64) -> Vec<f64> {
             _ => {}
         }
     }
-    by_pair_specter
+    by_pair_warpsock
         .iter()
         .filter_map(|(k, s)| by_pair_reqwest.get(k).map(|r| s - r))
         .collect()
 }
 
-// ---- Specter sample ----
+// ---- Warpsock sample ----
 
-async fn run_specter_sample(
-    client: &specter::Client,
+async fn run_warpsock_sample(
+    client: &warpsock::Client,
     token: &str,
     account_id: Option<&str>,
 ) -> Result<SampleResult, Box<dyn std::error::Error>> {
@@ -531,7 +531,7 @@ async fn run_specter_sample(
                 completed: false,
                 pool_reuse_delta: None,
                 protocol_used: "unknown".into(),
-                error: Some(format!("specter send error: {e}")),
+                error: Some(format!("warpsock send error: {e}")),
             });
         }
     };
@@ -588,7 +588,7 @@ async fn run_specter_sample(
             buf.push(b'\n');
             drain_lines(&mut buf, &mut obs);
         }
-        Ok::<(), specter::Error>(())
+        Ok::<(), warpsock::Error>(())
     })
     .await;
 
@@ -607,7 +607,7 @@ async fn run_specter_sample(
             completed: obs.completed,
             pool_reuse_delta,
             protocol_used,
-            error: Some(format!("specter stream error: {e}")),
+            error: Some(format!("warpsock stream error: {e}")),
         }),
         Err(_) => Ok(SampleResult {
             status: "timeout",
@@ -619,7 +619,7 @@ async fn run_specter_sample(
             completed: obs.completed,
             pool_reuse_delta,
             protocol_used,
-            error: Some("specter 30s timeout".into()),
+            error: Some("warpsock 30s timeout".into()),
         }),
     }
 }
@@ -828,7 +828,7 @@ fn row_from_sample(
         delta_count: sample.delta_count,
         completed: sample.completed,
         chars_per_sec,
-        pool_reuse_delta_specter: sample.pool_reuse_delta,
+        pool_reuse_delta_warpsock: sample.pool_reuse_delta,
         protocol_used: sample.protocol_used,
         epoch_ms: now_epoch_ms(),
         error: sample.error,
@@ -881,8 +881,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Codex real-streaming bench: endpoint={ENDPOINT}, model={MODEL}, samples={sample_count}, warmup={warmup_count}"
     );
 
-    let specter_client = specter::Client::builder()
-        .fingerprint(specter::FingerprintProfile::Chrome146)
+    let warpsock_client = warpsock::Client::builder()
+        .fingerprint(warpsock::FingerprintProfile::Chrome146)
         .prefer_http2(true)
         .build()?;
     let reqwest_client = reqwest::Client::builder().build()?;
@@ -892,15 +892,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Warmup: alternate S, R, S, R, ... discarded statistics-wise but kept in rows
     for w in 0..warmup_count {
-        let lead_specter = w % 2 == 0;
-        let order = if lead_specter { ["s", "r"] } else { ["r", "s"] };
+        let lead_warpsock = w % 2 == 0;
+        let order = if lead_warpsock {
+            ["s", "r"]
+        } else {
+            ["r", "s"]
+        };
         for (i, client) in order.iter().enumerate() {
             let sample = if *client == "s" {
-                run_specter_sample(&specter_client, &token, account_id.as_deref()).await?
+                run_warpsock_sample(&warpsock_client, &token, account_id.as_deref()).await?
             } else {
                 run_reqwest_sample(&reqwest_client, &token, account_id.as_deref()).await?
             };
-            let client_name = if *client == "s" { "specter" } else { "reqwest" };
+            let client_name = if *client == "s" {
+                "warpsock"
+            } else {
+                "reqwest"
+            };
             rows.push(row_from_sample(
                 sample,
                 client_name,
@@ -916,16 +924,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Counted samples: alternate lead each pair (SR / RS / SR / RS ...)
     let pair_count = sample_count / 2;
     for p in 0..pair_count {
-        let lead_specter = p % 2 == 0;
-        let order = if lead_specter {
-            ("specter", "reqwest")
+        let lead_warpsock = p % 2 == 0;
+        let order = if lead_warpsock {
+            ("warpsock", "reqwest")
         } else {
-            ("reqwest", "specter")
+            ("reqwest", "warpsock")
         };
         let pair_index = p;
 
-        let sample1 = if order.0 == "specter" {
-            run_specter_sample(&specter_client, &token, account_id.as_deref()).await?
+        let sample1 = if order.0 == "warpsock" {
+            run_warpsock_sample(&warpsock_client, &token, account_id.as_deref()).await?
         } else {
             run_reqwest_sample(&reqwest_client, &token, account_id.as_deref()).await?
         };
@@ -939,8 +947,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
         tokio::time::sleep(INTER_REQUEST_DELAY).await;
 
-        let sample2 = if order.1 == "specter" {
-            run_specter_sample(&specter_client, &token, account_id.as_deref()).await?
+        let sample2 = if order.1 == "warpsock" {
+            run_warpsock_sample(&warpsock_client, &token, account_id.as_deref()).await?
         } else {
             run_reqwest_sample(&reqwest_client, &token, account_id.as_deref()).await?
         };
@@ -958,17 +966,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Protocol check across non-warmup rows
-    let mut proto_specter = "unknown".to_string();
+    let mut proto_warpsock = "unknown".to_string();
     let mut proto_reqwest = "unknown".to_string();
     for r in rows.iter().filter(|r| !r.warmup) {
-        if r.client == "specter" && r.protocol_used != "unknown" && proto_specter == "unknown" {
-            proto_specter = r.protocol_used.clone();
+        if r.client == "warpsock" && r.protocol_used != "unknown" && proto_warpsock == "unknown" {
+            proto_warpsock = r.protocol_used.clone();
         }
         if r.client == "reqwest" && r.protocol_used != "unknown" && proto_reqwest == "unknown" {
             proto_reqwest = r.protocol_used.clone();
         }
     }
-    let protocol_mismatch = proto_specter != "HTTP/2" || proto_reqwest != "HTTP/2";
+    let protocol_mismatch = proto_warpsock != "HTTP/2" || proto_reqwest != "HTTP/2";
 
     // Pass count
     let counted_rows: Vec<&Row> = rows.iter().filter(|r| !r.warmup).collect();
@@ -976,7 +984,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for p in 0..pair_count {
         let s_ok = counted_rows.iter().any(|r| {
             r.pair_index == p
-                && r.client == "specter"
+                && r.client == "warpsock"
                 && r.status == "ok"
                 && r.completed
                 && r.delta_count >= 1
@@ -993,7 +1001,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if s_ok && r_ok {
             passed_pairs += 1;
         } else {
-            failures.push(format!("pair {p}: specter_ok={s_ok} reqwest_ok={r_ok}"));
+            failures.push(format!("pair {p}: warpsock_ok={s_ok} reqwest_ok={r_ok}"));
         }
     }
 
@@ -1005,7 +1013,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Stats
-    let specter_summary = sample_summary_from(&rows, "specter");
+    let warpsock_summary = sample_summary_from(&rows, "warpsock");
     let reqwest_summary = sample_summary_from(&rows, "reqwest");
 
     let ttfb_diffs = paired_diffs(&rows, |r| r.ttfb_ms);
@@ -1015,11 +1023,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (wall_diff_mean, wall_ci) = t_ci_95(&wall_diffs);
 
     // Wilcoxon needs paired vectors of the two clients, not the diff.
-    let specter_ttfbs: Vec<f64> = (0..pair_count)
+    let warpsock_ttfbs: Vec<f64> = (0..pair_count)
         .filter_map(|p| {
             counted_rows
                 .iter()
-                .find(|r| r.pair_index == p && r.client == "specter" && r.status == "ok")
+                .find(|r| r.pair_index == p && r.client == "warpsock" && r.status == "ok")
                 .map(|r| r.ttfb_ms)
         })
         .collect();
@@ -1031,11 +1039,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|r| r.ttfb_ms)
         })
         .collect();
-    let specter_walls: Vec<f64> = (0..pair_count)
+    let warpsock_walls: Vec<f64> = (0..pair_count)
         .filter_map(|p| {
             counted_rows
                 .iter()
-                .find(|r| r.pair_index == p && r.client == "specter" && r.status == "ok")
+                .find(|r| r.pair_index == p && r.client == "warpsock" && r.status == "ok")
                 .map(|r| r.total_wall_time_ms)
         })
         .collect();
@@ -1048,15 +1056,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let ttfb_wilcoxon = paired_wilcoxon_signed_rank_p_value(&reqwest_ttfbs, &specter_ttfbs);
-    let wall_wilcoxon = paired_wilcoxon_signed_rank_p_value(&reqwest_walls, &specter_walls);
+    let ttfb_wilcoxon = paired_wilcoxon_signed_rank_p_value(&reqwest_ttfbs, &warpsock_ttfbs);
+    let wall_wilcoxon = paired_wilcoxon_signed_rank_p_value(&reqwest_walls, &warpsock_walls);
 
     let ttfb_ci_covers_zero = ttfb_ci[0] <= 0.0 && ttfb_ci[1] >= 0.0;
     let wall_ci_covers_zero = wall_ci[0] <= 0.0 && wall_ci[1] >= 0.0;
 
     let interpretation = if protocol_mismatch {
         format!(
-            "Protocol mismatch: specter={proto_specter}, reqwest={proto_reqwest}. Comparison invalid."
+            "Protocol mismatch: warpsock={proto_warpsock}, reqwest={proto_reqwest}. Comparison invalid."
         )
     } else if ttfb_ci_covers_zero && wall_ci_covers_zero {
         format!(
@@ -1064,14 +1072,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     } else if !ttfb_ci_covers_zero && ttfb_diff_mean < 0.0 {
         format!(
-            "Specter TTFB measurably faster: {ttfb_diff_mean:.1} ms [{:.1}, {:.1}] (95% CI excludes zero). Wall-time CI {} zero.",
+            "Warpsock TTFB measurably faster: {ttfb_diff_mean:.1} ms [{:.1}, {:.1}] (95% CI excludes zero). Wall-time CI {} zero.",
             ttfb_ci[0],
             ttfb_ci[1],
             if wall_ci_covers_zero { "covers" } else { "excludes" }
         )
     } else if !ttfb_ci_covers_zero && ttfb_diff_mean > 0.0 {
         format!(
-            "reqwest TTFB measurably faster by {:.1} ms [{:.1}, {:.1}]. Investigate Specter HTTP/2 read loop.",
+            "reqwest TTFB measurably faster by {:.1} ms [{:.1}, {:.1}]. Investigate Warpsock HTTP/2 read loop.",
             ttfb_diff_mean.abs(),
             ttfb_ci[0],
             ttfb_ci[1]
@@ -1081,9 +1089,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let summary = Summary {
-        specter: specter_summary,
+        warpsock: warpsock_summary,
         reqwest: reqwest_summary,
-        protocol_used_specter: proto_specter,
+        protocol_used_warpsock: proto_warpsock,
         protocol_used_reqwest: proto_reqwest,
         protocol_mismatch,
         comparison: Comparison {
@@ -1119,7 +1127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         environment: Environment {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
-            specter_version: env!("CARGO_PKG_VERSION"),
+            warpsock_version: env!("CARGO_PKG_VERSION"),
         },
         protocol_mismatch,
         rows,
@@ -1134,7 +1142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("wrote artifact: {}", json_path.display());
 
     println!(
-        "primary_claim={primary_claim} ({}/{} samples; specter={}/{} pairs, reqwest={}/{} pairs)",
+        "primary_claim={primary_claim} ({}/{} samples; warpsock={}/{} pairs, reqwest={}/{} pairs)",
         passed_pairs * 2,
         pair_count * 2,
         passed_pairs,
@@ -1149,8 +1157,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if protocol_mismatch {
         eprintln!(
-            "ERROR: protocol mismatch (specter={}, reqwest={})",
-            artifact.summary.protocol_used_specter, artifact.summary.protocol_used_reqwest
+            "ERROR: protocol mismatch (warpsock={}, reqwest={})",
+            artifact.summary.protocol_used_warpsock, artifact.summary.protocol_used_reqwest
         );
         std::process::exit(2);
     }

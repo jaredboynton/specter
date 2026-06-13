@@ -1,13 +1,6 @@
 #![allow(dead_code)]
 
 use bytes::Bytes;
-use specter::fingerprint::Http3Fingerprint;
-use specter::transport::h3::handshake::{ClientH3Event, NativeQuicServerHandshake};
-use specter::transport::h3::native::{decode_header_block, encode_frame, H3Frame, H3Header};
-use specter::transport::h3::path::QuicServerPathRuntime;
-use specter::transport::h3::quic::{split_long_header_datagram, ConnectionId, LongHeaderType};
-use specter::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
-use specter::transport::h3::tls::NATIVE_H3_TICKET_KEY_LEN;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,6 +8,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use warpsock::fingerprint::Http3Fingerprint;
+use warpsock::transport::h3::handshake::{ClientH3Event, NativeQuicServerHandshake};
+use warpsock::transport::h3::native::{decode_header_block, encode_frame, H3Frame, H3Header};
+use warpsock::transport::h3::path::QuicServerPathRuntime;
+use warpsock::transport::h3::quic::{split_long_header_datagram, ConnectionId, LongHeaderType};
+use warpsock::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
+use warpsock::transport::h3::tls::NATIVE_H3_TICKET_KEY_LEN;
 
 const SHORT_HEADER_CID_LEN: usize = 16;
 const MOCK_IDLE_TIMEOUT: Duration = Duration::from_millis(150);
@@ -392,7 +392,7 @@ impl NativeMockH3Connection {
         &mut self,
         remote: SocketAddr,
         packet: &[u8],
-    ) -> specter::Result<bool> {
+    ) -> warpsock::Result<bool> {
         if self.handshake.close_state().is_closing() {
             self.handshake.server_observe_inbound_packet_for_close();
             if self
@@ -552,12 +552,12 @@ impl NativeMockH3Connection {
             .server_close_time_until_expiry(Instant::now())
     }
 
-    async fn run_server_close_window(&mut self) -> specter::Result<()> {
+    async fn run_server_close_window(&mut self) -> warpsock::Result<()> {
         self.closed = true;
         Ok(())
     }
 
-    async fn replay_connection_close(&mut self) -> specter::Result<()> {
+    async fn replay_connection_close(&mut self) -> warpsock::Result<()> {
         if let Some(close_packet) = self.closing_connection_close_packet.clone() {
             self.send_packet(close_packet).await?;
             self.handshake
@@ -566,7 +566,7 @@ impl NativeMockH3Connection {
         Ok(())
     }
 
-    async fn handle_loss_detection_timeout(&mut self) -> specter::Result<()> {
+    async fn handle_loss_detection_timeout(&mut self) -> warpsock::Result<()> {
         let Some(timer) = self.handshake.loss_detection_timer() else {
             return Ok(());
         };
@@ -604,7 +604,7 @@ impl NativeMockH3Connection {
         Ok(())
     }
 
-    async fn send_delayed_application_ack(&mut self) -> specter::Result<()> {
+    async fn send_delayed_application_ack(&mut self) -> warpsock::Result<()> {
         if let Some(packet) = self
             .handshake
             .build_server_application_ack_packet_with_delay(
@@ -617,7 +617,7 @@ impl NativeMockH3Connection {
         Ok(())
     }
 
-    async fn send_settings_if_ready(&mut self) -> specter::Result<()> {
+    async fn send_settings_if_ready(&mut self) -> warpsock::Result<()> {
         if !self.handshake.is_application_ready() {
             return Ok(());
         }
@@ -653,7 +653,7 @@ impl NativeMockH3Connection {
         &mut self,
         remote: SocketAddr,
         event: ClientH3Event,
-    ) -> specter::Result<bool> {
+    ) -> warpsock::Result<bool> {
         match event {
             ClientH3Event::Stream(event) => {
                 let mut active = false;
@@ -748,7 +748,7 @@ impl NativeMockH3Connection {
         }
     }
 
-    async fn process_command(&mut self, command: MockCommand) -> specter::Result<()> {
+    async fn process_command(&mut self, command: MockCommand) -> warpsock::Result<()> {
         match command {
             MockCommand::SendFrame { stream_id, payload }
             | MockCommand::SendBytes {
@@ -840,7 +840,7 @@ impl NativeMockH3Connection {
         stream_id: u64,
         payload: Bytes,
         fin: bool,
-    ) -> specter::Result<()> {
+    ) -> warpsock::Result<()> {
         const MAX_MOCK_STREAM_PAYLOAD: usize = 1000;
 
         if payload.is_empty() {
@@ -866,7 +866,7 @@ impl NativeMockH3Connection {
         Ok(())
     }
 
-    async fn send_packet(&mut self, packet: Bytes) -> specter::Result<()> {
+    async fn send_packet(&mut self, packet: Bytes) -> warpsock::Result<()> {
         self.send_packet_to_path(self.path_runtime.primary_peer(), packet)
             .await
     }
@@ -875,16 +875,16 @@ impl NativeMockH3Connection {
         &mut self,
         remote: SocketAddr,
         packet: Bytes,
-    ) -> specter::Result<()> {
+    ) -> warpsock::Result<()> {
         if !self.path_runtime.may_send_to(remote, packet.len()) {
-            return Err(specter::Error::Quic(
+            return Err(warpsock::Error::Quic(
                 "native mock H3 server anti-amplification budget exhausted".into(),
             ));
         }
         self.socket
             .send_to(packet.as_ref(), remote)
             .await
-            .map_err(specter::Error::Io)?;
+            .map_err(warpsock::Error::Io)?;
         self.path_runtime.record_sent_to(remote, packet.len());
         Ok(())
     }
@@ -903,7 +903,7 @@ fn is_request_headers_event(event: &ClientH3Event) -> bool {
 
 fn route_connection_id(
     packet: &[u8],
-    long_packets: Option<&[specter::transport::h3::quic::LongHeaderDatagramPacket]>,
+    long_packets: Option<&[warpsock::transport::h3::quic::LongHeaderDatagramPacket]>,
 ) -> Option<Vec<u8>> {
     if let Some(first) = long_packets.and_then(|packets| packets.first()) {
         return Some(first.destination_cid.as_bytes().to_vec());

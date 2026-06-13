@@ -7,7 +7,7 @@ current_rows_parse.py: manifest, provenance, selected clients, sample/warmup
 counts, payload sizes, and measured rows. Only then does this script compare
 metrics across repeats.
 
-The repeat pass is intentionally stricter than one-run comparison: Specter's
+The repeat pass is intentionally stricter than one-run comparison: Warpsock's
 worst latency and workload-specific completion metric across all repeats must
 still meet or beat each comparator's best corresponding metric across all
 repeats.
@@ -42,11 +42,11 @@ def _canonical_path(value: Any) -> Any:
     return value
 
 
-SPECTER_BY_WORKLOAD = {
-    "http3_streaming_get": "specter_native",
-    "websocket_over_h3_raw_tunnel_echo": "specter_native_rfc9220_tunnel",
-    "websocket_over_h3_raw_tunnel_close_fin": "specter_native_rfc9220_tunnel_close",
-    "slow_consumer_tunnel_plus_http3_streaming": "specter_native_rfc9220_tunnel_mixed",
+WARPSOCK_BY_WORKLOAD = {
+    "http3_streaming_get": "warpsock_native",
+    "websocket_over_h3_raw_tunnel_echo": "warpsock_native_rfc9220_tunnel",
+    "websocket_over_h3_raw_tunnel_close_fin": "warpsock_native_rfc9220_tunnel_close",
+    "slow_consumer_tunnel_plus_http3_streaming": "warpsock_native_rfc9220_tunnel_mixed",
 }
 
 
@@ -168,7 +168,7 @@ def cohort_identity_failures(runs: list[dict[str, Any]]) -> list[str]:
     def normalized_runtime_env(manifest: dict[str, Any]) -> str:
         runtime_env = dict(manifest.get("runtime_env") or {})
         if runtime_env.get("FIXTURE_LEDGER_GATE") == "1":
-            runtime_env["SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR"] = "<per-repeat>"
+            runtime_env["WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR"] = "<per-repeat>"
         return json.dumps(runtime_env, sort_keys=True, separators=(",", ":"))
 
     keys = (
@@ -280,11 +280,11 @@ def compare_repeats(
     edges: list[dict[str, Any]] = []
     by_workload = collect_by_workload(runs)
     for workload, competitor_ids in workloads.items():
-        specter_id = SPECTER_BY_WORKLOAD[workload]
-        specter_rows = by_workload.get(workload, {}).get(specter_id, [])
-        if len(specter_rows) != len(runs):
+        warpsock_id = WARPSOCK_BY_WORKLOAD[workload]
+        warpsock_rows = by_workload.get(workload, {}).get(warpsock_id, [])
+        if len(warpsock_rows) != len(runs):
             failures.append(
-                f"FAIL repeat_missing_specter workload={workload} count={len(specter_rows)}"
+                f"FAIL repeat_missing_warpsock workload={workload} count={len(warpsock_rows)}"
             )
             continue
         is_get = workload == "http3_streaming_get"
@@ -301,9 +301,9 @@ def compare_repeats(
         throughput_failure_label = (
             "ledger_paced_throughput" if ledger_gate else "throughput"
         )
-        sp_p50_worst = worst_latency(specter_rows, "p50_ttfb_ns")
-        sp_p95_worst = worst_latency(specter_rows, "p95_ttfb_ns")
-        sp_tput_worst = worst_throughput(specter_rows, throughput_metric)
+        sp_p50_worst = worst_latency(warpsock_rows, "p50_ttfb_ns")
+        sp_p95_worst = worst_latency(warpsock_rows, "p95_ttfb_ns")
+        sp_tput_worst = worst_throughput(warpsock_rows, throughput_metric)
         if is_get:
             p50_tail_metric = (
                 "p50_ledger_paced_tail_overhead_ns"
@@ -316,13 +316,13 @@ def compare_repeats(
                 else "p95_paced_tail_overhead_ns"
             )
             sp_p50_tail_worst = worst_paced_overhead(
-                specter_rows, p50_tail_metric
+                warpsock_rows, p50_tail_metric
             )
             sp_p95_tail_worst = worst_paced_overhead(
-                specter_rows, p95_tail_metric
+                warpsock_rows, p95_tail_metric
             )
         print(
-            f"=== {workload} {specter_id} worst "
+            f"=== {workload} {warpsock_id} worst "
             f"p50={ms(sp_p50_worst)} p95={ms(sp_p95_worst)} "
             f"{throughput_label}={mibps(sp_tput_worst)}"
         )
@@ -332,7 +332,7 @@ def compare_repeats(
                 f"p95={ms(sp_p95_tail_worst)}"
             )
         for competitor_id in competitor_ids:
-            if competitor_id == specter_id:
+            if competitor_id == warpsock_id:
                 continue
             comp_rows = by_workload.get(workload, {}).get(competitor_id, [])
             if len(comp_rows) != len(runs):
@@ -353,20 +353,20 @@ def compare_repeats(
                 )
             edge = {
                 "workload": workload,
-                "specter_id": specter_id,
+                "warpsock_id": warpsock_id,
                 "competitor_id": competitor_id,
-                "specter_worst_p50_ttfb_ns": sp_p50_worst,
+                "warpsock_worst_p50_ttfb_ns": sp_p50_worst,
                 "competitor_best_p50_ttfb_ns": comp_p50_best,
-                "specter_worst_p95_ttfb_ns": sp_p95_worst,
+                "warpsock_worst_p95_ttfb_ns": sp_p95_worst,
                 "competitor_best_p95_ttfb_ns": comp_p95_best,
                 "throughput_metric": throughput_metric,
-                "specter_worst_bytes_per_sec": sp_tput_worst,
+                "warpsock_worst_bytes_per_sec": sp_tput_worst,
                 "competitor_best_bytes_per_sec": comp_tput_best,
             }
             if is_get:
-                p50_tail_edge_key = f"specter_worst_{p50_tail_metric}"
+                p50_tail_edge_key = f"warpsock_worst_{p50_tail_metric}"
                 comp_p50_tail_edge_key = f"competitor_best_{p50_tail_metric}"
-                p95_tail_edge_key = f"specter_worst_{p95_tail_metric}"
+                p95_tail_edge_key = f"warpsock_worst_{p95_tail_metric}"
                 comp_p95_tail_edge_key = f"competitor_best_{p95_tail_metric}"
                 edge.update(
                     {
@@ -389,30 +389,30 @@ def compare_repeats(
                 )
             if sp_p50_worst > comp_p50_best:
                 failures.append(
-                    f"FAIL_REPEAT {workload} {specter_id} worst_p50 "
+                    f"FAIL_REPEAT {workload} {warpsock_id} worst_p50 "
                     f"{sp_p50_worst:.0f} > {competitor_id} best_p50 {comp_p50_best:.0f}"
                 )
             if sp_p95_worst > comp_p95_best:
                 failures.append(
-                    f"FAIL_REPEAT {workload} {specter_id} worst_p95 "
+                    f"FAIL_REPEAT {workload} {warpsock_id} worst_p95 "
                     f"{sp_p95_worst:.0f} > {competitor_id} best_p95 {comp_p95_best:.0f}"
                 )
             if is_get:
                 if sp_p50_tail_worst > comp_p50_tail_best:
                     failures.append(
-                        f"FAIL_REPEAT {workload} {specter_id} worst_{p50_tail_metric.removesuffix('_ns')} "
+                        f"FAIL_REPEAT {workload} {warpsock_id} worst_{p50_tail_metric.removesuffix('_ns')} "
                         f"{sp_p50_tail_worst:.0f} > {competitor_id} "
                         f"best_{p50_tail_metric.removesuffix('_ns')} {comp_p50_tail_best:.0f}"
                     )
                 if sp_p95_tail_worst > comp_p95_tail_best:
                     failures.append(
-                        f"FAIL_REPEAT {workload} {specter_id} worst_{p95_tail_metric.removesuffix('_ns')} "
+                        f"FAIL_REPEAT {workload} {warpsock_id} worst_{p95_tail_metric.removesuffix('_ns')} "
                         f"{sp_p95_tail_worst:.0f} > {competitor_id} "
                         f"best_{p95_tail_metric.removesuffix('_ns')} {comp_p95_tail_best:.0f}"
                     )
             if sp_tput_worst < comp_tput_best:
                 failures.append(
-                    f"FAIL_REPEAT {workload} {specter_id} worst_{throughput_failure_label} "
+                    f"FAIL_REPEAT {workload} {warpsock_id} worst_{throughput_failure_label} "
                     f"{sp_tput_worst:.0f} < {competitor_id} best_{throughput_failure_label} {comp_tput_best:.0f}"
                 )
     return failures, edges

@@ -2,8 +2,8 @@
 //!
 //! Uses MockH3Server to inject malformed frames and test client robustness.
 
-use specter::transport::h3::H3Client;
 use std::time::Duration;
+use warpsock::transport::h3::H3Client;
 // use tokio::time::timeout;
 
 mod helpers;

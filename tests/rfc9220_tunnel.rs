@@ -1,7 +1,7 @@
 use bytes::Bytes;
-use specter::{Client, H3Backend, H3TunnelEvent};
 use std::time::Duration;
 use tokio::time::timeout;
+use warpsock::{Client, H3Backend, H3TunnelEvent};
 
 mod helpers;
 use helpers::mock_h3_server::{MockEvent, MockH3Connection, MockH3Server};

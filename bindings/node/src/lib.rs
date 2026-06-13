@@ -1,6 +1,6 @@
-//! Node.js bindings for Specter HTTP client.
+//! Node.js bindings for Warpsock HTTP client.
 //!
-//! Provides Node.js async access to Specter's HTTP client with full
+//! Provides Node.js async access to Warpsock's HTTP client with full
 //! TLS/HTTP2/HTTP3 fingerprint control.
 
 use bytes::Bytes;
@@ -20,20 +20,20 @@ mod websocket_h2;
 mod websocket_h3;
 mod ws_types;
 
-// Re-export specter types - use ::specter to disambiguate
-use ::specter::{
+// Re-export warpsock types - use ::warpsock to disambiguate
+use ::warpsock::{
     Body as RustBody, Client as RustClient, ClientBuilder as RustClientBuilder,
     CookieJar as RustCookieJar, Error as RustError, FingerprintProfile as RustFingerprintProfile,
     HttpVersion as RustHttpVersion, Response as RustResponse, Timeouts as RustTimeouts,
 };
 
 // gRPC support (crate feature `grpc`).
-use ::specter::grpc::{
+use ::warpsock::grpc::{
     encode_message as rust_encode_message, GrpcEncoding as RustGrpcEncoding,
     GrpcFramer as RustGrpcFramer,
 };
 
-/// Node.js wrapper for Specter HTTP client.
+/// Node.js wrapper for Warpsock HTTP client.
 #[napi]
 pub struct Client {
     pub(crate) inner: RustClient,
@@ -836,7 +836,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Enable or disable Specter's built-in DNS result cache.
+    /// Enable or disable Warpsock's built-in DNS result cache.
     #[napi]
     pub fn hickory_dns(&mut self, enable: bool) -> &Self {
         if let Some(inner) = self.inner.take() {
@@ -1227,7 +1227,7 @@ impl GrpcFramer {
     }
 }
 
-/// Convert a specter Error to a napi Error.
+/// Convert a warpsock Error to a napi Error.
 pub(crate) fn to_napi_err(e: RustError) -> Error {
     Error::new(Status::GenericFailure, e.to_string())
 }
@@ -1235,7 +1235,7 @@ pub(crate) fn to_napi_err(e: RustError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::{to_rust_fingerprint_profile, FingerprintProfile};
-    use specter::FingerprintProfile as RustFingerprintProfile;
+    use warpsock::FingerprintProfile as RustFingerprintProfile;
 
     #[test]
     fn fingerprint_profile_numeric_values_remain_compatible() {

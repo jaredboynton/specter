@@ -1,10 +1,10 @@
 use bytes::Bytes;
-use specter::transport::h3::H3Client;
-use specter::{Client, Error, HttpVersion, RequestBody};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
+use warpsock::transport::h3::H3Client;
+use warpsock::{Client, Error, HttpVersion, RequestBody};
 
 mod helpers;
 use helpers::mock_h3_server::{MockEvent, MockH3Server};

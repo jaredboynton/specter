@@ -13,17 +13,17 @@ fn quiche_is_not_in_the_h3_runtime() {
 
     assert!(
         !manifest.contains("h3-quiche-compat"),
-        "Specter's H3 runtime must not expose a quiche compatibility feature"
+        "Warpsock's H3 runtime must not expose a quiche compatibility feature"
     );
     assert!(
         !manifest.contains("quiche-fixtures"),
-        "Specter's package features must not expose quiche; fixture-only usage should stay in dev-dependencies"
+        "Warpsock's package features must not expose quiche; fixture-only usage should stay in dev-dependencies"
     );
     assert!(
         !manifest
             .lines()
             .any(|line| line.trim_start().starts_with("quiche =")),
-        "Specter must not depend on quiche anywhere in the main package manifest"
+        "Warpsock must not depend on quiche anywhere in the main package manifest"
     );
 
     let dependencies = manifest
@@ -60,7 +60,7 @@ fn quiche_is_not_in_the_h3_runtime() {
         let source = std::fs::read_to_string(path).expect("H3 fixture source should be readable");
         assert!(
             !source.contains("quiche"),
-            "{path} must not reference quiche; fixtures and benches must use Specter's native H3"
+            "{path} must not reference quiche; fixtures and benches must use Warpsock's native H3"
         );
     }
 }

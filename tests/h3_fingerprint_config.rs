@@ -1,12 +1,12 @@
-use specter::fingerprint::tls::NativeH3TlsFeatureStatus;
-use specter::fingerprint::{
+use std::time::Duration;
+use warpsock::fingerprint::tls::NativeH3TlsFeatureStatus;
+use warpsock::fingerprint::{
     FingerprintProfile, H3Settings, Http3Fingerprint, QuicEcnCodepoint, QuicTransportParams,
     TlsFingerprint,
 };
-use specter::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
-use specter::transport::h3::tls::NativeH3HandshakeStatus;
-use specter::{Client, H3Backend, H3Client};
-use std::time::Duration;
+use warpsock::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
+use warpsock::transport::h3::tls::NativeH3HandshakeStatus;
+use warpsock::{Client, H3Backend, H3Client};
 
 #[test]
 fn chrome_http3_fingerprint_exposes_quic_h3_and_grease_knobs() {

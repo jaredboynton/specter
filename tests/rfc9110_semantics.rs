@@ -4,9 +4,9 @@
 //! https://www.rfc-editor.org/rfc/rfc9110
 
 use http::Method;
-use specter::transport::h1::H1Connection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use warpsock::transport::h1::H1Connection;
 
 async fn run_mock_server() -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -81,8 +81,8 @@ async fn test_redirect_response_301() {
     // or standard Client if exposed.
     // Using simple TcpStream for H1Connection.
 
-    use specter::transport::connector::MaybeHttpsStream;
     use tokio::net::TcpStream;
+    use warpsock::transport::connector::MaybeHttpsStream;
 
     let uri: http::Uri = format!("{}/redirect", base_url).parse().unwrap();
     let host = uri.host().unwrap();
@@ -113,8 +113,8 @@ async fn test_content_negotiation_accept_header() {
     let host = uri.host().unwrap();
     let port = uri.port_u16().unwrap();
 
-    use specter::transport::connector::MaybeHttpsStream;
     use tokio::net::TcpStream;
+    use warpsock::transport::connector::MaybeHttpsStream;
     let stream = TcpStream::connect((host, port)).await.unwrap();
     let mut conn = H1Connection::new(MaybeHttpsStream::Http(stream));
 
@@ -146,8 +146,8 @@ async fn test_conditional_request_if_none_match() {
     let host = uri.host().unwrap();
     let port = uri.port_u16().unwrap();
 
-    use specter::transport::connector::MaybeHttpsStream;
     use tokio::net::TcpStream;
+    use warpsock::transport::connector::MaybeHttpsStream;
     let stream = TcpStream::connect((host, port)).await.unwrap();
     let mut conn = H1Connection::new(MaybeHttpsStream::Http(stream));
 

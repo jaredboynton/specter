@@ -525,7 +525,7 @@ impl H3Client {
 
     /// Resolve a reusable HTTP/3 handle for low-overhead repeated requests to one URL.
     pub async fn handle(&self, url: &str) -> Result<H3Handle> {
-        if std::env::var_os("SPECTER_NATIVE_H3_DIRECT_IDLE_GET").is_some()
+        if std::env::var_os("WARPSOCK_NATIVE_H3_DIRECT_IDLE_GET").is_some()
             && self.backend == H3Backend::Native
         {
             let key = self.pool_key(url)?;

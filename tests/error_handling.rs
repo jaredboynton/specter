@@ -1,4 +1,4 @@
-//! Error handling tests for the specter HTTP client.
+//! Error handling tests for the warpsock HTTP client.
 //!
 //! Tests client behavior under various failure conditions:
 //! - Connection refused
@@ -7,10 +7,10 @@
 //! - Connection reset during body read
 //! - TLS handshake failure
 
-use specter::Client;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
+use warpsock::Client;
 
 mod helpers;
 

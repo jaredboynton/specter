@@ -2,7 +2,7 @@
 
 These artifacts replace the prior 2026-05-24 / 2026-05-25 Mac-sourced streaming
 numbers with a single-environment re-measurement. Every client in the comparison
-(Specter and `reqwest 0.12`) was measured on the same quiet host so no figure
+(Warpsock and `reqwest 0.12`) was measured on the same quiet host so no figure
 mixes hardware.
 
 ## Environment
@@ -28,9 +28,9 @@ clamps, and zero upload-complete fallbacks at `n=100`.
 | Response-body | H1 | +63.64% (63.51%) | +10.96% (10.62%) | ~0 | -11.25% (improved) | pass |
 | Response-body | H2 | +24.25% (23.58%) | +17.83% (17.57%) | ~0 | -17.75% (improved) | pass |
 
-Absolute medians (Specter / reqwest):
+Absolute medians (Warpsock / reqwest):
 
-| Workload | Specter TTFB | reqwest TTFB | Specter throughput | reqwest throughput |
+| Workload | Warpsock TTFB | reqwest TTFB | Warpsock throughput | reqwest throughput |
 | --- | ---: | ---: | ---: | ---: |
 | H1 request-body | 0.085 ms | 0.098 ms | 479.2 MB/s | 419.5 MB/s |
 | H2 request-body | 0.127 ms | 0.293 ms | 323.8 MB/s | 139.8 MB/s |
@@ -40,7 +40,7 @@ Absolute medians (Specter / reqwest):
 The H2 request-body throughput ratio is large because the request body is small
 (`5 x 1024B`, 2 ms inter-chunk pacing, 8-request workload) and is measured to the
 fixture upload-complete timestamp, so it is dominated by per-request client
-overhead where Specter's lower fixed cost shows as a wide ratio on a small
+overhead where Warpsock's lower fixed cost shows as a wide ratio on a small
 absolute (323.8 vs 139.8 MB/s).
 
 ## Reproduce

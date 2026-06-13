@@ -48,10 +48,10 @@ use crate::transport::h1_h2::{Client, RequestBuilder};
 ///
 /// ## Example
 /// ```no_run
-/// use specter::Client;
-/// use specter::grpc::{encode_message, grpc_request, GrpcEncoding, GrpcFramer};
+/// use warpsock::Client;
+/// use warpsock::grpc::{encode_message, grpc_request, GrpcEncoding, GrpcFramer};
 ///
-/// # async fn run() -> specter::Result<()> {
+/// # async fn run() -> warpsock::Result<()> {
 /// let client = Client::new()?;
 /// let framed = encode_message(b"\x0a\x05world", false, GrpcEncoding::Identity)?;
 /// let mut response = grpc_request(

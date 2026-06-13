@@ -2,7 +2,7 @@
 //!
 //! Validates OrderedHeaders preserves order and JA4H fingerprint calculation.
 
-use specter::headers::{
+use warpsock::headers::{
     chrome_142_headers, firefox_133_headers, firefox_151_headers, OrderedHeaders,
 };
 

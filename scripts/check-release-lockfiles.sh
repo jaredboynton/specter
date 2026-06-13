@@ -87,7 +87,7 @@ PY
 }
 
 python_init_version() {
-    python3 - "$PROJECT_ROOT/bindings/python/python/specter/__init__.py" <<'PY'
+    python3 - "$PROJECT_ROOT/bindings/python/python/warpsock/__init__.py" <<'PY'
 import ast
 import sys
 
@@ -98,7 +98,7 @@ for node in source.body:
             if isinstance(target, ast.Name) and target.id == "__version__":
                 print(ast.literal_eval(node.value))
                 raise SystemExit(0)
-raise SystemExit("__version__ not found in bindings/python/python/specter/__init__.py")
+raise SystemExit("__version__ not found in bindings/python/python/warpsock/__init__.py")
 PY
 }
 
@@ -118,7 +118,7 @@ checks = [
     ('packages[""].version', data.get("packages", {}).get("", {}).get("version")),
 ]
 optional = data.get("packages", {}).get("", {}).get("optionalDependencies", {})
-for name in ("specters-darwin-arm64", "specters-darwin-x64", "specters-linux-arm64-gnu", "specters-linux-x64-gnu"):
+for name in ("warpsock-darwin-arm64", "warpsock-darwin-x64", "warpsock-linux-arm64-gnu", "warpsock-linux-x64-gnu"):
     checks.append((f'packages[""].optionalDependencies.{name}', optional.get(name)))
 
 for source, actual in checks:
@@ -175,7 +175,7 @@ expect_version "$(version_from_package_json "$PROJECT_ROOT/bindings/node/package
 expect_version "$(version_from_package_json "$PROJECT_ROOT/bindings/node/package-lock.json")" "$root_version" "bindings/node/package-lock.json"
 expect_version "$(node_index_version)" "$root_version" "bindings/node/index.js"
 expect_version "$(pyproject_version)" "$root_version" "bindings/python/pyproject.toml"
-expect_version "$(python_init_version)" "$root_version" "bindings/python/python/specter/__init__.py"
+expect_version "$(python_init_version)" "$root_version" "bindings/python/python/warpsock/__init__.py"
 check_node_package_lock_versions "$root_version"
 
 if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then

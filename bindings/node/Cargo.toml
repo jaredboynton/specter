@@ -1,16 +1,16 @@
 [package]
-name = "specter-node"
-version = "4.2.3"
+name = "warpsock-node"
+version = "4.2.4"
 edition = "2021"
 license = "MIT"
-description = "Node.js bindings for Specter HTTP client"
-repository = "https://github.com/jaredboynton/specter"
+description = "Node.js bindings for Warpsock HTTP client"
+repository = "https://github.com/jaredboynton/warpsock"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-specter = { package = "specters", path = "../..", features = ["grpc"] }
+warpsock = { package = "warpsock", path = "../..", features = ["grpc"] }
 napi = { version = "2", features = ["async", "tokio_rt", "napi9"] }
 napi-derive = "2"
 tokio = { version = "1", features = ["rt-multi-thread"] }

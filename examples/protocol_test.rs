@@ -15,10 +15,10 @@
 //!   cargo run --example protocol_test -- --verbose
 //!   cargo run --example protocol_test -- --target cloudflare.com
 
-use specter::headers::chrome_142_headers;
-use specter::{ClientBuilder, FingerprintProfile, HttpVersion};
 use std::time::Instant;
 use tracing::info;
+use warpsock::headers::chrome_142_headers;
+use warpsock::{ClientBuilder, FingerprintProfile, HttpVersion};
 
 #[derive(Debug)]
 struct TestResult {
@@ -128,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = subscriber.try_init();
 
     info!("================================================================================");
-    info!("Specter Protocol Test Suite");
+    info!("Warpsock Protocol Test Suite");
     info!("================================================================================");
     info!("");
 
@@ -604,7 +604,7 @@ async fn test_post_request(base_url: &str, _verbose: bool) -> TestResult {
     let mut headers = chrome_headers_owned();
     headers.push(("Content-Type".to_string(), "application/json".to_string()));
 
-    let body = r#"{"test": "specter", "protocol": "h2"}"#;
+    let body = r#"{"test": "warpsock", "protocol": "h2"}"#;
 
     let start = Instant::now();
 

@@ -1,4 +1,4 @@
-# Specter Test & Build Optimization Shared Plan
+# Warpsock Test & Build Optimization Shared Plan
 
 Status: implemented for the low-risk test/build optimization phases; CI sharding and deeper H2/H3 timing cleanup remain deferred.
 

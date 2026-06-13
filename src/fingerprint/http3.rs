@@ -67,11 +67,11 @@ impl RawQuicTransportParameter {
     const INITIAL_SOURCE_CONNECTION_ID_ID: u64 = 0x0f;
     const RETRY_SOURCE_CONNECTION_ID_ID: u64 = 0x10;
     const ORIGINAL_DESTINATION_CONNECTION_ID_PLACEHOLDER: &'static [u8] =
-        b"$specter:original_destination_connection_id";
+        b"$warpsock:original_destination_connection_id";
     const INITIAL_SOURCE_CONNECTION_ID_PLACEHOLDER: &'static [u8] =
-        b"$specter:initial_source_connection_id";
+        b"$warpsock:initial_source_connection_id";
     const RETRY_SOURCE_CONNECTION_ID_PLACEHOLDER: &'static [u8] =
-        b"$specter:retry_source_connection_id";
+        b"$warpsock:retry_source_connection_id";
 
     pub fn varint(id: u64, value: u64) -> Self {
         Self {

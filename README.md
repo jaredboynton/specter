@@ -1,10 +1,10 @@
-# Specter
+# Warpsock
 
 Rust HTTP client with Chrome-accurate fingerprints across TLS, HTTP/1.1, HTTP/2, HTTP/3, and WebSockets - automation that looks like a real browser on the wire.
 
 ## What This Is
 
-Specter implements HTTP/1.1, HTTP/2, and HTTP/3 with browser-like protocol fingerprints. It's written in Rust with a custom HTTP/2 implementation built from RFC 9113 (we don't use hyper or the h2 crate). TLS uses BoringSSL - Chrome's actual TLS library. When you make requests with Specter, fingerprinting systems see browser-style signatures across TLS, HTTP/2, HTTP/3, and request headers. Validated against ScrapFly, Browserleaks, and tls.peet.ws.
+Warpsock implements HTTP/1.1, HTTP/2, and HTTP/3 with browser-like protocol fingerprints. It's written in Rust with a custom HTTP/2 implementation built from RFC 9113 (we don't use hyper or the h2 crate). TLS uses BoringSSL - Chrome's actual TLS library. When you make requests with Warpsock, fingerprinting systems see browser-style signatures across TLS, HTTP/2, HTTP/3, and request headers. Validated against ScrapFly, Browserleaks, and tls.peet.ws.
 
 Implemented Chrome fingerprints: **142, 143, 144, 145, 146, 147, 148**.
 Implemented Firefox stable fingerprints: **133 through 151**. Firefox ESR fingerprints: **115, 128, 140**.
@@ -13,8 +13,21 @@ See [`docs/fingerprints/firefox-version-profiles.md`](docs/fingerprints/firefox-
 
 ```toml
 [dependencies]
-specter = "4.0"
+warpsock = "4.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
+
+### Migrating from Specter
+
+Warpsock is the new package name for the former Specter/Specters packages:
+
+| Old package | New package |
+| --- | --- |
+| Rust crate `specters` / crate path `specter` | Rust crate `warpsock` / crate path `warpsock` |
+| npm `specters` plus `specters-*` native packages | npm `warpsock` plus `warpsock-*` native packages |
+| PyPI `specters` / Python module `specter` | PyPI `warpsock` / Python module `warpsock` |
+
+The old package names remain available for existing lockfiles, with deprecation notices pointing at Warpsock.
 
 ### Certified Chrome profiles
 
@@ -46,10 +59,10 @@ specter = "4.0"
 ### Basic request
 
 ```rust
-use specter::{Client, FingerprintProfile};
+use warpsock::{Client, FingerprintProfile};
 
 #[tokio::main]
-async fn main() -> Result<(), specter::Error> {
+async fn main() -> Result<(), warpsock::Error> {
     let client = Client::builder()
         .fingerprint(FingerprintProfile::Chrome148)
         .build()?;
@@ -68,7 +81,7 @@ async fn main() -> Result<(), specter::Error> {
 ### Force a specific HTTP version
 
 ```rust
-use specter::HttpVersion;
+use warpsock::HttpVersion;
 
 // HTTP/2 only
 client.get(url).version(HttpVersion::Http2).send().await?;
@@ -80,24 +93,24 @@ client.get(url).version(HttpVersion::Http3).send().await?;
 ### Configure the client builder
 
 ```rust
-use specter::{Client, FingerprintProfile};
-use specter::fingerprint::http2::Http2Settings;
-use specter::transport::h2::PseudoHeaderOrder;
+use warpsock::{Client, FingerprintProfile};
+use warpsock::fingerprint::http2::Http2Settings;
+use warpsock::transport::h2::PseudoHeaderOrder;
 use std::time::Duration;
 
 let client = Client::builder()
     .fingerprint(FingerprintProfile::Chrome148)
     .prefer_http2(true)          // advertise h2 first and reuse pooled connections
-    .timeout(Duration::from_secs(30))
+    .total_timeout(Duration::from_secs(30))
     .http2_settings(Http2Settings::default())
     .pseudo_order(PseudoHeaderOrder::Chrome)
     .h3_upgrade(true)            // cache Alt-Svc upgrades
     .build()?;
 ```
 
-- `fingerprint(FingerprintProfile::Chrome148)` selects profile-derived TLS, HTTP/2, and HTTP/3 behavior for the implemented Chrome 148 milestone. Other versions available: `Chrome142` through `Chrome147`, Firefox stable `Firefox133` through `Firefox151`, and Firefox ESR `FirefoxEsr115`, `FirefoxEsr128`, `FirefoxEsr140`. Use `.user_agent(...)`, `.default_headers(...)`, or `specter::headers::*` helpers when you need exact User-Agent or request header presets; `.fingerprint(...)` does not inject per-request headers by itself.
+- `fingerprint(FingerprintProfile::Chrome148)` selects profile-derived TLS, HTTP/2, and HTTP/3 behavior for the implemented Chrome 148 milestone. Other versions available: `Chrome142` through `Chrome147`, Firefox stable `Firefox133` through `Firefox151`, and Firefox ESR `FirefoxEsr115`, `FirefoxEsr128`, `FirefoxEsr140`. Use `.user_agent(...)`, `.default_headers(...)`, or `warpsock::headers::*` helpers when you need exact User-Agent or request header presets; `.fingerprint(...)` does not inject per-request headers by itself.
 - `prefer_http2(true)` keeps HTTP/1.1 available through ALPN but defaults to pooled HTTP/2.
-- `timeout(...)` adds a global request timeout enforced across all transports.
+- `total_timeout(...)` adds a global request timeout enforced across all transports.
 - `http2_settings(...)` / `pseudo_order(...)` let you override SETTINGS frames and pseudo header ordering when you need to mimic a different browser or experiment with fingerprints.
 - `h3_upgrade(false)` disables Alt-Svc based HTTP/3 upgrades if you want deterministic TCP-only behavior.
 
@@ -106,7 +119,7 @@ let client = Client::builder()
 Use `CapacityPolicy` when callers need one protocol-neutral capacity control surface instead of separate H1/H2/H3 knobs:
 
 ```rust
-use specter::{CapacityPolicy, Client};
+use warpsock::{CapacityPolicy, Client};
 
 let client = Client::builder()
     .capacity_policy(
@@ -124,10 +137,10 @@ let client = Client::builder()
 
 ### Redirects, retries, and cookies stay under your control
 
-Specter never follows redirects or stores cookies automatically by default. That is intentional so you can replay the exact browser flow the target expects. You can opt in:
+Warpsock never follows redirects or stores cookies automatically by default. That is intentional so you can replay the exact browser flow the target expects. You can opt in:
 
 ```rust
-use specter::RedirectPolicy;
+use warpsock::RedirectPolicy;
 
 let client = Client::builder()
     .redirect_policy(RedirectPolicy::Limited(10))
@@ -138,9 +151,9 @@ let client = Client::builder()
 Use `CookieJar` plus the header helpers to implement whatever policy you need:
 
 ```rust
-use specter::{Client, CookieJar, FingerprintProfile, HttpVersion, Result};
-use specter::headers::{chrome_148_headers, with_cookies};
-use url::Url;
+use warpsock::{Client, CookieJar, FingerprintProfile, HttpVersion, Result};
+use warpsock::headers::{chrome_148_headers, with_cookies};
+use warpsock::Url;
 
 async fn fetch_with_redirects() -> Result<()> {
     let client = Client::builder()
@@ -193,7 +206,7 @@ jar.save_to_file("cookies.txt").await?;
 
 ### Header presets & origin helpers
 
-`specter::headers` ships Chrome 142-148 navigation, AJAX, and form presets plus helpers such as `with_origin`, `with_referer`, `with_cookies`, and `headers_to_owned`. Start from those presets, then add per-request headers so you never accidentally send forbidden connection-specific headers on HTTP/2/3.
+`warpsock::headers` ships Chrome 142-148 navigation, AJAX, and form presets plus helpers such as `with_origin`, `with_referer`, `with_cookies`, and `headers_to_owned`. Start from those presets, then add per-request headers so you never accidentally send forbidden connection-specific headers on HTTP/2/3.
 
 ### Response helpers
 
@@ -201,10 +214,10 @@ jar.save_to_file("cookies.txt").await?;
 
 ### WebSockets
 
-Specter supports RFC 6455 WebSockets over HTTP/1.1 Upgrade:
+Warpsock supports RFC 6455 WebSockets over HTTP/1.1 Upgrade:
 
 ```rust
-use specter::{Client, FingerprintProfile, Message};
+use warpsock::{Client, FingerprintProfile, Message};
 
 let mut ws = Client::builder()
     .fingerprint(FingerprintProfile::Chrome148)
@@ -230,11 +243,9 @@ For `wss://`, the RFC 6455 path advertises HTTP/1.1 only via ALPN so the opening
 
 Node and Python bindings expose the same RFC 6455 API shape through `client.websocket(...)`, with RFC 6455 messages represented as typed text, binary, ping, pong, and close objects.
 
-Specter also exposes RFC 8441 Extended CONNECT for WebSocket-over-HTTP/2 when the peer advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL`:
+Warpsock also exposes RFC 8441 Extended CONNECT for WebSocket-over-HTTP/2 when the peer advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL`:
 
 ```rust
-use bytes::Bytes;
-
 let mut tunnel = client
     .websocket_h2("wss://example.com/socket")
     .header("origin", "https://example.com")
@@ -250,7 +261,7 @@ The RFC 8441 API is a byte tunnel. Use it when you need H2 Extended CONNECT sema
 
 ## Performance
 
-Specter ships deterministic localhost streaming benchmarks against `reqwest 0.12`. Across H1 and H2 request- and response-body streaming, Specter beats reqwest on both TTFB and throughput with Wilcoxon p-values well below 0.01. The numbers below are a single-environment re-baseline measured on a quiet AWS Graviton4 host (commit `25395a8`, 3 repeats per workload, 100 paired samples each), with both clients measured on the same machine. Values are the median across the 3 repeats; each Artifact link is rep 1 of that workload, and the [directory README](docs/benchmarks/2026-06-03-streaming/) lists all three reps with the median and weakest-repeat computation:
+Warpsock ships deterministic localhost streaming benchmarks against `reqwest 0.12`. Across H1 and H2 request- and response-body streaming, Warpsock beats reqwest on both TTFB and throughput with Wilcoxon p-values well below 0.01. The numbers below are a single-environment re-baseline measured on a quiet AWS Graviton4 host (commit `25395a8`, 3 repeats per workload, 100 paired samples each), with both clients measured on the same machine. Values are the median across the 3 repeats; each Artifact link is rep 1 of that workload, and the [directory README](docs/benchmarks/2026-06-03-streaming/) lists all three reps with the median and weakest-repeat computation:
 
 | Workload | Protocol | TTFB Improvement | Throughput Improvement | Throughput p-value | Artifact |
 | --- | --- | ---: | ---: | ---: | --- |
@@ -259,7 +270,7 @@ Specter ships deterministic localhost streaming benchmarks against `reqwest 0.12
 | Request-body streaming | H1 | +13.40% | +15.48% | ≈ 0 | [`h1-req-rep1.json`](docs/benchmarks/2026-06-03-streaming/h1-req-rep1.json) |
 | Request-body streaming | H2 | +57.05% | +132.81% | ≈ 0 | [`h2-req-rep1.json`](docs/benchmarks/2026-06-03-streaming/h2-req-rep1.json) |
 
-CI gates require at least 5% median TTFB and throughput improvement, p<0.01, p95 throughput regression at most 5%, and RFC 8441/WebSocket coexistence preserved; the measured numbers above clear those gates by wide margins. Across all three repeats every workload reported zero denominator-floor clamps, zero client-write denominator-floor clamps, and zero upload-complete fallbacks at n=100, and the paired Wilcoxon p underflowed to zero on both TTFB and throughput for every workload. The weakest single repeat still clears the gate everywhere: H1 request +10.55% throughput, H2 request +131.55%, H1 response +10.62%, H2 response +17.57%; every workload also improves p95 throughput (regressions from −11% to −91%). The large H2 request-body throughput ratio reflects a small paced upload measured to the upload-complete timestamp (323.8 vs 139.8 MB/s absolute), where Specter's lower per-request overhead dominates.
+CI gates require at least 5% median TTFB and throughput improvement, p<0.01, p95 throughput regression at most 5%, and RFC 8441/WebSocket coexistence preserved; the measured numbers above clear those gates by wide margins. Across all three repeats every workload reported zero denominator-floor clamps, zero client-write denominator-floor clamps, and zero upload-complete fallbacks at n=100, and the paired Wilcoxon p underflowed to zero on both TTFB and throughput for every workload. The weakest single repeat still clears the gate everywhere: H1 request +10.55% throughput, H2 request +131.55%, H1 response +10.62%, H2 response +17.57%; every workload also improves p95 throughput (regressions from −11% to −91%). The large H2 request-body throughput ratio reflects a small paced upload measured to the upload-complete timestamp (323.8 vs 139.8 MB/s absolute), where Warpsock's lower per-request overhead dominates.
 
 The request-body benchmark uses a fixed `5 x 1024B` body schedule, `2ms` inter-chunk pacing, and an 8-request workload, measured at the fixture upload-complete timestamp so the metric reflects request-send cost.
 
@@ -267,58 +278,58 @@ See [`docs/benchmarks/2026-06-03-streaming/`](docs/benchmarks/2026-06-03-streami
 
 ### Local native HTTP/3 vs Rust H3 clients
 
-Specter's native HTTP/3 path also has a local same-fixture comparator matrix against `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest` HTTP/3. The canonical evidence is the GET-only ledger repeat gate on the quiet AWS Graviton4 host: every client drives the same paced 80 KiB streaming-GET fixture at Specter's shipping Chrome ACK cadence with warm connection reuse, each client runs in its own process (4 fresh-process reps per client per gate, n=100 plus 10 warmups), the fixture process is pinned to core 2 and every client process identically to cores 4-11, and the gate fails closed on dirty trees, non-allowlisted environment, or missing fixture-ledger provenance. The comparison basis is deliberately conservative: Specter's worst rep must beat every comparator's per-metric best rep on p50/p95 TTFB, ledger-paced throughput, and the p50/p95 ledger-paced tail (per-sample client overhead beyond the fixture's own emission span). Two consecutive gates passed at `ba356d7` (artifacts [`2026-06-09-direct-get-clientpin-clean-gate/`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/) and [`2026-06-09-direct-get-clientpin-clean-gate-r2/`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate-r2/)); gate 1:
+Warpsock's native HTTP/3 path also has a local same-fixture comparator matrix against `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest` HTTP/3. The canonical evidence is the GET-only ledger repeat gate on the quiet AWS Graviton4 host: every client drives the same paced 80 KiB streaming-GET fixture at Warpsock's shipping Chrome ACK cadence with warm connection reuse, each client runs in its own process (4 fresh-process reps per client per gate, n=100 plus 10 warmups), the fixture process is pinned to core 2 and every client process identically to cores 4-11, and the gate fails closed on dirty trees, non-allowlisted environment, or missing fixture-ledger provenance. The comparison basis is deliberately conservative: Warpsock's worst rep must beat every comparator's per-metric best rep on p50/p95 TTFB, ledger-paced throughput, and the p50/p95 ledger-paced tail (per-sample client overhead beyond the fixture's own emission span). Two consecutive gates passed at `ba356d7` (artifacts [`2026-06-09-direct-get-clientpin-clean-gate/`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/) and [`2026-06-09-direct-get-clientpin-clean-gate-r2/`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate-r2/)); gate 1:
 
 | Client | p50 TTFB | p95 TTFB | Ledger throughput | p50 ledger tail | p95 ledger tail |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Specter native H3 (worst rep) | 37.6 us | 45.3 us | 19.35 MiB/s | 1.0 us | 7.2 us |
+| Warpsock native H3 (worst rep) | 37.6 us | 45.3 us | 19.35 MiB/s | 1.0 us | 7.2 us |
 | tokio-quiche (per-metric best rep) | 39.6 us | 51.6 us | 19.29 MiB/s | 2.0 us | 9.0 us |
 | h3-quinn (per-metric best rep) | 44.6 us | 57.8 us | 19.27 MiB/s | 3.4 us | 14.1 us |
 | reqwest_h3 (per-metric best rep) | 47.9 us | 81.5 us | 19.23 MiB/s | 2.8 us | 13.0 us |
 | quiche direct (per-metric best rep) | 46.5 us | 80.4 us | 19.12 MiB/s | 16.0 us | 51.8 us |
 
-The second gate reproduces the verdict: Specter worst rep 32.5 us p50 TTFB / 43.5 us p95 / 19.36 MiB/s with a 2.9 us p50 and 7.4 us p95 ledger tail, again ahead of every comparator's best rep on all six metrics. This supersedes the 2026-06-05 matrix in earlier revisions of this section, which had tokio-quiche leading loopback GET TTFB at millisecond scale; that matrix was a same-process all-client capture whose cross-client contention inflated every row, and it predates the direct-GET epoch receive loop, the deferred boundary-ACK send (`9aa436b`), the GET-burst drain ordering (`b23ef2c`), the single-copy 1-RTT datagram decode (`ff6f467`), and the harness placement control (`ba356d7`) that removed scheduler placement luck from both sides of the worst-vs-best comparison.
+The second gate reproduces the verdict: Warpsock worst rep 32.5 us p50 TTFB / 43.5 us p95 / 19.36 MiB/s with a 2.9 us p50 and 7.4 us p95 ledger tail, again ahead of every comparator's best rep on all six metrics. This supersedes the 2026-06-05 matrix in earlier revisions of this section, which had tokio-quiche leading loopback GET TTFB at millisecond scale; that matrix was a same-process all-client capture whose cross-client contention inflated every row, and it predates the direct-GET epoch receive loop, the deferred boundary-ACK send (`9aa436b`), the GET-burst drain ordering (`b23ef2c`), the single-copy 1-RTT datagram decode (`ff6f467`), and the harness placement control (`ba356d7`) that removed scheduler placement luck from both sides of the worst-vs-best comparison.
 
-`quinn_transport` and `s2n_quic_transport` are separate QUIC transport-only evidence and stay out of the H3 HTTP gate. Native QUIC recovery, fallback, browser ACK parity, capture presets, and capacity-policy hardening are tracked as closed regression guards in [`docs/specter-native-h3-remaining-seams.md`](docs/specter-native-h3-remaining-seams.md).
+`quinn_transport` and `s2n_quic_transport` are separate QUIC transport-only evidence and stay out of the H3 HTTP gate. Native QUIC recovery, fallback, browser ACK parity, capture presets, and capacity-policy hardening are tracked as closed regression guards in [`docs/warpsock-native-h3-remaining-seams.md`](docs/warpsock-native-h3-remaining-seams.md).
 
-Specter also runs the RFC 9220 (WebSocket-over-HTTP/3) tunnel as a fair warm-vs-warm comparator. With `BENCH_TUNNEL_STEADYSTATE=1` every client (Specter and comparators alike) opens one warm Extended-CONNECT tunnel and is timed on per-message round-trips, so there is no connection-reuse asymmetry (awsdev Graviton4, n=100). Against the fastest comparator, `tokio-quiche`, Specter holds the lower p95 round-trip tail on all three tunnel workloads (artifact [`2026-06-09-pmtu-probe-tunnel-defer/`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-pmtu-probe-tunnel-defer/)):
+Warpsock also runs the RFC 9220 (WebSocket-over-HTTP/3) tunnel as a fair warm-vs-warm comparator. With `BENCH_TUNNEL_STEADYSTATE=1` every client (Warpsock and comparators alike) opens one warm Extended-CONNECT tunnel and is timed on per-message round-trips, so there is no connection-reuse asymmetry (awsdev Graviton4, n=100). Against the fastest comparator, `tokio-quiche`, Warpsock holds the lower p95 round-trip tail on all three tunnel workloads (artifact [`2026-06-09-pmtu-probe-tunnel-defer/`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-pmtu-probe-tunnel-defer/)):
 
-| Tunnel workload | Specter p50 | Specter p95 | tokio-quiche p50 | tokio-quiche p95 | Result |
+| Tunnel workload | Warpsock p50 | Warpsock p95 | tokio-quiche p50 | tokio-quiche p95 | Result |
 | --- | ---: | ---: | ---: | ---: | --- |
 | echo (1 KB single frame) | 32.9 us | 40.3 us | 32.4 us | 51.2 us | p95 win (non-overlapping); p50 / throughput parity |
 | client DATA+FIN (close) | 69.7 us | 80.1 us | 75.3 us | 101.9 us | win p50, p95, and throughput |
 | slow-consumer mixed | 37.1 us | 42.3 us | 63.6 us | 68.1 us | win p50 and p95 |
 
-`quiche_direct` runs ~3.3-3.4 ms on every tunnel workload, several-fold behind both. The echo p95 win is non-overlapping across 8 reps (Specter worst 43.3 us < tokio-quiche best 48.3 us); echo p50 and throughput (28.8 vs 28.4 MiB/s) are parity at the 1 KB single-frame payload, Specter's sub-MTU regime. The win came from deferring DPLPMTUD path-MTU probes off the tunnel's interactive recv->send turn (commit `5e0d429`), which removed two ~100 us per-run probe spikes inline on the proxied round-trip; the probe cadence and wire image are unchanged. The strict `rfc9220_full_suite_superiority_gate` still does not pass, because it demands a strict p50 AND p95 AND throughput win on every workload and echo p50/throughput are parity; the honest result is the p95-tail reversal, where Specter now leads on the echo and client-DATA+FIN tails that the 4.2.1 changelog had recorded as losses.
+`quiche_direct` runs ~3.3-3.4 ms on every tunnel workload, several-fold behind both. The echo p95 win is non-overlapping across 8 reps (Warpsock worst 43.3 us < tokio-quiche best 48.3 us); echo p50 and throughput (28.8 vs 28.4 MiB/s) are parity at the 1 KB single-frame payload, Warpsock's sub-MTU regime. The win came from deferring DPLPMTUD path-MTU probes off the tunnel's interactive recv->send turn (commit `5e0d429`), which removed two ~100 us per-run probe spikes inline on the proxied round-trip; the probe cadence and wire image are unchanged. The strict `rfc9220_full_suite_superiority_gate` still does not pass, because it demands a strict p50 AND p95 AND throughput win on every workload and echo p50/throughput are parity; the honest result is the p95-tail reversal, where Warpsock now leads on the echo and client-DATA+FIN tails that the 4.2.1 changelog had recorded as losses.
 
 ### Local WebSocket echo vs fastwebsockets and tokio-tungstenite
 
-Specter also ships a local RFC 6455 echo benchmark, [`benches/websocket_vs_fastwebsockets.rs`](benches/websocket_vs_fastwebsockets.rs), against `fastwebsockets 0.10.0` and `tokio-tungstenite 0.24`.
+Warpsock also ships a local RFC 6455 echo benchmark, [`benches/websocket_vs_fastwebsockets.rs`](benches/websocket_vs_fastwebsockets.rs), against `fastwebsockets 0.10.0` and `tokio-tungstenite 0.24`.
 
 From the Graviton4 re-baseline (commit `25395a8`), using 20,000 measured 1 KiB binary echoes after 2,000 warmups, across three reps:
 
-| Rep | Specter | fastwebsockets | tokio-tungstenite | Specter vs fws | Specter vs tung |
+| Rep | Warpsock | fastwebsockets | tokio-tungstenite | Warpsock vs fws | Warpsock vs tung |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | 1 | 42,022 msg/s | 43,482 | 43,612 | −3.4% | −3.6% |
 | 2 | 53,488 msg/s | 53,301 | 51,756 | +0.4% | +3.3% |
 | 3 | 42,321 msg/s | 45,181 | 43,663 | −6.3% | −3.1% |
 
-On loopback the three clients sit within run-to-run variance of each other: every client swings between roughly 42k and 53k msg/s across reps, a spread that exceeds the gap between clients. Specter ranges −6.3% to +0.4% against fastwebsockets and −3.6% to +3.3% against tokio-tungstenite, so loopback message-rate is parity. Artifacts: [`2026-06-03-graviton4-n20000-rep1.json`](docs/benchmarks/websocket-vs-fastwebsockets/2026-06-03-graviton4-n20000-rep1.json) and its rep2/rep3 siblings. Run with `cargo bench --bench websocket_vs_fastwebsockets -- --messages 20000 --warmups 2000 --payload-bytes 1024`.
+On loopback the three clients sit within run-to-run variance of each other: every client swings between roughly 42k and 53k msg/s across reps, a spread that exceeds the gap between clients. Warpsock ranges −6.3% to +0.4% against fastwebsockets and −3.6% to +3.3% against tokio-tungstenite, so loopback message-rate is parity. Artifacts: [`2026-06-03-graviton4-n20000-rep1.json`](docs/benchmarks/websocket-vs-fastwebsockets/2026-06-03-graviton4-n20000-rep1.json) and its rep2/rep3 siblings. Run with `cargo bench --bench websocket_vs_fastwebsockets -- --messages 20000 --warmups 2000 --payload-bytes 1024`.
 
 ### Live LLM streaming vs reqwest
 
-The localhost results above hold up against a real production LLM endpoint. Specter ships a second bench, [`benches/codex_real_streaming.rs`](benches/codex_real_streaming.rs), that hits `POST https://chatgpt.com/backend-api/codex/responses` (the Codex backend, SSE over HTTP/2) and measures TTFB and end-to-end wall time for both Specter and reqwest with paired interleaved samples.
+The localhost results above hold up against a real production LLM endpoint. Warpsock ships a second bench, [`benches/codex_real_streaming.rs`](benches/codex_real_streaming.rs), that hits `POST https://chatgpt.com/backend-api/codex/responses` (the Codex backend, SSE over HTTP/2) and measures TTFB and end-to-end wall time for both Warpsock and reqwest with paired interleaved samples.
 
-Specter vs reqwest on `POST https://chatgpt.com/backend-api/codex/responses` (n=10, 5 pairs):
+Warpsock vs reqwest on `POST https://chatgpt.com/backend-api/codex/responses` (n=10, 5 pairs):
 
-| Metric | Specter | reqwest | Specter advantage |
+| Metric | Warpsock | reqwest | Warpsock advantage |
 | --- | ---: | ---: | ---: |
 | Median TTFB | 558.8 ms | 924.4 ms | −365.6 ms (−40%) |
 | Median wall time | 670.7 ms | 968.9 ms | −298.2 ms (−31%) |
 | Wall time 95% CI | [−419, −52] | (excludes zero) | statistically significant |
 | Wilcoxon p-value | 0.0295 | < 0.05 | significant |
 
-Both clients negotiated HTTP/2; all 10 samples passed the per-pair oracle (`status_code==200 AND delta_count>=1 AND response.completed`). All 5 paired samples showed Specter faster, with the wall-time 95% CI excluding zero — a real, measurable Specter advantage on a live LLM stream over the public internet.
+Both clients negotiated HTTP/2; all 10 samples passed the per-pair oracle (`status_code==200 AND delta_count>=1 AND response.completed`). All 5 paired samples showed Warpsock faster, with the wall-time 95% CI excluding zero — a real, measurable Warpsock advantage on a live LLM stream over the public internet.
 
 Run with `cargo bench --bench codex_real_streaming` (skips with exit 0 when `~/.codex/auth.json` is absent).
 
@@ -326,9 +337,9 @@ Run with `cargo bench --bench codex_real_streaming` (skips with exit 0 when `~/.
 
 reqwest doesn't natively support WebSockets, so the receive-side comparison is against [`tokio-tungstenite`](https://crates.io/crates/tokio-tungstenite) 0.24 — the canonical Rust WebSocket client. The companion bench [`benches/codex_ws_streaming.rs`](benches/codex_ws_streaming.rs) hits the same Codex backend over `wss://` and sends a `response.create` frame, then measures TTFB and wall time over the text-frame stream.
 
-Specter vs tokio-tungstenite 0.24 on `wss://chatgpt.com/backend-api/codex/responses` (n=50, 25 paired samples):
+Warpsock vs tokio-tungstenite 0.24 on `wss://chatgpt.com/backend-api/codex/responses` (n=50, 25 paired samples):
 
-| Metric | Specter | tokio-tungstenite | Specter advantage |
+| Metric | Warpsock | tokio-tungstenite | Warpsock advantage |
 | --- | ---: | ---: | ---: |
 | Median TTFB | 781.1 ms | 702.8 ms | +78 ms (tungstenite slightly faster at median) |
 | **p95 TTFB** | **1423.9 ms** | **4110.7 ms** | **−2687 ms (−65%)** |
@@ -355,7 +366,7 @@ Run with `cargo bench --bench codex_ws_streaming`.
 - All headers properly lowercased per RFC 7540/9113
 - True multiplexing (concurrent requests on single connection, respecting `MAX_CONCURRENT_STREAMS`)
 
-**HTTP/3** - Native QUIC/H3 implementation under `src/transport/h3`, with request streaming, browser-shaped H3/QUIC fingerprint controls, RFC 9220 WebSocket-over-H3 tunnels, and public capacity snapshots. The H3 benchmark matrix uses `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest_h3` as comparator baselines; current native H3 gap status lives in [`docs/specter-native-h3-remaining-seams.md`](docs/specter-native-h3-remaining-seams.md).
+**HTTP/3** - Native QUIC/H3 implementation under `src/transport/h3`, with request streaming, browser-shaped H3/QUIC fingerprint controls, RFC 9220 WebSocket-over-H3 tunnels, and public capacity snapshots. The H3 benchmark matrix uses `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest_h3` as comparator baselines; current native H3 gap status lives in [`docs/warpsock-native-h3-remaining-seams.md`](docs/warpsock-native-h3-remaining-seams.md).
 
 **WebSockets** - RFC 6455 client over HTTP/1.1 Upgrade, RFC 8441 Extended CONNECT tunnels over HTTP/2, and RFC 9220 Extended CONNECT tunnels over native HTTP/3. The H1 RFC 6455 surface includes split read/write halves, raw frame receive helpers, prepared reusable messages, and batched prepared writes. Compression extensions are intentionally not negotiated unless a product caller requires permessage-deflate.
 
@@ -365,7 +376,7 @@ Run with `cargo bench --bench codex_ws_streaming`.
 
 ## Testing & Validation
 
-Specter is validated against production fingerprinting services:
+Warpsock is validated against production fingerprinting services:
 - ScrapFly (tools.scrapfly.io) - matches Chrome fingerprint
 - Browserleaks (tls.browserleaks.com) - TLS fingerprint validation
 - tls.peet.ws - HTTP/2 Akamai fingerprint validation
@@ -373,10 +384,10 @@ Specter is validated against production fingerprinting services:
 
 Local/CI checks:
 
-- `cargo test -p specter` exercises the cookie jar, header filtering, and transport layers.
-- `cargo run --example fingerprint_validation` hits ScrapFly, BrowserLeaks, tls.peet.ws, and Cloudflare to confirm TLS/HTTP/2/HTTP/3 fingerprints.
-- `cargo run --example protocol_test -- --verbose` walks through HTTP/1.1 preference, HTTP/2 pooling, HTTP/3 only, and connection header filtering. Pass `--target example.com` to test a custom origin.
-- `cargo clippy -p specter -- -D warnings` stays clean to make CI fail-fast on regressions.
+- `cargo test -p warpsock` exercises the cookie jar, header filtering, and transport layers.
+- In a repository checkout, `cargo run --example fingerprint_validation` hits ScrapFly, BrowserLeaks, tls.peet.ws, and Cloudflare to confirm TLS/HTTP/2/HTTP/3 fingerprints.
+- In a repository checkout, `cargo run --example protocol_test -- --verbose` walks through HTTP/1.1 preference, HTTP/2 pooling, HTTP/3 only, and connection header filtering. Pass `--target example.com` to test a custom origin.
+- `cargo clippy -p warpsock -- -D warnings` stays clean to make CI fail-fast on regressions.
 
 ## Development
 
@@ -404,10 +415,10 @@ pre-commit run --all-files
 
 ## Responsible Use
 
-Specter makes it easy to mimic real Chrome traffic. Please use it responsibly:
+Warpsock makes it easy to mimic real Chrome traffic. Please use it responsibly:
 - Only target hosts you own or have written permission to test, and obey their terms of service plus local laws.
-- Make it clear in your own product documentation that requests are automated; do not use Specter to impersonate real end users.
-- Respect robots.txt, rate limits, and authentication boundaries—Specter gives you the tools but you are accountable for policy.
+- Make it clear in your own product documentation that requests are automated; do not use Warpsock to impersonate real end users.
+- Respect robots.txt, rate limits, and authentication boundaries—Warpsock gives you the tools but you are accountable for policy.
 - Keep your own audit logs so you can answer abuse reports quickly.
 
 ## License

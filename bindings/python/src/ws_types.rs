@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use ::specter::{CloseCode as RustCloseCode, CloseFrame as RustCloseFrame, Message};
+use ::warpsock::{CloseCode as RustCloseCode, CloseFrame as RustCloseFrame, Message};
 
 #[pyclass]
 #[derive(Clone)]
@@ -61,7 +61,7 @@ impl CloseFrame {
 
     fn __repr__(&self) -> String {
         format!(
-            "<specter.CloseFrame code={} reason={:?}>",
+            "<warpsock.CloseFrame code={} reason={:?}>",
             self.code, self.reason
         )
     }
@@ -167,7 +167,7 @@ impl WebSocketMessage {
     }
 
     fn __repr__(&self) -> String {
-        format!("<specter.WebSocketMessage kind={:?}>", self.kind)
+        format!("<warpsock.WebSocketMessage kind={:?}>", self.kind)
     }
 }
 

@@ -1,5 +1,4 @@
 use bytes::Bytes;
-use specter::{Client, HttpVersion};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -8,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex};
 use tokio::time::{timeout, Duration};
+use warpsock::{Client, HttpVersion};
 
 mod helpers;
 use helpers::mock_server::MockHttpServer;
@@ -210,7 +210,7 @@ async fn handle_pool_connection(
     }
 }
 
-async fn drain(mut response: specter::Response) -> Vec<u8> {
+async fn drain(mut response: warpsock::Response) -> Vec<u8> {
     let mut body = Vec::new();
     while let Some(frame) = response.body_mut().frame().await {
         let chunk = frame.unwrap().into_data().unwrap();

@@ -8,8 +8,6 @@
 
 use bytes::Bytes;
 use serde_json::json;
-use specter::transport::h2::hpack_impl::Encoder;
-use specter::{Client, CookieJar, Error, HttpVersion, RedirectPolicy};
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -18,6 +16,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::timeout;
+use warpsock::transport::h2::hpack_impl::Encoder;
+use warpsock::{Client, CookieJar, Error, HttpVersion, RedirectPolicy};
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};
 use helpers::mock_h3_server::{MockEvent, MockH3Server};
@@ -234,7 +234,7 @@ async fn handle_h1_connection(mut stream: TcpStream, logs: Arc<Mutex<Vec<H1Log>>
     }
 }
 
-async fn collect_body(mut response: specter::Response) -> Result<Vec<u8>, Error> {
+async fn collect_body(mut response: warpsock::Response) -> Result<Vec<u8>, Error> {
     let mut body = Vec::new();
     while let Some(frame) = response.body_mut().frame().await {
         let chunk = frame?.into_data().unwrap_or_else(|_| bytes::Bytes::new());
@@ -920,9 +920,9 @@ async fn public_response_body_is_http_body() {
         "send_streaming must return a poll-based streaming Body"
     );
 
-    let mut body: specter::Body = response.into_body();
+    let mut body: warpsock::Body = response.into_body();
 
-    fn assert_http_body_impl<B: http_body::Body<Data = bytes::Bytes, Error = specter::Error>>(
+    fn assert_http_body_impl<B: http_body::Body<Data = bytes::Bytes, Error = warpsock::Error>>(
         _: &B,
     ) {
     }
@@ -962,7 +962,7 @@ async fn poll_body_hard_cutover_has_no_legacy_shim() {
     );
     assert!(
         response_rs.contains("impl HttpBody for Body"),
-        "specter::Body must implement http_body::Body for the public response surface"
+        "warpsock::Body must implement http_body::Body for the public response surface"
     );
 
     // No public legacy compatibility flag is allowed.
@@ -971,7 +971,7 @@ async fn poll_body_hard_cutover_has_no_legacy_shim() {
         "legacy-mpsc-body",
         "compat-mpsc-body",
         "compat_mpsc_body",
-        "specter-legacy-body",
+        "warpsock-legacy-body",
     ] {
         assert!(
             !manifest.contains(forbidden),

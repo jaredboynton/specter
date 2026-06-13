@@ -1,14 +1,14 @@
 //! HTTP/2 Multiplexing Validation Tests
 //!
-//! Tests that the specter client properly multiplexes concurrent requests
+//! Tests that the warpsock client properly multiplexes concurrent requests
 //! over a single HTTP/2 connection using the mock H2 server infrastructure.
 
-use specter::Client;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+use warpsock::Client;
 
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};

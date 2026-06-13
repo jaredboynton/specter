@@ -1,14 +1,14 @@
 use bytes::Bytes;
 use http::Uri;
-use specter::fingerprint::http2::Http2Settings;
-use specter::transport::h2::{
+use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::{timeout, Duration};
+use warpsock::fingerprint::http2::Http2Settings;
+use warpsock::transport::h2::{
     flags, DataFrame, DriverCommand, FrameHeader, FrameType, H2Driver, H2Handle, H2TransportConfig,
     H2TunnelEvent, PseudoHeaderOrder, RawH2Connection, SettingsFrame, WindowUpdateFrame,
     CONNECTION_PREFACE, FRAME_HEADER_SIZE,
 };
-use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::{timeout, Duration};
 
 async fn read_client_preface_and_settings(server: &mut DuplexStream) {
     let mut preface = vec![0; CONNECTION_PREFACE.len()];
@@ -89,7 +89,7 @@ async fn write_headers(
     end_stream: bool,
 ) {
     let headers =
-        specter::transport::h2::HeadersFrame::new(stream_id, Bytes::copy_from_slice(header_block))
+        warpsock::transport::h2::HeadersFrame::new(stream_id, Bytes::copy_from_slice(header_block))
             .end_headers(true)
             .end_stream(end_stream);
     server.write_all(&headers.serialize()).await.unwrap();
@@ -161,7 +161,7 @@ async fn rfc8441_handle_open_websocket_tunnel_sends_driver_command() {
             let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
             let (inbound_tx, inbound_rx) = mpsc::channel(4);
             response_tx
-                .send(Ok(specter::transport::h2::H2Tunnel::new(
+                .send(Ok(warpsock::transport::h2::H2Tunnel::new(
                     outbound_tx,
                     inbound_rx,
                 )))
@@ -203,7 +203,7 @@ async fn rfc8441_handle_reports_driver_open_error() {
     match command {
         DriverCommand::OpenWebSocketTunnel { response_tx, .. } => {
             response_tx
-                .send(Err(specter::Error::HttpProtocol(
+                .send(Err(warpsock::Error::HttpProtocol(
                     "SETTINGS_ENABLE_CONNECT_PROTOCOL not advertised".into(),
                 )))
                 .unwrap();

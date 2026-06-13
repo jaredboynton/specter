@@ -7,12 +7,12 @@
 
 use bytes::Bytes;
 use http::{Request, Uri};
-use specter::fingerprint::http2::Http2Settings;
-use specter::fingerprint::tls::TlsFingerprint;
-use specter::transport::connector::BoringConnector;
-use specter::transport::h2::{H2Connection, PseudoHeaderOrder};
 use std::time::Duration;
 use tokio::time::timeout;
+use warpsock::fingerprint::http2::Http2Settings;
+use warpsock::fingerprint::tls::TlsFingerprint;
+use warpsock::transport::connector::BoringConnector;
+use warpsock::transport::h2::{H2Connection, PseudoHeaderOrder};
 
 /// Test streaming with nghttp2.org's HTTP/2 test server.
 /// Uses /httpbin/stream-bytes/N which streams N random bytes.
@@ -324,7 +324,7 @@ async fn test_streaming_headers_available_immediately() {
     let request = Request::builder()
         .method("GET")
         .uri(&uri)
-        .header("user-agent", "specter/test")
+        .header("user-agent", "warpsock/test")
         .header("accept", "application/json")
         .header("x-custom-header", "test-value")
         .body(Bytes::new())

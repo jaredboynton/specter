@@ -2,10 +2,10 @@
 //!
 //! Run with: cargo test --test h2_frames_debug -- --nocapture
 
-use specter::transport::h2::{
+use tracing::info;
+use warpsock::transport::h2::{
     FrameHeader, FrameType, WindowUpdateFrame, CHROME_WINDOW_UPDATE, CONNECTION_PREFACE,
 };
-use tracing::info;
 
 #[test]
 fn test_window_update_frame() {

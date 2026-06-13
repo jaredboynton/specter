@@ -16,7 +16,7 @@ fi
 
 cd "$bench_dir"
 script_path="$repo_root/benches/native_h3_vs_rust_clients/scripts/current_rows_awsdev.sh"
-. ~/specter/scripts/lib-bssl-env.sh aarch64-unknown-linux-gnu >/dev/null 2>&1
+. ~/warpsock/scripts/lib-bssl-env.sh aarch64-unknown-linux-gnu >/dev/null 2>&1
 export BORING_BSSL_PATH BORING_BSSL_INCLUDE_PATH
 export PATH="$HOME/.cargo/bin:$PATH"
 export RUSTFLAGS="--cfg reqwest_unstable"
@@ -24,35 +24,35 @@ bench_features="${BENCH_FEATURES:-reqwest-h3}"
 
 # Publication runs must stamp the exact runtime fast-path profile. Missing or
 # inherited env cannot be allowed to turn a partial/slow path into a false pass.
-: "${SPECTER_NATIVE_H3_DIRECT_IDLE_GET:=1}"
-: "${SPECTER_NATIVE_H3_DIRECT_GET_EPOCH:=1}"
-: "${SPECTER_NATIVE_H3_DIRECT_GET_IO_EPOCH:=0}"
-: "${SPECTER_NATIVE_H3_DIRECT_GET_READY_SPIN_US:=25}"
-: "${SPECTER_NATIVE_H3_DIRECT_GET_BODY_SPIN_US:=$SPECTER_NATIVE_H3_DIRECT_GET_READY_SPIN_US}"
-: "${SPECTER_LOCAL_NATIVE_H3_FIXTURE_MODE:=process}"
-: "${SPECTER_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE:=2}"
-: "${SPECTER_LOCAL_NATIVE_H3_FIXTURE_PUMP:=inline-first-chunk-v1}"
+: "${WARPSOCK_NATIVE_H3_DIRECT_IDLE_GET:=1}"
+: "${WARPSOCK_NATIVE_H3_DIRECT_GET_EPOCH:=1}"
+: "${WARPSOCK_NATIVE_H3_DIRECT_GET_IO_EPOCH:=0}"
+: "${WARPSOCK_NATIVE_H3_DIRECT_GET_READY_SPIN_US:=25}"
+: "${WARPSOCK_NATIVE_H3_DIRECT_GET_BODY_SPIN_US:=$WARPSOCK_NATIVE_H3_DIRECT_GET_READY_SPIN_US}"
+: "${WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_MODE:=process}"
+: "${WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE:=2}"
+: "${WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_PUMP:=inline-first-chunk-v1}"
 : "${BENCH_TUNNEL_STEADYSTATE:=1}"
-: "${SPECTER_NATIVE_H3_DIRECT_RFC9220_TUNNEL:=1}"
-: "${SPECTER_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO:=1}"
-: "${SPECTER_NATIVE_H3_DIRECT_RFC9220_MIXED:=1}"
-: "${SPECTER_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH:=1}"
-export SPECTER_NATIVE_H3_DIRECT_IDLE_GET
-export SPECTER_NATIVE_H3_DIRECT_GET_EPOCH
-export SPECTER_NATIVE_H3_DIRECT_GET_IO_EPOCH
-export SPECTER_NATIVE_H3_DIRECT_GET_READY_SPIN_US
-export SPECTER_NATIVE_H3_DIRECT_GET_BODY_SPIN_US
-export SPECTER_LOCAL_NATIVE_H3_FIXTURE_MODE
-export SPECTER_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE
-export SPECTER_LOCAL_NATIVE_H3_FIXTURE_PUMP
+: "${WARPSOCK_NATIVE_H3_DIRECT_RFC9220_TUNNEL:=1}"
+: "${WARPSOCK_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO:=1}"
+: "${WARPSOCK_NATIVE_H3_DIRECT_RFC9220_MIXED:=1}"
+: "${WARPSOCK_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH:=1}"
+export WARPSOCK_NATIVE_H3_DIRECT_IDLE_GET
+export WARPSOCK_NATIVE_H3_DIRECT_GET_EPOCH
+export WARPSOCK_NATIVE_H3_DIRECT_GET_IO_EPOCH
+export WARPSOCK_NATIVE_H3_DIRECT_GET_READY_SPIN_US
+export WARPSOCK_NATIVE_H3_DIRECT_GET_BODY_SPIN_US
+export WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_MODE
+export WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE
+export WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_PUMP
 export BENCH_TUNNEL_STEADYSTATE
-export SPECTER_NATIVE_H3_DIRECT_RFC9220_TUNNEL
-export SPECTER_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO
-export SPECTER_NATIVE_H3_DIRECT_RFC9220_MIXED
-export SPECTER_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH
+export WARPSOCK_NATIVE_H3_DIRECT_RFC9220_TUNNEL
+export WARPSOCK_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO
+export WARPSOCK_NATIVE_H3_DIRECT_RFC9220_MIXED
+export WARPSOCK_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH
 if [ -n "${RUNTIME_PROFILE:-}" ]; then
     runtime_profile="$RUNTIME_PROFILE"
-elif [ "$SPECTER_NATIVE_H3_DIRECT_GET_IO_EPOCH" = "1" ]; then
+elif [ "$WARPSOCK_NATIVE_H3_DIRECT_GET_IO_EPOCH" = "1" ]; then
     runtime_profile="direct-get-io-epoch-rfc9220-fused-echo-close-epoch-mixed"
 else
     runtime_profile="direct-get-epoch-rfc9220-fused-echo-close-epoch-mixed"
@@ -120,38 +120,38 @@ if [ -z "${FIXTURE_LEDGER_GATE+x}" ]; then
         FIXTURE_LEDGER_GATE=1
     fi
 fi
-: "${SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR:=}"
-if [ "$FIXTURE_LEDGER_GATE" = "1" ] && [ -z "$SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR" ]; then
-    SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR="$prefix.fixture-ledgers"
+: "${WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR:=}"
+if [ "$FIXTURE_LEDGER_GATE" = "1" ] && [ -z "$WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR" ]; then
+    WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR="$prefix.fixture-ledgers"
 fi
 export FIXTURE_LEDGER_GATE
-export SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR
+export WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR
 runtime_env_json="$(
     python3 - <<'PY'
 import json
 import os
 
 required_keys = [
-    "SPECTER_NATIVE_H3_DIRECT_IDLE_GET",
-    "SPECTER_NATIVE_H3_DIRECT_GET_EPOCH",
-    "SPECTER_NATIVE_H3_DIRECT_GET_IO_EPOCH",
-    "SPECTER_NATIVE_H3_DIRECT_GET_READY_SPIN_US",
-    "SPECTER_NATIVE_H3_DIRECT_GET_BODY_SPIN_US",
-    "SPECTER_LOCAL_NATIVE_H3_FIXTURE_MODE",
-    "SPECTER_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE",
-    "SPECTER_LOCAL_NATIVE_H3_FIXTURE_PUMP",
+    "WARPSOCK_NATIVE_H3_DIRECT_IDLE_GET",
+    "WARPSOCK_NATIVE_H3_DIRECT_GET_EPOCH",
+    "WARPSOCK_NATIVE_H3_DIRECT_GET_IO_EPOCH",
+    "WARPSOCK_NATIVE_H3_DIRECT_GET_READY_SPIN_US",
+    "WARPSOCK_NATIVE_H3_DIRECT_GET_BODY_SPIN_US",
+    "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_MODE",
+    "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE",
+    "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_PUMP",
     "BENCH_TUNNEL_STEADYSTATE",
-    "SPECTER_NATIVE_H3_DIRECT_RFC9220_TUNNEL",
-    "SPECTER_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO",
-    "SPECTER_NATIVE_H3_DIRECT_RFC9220_MIXED",
-    "SPECTER_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH",
+    "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_TUNNEL",
+    "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO",
+    "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_MIXED",
+    "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH",
     "FIXTURE_LEDGER_GATE",
-    "SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR",
+    "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR",
 ]
 captured_prefixes = (
-    "SPECTER_NATIVE_H3_",
-    "SPECTER_LOCAL_NATIVE_H3_",
-    "SPECTER_BENCH_",
+    "WARPSOCK_NATIVE_H3_",
+    "WARPSOCK_LOCAL_NATIVE_H3_",
+    "WARPSOCK_BENCH_",
     "BENCH_TUNNEL_",
 )
 keys = set(required_keys)
@@ -205,7 +205,7 @@ if [ "$get_repeat_gate" = "1" ]; then
 
     echo "BUILD $(date -u +%FT%TZ)"
     cargo build --release --features "$bench_features"
-    repeat_bin=./target/release/specter-native-h3-vs-rust-clients
+    repeat_bin=./target/release/warpsock-native-h3-vs-rust-clients
 
     repeat_manifests=()
     measurement_rc=0
@@ -213,7 +213,7 @@ if [ "$get_repeat_gate" = "1" ]; then
         repeat_label="$(printf 'r%03d' "$repeat_index")"
         repeat_prefix="$prefix.$repeat_label"
         repeat_manifests+=("$repeat_prefix.manifest.json")
-        repeat_ledger_dir="$SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR"
+        repeat_ledger_dir="$WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR"
         if [ "$FIXTURE_LEDGER_GATE" = "1" ]; then
             repeat_ledger_dir="$repeat_prefix.fixture-ledgers"
         fi
@@ -231,7 +231,7 @@ if [ "$get_repeat_gate" = "1" ]; then
         GET_ONLY_GATE=1 \
         SCOUT_GATE=0 \
         GET_RUN_ORDER="$repeat_run_order" \
-        SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR="$repeat_ledger_dir" \
+        WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR="$repeat_ledger_dir" \
         PREFIX="$repeat_prefix" \
         PROVENANCE_PREFIX="$provenance_prefix.$repeat_label" \
         ARCHIVE_NAME= \
@@ -281,30 +281,30 @@ if [ -n "${CURRENT_ROWS_PREBUILT_BIN:-}" ]; then
 else
     echo "BUILD $(date -u +%FT%TZ)"
     cargo build --release --features "$bench_features"
-    bin=./target/release/specter-native-h3-vs-rust-clients
+    bin=./target/release/warpsock-native-h3-vs-rust-clients
 fi
 if [ -z "$archive_name" ]; then
     rm -f "$prefix".*.json
 fi
 
 clients=(
-    specter_native
+    warpsock_native
     quiche_direct
     tokio_quiche
     h3_quinn
     reqwest_h3
-    specter_native_rfc9220_tunnel
+    warpsock_native_rfc9220_tunnel
     quiche_direct_rfc9220_tunnel
     tokio_quiche_rfc9220_tunnel
-    specter_native_rfc9220_tunnel_close
+    warpsock_native_rfc9220_tunnel_close
     quiche_direct_rfc9220_tunnel_close
     tokio_quiche_rfc9220_tunnel_close
-    specter_native_rfc9220_tunnel_mixed
+    warpsock_native_rfc9220_tunnel_mixed
     quiche_direct_rfc9220_tunnel_mixed
     tokio_quiche_rfc9220_tunnel_mixed
 )
-scout_clients=(specter_native quiche_direct)
-get_only_clients=(specter_native quiche_direct tokio_quiche h3_quinn reqwest_h3)
+scout_clients=(warpsock_native quiche_direct)
+get_only_clients=(warpsock_native quiche_direct tokio_quiche h3_quinn reqwest_h3)
 
 if [ "$scout_gate" = "1" ]; then
     clients=("${scout_clients[@]}")
@@ -354,9 +354,9 @@ if [ "$scout_gate" = "1" ] && [ "$scout_repeats" -gt 1 ]; then
         repeat_manifest="$repeat_prefix.manifest.json"
         repeat_manifests+=("$repeat_manifest")
         if [ $((repeat_index % 2)) -eq 1 ]; then
-            repeat_clients=(specter_native quiche_direct)
+            repeat_clients=(warpsock_native quiche_direct)
         else
-            repeat_clients=(quiche_direct specter_native)
+            repeat_clients=(quiche_direct warpsock_native)
         fi
         clients_csv="$(IFS=,; echo "${repeat_clients[*]}")"
         selected_clients_sha256="$(printf '%s' "$clients_csv" | sha256sum | awk '{print $1}')"
@@ -469,7 +469,7 @@ print(json.dumps({
 PY
             )"
             set +e
-            SPECTER_BENCH_RUN_PROVENANCE="$run_provenance" taskset -c 4-11 "$bin" \
+            WARPSOCK_BENCH_RUN_PROVENANCE="$run_provenance" taskset -c 4-11 "$bin" \
                 --measure-local-native-fixture \
                 --measure-local-native-fixture-client "$client" \
                 --warmups "$warmups" \
@@ -641,7 +641,7 @@ print(json.dumps({
 PY
     )"
     set +e
-    SPECTER_BENCH_RUN_PROVENANCE="$run_provenance" taskset -c 4-11 "$bin" \
+    WARPSOCK_BENCH_RUN_PROVENANCE="$run_provenance" taskset -c 4-11 "$bin" \
         --measure-local-native-fixture \
         --measure-local-native-fixture-client "$client" \
         --warmups "$warmups" \
@@ -761,7 +761,7 @@ prefix = (
     if str(manifest_path).endswith(".manifest.json")
     else str(manifest_path)
 )
-clients = ["specter_native", "quiche_direct"]
+clients = ["warpsock_native", "quiche_direct"]
 expected_artifact_by_client = {client: Path(f"{prefix}.{client}.json") for client in clients}
 manifest_info = {
     "path": str(manifest_path),
@@ -815,24 +815,24 @@ def measured_get(client):
         return None
     return row
 
-specter = measured_get("specter_native")
+warpsock = measured_get("warpsock_native")
 quiche = measured_get("quiche_direct")
 metric_edges = {}
-if specter and quiche:
+if warpsock and quiche:
     metric_edges = {
-        "specter_p50_ttfb_ns": specter.get("p50_ttfb_ns"),
+        "warpsock_p50_ttfb_ns": warpsock.get("p50_ttfb_ns"),
         "quiche_direct_p50_ttfb_ns": quiche.get("p50_ttfb_ns"),
-        "specter_p95_ttfb_ns": specter.get("p95_ttfb_ns"),
+        "warpsock_p95_ttfb_ns": warpsock.get("p95_ttfb_ns"),
         "quiche_direct_p95_ttfb_ns": quiche.get("p95_ttfb_ns"),
-        "specter_bytes_per_sec": specter.get("bytes_per_sec"),
+        "warpsock_bytes_per_sec": warpsock.get("bytes_per_sec"),
         "quiche_direct_bytes_per_sec": quiche.get("bytes_per_sec"),
     }
-    if specter.get("p50_ttfb_ns") > quiche.get("p50_ttfb_ns"):
-        failures.append("metric_miss p50 specter_native_vs_quiche_direct")
-    if specter.get("p95_ttfb_ns") > quiche.get("p95_ttfb_ns"):
-        failures.append("metric_miss p95 specter_native_vs_quiche_direct")
-    if specter.get("bytes_per_sec") < quiche.get("bytes_per_sec"):
-        failures.append("metric_miss throughput specter_native_vs_quiche_direct")
+    if warpsock.get("p50_ttfb_ns") > quiche.get("p50_ttfb_ns"):
+        failures.append("metric_miss p50 warpsock_native_vs_quiche_direct")
+    if warpsock.get("p95_ttfb_ns") > quiche.get("p95_ttfb_ns"):
+        failures.append("metric_miss p95 warpsock_native_vs_quiche_direct")
+    if warpsock.get("bytes_per_sec") < quiche.get("bytes_per_sec"):
+        failures.append("metric_miss throughput warpsock_native_vs_quiche_direct")
 
 doc = {
     "kind": "current_rows_scout",

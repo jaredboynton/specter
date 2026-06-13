@@ -1,4 +1,4 @@
-use specter::{Client, Message, PreparedMessage, WebSocketFrameOpcode};
+use warpsock::{Client, Message, PreparedMessage, WebSocketFrameOpcode};
 
 #[path = "helpers/mock_ws_server.rs"]
 mod mock_ws_server;

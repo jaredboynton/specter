@@ -17,9 +17,9 @@
 //! ## Usage
 //!
 //! ```no_run
-//! use specter::transport::h2::{H2Connection, PseudoHeaderOrder};
-//! use specter::fingerprint::http2::Http2Settings;
-//! use specter::transport::connector::MaybeHttpsStream;
+//! use warpsock::transport::h2::{H2Connection, PseudoHeaderOrder};
+//! use warpsock::fingerprint::http2::Http2Settings;
+//! use warpsock::transport::connector::MaybeHttpsStream;
 //! use http::{Method, Uri};
 //!
 //! # async fn example(stream: MaybeHttpsStream) -> Result<(), Box<dyn std::error::Error>> {

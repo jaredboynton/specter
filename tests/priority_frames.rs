@@ -2,8 +2,8 @@
 //!
 //! Validates PRIORITY frame generation for Chrome and Firefox fingerprinting.
 
-use specter::fingerprint::http2::PriorityTree;
-use specter::transport::h2::{FrameHeader, FrameType, PriorityFrame, FRAME_HEADER_SIZE};
+use warpsock::fingerprint::http2::PriorityTree;
+use warpsock::transport::h2::{FrameHeader, FrameType, PriorityFrame, FRAME_HEADER_SIZE};
 
 #[test]
 fn test_priority_tree_chrome() {
@@ -121,7 +121,7 @@ fn test_priority_frame_exclusive() {
 
 #[test]
 fn test_priority_tree_in_http2_settings() {
-    use specter::fingerprint::http2::Http2Settings;
+    use warpsock::fingerprint::http2::Http2Settings;
 
     // Chrome settings include PRIORITY tree
     let chrome_settings = Http2Settings::default();

@@ -5,9 +5,9 @@
   "scout_gate": false,
   "get_only_gate": true,
   "generated_at": "2026-06-09T20:33:38.167533+00:00",
-  "parser_path": "/tmp/specter-owned-direct-get-main/benches/native_h3_vs_rust_clients/scripts/current_rows_parse.py",
+  "parser_path": "/tmp/warpsock-owned-direct-get-main/benches/native_h3_vs_rust_clients/scripts/current_rows_parse.py",
   "parser_sha256": "098cdc4fbda6a12ad4cccc3109985826a4836dea6516892455859e59c1c27fee",
-  "manifest_path": "/tmp/specter-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.manifest.json",
+  "manifest_path": "/tmp/warpsock-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.manifest.json",
   "manifest_sha256": "a61435e1397686aafa32339b56a4afc479f61d7dd9a88b433939dc603d3f819a",
   "binary_sha256": "addb844a5719fd57733eff603e414d3fba70b740cc583969d2c44034bedd609a",
   "selected_clients_sha256": "e025d16a71b1a2aa3449048e7b59be65596cb13bfd067a6a6e9f149e69b935df",
@@ -20,11 +20,11 @@
   "runtime_env_sha256": "e84c45754fe1cb71073c1b983ec1e26506628da89428e0abb5309142156d518d",
   "samples": 100,
   "warmups": 10,
-  "high_water_path": "/tmp/specter-owned-direct-get-main/.hkd/goals/performance/native-h3-meet-or-beat/high_water.native_h3_get.json",
+  "high_water_path": "/tmp/warpsock-owned-direct-get-main/.hkd/goals/performance/native-h3-meet-or-beat/high_water.native_h3_get.json",
   "high_water_sha256": "82d7233aeff0eead16d1ce14db769cdbf2e3cc6b54a8590376d5f3a9385a2b00",
   "exit_code": 0,
   "artifact_sha256": {
-    "specter_native": "ec0417f20cb29a423af2e423440a0b7e5f87b384438210589946cfc3903786ac",
+    "warpsock_native": "ec0417f20cb29a423af2e423440a0b7e5f87b384438210589946cfc3903786ac",
     "quiche_direct": "981edc8baff635d854fa24d1b6f8f3380ff8492cc731966e642ad41d089f19ff",
     "tokio_quiche": "03f0365485bf0648dd8652b009617fdfb4b70f2c3035462f54cb28e87ff85c80",
     "h3_quinn": "0591e73d93d9c59178bc1629fb053e9789d7d445eba79e0586ae1fb2576942f7",
@@ -32,9 +32,9 @@
   },
   "selected_rows": [
     {
-      "competitor_id": "specter_native",
+      "competitor_id": "warpsock_native",
       "workload": "http3_streaming_get",
-      "artifact": "/tmp/specter-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.specter_native.json",
+      "artifact": "/tmp/warpsock-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.warpsock_native.json",
       "p50_ttfb_ns": 32446.0,
       "p95_ttfb_ns": 45250.0,
       "bytes_per_sec": 17534586.270420235,
@@ -43,21 +43,21 @@
       "p95_ledger_paced_tail_overhead_ns": 2539.0,
       "p50_fixture_emission_span_ns": 4590072.0,
       "p95_fixture_emission_span_ns": 4741529.0,
-      "fixture_ledger_path": "docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.fixture-ledgers/fixture-ledger.specter_native.jsonl",
+      "fixture_ledger_path": "docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.fixture-ledgers/fixture-ledger.warpsock_native.jsonl",
       "fixture_ledger_sha256": "a25940eb7950f06b886ea7011fba8d5c34d4360a415e41eb171f0249d905b2c3",
       "fixture_ledger_response_count": 110,
       "fixture_ledger_required_response_count": 110,
       "fixture_ledger_sample_offset": 10,
       "sample_count": 100,
       "payload_bytes": 81920,
-      "source": "specter_native_adapter",
+      "source": "warpsock_native_adapter",
       "raw_sample_count": 100,
       "raw_samples_sha256": "20f0a39403a6d814b85deaeb1f73032c17d6947b4e6de03d9a2c06b1f03e5065"
     },
     {
       "competitor_id": "quiche_direct",
       "workload": "http3_streaming_get",
-      "artifact": "/tmp/specter-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.quiche_direct.json",
+      "artifact": "/tmp/warpsock-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.quiche_direct.json",
       "p50_ttfb_ns": 55476.0,
       "p95_ttfb_ns": 91177.0,
       "bytes_per_sec": 17255188.443698145,
@@ -80,7 +80,7 @@
     {
       "competitor_id": "tokio_quiche",
       "workload": "http3_streaming_get",
-      "artifact": "/tmp/specter-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.tokio_quiche.json",
+      "artifact": "/tmp/warpsock-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.tokio_quiche.json",
       "p50_ttfb_ns": 42967.0,
       "p95_ttfb_ns": 59614.0,
       "bytes_per_sec": 17728887.94539695,
@@ -103,7 +103,7 @@
     {
       "competitor_id": "h3_quinn",
       "workload": "http3_streaming_get",
-      "artifact": "/tmp/specter-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.h3_quinn.json",
+      "artifact": "/tmp/warpsock-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.h3_quinn.json",
       "p50_ttfb_ns": 49148.0,
       "p95_ttfb_ns": 66822.0,
       "bytes_per_sec": 17466244.377282366,
@@ -126,7 +126,7 @@
     {
       "competitor_id": "reqwest_h3",
       "workload": "http3_streaming_get",
-      "artifact": "/tmp/specter-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.reqwest_h3.json",
+      "artifact": "/tmp/warpsock-owned-direct-get-main/docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/current_rows.clientpin_clean.r001.reqwest_h3.json",
       "p50_ttfb_ns": 51618.0,
       "p95_ttfb_ns": 84344.0,
       "bytes_per_sec": 17705108.680730496,
@@ -151,7 +151,7 @@
     "kind": "native_h3_get_high_water_comparison",
     "workload": "http3_streaming_get",
     "reference_client": "quiche_direct",
-    "candidate_client": "specter_native",
+    "candidate_client": "warpsock_native",
     "publication_eligible": false,
     "non_publishable": true,
     "artifact_set_sha256": "ec0417f20cb29a423af2e423440a0b7e5f87b384438210589946cfc3903786ac,981edc8baff635d854fa24d1b6f8f3380ff8492cc731966e642ad41d089f19ff",
@@ -164,11 +164,11 @@
       "source_manifest": "docs/benchmarks/native-h3-vs-rust-clients/2026-06-07-portable-main-n100/current_rows.portablemain_100.manifest.json",
       "recorded_at": "2026-06-07T21:40:00Z",
       "notes": [
-        "Portable n100 selected-row archive. Strict parser replay fails only specter_native GET p50 and p95 versus quiche_direct.",
+        "Portable n100 selected-row archive. Strict parser replay fails only warpsock_native GET p50 and p95 versus quiche_direct.",
         "This file exists so current_rows_high_water.py and current_rows_awsdev.sh use an explicit repo-owned high-water artifact rather than falling back to embedded defaults.",
         "2026-06-09: backfilled ledger_paced_bytes_per_sec = bytes_per_sec for both clients (schema migration; the 2026-06-07 source archive predates the ledger-paced throughput metric, and DEFAULT_HIGH_WATER in current_rows_high_water.py uses the same mirror convention for this source)."
       ],
-      "specter_native": {
+      "warpsock_native": {
         "p50_ttfb_ns": 56230.0,
         "p95_ttfb_ns": 68117.0,
         "bytes_per_sec": 9801039.201774033,
@@ -189,7 +189,7 @@
       }
     },
     "current": {
-      "specter_native": {
+      "warpsock_native": {
         "p50_ttfb_ns": 32446.0,
         "p95_ttfb_ns": 45250.0,
         "ledger_paced_bytes_per_sec": 20302470.628766175,
@@ -209,7 +209,7 @@
       "raw_bytes_per_sec_diagnostic": -1.6192105211353371
     },
     "delta_vs_high_water": {
-      "specter_native": {
+      "warpsock_native": {
         "p50_ttfb_ns": -23784.0,
         "p95_ttfb_ns": -22867.0,
         "ledger_paced_bytes_per_sec": 10501431.426992143

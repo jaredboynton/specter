@@ -3,7 +3,7 @@
 import asyncio
 
 import pytest
-import specter
+import warpsock
 
 from helpers.ws_server import create_websocket_fixture
 
@@ -34,7 +34,7 @@ async def test_websocket_round_trip_and_controlled_headers():
         protocols=["chat.v1"],
         on_connection=track_close,
     ) as fixture:
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         builder = client.websocket(fixture.url)
 
         assert builder.header("Origin", "https://example.test") is None
@@ -77,24 +77,24 @@ async def test_websocket_round_trip_and_controlled_headers():
         assert message.kind == "pong"
         assert message.data == b"are-you-there"
 
-        await wait(ws.close(specter.CloseFrame(1000, "done")))
+        await wait(ws.close(warpsock.CloseFrame(1000, "done")))
         await wait(close_seen.wait())
         assert ("close", b"\x03\xe8done") in fixture.connections[0].received
 
 
 def test_close_frame_and_message_helpers():
-    assert specter.is_valid_close_code(1000)
-    assert not specter.is_valid_close_code(1005)
+    assert warpsock.is_valid_close_code(1000)
+    assert not warpsock.is_valid_close_code(1005)
 
-    frame = specter.CloseFrame(4000, "private")
+    frame = warpsock.CloseFrame(4000, "private")
     assert frame.code == 4000
     assert frame.reason == "private"
 
-    message = specter.WebSocketMessage("text", text="hello")
+    message = warpsock.WebSocketMessage("text", text="hello")
     assert message.kind == "text"
     assert message.text == "hello"
     assert message.data is None
 
-    ping = specter.WebSocketMessage("ping", data=b"x")
+    ping = warpsock.WebSocketMessage("ping", data=b"x")
     assert ping.kind == "ping"
     assert ping.data == b"x"

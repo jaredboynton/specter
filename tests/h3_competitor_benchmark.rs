@@ -2,24 +2,24 @@ fn native_h3_required_runtime_env() -> serde_json::Value {
     serde_json::json!({
         "BENCH_TUNNEL_STEADYSTATE": "1",
         "FIXTURE_LEDGER_GATE": "1",
-        "SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR": "fixture-ledgers",
-        "SPECTER_LOCAL_NATIVE_H3_FIXTURE_MODE": "process",
-        "SPECTER_LOCAL_NATIVE_H3_FIXTURE_PUMP": "inline-first-chunk-v1",
-        "SPECTER_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE": "2",
-        "SPECTER_NATIVE_H3_DIRECT_GET_EPOCH": "1",
-        "SPECTER_NATIVE_H3_DIRECT_GET_IO_EPOCH": "0",
-        "SPECTER_NATIVE_H3_DIRECT_GET_READY_SPIN_US": "25",
-        "SPECTER_NATIVE_H3_DIRECT_GET_BODY_SPIN_US": "25",
-        "SPECTER_NATIVE_H3_DIRECT_IDLE_GET": "1",
-        "SPECTER_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH": "1",
-        "SPECTER_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO": "1",
-        "SPECTER_NATIVE_H3_DIRECT_RFC9220_MIXED": "1",
-        "SPECTER_NATIVE_H3_DIRECT_RFC9220_TUNNEL": "1"
+        "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR": "fixture-ledgers",
+        "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_MODE": "process",
+        "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_PUMP": "inline-first-chunk-v1",
+        "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE": "2",
+        "WARPSOCK_NATIVE_H3_DIRECT_GET_EPOCH": "1",
+        "WARPSOCK_NATIVE_H3_DIRECT_GET_IO_EPOCH": "0",
+        "WARPSOCK_NATIVE_H3_DIRECT_GET_READY_SPIN_US": "25",
+        "WARPSOCK_NATIVE_H3_DIRECT_GET_BODY_SPIN_US": "25",
+        "WARPSOCK_NATIVE_H3_DIRECT_IDLE_GET": "1",
+        "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH": "1",
+        "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO": "1",
+        "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_MIXED": "1",
+        "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_TUNNEL": "1"
     })
 }
 
 fn native_h3_required_runtime_env_sha256() -> String {
-    "56d1695137a60a9ac53b3d2f521c3e6b5fc5e64cce2d0c01b90a92146aa6920f".to_string()
+    "065fea108f5159b1624f112059b7293594b3107631bad8f6ae8db5d49bb9e583".to_string()
 }
 
 fn write_synthetic_fixture_ledger(path: &std::path::Path, client: &str) -> String {
@@ -82,7 +82,7 @@ fn native_h3_competitor_benchmark_is_isolated_and_covers_known_fast_clients() {
         !main_manifest
             .lines()
             .any(|line| line.trim_start().starts_with("quiche =")),
-        "Specter itself must stay quiche-free; competitor dependencies belong in the isolated benchmark crate"
+        "Warpsock itself must stay quiche-free; competitor dependencies belong in the isolated benchmark crate"
     );
 
     let bench_manifest = std::fs::read_to_string("benches/native_h3_vs_rust_clients/Cargo.toml")
@@ -109,7 +109,7 @@ fn native_h3_competitor_benchmark_is_isolated_and_covers_known_fast_clients() {
     let bench_source = std::fs::read_to_string("benches/native_h3_vs_rust_clients/src/main.rs")
         .expect("isolated native H3 competitor benchmark source should exist");
     for required in [
-        "specter_native",
+        "warpsock_native",
         "quiche_direct",
         "tokio_quiche",
         "h3_quinn",
@@ -117,10 +117,10 @@ fn native_h3_competitor_benchmark_is_isolated_and_covers_known_fast_clients() {
         "quinn_transport",
         "s2n_quic_transport",
         "--require-superiority",
-        "--specter-streaming-artifact",
+        "--warpsock-streaming-artifact",
         "--measure-local-native-fixture",
-        "--measure-specter-native-url",
-        "--measure-specter-native-rfc9220-tunnel-url",
+        "--measure-warpsock-native-url",
+        "--measure-warpsock-native-rfc9220-tunnel-url",
         "--measure-quiche-direct-rfc9220-tunnel-url",
         "--measure-tokio-quiche-rfc9220-tunnel-url",
         "--measure-quiche-direct-url",
@@ -131,9 +131,9 @@ fn native_h3_competitor_benchmark_is_isolated_and_covers_known_fast_clients() {
         "--measure-s2n-quic-transport-url",
         "--s2n-quic-cert",
         "streaming_vs_reqwest_h3_artifact",
-        "fastest_non_specter_h3_client",
+        "fastest_non_warpsock_h3_client",
         "no_h3_superiority_claim_without_all_required_rows",
-        "SPECTER_BENCH_PHASE_TRACE",
+        "WARPSOCK_BENCH_PHASE_TRACE",
         "phase_trace: Option<PhaseTraceSample>",
         "send_streaming_parts_with_phase_trace",
         "headers_oneshot_sent_ns",
@@ -147,17 +147,17 @@ fn native_h3_competitor_benchmark_is_isolated_and_covers_known_fast_clients() {
 }
 
 #[test]
-fn native_h3_http_gate_reports_missing_specter_row_explicitly() {
+fn native_h3_http_gate_reports_missing_warpsock_row_explicitly() {
     let bench_source = std::fs::read_to_string("benches/native_h3_vs_rust_clients/src/main.rs")
         .expect("isolated native H3 competitor benchmark source should exist");
     for required in [
-        r#"let required_h3_measurement_rows = std::iter::once("specter_native")"#,
+        r#"let required_h3_measurement_rows = std::iter::once("warpsock_native")"#,
         "let missing_required_rows = required_h3_measurement_rows",
         "no_h3_superiority_claim_without_all_required_rows",
     ] {
         assert!(
             bench_source.contains(required),
-            "HTTP H3 gate must treat a missing specter_native row as a missing required row: {required}"
+            "HTTP H3 gate must treat a missing warpsock_native row as a missing required row: {required}"
         );
     }
 }
@@ -196,7 +196,7 @@ fn native_h3_selected_row_runner_has_non_publishable_scout_gate() {
     for required in [
         "SCOUT_GATE",
         "BENCH_FEATURES",
-        "scout_clients=(specter_native quiche_direct)",
+        "scout_clients=(warpsock_native quiche_direct)",
         "current_rows_scout",
         "parser_sha256",
         "validate_run_provenance",
@@ -224,9 +224,9 @@ fn native_h3_selected_row_runner_captures_unknown_benchmark_env() {
     for required in [
         "required_keys = [",
         "captured_prefixes = (",
-        r#""SPECTER_NATIVE_H3_","#,
-        r#""SPECTER_LOCAL_NATIVE_H3_","#,
-        r#""SPECTER_BENCH_","#,
+        r#""WARPSOCK_NATIVE_H3_","#,
+        r#""WARPSOCK_LOCAL_NATIVE_H3_","#,
+        r#""WARPSOCK_BENCH_","#,
         r#""BENCH_TUNNEL_","#,
         r#"key == "FIXTURE_LEDGER_GATE""#,
         "key.startswith(captured_prefixes)",
@@ -277,13 +277,13 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
     }
 
     let selected_clients = [
-        ("specter_native", "http3_streaming_get", 16 * 1024 * 5),
+        ("warpsock_native", "http3_streaming_get", 16 * 1024 * 5),
         ("quiche_direct", "http3_streaming_get", 16 * 1024 * 5),
         ("tokio_quiche", "http3_streaming_get", 16 * 1024 * 5),
         ("h3_quinn", "http3_streaming_get", 16 * 1024 * 5),
         ("reqwest_h3", "http3_streaming_get", 16 * 1024 * 5),
         (
-            "specter_native_rfc9220_tunnel",
+            "warpsock_native_rfc9220_tunnel",
             "websocket_over_h3_raw_tunnel_echo",
             1024,
         ),
@@ -298,7 +298,7 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
             1024,
         ),
         (
-            "specter_native_rfc9220_tunnel_close",
+            "warpsock_native_rfc9220_tunnel_close",
             "websocket_over_h3_raw_tunnel_close_fin",
             1024,
         ),
@@ -313,7 +313,7 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
             1024,
         ),
         (
-            "specter_native_rfc9220_tunnel_mixed",
+            "warpsock_native_rfc9220_tunnel_mixed",
             "slow_consumer_tunnel_plus_http3_streaming",
             1024 * 40 + 16 * 1024 * 5,
         ),
@@ -352,7 +352,7 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
         .expect("test clock should be after epoch")
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "specter-native-h3-portable-provenance-{}-{unique}",
+        "warpsock-native-h3-portable-provenance-{}-{unique}",
         std::process::id()
     ));
     let archive = root.join("docs/benchmarks/native-h3-vs-rust-clients/test-portable");
@@ -628,18 +628,18 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
     );
     std::fs::write(first_artifact, &original_first_artifact).expect("artifact should be restored");
 
-    let specter_artifact = archive.join("current_rows.portable.specter_native.json");
-    let original_specter_artifact =
-        std::fs::read(&specter_artifact).expect("specter artifact should read");
-    let mut scoped_doc: serde_json::Value =
-        serde_json::from_slice(&original_specter_artifact).expect("specter artifact should parse");
-    let external_ledger = archive.join("fixture-ledger.specter_native.external.jsonl");
-    let external_sha256 = write_synthetic_fixture_ledger(&external_ledger, "specter_native");
+    let warpsock_artifact = archive.join("current_rows.portable.warpsock_native.json");
+    let original_warpsock_artifact =
+        std::fs::read(&warpsock_artifact).expect("warpsock artifact should read");
+    let mut scoped_doc: serde_json::Value = serde_json::from_slice(&original_warpsock_artifact)
+        .expect("warpsock artifact should parse");
+    let external_ledger = archive.join("fixture-ledger.warpsock_native.external.jsonl");
+    let external_sha256 = write_synthetic_fixture_ledger(&external_ledger, "warpsock_native");
     scoped_doc["rows"][0]["fixture_ledger_path"] =
         json!(external_ledger.to_string_lossy().into_owned());
     scoped_doc["rows"][0]["fixture_ledger_sha256"] = json!(external_sha256);
     std::fs::write(
-        &specter_artifact,
+        &warpsock_artifact,
         serde_json::to_vec_pretty(&scoped_doc).expect("scoped artifact should serialize"),
     )
     .expect("scoped artifact should be written");
@@ -659,20 +659,20 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
         stdout.contains("fixture_ledger_path_outside_artifact_scope"),
         "parser must name out-of-scope fixture ledger paths; stdout was: {stdout}"
     );
-    std::fs::write(&specter_artifact, original_specter_artifact.clone())
-        .expect("specter artifact should be restored");
+    std::fs::write(&warpsock_artifact, original_warpsock_artifact.clone())
+        .expect("warpsock artifact should be restored");
 
-    let specter_ledger =
-        synthetic_artifact_fixture_ledger_path(&specter_artifact, "specter_native");
-    let original_specter_ledger =
-        std::fs::read_to_string(&specter_ledger).expect("specter ledger should read");
+    let warpsock_ledger =
+        synthetic_artifact_fixture_ledger_path(&warpsock_artifact, "warpsock_native");
+    let original_warpsock_ledger =
+        std::fs::read_to_string(&warpsock_ledger).expect("warpsock ledger should read");
     let bad_due_ledger =
-        original_specter_ledger.replacen("\"due_ns\":1000000", "\"due_ns\":1000001", 1);
+        original_warpsock_ledger.replacen("\"due_ns\":1000000", "\"due_ns\":1000001", 1);
     assert_ne!(
-        bad_due_ledger, original_specter_ledger,
+        bad_due_ledger, original_warpsock_ledger,
         "synthetic ledger mutation must alter a due_ns field"
     );
-    std::fs::write(&specter_ledger, bad_due_ledger).expect("bad due ledger should be written");
+    std::fs::write(&warpsock_ledger, bad_due_ledger).expect("bad due ledger should be written");
     let output = std::process::Command::new("python3")
         .arg("benches/native_h3_vs_rust_clients/scripts/current_rows_parse.py")
         .arg("--manifest")
@@ -689,8 +689,8 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
         stdout.contains("due_ns=1000001 expected=1000000"),
         "parser must name invalid fixture due schedule; stdout was: {stdout}"
     );
-    std::fs::write(&specter_ledger, original_specter_ledger)
-        .expect("specter ledger should be restored");
+    std::fs::write(&warpsock_ledger, original_warpsock_ledger)
+        .expect("warpsock ledger should be restored");
 
     let unexpected_sibling = archive.join("current_rows.portable.shadow_client.json");
     std::fs::write(&unexpected_sibling, br#"{"rows":[]}"#)
@@ -800,13 +800,13 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
         "verifier must name stale high-water comparison truth; stdout was: {stdout}"
     );
 
-    let specter_artifact = archive.join("current_rows.portable.specter_native.json");
+    let warpsock_artifact = archive.join("current_rows.portable.warpsock_native.json");
     let mut metric_doc: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&specter_artifact).expect("artifact should read"))
+        serde_json::from_slice(&std::fs::read(&warpsock_artifact).expect("artifact should read"))
             .expect("artifact should parse");
     metric_doc["rows"][0]["p50_ttfb_ns"] = json!(9_999);
     std::fs::write(
-        &specter_artifact,
+        &warpsock_artifact,
         serde_json::to_vec_pretty(&metric_doc).expect("metric-sabotaged artifact should serialize"),
     )
     .expect("metric-sabotaged artifact should be written");
@@ -826,15 +826,15 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
         stdout.contains("p50_ttfb_ns=9999 raw_expected=1000"),
         "parser must name the forged metric/raw_samples mismatch; stdout was: {stdout}"
     );
-    std::fs::write(&specter_artifact, original_specter_artifact.clone())
-        .expect("specter artifact should be restored after metric sabotage");
+    std::fs::write(&warpsock_artifact, original_warpsock_artifact.clone())
+        .expect("warpsock artifact should be restored after metric sabotage");
 
     let mut provenance_doc: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&specter_artifact).expect("artifact should read"))
+        serde_json::from_slice(&std::fs::read(&warpsock_artifact).expect("artifact should read"))
             .expect("artifact should parse");
     provenance_doc["run_provenance"]["selected_client"] = json!("tokio_quiche");
     std::fs::write(
-        &specter_artifact,
+        &warpsock_artifact,
         serde_json::to_vec_pretty(&provenance_doc)
             .expect("provenance-sabotaged artifact should serialize"),
     )
@@ -852,27 +852,27 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("FAIL provenance_selected_client specter_native"),
+        stdout.contains("FAIL provenance_selected_client warpsock_native"),
         "parser must name the selected-client provenance mismatch; stdout was: {stdout}"
     );
-    std::fs::write(&specter_artifact, original_specter_artifact.clone())
-        .expect("specter artifact should be restored after provenance sabotage");
+    std::fs::write(&warpsock_artifact, original_warpsock_artifact.clone())
+        .expect("warpsock artifact should be restored after provenance sabotage");
 
-    let mut specter_doc: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&specter_artifact).expect("artifact should read"))
+    let mut warpsock_doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&warpsock_artifact).expect("artifact should read"))
             .expect("artifact should parse");
-    specter_doc["rows"]
+    warpsock_doc["rows"]
         .as_array_mut()
         .expect("rows should be an array")
         .push(json!({
-            "competitor_id": "specter_native",
+            "competitor_id": "warpsock_native",
             "status": "measured_fail",
-            "source": "specter_native_adapter",
+            "source": "warpsock_native_adapter",
             "workload": "http3_streaming_get"
         }));
     std::fs::write(
-        &specter_artifact,
-        serde_json::to_vec_pretty(&specter_doc).expect("artifact should serialize"),
+        &warpsock_artifact,
+        serde_json::to_vec_pretty(&warpsock_doc).expect("artifact should serialize"),
     )
     .expect("artifact with duplicate row should be written");
     let output = std::process::Command::new("python3")
@@ -896,7 +896,7 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("DUPLICATE_REQUIRED_ROW specter_native"),
+        stdout.contains("DUPLICATE_REQUIRED_ROW warpsock_native"),
         "parser output must name duplicate required row; stdout was: {stdout}"
     );
     assert!(
@@ -905,8 +905,8 @@ fn native_h3_selected_row_parser_accepts_portable_archive_manifest_provenance() 
     );
     let verify_stdout = String::from_utf8_lossy(&verify_output.stdout);
     assert!(
-        verify_stdout.contains("truth_stamp_artifact_sha256 specter_native")
-            || verify_stdout.contains("TRUTH_STAMP_REPLAY DUPLICATE_REQUIRED_ROW specter_native"),
+        verify_stdout.contains("truth_stamp_artifact_sha256 warpsock_native")
+            || verify_stdout.contains("TRUTH_STAMP_REPLAY DUPLICATE_REQUIRED_ROW warpsock_native"),
         "verifier must name stale artifact truth; stdout was: {verify_stdout}"
     );
 }
@@ -927,13 +927,13 @@ fn native_h3_repeat_truth_stamp_replays_and_rejects_stale_artifacts() {
     }
 
     let selected_clients = [
-        ("specter_native", "http3_streaming_get", 16 * 1024 * 5),
+        ("warpsock_native", "http3_streaming_get", 16 * 1024 * 5),
         ("quiche_direct", "http3_streaming_get", 16 * 1024 * 5),
         ("tokio_quiche", "http3_streaming_get", 16 * 1024 * 5),
         ("h3_quinn", "http3_streaming_get", 16 * 1024 * 5),
         ("reqwest_h3", "http3_streaming_get", 16 * 1024 * 5),
         (
-            "specter_native_rfc9220_tunnel",
+            "warpsock_native_rfc9220_tunnel",
             "websocket_over_h3_raw_tunnel_echo",
             1024,
         ),
@@ -948,7 +948,7 @@ fn native_h3_repeat_truth_stamp_replays_and_rejects_stale_artifacts() {
             1024,
         ),
         (
-            "specter_native_rfc9220_tunnel_close",
+            "warpsock_native_rfc9220_tunnel_close",
             "websocket_over_h3_raw_tunnel_close_fin",
             1024,
         ),
@@ -963,7 +963,7 @@ fn native_h3_repeat_truth_stamp_replays_and_rejects_stale_artifacts() {
             1024,
         ),
         (
-            "specter_native_rfc9220_tunnel_mixed",
+            "warpsock_native_rfc9220_tunnel_mixed",
             "slow_consumer_tunnel_plus_http3_streaming",
             1024 * 40 + 16 * 1024 * 5,
         ),
@@ -1002,7 +1002,7 @@ fn native_h3_repeat_truth_stamp_replays_and_rejects_stale_artifacts() {
         .expect("test clock should be after epoch")
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "specter-native-h3-repeat-truth-{}-{unique}",
+        "warpsock-native-h3-repeat-truth-{}-{unique}",
         std::process::id()
     ));
     std::fs::create_dir_all(&root).expect("repeat temp root should be created");
@@ -1058,18 +1058,18 @@ fn native_h3_repeat_truth_stamp_replays_and_rejects_stale_artifacts() {
                 + run_sequence_index as u64 * 1_000_000;
             let run_finished_at_unix_ns = run_started_at_unix_ns + 100_000;
             let artifact = archive.join(format!("current_rows.r{run_index}.{client}.json"));
-            let specter_row = client.starts_with("specter_native");
-            let metric = if specter_row {
+            let warpsock_row = client.starts_with("warpsock_native");
+            let metric = if warpsock_row {
                 1_000 + run_index as u64
             } else {
                 2_000 + run_index as u64 + client_index as u64
             };
-            let bytes_per_sec = if specter_row {
+            let bytes_per_sec = if warpsock_row {
                 *payload_bytes as u64 * 2_000
             } else {
                 *payload_bytes as u64 * 1_000
             };
-            let total_ns = if specter_row { 500_000 } else { 1_000_000 };
+            let total_ns = if warpsock_row { 500_000 } else { 1_000_000 };
             let raw_samples = (0..100)
                 .map(|_| {
                     json!({
@@ -1233,16 +1233,16 @@ fn native_h3_repeat_truth_stamp_replays_and_rejects_stale_artifacts() {
         "verifier must name stale runtime env identity; stdout was: {stdout}"
     );
 
-    let specter_artifact = root.join(
-        "docs/benchmarks/native-h3-vs-rust-clients/repeat-1/current_rows.r1.specter_native.json",
+    let warpsock_artifact = root.join(
+        "docs/benchmarks/native-h3-vs-rust-clients/repeat-1/current_rows.r1.warpsock_native.json",
     );
-    let mut specter_doc: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&specter_artifact).expect("artifact should read"))
+    let mut warpsock_doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&warpsock_artifact).expect("artifact should read"))
             .expect("artifact should parse");
-    specter_doc["rows"][0]["p50_ttfb_ns"] = json!(9_999);
+    warpsock_doc["rows"][0]["p50_ttfb_ns"] = json!(9_999);
     std::fs::write(
-        &specter_artifact,
-        serde_json::to_vec_pretty(&specter_doc).expect("mutated artifact should serialize"),
+        &warpsock_artifact,
+        serde_json::to_vec_pretty(&warpsock_doc).expect("mutated artifact should serialize"),
     )
     .expect("mutated artifact should be written");
     let output = std::process::Command::new("python3")
@@ -1275,18 +1275,18 @@ fn native_h3_selected_row_parser_rejects_ambiguous_json_inputs() {
     }
 
     let selected_clients = [
-        "specter_native",
+        "warpsock_native",
         "quiche_direct",
         "tokio_quiche",
         "h3_quinn",
         "reqwest_h3",
-        "specter_native_rfc9220_tunnel",
+        "warpsock_native_rfc9220_tunnel",
         "quiche_direct_rfc9220_tunnel",
         "tokio_quiche_rfc9220_tunnel",
-        "specter_native_rfc9220_tunnel_close",
+        "warpsock_native_rfc9220_tunnel_close",
         "quiche_direct_rfc9220_tunnel_close",
         "tokio_quiche_rfc9220_tunnel_close",
-        "specter_native_rfc9220_tunnel_mixed",
+        "warpsock_native_rfc9220_tunnel_mixed",
         "quiche_direct_rfc9220_tunnel_mixed",
         "tokio_quiche_rfc9220_tunnel_mixed",
     ];
@@ -1295,7 +1295,7 @@ fn native_h3_selected_row_parser_rejects_ambiguous_json_inputs() {
         .expect("test clock should be after epoch")
         .as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "specter-native-h3-strict-json-{}-{unique}",
+        "warpsock-native-h3-strict-json-{}-{unique}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("test temp dir should be created");
@@ -1351,10 +1351,10 @@ fn native_h3_selected_row_parser_rejects_ambiguous_json_inputs() {
         ),
     )
     .expect("manifest should be written");
-    let non_finite_artifact = dir.join("current_rows.strict.specter_native.json");
+    let non_finite_artifact = dir.join("current_rows.strict.warpsock_native.json");
     std::fs::write(
         &non_finite_artifact,
-        r#"{"rows":[{"competitor_id":"specter_native","status":"measured_pass","p50_ttfb_ns":NaN}]}"#,
+        r#"{"rows":[{"competitor_id":"warpsock_native","status":"measured_pass","p50_ttfb_ns":NaN}]}"#,
     )
     .expect("non-finite artifact should be written");
     let output = std::process::Command::new("python3")
@@ -1391,8 +1391,8 @@ fn native_h3_selected_row_runner_has_paired_non_publishable_scout_repeats() {
         "paired_run_started_at_unix_ns",
         "paired_run_finished_at_unix_ns",
         r#""publication_eligible": False"#,
-        "repeat_clients=(specter_native quiche_direct)",
-        "repeat_clients=(quiche_direct specter_native)",
+        "repeat_clients=(warpsock_native quiche_direct)",
+        "repeat_clients=(quiche_direct warpsock_native)",
         "--verify-stamp",
         "pair_verify_rc",
     ] {
@@ -1411,7 +1411,7 @@ fn native_h3_selected_row_runner_has_paired_non_publishable_scout_repeats() {
         "non_publishable",
         "publication_eligible",
         "candidate",
-        "specter_worst_p50_ttfb_ns",
+        "warpsock_worst_p50_ttfb_ns",
         "quiche_direct_best_p50_ttfb_ns",
         "FAIL_PAIR p50",
         "FAIL_PAIR p95",
@@ -1548,11 +1548,11 @@ fn native_h3_pair_scout_parser_rejects_ambiguous_required_rows() {
                 "scout_repeat_index": repeat_index,
                 "scout_repeat_count": 3,
                 "run_order": if repeat_index % 2 == 1 {
-                    vec!["specter_native", "quiche_direct"]
+                    vec!["warpsock_native", "quiche_direct"]
                 } else {
-                    vec!["quiche_direct", "specter_native"]
+                    vec!["quiche_direct", "warpsock_native"]
                 },
-                "paired_run_sequence_index": if (repeat_index % 2 == 1 && client == "specter_native")
+                "paired_run_sequence_index": if (repeat_index % 2 == 1 && client == "warpsock_native")
                     || (repeat_index.is_multiple_of(2) && client == "quiche_direct") {
                     1
                 } else {
@@ -1560,7 +1560,7 @@ fn native_h3_pair_scout_parser_rejects_ambiguous_required_rows() {
                 },
                 "paired_run_started_at_unix_ns": 1_000_000_000_u128
                     + repeat_index as u128 * 10_000
-                    + if (repeat_index % 2 == 1 && client == "specter_native")
+                    + if (repeat_index % 2 == 1 && client == "warpsock_native")
                         || (repeat_index.is_multiple_of(2) && client == "quiche_direct") {
                         0
                     } else {
@@ -1568,7 +1568,7 @@ fn native_h3_pair_scout_parser_rejects_ambiguous_required_rows() {
                     },
                 "paired_run_finished_at_unix_ns": 1_000_000_000_u128
                     + repeat_index as u128 * 10_000
-                    + if (repeat_index % 2 == 1 && client == "specter_native")
+                    + if (repeat_index % 2 == 1 && client == "warpsock_native")
                         || (repeat_index.is_multiple_of(2) && client == "quiche_direct") {
                         4_000
                     } else {
@@ -1590,7 +1590,7 @@ fn native_h3_pair_scout_parser_rejects_ambiguous_required_rows() {
         .expect("test clock should be after epoch")
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "specter-native-h3-pair-scout-{}-{unique}",
+        "warpsock-native-h3-pair-scout-{}-{unique}",
         std::process::id()
     ));
     std::fs::create_dir_all(&root).expect("pair scout temp root should be created");
@@ -1601,9 +1601,9 @@ fn native_h3_pair_scout_parser_rejects_ambiguous_required_rows() {
             "current_rows_pair_scout.r{repeat_index}.manifest.json"
         ));
         let run_order = if repeat_index % 2 == 1 {
-            vec!["specter_native", "quiche_direct"]
+            vec!["warpsock_native", "quiche_direct"]
         } else {
-            vec!["quiche_direct", "specter_native"]
+            vec!["quiche_direct", "warpsock_native"]
         };
         let selected_clients_sha256 = sha256_bytes(run_order.join(",").as_bytes());
         let manifest_doc = json!({
@@ -1624,9 +1624,9 @@ fn native_h3_pair_scout_parser_rejects_ambiguous_required_rows() {
             "scout_repeat_index": repeat_index,
             "scout_repeat_count": 3,
             "run_order": if repeat_index % 2 == 1 {
-                vec!["specter_native", "quiche_direct"]
+                vec!["warpsock_native", "quiche_direct"]
             } else {
-                vec!["quiche_direct", "specter_native"]
+                vec!["quiche_direct", "warpsock_native"]
             }
         });
         std::fs::write(
@@ -1638,12 +1638,12 @@ fn native_h3_pair_scout_parser_rejects_ambiguous_required_rows() {
 
         write_pair_artifact(
             &root.join(format!(
-                "current_rows_pair_scout.r{repeat_index}.specter_native.json"
+                "current_rows_pair_scout.r{repeat_index}.warpsock_native.json"
             )),
             &manifest,
             &manifest_sha256,
             &selected_clients_sha256,
-            "specter_native",
+            "warpsock_native",
             repeat_index,
             1_000 + repeat_index as u64,
             1_000_000,
@@ -1680,7 +1680,7 @@ fn native_h3_pair_scout_parser_rejects_ambiguous_required_rows() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("FAIL pair_duplicate_required_row repeat=2 client=specter_native"),
+        stdout.contains("FAIL pair_duplicate_required_row repeat=2 client=warpsock_native"),
         "pair scout parser must explicitly name the ambiguous required row; stdout was: {stdout}"
     );
 
@@ -1696,7 +1696,7 @@ fn native_h3_pair_scout_parser_rejects_ambiguous_required_rows() {
         String::from_utf8_lossy(&verify_output.stdout)
     );
 
-    let repaired_artifact = root.join("current_rows_pair_scout.r2.specter_native.json");
+    let repaired_artifact = root.join("current_rows_pair_scout.r2.warpsock_native.json");
     let mut repaired_doc: serde_json::Value = serde_json::from_slice(
         &std::fs::read(&repaired_artifact).expect("repaired artifact should be readable"),
     )
@@ -1708,7 +1708,7 @@ fn native_h3_pair_scout_parser_rejects_ambiguous_required_rows() {
     )
     .expect("repaired artifact mutation should be written");
 
-    let bad_sequence_artifact = root.join("current_rows_pair_scout.r1.specter_native.json");
+    let bad_sequence_artifact = root.join("current_rows_pair_scout.r1.warpsock_native.json");
     let mut bad_sequence_doc: serde_json::Value = serde_json::from_slice(
         &std::fs::read(&bad_sequence_artifact).expect("bad sequence artifact should be readable"),
     )
@@ -1738,7 +1738,7 @@ fn native_h3_pair_scout_parser_rejects_ambiguous_required_rows() {
         "pair scout parser must explicitly reject order-mismatched sequence provenance; stdout was: {sequence_stdout}"
     );
 
-    let stale_artifact = root.join("current_rows_pair_scout.r1.specter_native.json");
+    let stale_artifact = root.join("current_rows_pair_scout.r1.warpsock_native.json");
     let mut stale_doc: serde_json::Value = serde_json::from_slice(
         &std::fs::read(&stale_artifact).expect("stale artifact should be readable"),
     )
@@ -1793,7 +1793,7 @@ fn native_h3_get_scout_reports_high_water_percent_behind() {
     for required in [
         "high_water_comparison",
         "strict_percent_behind",
-        "specter_native",
+        "warpsock_native",
         "quiche_direct",
         "p50_ttfb_ns",
         "p95_ttfb_ns",
@@ -1862,7 +1862,7 @@ fn native_h3_publication_gate_requires_publishable_clean_manifest() {
             .expect("selected-row awsdev runner source should exist");
     for required in [
         "direct-get-io-epoch-rfc9220-fused-echo-close-epoch-mixed",
-        r#"[ "$SPECTER_NATIVE_H3_DIRECT_GET_IO_EPOCH" = "1" ]"#,
+        r#"[ "$WARPSOCK_NATIVE_H3_DIRECT_GET_IO_EPOCH" = "1" ]"#,
         r#""scout_gate": scout_gate == "1""#,
         r#""publication_eligible": scout_gate != "1""#,
     ] {
@@ -1919,18 +1919,18 @@ fn native_h3_aggregate_gate_rejects_ambiguous_required_rows() {
 #[test]
 fn native_h3_selected_row_parser_rejects_non_publishable_manifest_fields() {
     let selected_clients = [
-        "specter_native",
+        "warpsock_native",
         "quiche_direct",
         "tokio_quiche",
         "h3_quinn",
         "reqwest_h3",
-        "specter_native_rfc9220_tunnel",
+        "warpsock_native_rfc9220_tunnel",
         "quiche_direct_rfc9220_tunnel",
         "tokio_quiche_rfc9220_tunnel",
-        "specter_native_rfc9220_tunnel_close",
+        "warpsock_native_rfc9220_tunnel_close",
         "quiche_direct_rfc9220_tunnel_close",
         "tokio_quiche_rfc9220_tunnel_close",
-        "specter_native_rfc9220_tunnel_mixed",
+        "warpsock_native_rfc9220_tunnel_mixed",
         "quiche_direct_rfc9220_tunnel_mixed",
         "tokio_quiche_rfc9220_tunnel_mixed",
     ];
@@ -1939,7 +1939,7 @@ fn native_h3_selected_row_parser_rejects_non_publishable_manifest_fields() {
         .expect("test clock should be after epoch")
         .as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "specter-native-h3-publication-gate-{}-{unique}",
+        "warpsock-native-h3-publication-gate-{}-{unique}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("test temp dir should be created");
@@ -1972,7 +1972,7 @@ fn native_h3_selected_row_parser_rejects_non_publishable_manifest_fields() {
     )
     .expect("manifest should be written");
 
-    let missing_artifact = dir.join("current_rows.specter_native.json");
+    let missing_artifact = dir.join("current_rows.warpsock_native.json");
     let output = std::process::Command::new("python3")
         .arg("benches/native_h3_vs_rust_clients/scripts/current_rows_parse.py")
         .arg("--manifest")

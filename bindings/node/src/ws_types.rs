@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use specter::{CloseCode, CloseFrame, Message as RustWebSocketMessage};
+use warpsock::{CloseCode, CloseFrame, Message as RustWebSocketMessage};
 
 #[napi]
 pub const CLOSE_NORMAL: u16 = 1000;

@@ -16,7 +16,7 @@ from typing import Any
 
 
 WORKLOAD = "http3_streaming_get"
-SPECTER = "specter_native"
+WARPSOCK = "warpsock_native"
 REFERENCE = "quiche_direct"
 RAW_THROUGHPUT = "bytes_per_sec"
 LEDGER_THROUGHPUT = "ledger_paced_bytes_per_sec"
@@ -32,7 +32,7 @@ DEFAULT_HIGH_WATER = {
     "kind": "native_h3_get_high_water",
     "workload": WORKLOAD,
     "source": "historical portable-main n100 baseline (2026-06-07; iteration artifacts pruned 2026-06-09)",
-    "specter_native": {
+    "warpsock_native": {
         "p50_ttfb_ns": 56_230.0,
         "p95_ttfb_ns": 68_117.0,
         "bytes_per_sec": 9.347 * 1024 * 1024,
@@ -54,7 +54,7 @@ def validate_high_water(doc: dict[str, Any], source: str) -> dict[str, Any]:
         raise ValueError(f"high-water document has invalid workload: {source}")
     if not isinstance(doc.get("source"), str) or not doc.get("source"):
         raise ValueError(f"high-water document is missing source: {source}")
-    for client in (SPECTER, REFERENCE):
+    for client in (WARPSOCK, REFERENCE):
         block = doc.get(client)
         if not isinstance(block, dict):
             raise ValueError(f"high-water document missing {client}: {source}")
@@ -80,16 +80,16 @@ def load_high_water(path: str | None) -> dict[str, Any]:
     return validate_high_water(DEFAULT_HIGH_WATER, "DEFAULT_HIGH_WATER")
 
 
-def lower_is_better_percent_behind(specter: float, reference: float) -> float:
+def lower_is_better_percent_behind(warpsock: float, reference: float) -> float:
     if reference == 0:
         return 0.0
-    return ((specter - reference) / reference) * 100.0
+    return ((warpsock - reference) / reference) * 100.0
 
 
-def higher_is_better_percent_behind(specter: float, reference: float) -> float:
+def higher_is_better_percent_behind(warpsock: float, reference: float) -> float:
     if reference == 0:
         return 0.0
-    return ((reference - specter) / reference) * 100.0
+    return ((reference - warpsock) / reference) * 100.0
 
 
 def metric_delta(current: float, high_water: float) -> float:
@@ -102,15 +102,15 @@ def has_numeric_metric(row: dict[str, Any], key: str) -> bool:
 
 
 def choose_throughput_metric(
-    specter: dict[str, Any], reference: dict[str, Any], preferred: str | None = None
+    warpsock: dict[str, Any], reference: dict[str, Any], preferred: str | None = None
 ) -> str:
     if (
         preferred
-        and has_numeric_metric(specter, preferred)
+        and has_numeric_metric(warpsock, preferred)
         and has_numeric_metric(reference, preferred)
     ):
         return preferred
-    if has_numeric_metric(specter, LEDGER_THROUGHPUT) and has_numeric_metric(
+    if has_numeric_metric(warpsock, LEDGER_THROUGHPUT) and has_numeric_metric(
         reference, LEDGER_THROUGHPUT
     ):
         return LEDGER_THROUGHPUT
@@ -135,7 +135,7 @@ def current_metric_block(row: dict[str, Any], throughput_metric: str) -> dict[st
 
 
 def strict_comparison(
-    specter: dict[str, Any],
+    warpsock: dict[str, Any],
     reference: dict[str, Any],
     high_water: dict[str, Any],
     *,
@@ -145,47 +145,47 @@ def strict_comparison(
     non_publishable: bool,
     throughput_metric: str | None = None,
 ) -> dict[str, Any]:
-    throughput_metric = choose_throughput_metric(specter, reference, throughput_metric)
+    throughput_metric = choose_throughput_metric(warpsock, reference, throughput_metric)
     current = {
-        "specter_native": current_metric_block(specter, throughput_metric),
+        "warpsock_native": current_metric_block(warpsock, throughput_metric),
         "quiche_direct": current_metric_block(reference, throughput_metric),
     }
-    hw_specter = high_water[SPECTER]
+    hw_warpsock = high_water[WARPSOCK]
     hw_reference = high_water[REFERENCE]
     strict_percent_behind = {
         "p50_ttfb_ns": lower_is_better_percent_behind(
-            current["specter_native"]["p50_ttfb_ns"],
+            current["warpsock_native"]["p50_ttfb_ns"],
             current["quiche_direct"]["p50_ttfb_ns"],
         ),
         "p95_ttfb_ns": lower_is_better_percent_behind(
-            current["specter_native"]["p95_ttfb_ns"],
+            current["warpsock_native"]["p95_ttfb_ns"],
             current["quiche_direct"]["p95_ttfb_ns"],
         ),
         throughput_metric: higher_is_better_percent_behind(
-            current["specter_native"][throughput_metric],
+            current["warpsock_native"][throughput_metric],
             current["quiche_direct"][throughput_metric],
         ),
     }
     if (
         throughput_metric != RAW_THROUGHPUT
-        and RAW_THROUGHPUT in current["specter_native"]
+        and RAW_THROUGHPUT in current["warpsock_native"]
         and RAW_THROUGHPUT in current["quiche_direct"]
     ):
         strict_percent_behind["raw_bytes_per_sec_diagnostic"] = higher_is_better_percent_behind(
-            current["specter_native"][RAW_THROUGHPUT],
+            current["warpsock_native"][RAW_THROUGHPUT],
             current["quiche_direct"][RAW_THROUGHPUT],
         )
     delta_vs_high_water = {
-        "specter_native": {
+        "warpsock_native": {
             "p50_ttfb_ns": metric_delta(
-                current["specter_native"]["p50_ttfb_ns"], float(hw_specter["p50_ttfb_ns"])
+                current["warpsock_native"]["p50_ttfb_ns"], float(hw_warpsock["p50_ttfb_ns"])
             ),
             "p95_ttfb_ns": metric_delta(
-                current["specter_native"]["p95_ttfb_ns"], float(hw_specter["p95_ttfb_ns"])
+                current["warpsock_native"]["p95_ttfb_ns"], float(hw_warpsock["p95_ttfb_ns"])
             ),
             throughput_metric: metric_delta(
-                current["specter_native"][throughput_metric],
-                metric_value(hw_specter, throughput_metric),
+                current["warpsock_native"][throughput_metric],
+                metric_value(hw_warpsock, throughput_metric),
             ),
         },
         "quiche_direct": {
@@ -205,7 +205,7 @@ def strict_comparison(
         "kind": "native_h3_get_high_water_comparison",
         "workload": WORKLOAD,
         "reference_client": REFERENCE,
-        "candidate_client": SPECTER,
+        "candidate_client": WARPSOCK,
         "publication_eligible": publication_eligible,
         "non_publishable": non_publishable,
         "artifact_set_sha256": artifact_set_sha256,
@@ -233,10 +233,10 @@ def attach_pair_high_water_comparison(doc: dict[str, Any], high_water_path: str 
             str(run.get("raw_samples_set_sha256")) for run in runs if isinstance(run, dict)
         )
     throughput_metric = str(edges.get("throughput_metric", RAW_THROUGHPUT))
-    specter = {
-        "p50_ttfb_ns": edges["specter_worst_p50_ttfb_ns"],
-        "p95_ttfb_ns": edges["specter_worst_p95_ttfb_ns"],
-        throughput_metric: edges["specter_worst_bytes_per_sec"],
+    warpsock = {
+        "p50_ttfb_ns": edges["warpsock_worst_p50_ttfb_ns"],
+        "p95_ttfb_ns": edges["warpsock_worst_p95_ttfb_ns"],
+        throughput_metric: edges["warpsock_worst_bytes_per_sec"],
     }
     reference = {
         "p50_ttfb_ns": edges["quiche_direct_best_p50_ttfb_ns"],
@@ -244,7 +244,7 @@ def attach_pair_high_water_comparison(doc: dict[str, Any], high_water_path: str 
         throughput_metric: edges["quiche_direct_best_bytes_per_sec"],
     }
     comparison = strict_comparison(
-        specter,
+        warpsock,
         reference,
         load_high_water(high_water_path),
         artifact_set_sha256=artifact_set_sha256,
@@ -267,21 +267,21 @@ def attach_selected_rows_high_water_comparison(
         for row in rows
         if isinstance(row, dict) and row.get("workload") == WORKLOAD
     }
-    specter = by_id.get(SPECTER)
+    warpsock = by_id.get(WARPSOCK)
     reference = by_id.get(REFERENCE)
-    if not isinstance(specter, dict) or not isinstance(reference, dict):
+    if not isinstance(warpsock, dict) or not isinstance(reference, dict):
         return
     artifact_sha256 = doc.get("artifact_sha256")
     artifact_set_sha256 = None
     if isinstance(artifact_sha256, dict):
         artifact_set_sha256 = ",".join(
-            str(artifact_sha256.get(client)) for client in (SPECTER, REFERENCE)
+            str(artifact_sha256.get(client)) for client in (WARPSOCK, REFERENCE)
         )
     raw_samples_set_sha256 = ",".join(
-        str(row.get("raw_samples_sha256")) for row in (specter, reference)
+        str(row.get("raw_samples_sha256")) for row in (warpsock, reference)
     )
     comparison = strict_comparison(
-        specter,
+        warpsock,
         reference,
         load_high_water(high_water_path),
         artifact_set_sha256=artifact_set_sha256,

@@ -1,17 +1,17 @@
 [package]
-name = "specter-python"
-version = "4.2.3"
+name = "warpsock-python"
+version = "4.2.4"
 edition = "2021"
 license = "MIT"
-description = "Python bindings for Specter HTTP client"
-repository = "https://github.com/jaredboynton/specter"
+description = "Python bindings for Warpsock HTTP client"
+repository = "https://github.com/jaredboynton/warpsock"
 
 [lib]
-name = "specter"
+name = "warpsock"
 crate-type = ["cdylib"]
 
 [dependencies]
-specter = { package = "specters", path = "../..", features = ["grpc"] }
+warpsock = { package = "warpsock", path = "../..", features = ["grpc"] }
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
 pyo3-async-runtimes = { version = "0.23", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }

@@ -54,9 +54,9 @@ fn metrics_json_emits_zero_denominator_floor_counts() {
 #[test]
 fn comparable_threshold_fails_when_median_throughput_regresses() {
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
-    let specter = metrics(900.0, 940.0, 1_100.0, 900.0);
+    let warpsock = metrics(900.0, 940.0, 1_100.0, 900.0);
 
-    let result = evaluate_comparable_threshold(&reqwest, &specter);
+    let result = evaluate_comparable_threshold(&reqwest, &warpsock);
 
     assert!(!result.pass);
     assert!(result.ttfb_improvement_pct >= 5.0);
@@ -68,9 +68,9 @@ fn comparable_threshold_fails_when_median_throughput_regresses() {
 #[test]
 fn comparable_threshold_fails_when_median_throughput_is_equal() {
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
-    let specter = metrics(900.0, 1_000.0, 1_100.0, 900.0);
+    let warpsock = metrics(900.0, 1_000.0, 1_100.0, 900.0);
 
-    let result = evaluate_comparable_threshold(&reqwest, &specter);
+    let result = evaluate_comparable_threshold(&reqwest, &warpsock);
 
     assert!(!result.pass);
     assert!(result.ttfb_improvement_pct >= 5.0);
@@ -83,9 +83,9 @@ fn comparable_threshold_fails_when_median_throughput_is_equal() {
 #[test]
 fn comparable_threshold_fails_when_median_throughput_win_is_under_five_percent() {
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
-    let specter = metrics(900.0, 1_049.0, 1_100.0, 900.0);
+    let warpsock = metrics(900.0, 1_049.0, 1_100.0, 900.0);
 
-    let result = evaluate_comparable_threshold(&reqwest, &specter);
+    let result = evaluate_comparable_threshold(&reqwest, &warpsock);
 
     assert!(!result.pass);
     assert!(result.ttfb_improvement_pct >= 5.0);
@@ -98,9 +98,9 @@ fn comparable_threshold_fails_when_median_throughput_win_is_under_five_percent()
 #[test]
 fn comparable_threshold_fails_when_median_ttfb_win_is_under_five_percent() {
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
-    let specter = metrics(951.0, 1_100.0, 1_100.0, 951.0);
+    let warpsock = metrics(951.0, 1_100.0, 1_100.0, 951.0);
 
-    let result = evaluate_comparable_threshold(&reqwest, &specter);
+    let result = evaluate_comparable_threshold(&reqwest, &warpsock);
 
     assert!(!result.pass);
     assert!(result.ttfb_improvement_pct < 5.0);
@@ -112,9 +112,9 @@ fn comparable_threshold_fails_when_median_ttfb_win_is_under_five_percent() {
 #[test]
 fn comparable_threshold_fails_when_p95_throughput_regresses() {
     let reqwest = metrics(1_000.0, 1_000.0, 2_000.0, 1_000.0);
-    let specter = metrics(900.0, 1_100.0, 1_850.0, 900.0);
+    let warpsock = metrics(900.0, 1_100.0, 1_850.0, 900.0);
 
-    let result = evaluate_comparable_threshold(&reqwest, &specter);
+    let result = evaluate_comparable_threshold(&reqwest, &warpsock);
 
     assert!(!result.pass);
     assert!(result.ttfb_improvement_pct >= 5.0);
@@ -126,9 +126,9 @@ fn comparable_threshold_fails_when_p95_throughput_regresses() {
 #[test]
 fn comparable_threshold_fails_when_p95_ttfb_regresses_over_five_percent() {
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
-    let specter = metrics(900.0, 1_100.0, 1_100.0, 1_051.0);
+    let warpsock = metrics(900.0, 1_100.0, 1_100.0, 1_051.0);
 
-    let result = evaluate_comparable_threshold(&reqwest, &specter);
+    let result = evaluate_comparable_threshold(&reqwest, &warpsock);
 
     assert!(!result.pass);
     assert!(result.ttfb_improvement_pct >= 5.0);
@@ -140,9 +140,9 @@ fn comparable_threshold_fails_when_p95_ttfb_regresses_over_five_percent() {
 #[test]
 fn comparable_threshold_emits_and_enforces_wilcoxon_p_values() {
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
-    let specter = metrics(900.0, 1_100.0, 1_100.0, 900.0);
+    let warpsock = metrics(900.0, 1_100.0, 1_100.0, 900.0);
 
-    let result = evaluate_comparable_threshold(&reqwest, &specter);
+    let result = evaluate_comparable_threshold(&reqwest, &warpsock);
 
     assert!(result.pass);
     assert!(result.ttfb_wilcoxon_signed_rank_p_value < 0.01);
@@ -152,15 +152,15 @@ fn comparable_threshold_emits_and_enforces_wilcoxon_p_values() {
 #[test]
 fn comparable_threshold_fails_when_wilcoxon_p_values_are_not_significant() {
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
-    let mut specter = metrics(900.0, 1_100.0, 1_100.0, 900.0);
-    specter.ttfb_samples_ns = (0..30)
+    let mut warpsock = metrics(900.0, 1_100.0, 1_100.0, 900.0);
+    warpsock.ttfb_samples_ns = (0..30)
         .map(|idx| if idx < 16 { 900.0 } else { 2_000.0 })
         .collect();
-    specter.bytes_per_sec_samples = (0..30)
+    warpsock.bytes_per_sec_samples = (0..30)
         .map(|idx| if idx < 16 { 1_100.0 } else { 100.0 })
         .collect();
 
-    let result = evaluate_comparable_threshold(&reqwest, &specter);
+    let result = evaluate_comparable_threshold(&reqwest, &warpsock);
 
     assert!(!result.pass);
     assert!(result.ttfb_improvement_pct >= 5.0);
@@ -171,13 +171,13 @@ fn comparable_threshold_fails_when_wilcoxon_p_values_are_not_significant() {
 
 #[test]
 fn comparable_threshold_enforces_throughput_for_request_rows_too() {
-    // Specter wins TTFB by >5% but loses median throughput, p95 throughput,
+    // Warpsock wins TTFB by >5% but loses median throughput, p95 throughput,
     // and Wilcoxon throughput significance. The shared request/response gate
     // must still fail because throughput remains required.
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
-    let specter = metrics(900.0, 900.0, 900.0, 900.0);
+    let warpsock = metrics(900.0, 900.0, 900.0, 900.0);
 
-    let result = evaluate_comparable_threshold(&reqwest, &specter);
+    let result = evaluate_comparable_threshold(&reqwest, &warpsock);
 
     assert!(!result.pass);
     assert!(result.ttfb_improvement_pct >= 5.0);
@@ -189,9 +189,9 @@ fn comparable_threshold_enforces_throughput_for_request_rows_too() {
 fn comparable_threshold_still_enforces_ttfb_p95_and_wilcoxon() {
     // p95 TTFB regresses past 5%, so the gate fails even when throughput wins.
     let reqwest = metrics(1_000.0, 1_000.0, 1_100.0, 1_000.0);
-    let specter = metrics(900.0, 1_100.0, 1_100.0, 1_060.0);
+    let warpsock = metrics(900.0, 1_100.0, 1_100.0, 1_060.0);
 
-    let result = evaluate_comparable_threshold(&reqwest, &specter);
+    let result = evaluate_comparable_threshold(&reqwest, &warpsock);
     assert!(!result.pass);
     assert!(result.p95_ttfb_regression_pct > 5.0);
 }
@@ -199,13 +199,13 @@ fn comparable_threshold_still_enforces_ttfb_p95_and_wilcoxon() {
 #[test]
 fn paired_wilcoxon_signed_rank_uses_direction_for_metric_semantics() {
     let baseline = vec![1_000.0; 30];
-    let lower_specter = vec![900.0; 30];
-    let higher_specter = vec![1_100.0; 30];
+    let lower_warpsock = vec![900.0; 30];
+    let higher_warpsock = vec![1_100.0; 30];
 
-    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &lower_specter, true) < 0.01);
-    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &higher_specter, false) < 0.01);
-    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &higher_specter, true) > 0.99);
-    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &lower_specter, false) > 0.99);
+    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &lower_warpsock, true) < 0.01);
+    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &higher_warpsock, false) < 0.01);
+    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &higher_warpsock, true) > 0.99);
+    assert!(paired_wilcoxon_signed_rank_p_value(&baseline, &lower_warpsock, false) > 0.99);
 }
 
 #[test]

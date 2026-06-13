@@ -27,7 +27,7 @@ from typing import Any
 import current_rows_high_water as high_water
 
 GET_REQUIRED = (
-    "specter_native",
+    "warpsock_native",
     "quiche_direct",
     "tokio_quiche",
     "h3_quinn",
@@ -35,13 +35,13 @@ GET_REQUIRED = (
 )
 
 RFC9220_REQUIRED = (
-    "specter_native_rfc9220_tunnel",
+    "warpsock_native_rfc9220_tunnel",
     "quiche_direct_rfc9220_tunnel",
     "tokio_quiche_rfc9220_tunnel",
-    "specter_native_rfc9220_tunnel_close",
+    "warpsock_native_rfc9220_tunnel_close",
     "quiche_direct_rfc9220_tunnel_close",
     "tokio_quiche_rfc9220_tunnel_close",
-    "specter_native_rfc9220_tunnel_mixed",
+    "warpsock_native_rfc9220_tunnel_mixed",
     "quiche_direct_rfc9220_tunnel_mixed",
     "tokio_quiche_rfc9220_tunnel_mixed",
 )
@@ -61,26 +61,26 @@ REQUIRED_FEATURES = "reqwest-h3"
 
 REQUIRED_RUNTIME_ENV = {
     "BENCH_TUNNEL_STEADYSTATE": "1",
-    "SPECTER_LOCAL_NATIVE_H3_FIXTURE_MODE": "process",
-    "SPECTER_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE": "2",
-    "SPECTER_LOCAL_NATIVE_H3_FIXTURE_PUMP": "inline-first-chunk-v1",
-    "SPECTER_NATIVE_H3_DIRECT_GET_EPOCH": "1",
-    "SPECTER_NATIVE_H3_DIRECT_GET_IO_EPOCH": "0",
-    "SPECTER_NATIVE_H3_DIRECT_IDLE_GET": "1",
-    "SPECTER_NATIVE_H3_DIRECT_GET_READY_SPIN_US": "25",
-    "SPECTER_NATIVE_H3_DIRECT_GET_BODY_SPIN_US": "25",
-    "SPECTER_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH": "1",
-    "SPECTER_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO": "1",
-    "SPECTER_NATIVE_H3_DIRECT_RFC9220_MIXED": "1",
-    "SPECTER_NATIVE_H3_DIRECT_RFC9220_TUNNEL": "1",
+    "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_MODE": "process",
+    "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE": "2",
+    "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_PUMP": "inline-first-chunk-v1",
+    "WARPSOCK_NATIVE_H3_DIRECT_GET_EPOCH": "1",
+    "WARPSOCK_NATIVE_H3_DIRECT_GET_IO_EPOCH": "0",
+    "WARPSOCK_NATIVE_H3_DIRECT_IDLE_GET": "1",
+    "WARPSOCK_NATIVE_H3_DIRECT_GET_READY_SPIN_US": "25",
+    "WARPSOCK_NATIVE_H3_DIRECT_GET_BODY_SPIN_US": "25",
+    "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH": "1",
+    "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO": "1",
+    "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_MIXED": "1",
+    "WARPSOCK_NATIVE_H3_DIRECT_RFC9220_TUNNEL": "1",
     "FIXTURE_LEDGER_GATE": "0",
-    "SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR": "",
+    "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR": "",
 }
 
 RUNTIME_PROFILE_ENV_OVERRIDES = {
     REQUIRED_RUNTIME_PROFILE: {},
     REQUIRED_IO_EPOCH_RUNTIME_PROFILE: {
-        "SPECTER_NATIVE_H3_DIRECT_GET_IO_EPOCH": "1",
+        "WARPSOCK_NATIVE_H3_DIRECT_GET_IO_EPOCH": "1",
     },
 }
 
@@ -96,17 +96,17 @@ def required_runtime_env_for_profile(runtime_profile: str | None) -> dict[str, s
 WORKLOADS = {
     "http3_streaming_get": GET_REQUIRED,
     "websocket_over_h3_raw_tunnel_echo": (
-        "specter_native_rfc9220_tunnel",
+        "warpsock_native_rfc9220_tunnel",
         "quiche_direct_rfc9220_tunnel",
         "tokio_quiche_rfc9220_tunnel",
     ),
     "websocket_over_h3_raw_tunnel_close_fin": (
-        "specter_native_rfc9220_tunnel_close",
+        "warpsock_native_rfc9220_tunnel_close",
         "quiche_direct_rfc9220_tunnel_close",
         "tokio_quiche_rfc9220_tunnel_close",
     ),
     "slow_consumer_tunnel_plus_http3_streaming": (
-        "specter_native_rfc9220_tunnel_mixed",
+        "warpsock_native_rfc9220_tunnel_mixed",
         "quiche_direct_rfc9220_tunnel_mixed",
         "tokio_quiche_rfc9220_tunnel_mixed",
     ),
@@ -1196,7 +1196,7 @@ def validate_manifest(
                         "FAIL invalid_manifest runtime_env "
                         f"{key} expected={expected_value} actual={actual_value}"
                     )
-            elif key == "SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR" and (
+            elif key == "WARPSOCK_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR" and (
                 ledger_gate or requires_fixture_ledger
             ):
                 if not isinstance(actual_value, str) or not actual_value:
@@ -1755,9 +1755,9 @@ def evaluate_selected_rows(
         throughput_label = (
             "ledger_paced_throughput" if ledger_gate else "throughput"
         )
-        specter = [row for row in group if row["competitor_id"].startswith("specter_native")]
-        comps = [row for row in group if not row["competitor_id"].startswith("specter_native")]
-        for srow in specter:
+        warpsock = [row for row in group if row["competitor_id"].startswith("warpsock_native")]
+        comps = [row for row in group if not row["competitor_id"].startswith("warpsock_native")]
+        for srow in warpsock:
             for crow in comps:
                 if srow["p50_ttfb_ns"] > crow["p50_ttfb_ns"]:
                     failures.append(

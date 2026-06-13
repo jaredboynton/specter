@@ -5,7 +5,7 @@
   "run_provenance": {
     "manifest_path": "docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-scout/current_rows.clientpin_scout.r002.manifest.json",
     "manifest_sha256": "5e04cde43cb420fc1d5f91cc93910980d5aa8f6d0c7a71d7bd5645168e58f432",
-    "binary_path": "./target/release/specter-native-h3-vs-rust-clients",
+    "binary_path": "./target/release/warpsock-native-h3-vs-rust-clients",
     "binary_sha256": "addb844a5719fd57733eff603e414d3fba70b740cc583969d2c44034bedd609a",
     "git_head": "ff6f467720ff2665a64bbf0563c8a4468d562972",
     "git_dirty": true,
@@ -26,7 +26,7 @@
       "h3_quinn",
       "tokio_quiche",
       "quiche_direct",
-      "specter_native"
+      "warpsock_native"
     ],
     "run_order_sha256": "9f3bd8f191ce5ac63ac0bfea044cc7e0397a44506cc2332fafe544527b5035c7",
     "run_sequence_index": 2,
@@ -35,36 +35,36 @@
   },
   "competitors": [
     {
-      "id": "specter_native",
-      "crate_name": "specters",
+      "id": "warpsock_native",
+      "crate_name": "warpsock",
       "version": "4.2.2",
       "role": "candidate",
       "required_for_superiority": true,
-      "invocation_notes": "Specter native H3 backend; no quiche in the package graph."
+      "invocation_notes": "Warpsock native H3 backend; no quiche in the package graph."
     },
     {
-      "id": "specter_native_rfc9220_tunnel",
-      "crate_name": "specters",
+      "id": "warpsock_native_rfc9220_tunnel",
+      "crate_name": "warpsock",
       "version": "4.2.2",
       "role": "h3_tunnel_workload",
       "required_for_superiority": false,
-      "invocation_notes": "Specter native RFC 9220 WebSocket-over-H3 tunnel echo workload."
+      "invocation_notes": "Warpsock native RFC 9220 WebSocket-over-H3 tunnel echo workload."
     },
     {
-      "id": "specter_native_rfc9220_tunnel_close",
-      "crate_name": "specters",
+      "id": "warpsock_native_rfc9220_tunnel_close",
+      "crate_name": "warpsock",
       "version": "4.2.2",
       "role": "h3_tunnel_workload",
       "required_for_superiority": false,
-      "invocation_notes": "Specter native RFC 9220 tunnel echo with client FIN and server FIN timing."
+      "invocation_notes": "Warpsock native RFC 9220 tunnel echo with client FIN and server FIN timing."
     },
     {
-      "id": "specter_native_rfc9220_tunnel_mixed",
-      "crate_name": "specters",
+      "id": "warpsock_native_rfc9220_tunnel_mixed",
+      "crate_name": "warpsock",
       "version": "4.2.2",
       "role": "h3_tunnel_workload",
       "required_for_superiority": false,
-      "invocation_notes": "Specter native RFC 9220 slow-consumer tunnel plus concurrent H3 streaming workload."
+      "invocation_notes": "Warpsock native RFC 9220 slow-consumer tunnel plus concurrent H3 streaming workload."
     },
     {
       "id": "quiche_direct_rfc9220_tunnel",
@@ -197,7 +197,7 @@
   ],
   "rows": [
     {
-      "competitor_id": "specter_native",
+      "competitor_id": "warpsock_native",
       "status": "pending_measurement",
       "p50_ttfb_ns": null,
       "p95_ttfb_ns": null,
@@ -208,7 +208,7 @@
       "payload_bytes": 81920
     },
     {
-      "competitor_id": "specter_native_rfc9220_tunnel",
+      "competitor_id": "warpsock_native_rfc9220_tunnel",
       "status": "pending_adapter",
       "p50_ttfb_ns": null,
       "p95_ttfb_ns": null,
@@ -217,10 +217,10 @@
       "protocol": "h3_rfc9220",
       "workload": "websocket_over_h3_raw_tunnel_echo",
       "payload_bytes": 1024,
-      "notes": "Measured Specter raw byte tunnel over RFC9220 Extended CONNECT; not RFC6455 frame parsing."
+      "notes": "Measured Warpsock raw byte tunnel over RFC9220 Extended CONNECT; not RFC6455 frame parsing."
     },
     {
-      "competitor_id": "specter_native_rfc9220_tunnel_close",
+      "competitor_id": "warpsock_native_rfc9220_tunnel_close",
       "status": "pending_adapter",
       "p50_ttfb_ns": null,
       "p95_ttfb_ns": null,
@@ -232,7 +232,7 @@
       "notes": "Measures client DATA+FIN through echoed DATA and server FIN delivery on an RFC9220 tunnel."
     },
     {
-      "competitor_id": "specter_native_rfc9220_tunnel_mixed",
+      "competitor_id": "warpsock_native_rfc9220_tunnel_mixed",
       "status": "pending_adapter",
       "p50_ttfb_ns": null,
       "p95_ttfb_ns": null,
@@ -301,7 +301,7 @@
       "protocol": "h3_rfc9220",
       "workload": "slow_consumer_tunnel_plus_http3_streaming",
       "payload_bytes": 122880,
-      "notes": "RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes. TTFB is captured on the H3 Headers event so suite gate is metric-symmetric with specter_native_rfc9220_tunnel_mixed."
+      "notes": "RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes. TTFB is captured on the H3 Headers event so suite gate is metric-symmetric with warpsock_native_rfc9220_tunnel_mixed."
     },
     {
       "competitor_id": "tokio_quiche_rfc9220_tunnel_mixed",
@@ -313,7 +313,7 @@
       "protocol": "h3_rfc9220",
       "workload": "slow_consumer_tunnel_plus_http3_streaming",
       "payload_bytes": 122880,
-      "notes": "RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes. TTFB is captured on the H3 Headers event so suite gate is metric-symmetric with specter_native_rfc9220_tunnel_mixed."
+      "notes": "RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes. TTFB is captured on the H3 Headers event so suite gate is metric-symmetric with warpsock_native_rfc9220_tunnel_mixed."
     },
     {
       "competitor_id": "h3_quinn_rfc9220_tunnel",
@@ -1059,7 +1059,7 @@
     "status": "incomplete",
     "pass": false,
     "reason": "no_h3_superiority_claim_without_all_required_rows",
-    "fastest_non_specter_h3_client": "h3_quinn",
+    "fastest_non_warpsock_h3_client": "h3_quinn",
     "no_h3_superiority_claim_without_all_required_rows": true,
     "required_h3_clients": [
       "quiche_direct",
@@ -1068,7 +1068,7 @@
       "reqwest_h3"
     ],
     "missing_required_rows": [
-      "specter_native",
+      "warpsock_native",
       "quiche_direct",
       "tokio_quiche",
       "reqwest_h3"
@@ -1080,28 +1080,28 @@
     "status": "incomplete",
     "pass": false,
     "reason": "no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows",
-    "fastest_non_specter_rfc9220_tunnel_client": null,
+    "fastest_non_warpsock_rfc9220_tunnel_client": null,
     "no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows": true,
     "minimum_sample_count": 100,
     "required_rfc9220_tunnel_clients": [
-      "specter_native_rfc9220_tunnel",
+      "warpsock_native_rfc9220_tunnel",
       "quiche_direct_rfc9220_tunnel",
       "tokio_quiche_rfc9220_tunnel",
-      "specter_native_rfc9220_tunnel_close",
+      "warpsock_native_rfc9220_tunnel_close",
       "quiche_direct_rfc9220_tunnel_close",
       "tokio_quiche_rfc9220_tunnel_close",
-      "specter_native_rfc9220_tunnel_mixed",
+      "warpsock_native_rfc9220_tunnel_mixed",
       "quiche_direct_rfc9220_tunnel_mixed",
       "tokio_quiche_rfc9220_tunnel_mixed"
     ],
     "missing_required_rfc9220_tunnel_rows": [
-      "specter_native_rfc9220_tunnel",
+      "warpsock_native_rfc9220_tunnel",
       "quiche_direct_rfc9220_tunnel",
       "tokio_quiche_rfc9220_tunnel",
-      "specter_native_rfc9220_tunnel_close",
+      "warpsock_native_rfc9220_tunnel_close",
       "quiche_direct_rfc9220_tunnel_close",
       "tokio_quiche_rfc9220_tunnel_close",
-      "specter_native_rfc9220_tunnel_mixed",
+      "warpsock_native_rfc9220_tunnel_mixed",
       "quiche_direct_rfc9220_tunnel_mixed",
       "tokio_quiche_rfc9220_tunnel_mixed"
     ],
@@ -1112,9 +1112,9 @@
     "workload_sub_gates": [
       {
         "workload": "echo",
-        "specter_id": "specter_native_rfc9220_tunnel",
+        "warpsock_id": "warpsock_native_rfc9220_tunnel",
         "pass": false,
-        "reason": "missing_specter_workload_metrics",
+        "reason": "missing_warpsock_workload_metrics",
         "failing_comparators": [
           "quiche_direct_rfc9220_tunnel",
           "tokio_quiche_rfc9220_tunnel"
@@ -1122,9 +1122,9 @@
       },
       {
         "workload": "close_fin",
-        "specter_id": "specter_native_rfc9220_tunnel_close",
+        "warpsock_id": "warpsock_native_rfc9220_tunnel_close",
         "pass": false,
-        "reason": "missing_specter_workload_metrics",
+        "reason": "missing_warpsock_workload_metrics",
         "failing_comparators": [
           "quiche_direct_rfc9220_tunnel_close",
           "tokio_quiche_rfc9220_tunnel_close"
@@ -1132,9 +1132,9 @@
       },
       {
         "workload": "mixed",
-        "specter_id": "specter_native_rfc9220_tunnel_mixed",
+        "warpsock_id": "warpsock_native_rfc9220_tunnel_mixed",
         "pass": false,
-        "reason": "missing_specter_workload_metrics",
+        "reason": "missing_warpsock_workload_metrics",
         "failing_comparators": [
           "quiche_direct_rfc9220_tunnel_mixed",
           "tokio_quiche_rfc9220_tunnel_mixed"

@@ -76,7 +76,7 @@ impl TcpFingerprint {
 
 /// Explicit TCP socket buffer overrides.
 ///
-/// By default Specter leaves `SO_RCVBUF` and `SO_SNDBUF` untouched so modern
+/// By default Warpsock leaves `SO_RCVBUF` and `SO_SNDBUF` untouched so modern
 /// kernels can autotune TCP buffers for high-bandwidth, high-RTT links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TcpSocketBuffers {

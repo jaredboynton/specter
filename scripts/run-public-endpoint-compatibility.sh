@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Public endpoint compatibility validation harness for Specter.
+# Public endpoint compatibility validation harness for Warpsock.
 #
-# Runs Specter's public-endpoint compatibility smoke checks (Cloudflare H2/H3,
+# Runs Warpsock's public-endpoint compatibility smoke checks (Cloudflare H2/H3,
 # nghttp2 H2 streaming, fingerprint validation) and records results under
 # `target/validation/integration/` together with a manifest that classifies
 # every row as `compatibility` (never as benchmark threshold input).

@@ -9,9 +9,6 @@ mod helpers;
 use boring::ssl::{SslOptions, SslSessionCacheMode, SslVersion};
 use boring_sys::SSL_CTX;
 use helpers::tls::generate_cert_bundle;
-use specter::transport::connector::{BoringConnector, EarlyDataOutcome};
-use specter::transport::dns::{DnsConfig, Resolve, ResolveFuture};
-use specter::transport::session::SessionCache;
 use std::ffi::c_int;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,6 +16,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use warpsock::transport::connector::{BoringConnector, EarlyDataOutcome};
+use warpsock::transport::dns::{DnsConfig, Resolve, ResolveFuture};
+use warpsock::transport::session::SessionCache;
 
 extern "C" {
     fn SSL_CTX_set_early_data_enabled(ctx: *mut SSL_CTX, enabled: c_int);
@@ -125,7 +125,7 @@ async fn second_connect_resumes_tls13_session_ticket() {
     drop(first);
 
     // Wait for the new-session callback after BoringSSL parses the NewSessionTicket.
-    let key = specter::transport::session::SessionCacheKey::new("127.0.0.1", addr.port());
+    let key = warpsock::transport::session::SessionCacheKey::new("127.0.0.1", addr.port());
     assert!(
         shared_cache
             .wait_for_session(&key, Duration::from_secs(2))
@@ -168,7 +168,7 @@ async fn early_data_session_marked_zero_rtt_capable_when_server_enables_it() {
     let _ = tokio::time::timeout(Duration::from_secs(2), first.read(&mut buf)).await;
     drop(first);
 
-    let key = specter::transport::session::SessionCacheKey::new("127.0.0.1", addr.port());
+    let key = warpsock::transport::session::SessionCacheKey::new("127.0.0.1", addr.port());
     assert!(
         shared_cache
             .wait_for_session(&key, Duration::from_secs(2))
@@ -186,7 +186,7 @@ async fn early_data_session_marked_zero_rtt_capable_when_server_enables_it() {
     let (_stream, outcome) = connector
         .connect_with_alpn_and_early_data(
             &uri,
-            specter::transport::connector::AlpnMode::Default,
+            warpsock::transport::connector::AlpnMode::Default,
             Some(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
         )
         .await

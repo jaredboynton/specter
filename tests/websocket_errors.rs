@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use specter::{Client, CloseCode, CloseFrame};
+use warpsock::{Client, CloseCode, CloseFrame};
 
 #[path = "helpers/mock_ws_server.rs"]
 mod mock_ws_server;

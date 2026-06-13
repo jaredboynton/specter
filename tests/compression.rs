@@ -1,17 +1,17 @@
 //! Content-Encoding / Compression Tests
 //!
-//! Tests that the specter client correctly handles compressed responses:
+//! Tests that the warpsock client correctly handles compressed responses:
 //! - gzip Content-Encoding
 //! - deflate Content-Encoding
 //! - brotli Content-Encoding
 //! - zstd Content-Encoding
 //! - Identity (no compression) baseline
 
-use specter::transport::h2::{flags, hpack_impl::Encoder};
-use specter::Client;
 use std::io::Write;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use warpsock::transport::h2::{flags, hpack_impl::Encoder};
+use warpsock::Client;
 
 mod helpers;
 use helpers::mock_h2_server::MockH2Server;

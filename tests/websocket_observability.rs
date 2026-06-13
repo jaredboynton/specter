@@ -1,4 +1,4 @@
-use specter::Client;
+use warpsock::Client;
 
 #[path = "helpers/mock_ws_server.rs"]
 mod mock_ws_server;

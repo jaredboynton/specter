@@ -13,13 +13,13 @@ mod helpers {
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use specter::fingerprint::Http3Fingerprint;
-use specter::transport::h3::handshake::{NativeQuicHandshake, NativeQuicServerHandshake};
-use specter::transport::h3::quic::{decode_frames, ConnectionId, LongHeaderType, QuicFrame};
-use specter::transport::h3::recovery::{
+use warpsock::fingerprint::Http3Fingerprint;
+use warpsock::transport::h3::handshake::{NativeQuicHandshake, NativeQuicServerHandshake};
+use warpsock::transport::h3::quic::{decode_frames, ConnectionId, LongHeaderType, QuicFrame};
+use warpsock::transport::h3::recovery::{
     LossDetectionOutcome, PacketNumberSpace, RecoveryState, SentPacketInfo,
 };
-use specter::transport::h3::tls::{QuicEncryptionLevel, QuicSecretDirection, QuicTlsSecret};
+use warpsock::transport::h3::tls::{QuicEncryptionLevel, QuicSecretDirection, QuicTlsSecret};
 
 fn build_client_handshake() -> NativeQuicHandshake {
     NativeQuicHandshake::client_with_verify_peer(

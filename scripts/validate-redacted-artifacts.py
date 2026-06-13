@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate that mission, Specter, and proxy artifacts contain no unredacted
+"""Validate that mission, Warpsock, and proxy artifacts contain no unredacted
 secrets, bearer tokens, OAuth blobs, cargo tokens, or full local auth paths.
 
 Usage:

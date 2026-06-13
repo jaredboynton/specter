@@ -3,12 +3,6 @@ use bytes::Bytes;
 use futures_core::Stream;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use serde::Serialize;
-use specter::fingerprint::Http3Fingerprint;
-use specter::transport::h3::handshake::{ClientH3Event, NativeQuicServerHandshake};
-use specter::transport::h3::native::{decode_header_block, encode_frame, H3Frame, H3Header};
-use specter::transport::h3::quic::{
-    split_long_header_datagram, ConnectionId, LongHeaderDatagramPacket, LongHeaderType,
-};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -25,6 +19,12 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket as TokioUdpSocket};
 use tokio::sync::mpsc;
+use warpsock::fingerprint::Http3Fingerprint;
+use warpsock::transport::h3::handshake::{ClientH3Event, NativeQuicServerHandshake};
+use warpsock::transport::h3::native::{decode_header_block, encode_frame, H3Frame, H3Header};
+use warpsock::transport::h3::quic::{
+    split_long_header_datagram, ConnectionId, LongHeaderDatagramPacket, LongHeaderType,
+};
 
 const H1_PORT: u16 = 3201;
 const H2_PORT: u16 = 3202;
@@ -42,7 +42,7 @@ const BENCH_REQ_CHUNK_SIZE: usize = 1024;
 const BENCH_REQ_CHUNK_COUNT: usize = 5;
 const BENCH_REQ_CHUNK_DELAY_MS: u64 = 2;
 const BENCH_REQ_BODY_LEN: u64 = (BENCH_REQ_CHUNK_SIZE as u64) * (BENCH_REQ_CHUNK_COUNT as u64);
-const BENCH_UPLOAD_ID_HEADER: &str = "x-specter-bench-upload-id";
+const BENCH_UPLOAD_ID_HEADER: &str = "x-warpsock-bench-upload-id";
 
 const FIXTURE_PACING_MODE: &str = "monotonic_deadline_spin_wait";
 const FIXTURE_MONOTONIC_CLOCK_SOURCE: &str = "std::time::Instant";
@@ -284,7 +284,7 @@ struct Row {
     client_config: ClientConfig,
     metrics: Metrics,
     threshold: Threshold,
-    specter_api_path: Option<&'static str>,
+    warpsock_api_path: Option<&'static str>,
     protocol_selected_by_normal_dispatch: bool,
     pool_reuse_metadata: PoolReuse,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -474,19 +474,19 @@ struct Threshold {
     p95_regression_allowed_pct: f64,
     wilcoxon_p_value_required_less_than: f64,
     reqwest_median_ttfb_ns: Option<f64>,
-    specter_median_ttfb_ns: Option<f64>,
+    warpsock_median_ttfb_ns: Option<f64>,
     ttfb_improvement_pct: Option<f64>,
     ttfb_wilcoxon_signed_rank_p_value: Option<f64>,
     reqwest_median_bytes_per_sec: Option<f64>,
-    specter_median_bytes_per_sec: Option<f64>,
+    warpsock_median_bytes_per_sec: Option<f64>,
     throughput_improvement_pct: Option<f64>,
     throughput_wilcoxon_signed_rank_p_value: Option<f64>,
     median_throughput_regression_pct: Option<f64>,
     reqwest_p95_bytes_per_sec: Option<f64>,
-    specter_p95_bytes_per_sec: Option<f64>,
+    warpsock_p95_bytes_per_sec: Option<f64>,
     p95_throughput_regression_pct: Option<f64>,
     reqwest_p95_ttfb_ns: Option<f64>,
-    specter_p95_ttfb_ns: Option<f64>,
+    warpsock_p95_ttfb_ns: Option<f64>,
     p95_ttfb_regression_pct: Option<f64>,
     status: &'static str,
     reason: &'static str,
@@ -511,8 +511,8 @@ struct H3Gate {
     comparison_mode: &'static str,
     reqwest_comparison_available: bool,
     reqwest_unavailable_reason: &'static str,
-    specter_thresholds: H3RegressionThresholds,
-    specter_metrics: Metrics,
+    warpsock_thresholds: H3RegressionThresholds,
+    warpsock_metrics: Metrics,
     pass: bool,
     status: &'static str,
 }
@@ -528,8 +528,8 @@ struct H3RegressionThresholds {
 impl H3RegressionThresholds {
     /// Single source of truth for the H3 regression gate thresholds.
     /// Used both for evaluating per-row pass/fail and for emitting the
-    /// `h3_gate.specter_thresholds` JSON section so the two cannot drift.
-    fn default_specter_gate() -> Self {
+    /// `h3_gate.warpsock_thresholds` JSON section so the two cannot drift.
+    fn default_warpsock_gate() -> Self {
         Self {
             max_median_ttfb_p50_ns: 2_000_000.0,
             min_median_bytes_per_sec: 30_000.0,
@@ -712,8 +712,8 @@ impl Drop for Fixtures {
 }
 
 fn generate_certs_openssl() -> (String, String) {
-    let cert_path = std::env::temp_dir().join("specter_fixtures.crt");
-    let key_path = std::env::temp_dir().join("specter_fixtures.key");
+    let cert_path = std::env::temp_dir().join("warpsock_fixtures.crt");
+    let key_path = std::env::temp_dir().join("warpsock_fixtures.key");
 
     let _ = std::process::Command::new("openssl")
         .args([
@@ -1082,7 +1082,7 @@ async fn handle_h2_connection<
     }
 
     let mut settings_sent = false;
-    let mut decoder = specter::transport::h2::HpackDecoder::new();
+    let mut decoder = warpsock::transport::h2::HpackDecoder::new();
     let (tx, mut rx) = mpsc::channel::<(u8, u8, u32, Vec<u8>)>(100);
     // Track upload stream IDs and bytes received so DATA on those streams is
     // consumed for upload accounting instead of echoed back as response body.
@@ -1451,7 +1451,7 @@ impl NativeBenchH3Connection {
         }
     }
 
-    async fn process_datagram(&mut self, packet: &[u8]) -> specter::Result<()> {
+    async fn process_datagram(&mut self, packet: &[u8]) -> warpsock::Result<()> {
         if packet.first().is_some_and(|first| first & 0x80 != 0) {
             let packets = split_long_header_datagram(packet)?;
             if packets
@@ -1489,7 +1489,7 @@ impl NativeBenchH3Connection {
         Ok(())
     }
 
-    async fn send_settings_if_ready(&mut self) -> specter::Result<()> {
+    async fn send_settings_if_ready(&mut self) -> warpsock::Result<()> {
         if self.settings_sent || !self.handshake.is_application_ready() {
             return Ok(());
         }
@@ -1500,7 +1500,7 @@ impl NativeBenchH3Connection {
         self.send_packet(packet.packet).await
     }
 
-    async fn apply_client_event(&mut self, event: ClientH3Event) -> specter::Result<()> {
+    async fn apply_client_event(&mut self, event: ClientH3Event) -> warpsock::Result<()> {
         let ClientH3Event::Stream(event) = event else {
             return Ok(());
         };
@@ -1533,7 +1533,7 @@ impl NativeBenchH3Connection {
         stream_id: u64,
         headers: Vec<H3Header>,
         end_stream: bool,
-    ) -> specter::Result<()> {
+    ) -> warpsock::Result<()> {
         let mut path = "/";
         let mut method = "GET";
         let mut upload_id = None;
@@ -1599,7 +1599,7 @@ impl NativeBenchH3Connection {
         content_type: &str,
         body: Option<Bytes>,
         fin: bool,
-    ) -> specter::Result<()> {
+    ) -> warpsock::Result<()> {
         let headers = vec![
             H3Header::new(":status", "200"),
             H3Header::new("content-type", content_type),
@@ -1610,7 +1610,7 @@ impl NativeBenchH3Connection {
         self.send_packet(packet.packet).await
     }
 
-    async fn send_response_data(&mut self, response: BenchH3Response) -> specter::Result<()> {
+    async fn send_response_data(&mut self, response: BenchH3Response) -> warpsock::Result<()> {
         let encoded_data = encode_frame(&H3Frame::Data(response.bytes));
         let mut chunks = encoded_data.chunks(H3_BENCH_STREAM_SEGMENT_SIZE).peekable();
         while let Some(chunk) = chunks.next() {
@@ -1625,7 +1625,7 @@ impl NativeBenchH3Connection {
         Ok(())
     }
 
-    async fn finish_upload_if_needed(&mut self, stream_id: u64) -> specter::Result<()> {
+    async fn finish_upload_if_needed(&mut self, stream_id: u64) -> warpsock::Result<()> {
         let Some(upload) = self.uploads.remove(&stream_id) else {
             return Ok(());
         };
@@ -1639,11 +1639,11 @@ impl NativeBenchH3Connection {
         .await
     }
 
-    async fn send_packet(&self, packet: Bytes) -> specter::Result<()> {
+    async fn send_packet(&self, packet: Bytes) -> warpsock::Result<()> {
         self.socket
             .send_to(packet.as_ref(), self.peer)
             .await
-            .map_err(specter::Error::Io)?;
+            .map_err(warpsock::Error::Io)?;
         Ok(())
     }
 }
@@ -1808,9 +1808,9 @@ async fn wait_for_health() -> io::Result<()> {
     Ok(())
 }
 
-async fn measure_specter_streaming(
+async fn measure_warpsock_streaming(
     protocol: &str,
-    client: &specter::Client,
+    client: &warpsock::Client,
     url: &str,
 ) -> Result<
     (
@@ -1826,7 +1826,7 @@ async fn measure_specter_streaming(
     let start = std::time::Instant::now();
     let mut request = client.get(url);
     if protocol == "h3" {
-        request = request.version(specter::HttpVersion::Http3Only);
+        request = request.version(warpsock::HttpVersion::Http3Only);
     }
     let mut response = request.send_streaming().await?;
 
@@ -2041,9 +2041,9 @@ fn payload_schedule_duration(schedule_ms: &[u64], request_count: usize) -> Durat
     Duration::from_millis(single_request_ms.saturating_mul(request_count as u64))
 }
 
-async fn measure_specter_streaming_batch(
+async fn measure_warpsock_streaming_batch(
     protocol: &str,
-    client: &specter::Client,
+    client: &warpsock::Client,
     url: &str,
     request_count: usize,
 ) -> Result<
@@ -2066,7 +2066,7 @@ async fn measure_specter_streaming_batch(
 
     for _ in 0..request_count {
         let (ttfb, request_duration, request_delivery_overhead, bytes, chunks, gaps_ns) =
-            measure_specter_streaming(protocol, client, url).await?;
+            measure_warpsock_streaming(protocol, client, url).await?;
         ttfb_values.push(ttfb.as_nanos() as f64);
         transfer_duration += request_duration;
         delivery_overhead = delivery_overhead.add(request_delivery_overhead);
@@ -2192,9 +2192,9 @@ fn client_write_overhead_from_offsets(
     DenominatorEvidence::from_unclamped_ns(total_ns)
 }
 
-async fn measure_specter_request_streaming(
+async fn measure_warpsock_request_streaming(
     protocol: &str,
-    client: &specter::Client,
+    client: &warpsock::Client,
     url: &str,
 ) -> Result<
     (
@@ -2212,7 +2212,7 @@ async fn measure_specter_request_streaming(
     let observed_offsets = Arc::new(Mutex::new(Vec::with_capacity(BENCH_REQ_CHUNK_COUNT)));
     let consumed_offsets = Arc::new(Mutex::new(Vec::with_capacity(BENCH_REQ_CHUNK_COUNT)));
     let stream_anchor = Instant::now();
-    let body_stream = PacingRequestBodyStream::<specter::Error>::new(
+    let body_stream = PacingRequestBodyStream::<warpsock::Error>::new(
         stream_anchor,
         observed_offsets.clone(),
         consumed_offsets.clone(),
@@ -2222,7 +2222,7 @@ async fn measure_specter_request_streaming(
         .header(BENCH_UPLOAD_ID_HEADER, upload_id.clone())
         .body_stream_sized(body_stream, BENCH_REQ_BODY_LEN);
     if protocol == "h3" {
-        request = request.version(specter::HttpVersion::Http3Only);
+        request = request.version(warpsock::HttpVersion::Http3Only);
     }
     let mut response = request.send_streaming().await?;
     let response_headers_offset_ns = stream_anchor.elapsed().as_nanos() as f64;
@@ -2328,9 +2328,9 @@ async fn measure_reqwest_request_streaming(
     ))
 }
 
-async fn measure_specter_request_streaming_batch(
+async fn measure_warpsock_request_streaming_batch(
     protocol: &str,
-    client: &specter::Client,
+    client: &warpsock::Client,
     url: &str,
     request_count: usize,
 ) -> Result<
@@ -2355,7 +2355,7 @@ async fn measure_specter_request_streaming_batch(
 
     for _ in 0..request_count {
         let (ttfb, request_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns) =
-            measure_specter_request_streaming(protocol, client, url).await?;
+            measure_warpsock_request_streaming(protocol, client, url).await?;
         ttfb_values.push(ttfb.as_nanos() as f64);
         transfer_duration += request_duration;
         write_overhead_total = write_overhead_total.add(write_overhead);
@@ -2502,14 +2502,14 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
         sample_count: options.sample_count,
         thresholded_origins: vec!["127.0.0.1:3201", "127.0.0.1:3202"],
         comparable_clients_share_workload: true,
-        throughput_timing_window: "corrected client overhead: response rows use paired reqwest/Specter sample order and divide by final fixture DATA write-stamp to final observed body-chunk delivery overhead, falling back to fixed fixture schedule overhead if a stamp is unavailable; per-gap response pacing overage is emitted as jitter evidence only; request rows use per-chunk yielded/consumed timestamps with fixture upload-complete as the final endpoint and response headers only as an emitted fallback count; identical for reqwest and Specter",
+        throughput_timing_window: "corrected client overhead: response rows use paired reqwest/Warpsock sample order and divide by final fixture DATA write-stamp to final observed body-chunk delivery overhead, falling back to fixed fixture schedule overhead if a stamp is unavailable; per-gap response pacing overage is emitted as jitter evidence only; request rows use per-chunk yielded/consumed timestamps with fixture upload-complete as the final endpoint and response headers only as an emitted fallback count; identical for reqwest and Warpsock",
     };
 
     let mut rows = Vec::new();
     let mut required_thresholds_passed = true;
     let mut failed_rows = Vec::new();
 
-    let mut h3_specter_metrics = None;
+    let mut h3_warpsock_metrics = None;
     let run_response_rows =
         !options.request_body_streaming_only || options.response_body_streaming_only;
     let run_request_rows =
@@ -2556,16 +2556,17 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
             )
             .await
             {
-                Ok((reqwest, specter)) => {
-                    Some(BTreeMap::from([("reqwest", reqwest), ("specter", specter)]))
-                }
+                Ok((reqwest, warpsock)) => Some(BTreeMap::from([
+                    ("reqwest", reqwest),
+                    ("warpsock", warpsock),
+                ])),
                 Err(_) => None,
             }
         } else {
             None
         };
 
-        for client in ["reqwest", "specter"] {
+        for client in ["reqwest", "warpsock"] {
             let mut measurement_source = "not_applicable_non_comparable";
             let mut metrics = if let Some(metrics) = paired_response_metrics
                 .as_ref()
@@ -2573,7 +2574,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
             {
                 measurement_source = "localhost_paired_real_measurement";
                 metrics.clone()
-            } else if is_comparable || (protocol == "h3" && client == "specter") {
+            } else if is_comparable || (protocol == "h3" && client == "warpsock") {
                 measurement_source = "localhost_real_measurement";
                 match run_real_measurement(
                     protocol,
@@ -2595,7 +2596,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 Metrics::not_applicable(options.warmup_count, options.sample_count)
             };
 
-            if options.force_comparable_threshold_failure && is_comparable && client == "specter" {
+            if options.force_comparable_threshold_failure && is_comparable && client == "warpsock" {
                 measurement_source = "self_test_induced_threshold_failure";
                 metrics.ttfb_ns = 1_100_000.0;
                 metrics.chunks_per_sec = 2000.0;
@@ -2609,7 +2610,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 metrics.bytes_per_sec_samples = vec![25_000.0; options.sample_count];
             }
 
-            if options.force_h3_threshold_failure && protocol == "h3" && client == "specter" {
+            if options.force_h3_threshold_failure && protocol == "h3" && client == "warpsock" {
                 measurement_source = "self_test_induced_h3_threshold_failure";
                 metrics.ttfb_ns = 5_000_000.0;
                 metrics.chunks_per_sec = 100.0;
@@ -2622,12 +2623,12 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 metrics.pass = false;
             }
 
-            let h3_thresholds = H3RegressionThresholds::default_specter_gate();
+            let h3_thresholds = H3RegressionThresholds::default_warpsock_gate();
             let h3_gate_pass =
-                protocol != "h3" || client != "specter" || h3_thresholds.evaluate(&metrics);
-            if protocol == "h3" && client == "specter" {
+                protocol != "h3" || client != "warpsock" || h3_thresholds.evaluate(&metrics);
+            if protocol == "h3" && client == "warpsock" {
                 metrics.pass = h3_gate_pass;
-                h3_specter_metrics = Some(metrics.clone());
+                h3_warpsock_metrics = Some(metrics.clone());
             }
 
             protocol_metrics.insert(client, metrics.clone());
@@ -2640,21 +2641,22 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     .get("reqwest")
                     .expect("reqwest metrics captured"),
                 protocol_metrics
-                    .get("specter")
-                    .expect("specter metrics captured"),
+                    .get("warpsock")
+                    .expect("warpsock metrics captured"),
             ))
         } else {
             None
         };
 
-        for client in ["reqwest", "specter"] {
+        for client in ["reqwest", "warpsock"] {
             let mut metrics = protocol_metrics
                 .get(client)
                 .expect("client metrics captured")
                 .clone();
-            let row_threshold_required = is_comparable || (protocol == "h3" && client == "specter");
+            let row_threshold_required =
+                is_comparable || (protocol == "h3" && client == "warpsock");
             let is_row_pass = match (&comparable_threshold, client) {
-                (Some(result), "specter") => result.pass,
+                (Some(result), "warpsock") => result.pass,
                 (Some(_), "reqwest") => true,
                 _ => metrics.pass,
             };
@@ -2669,13 +2671,13 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                 comparable: is_comparable,
                 comparison_mode: match protocol {
                     "h1" | "h2" => "reqwest_comparable",
-                    "h3" => "reqwest_h3_unavailable_specter_regression_gate",
+                    "h3" => "reqwest_h3_unavailable_warpsock_regression_gate",
                     "rfc8441" => "reqwest_unavailable_non_http_streaming_case",
                     _ => "unknown",
                 },
                 skip_reason: if !is_comparable {
                     Some(match protocol {
-                        "h3" => "reqwest 0.12 does not expose a stable directly comparable high-level HTTP/3 streaming configuration in this harness; enforcing Specter H3 regression thresholds instead",
+                        "h3" => "reqwest 0.12 does not expose a stable directly comparable high-level HTTP/3 streaming configuration in this harness; enforcing Warpsock H3 regression thresholds instead",
                         "rfc8441" => "reqwest does not expose a directly comparable high-level RFC8441 WebSocket-over-H2 streaming API in this harness",
                         _ => "not comparable",
                     })
@@ -2705,9 +2707,9 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     reqwest_median_ttfb_ns: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].ttfb_ns),
-                    specter_median_ttfb_ns: comparable_threshold
+                    warpsock_median_ttfb_ns: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["specter"].ttfb_ns),
+                        .map(|_| protocol_metrics["warpsock"].ttfb_ns),
                     ttfb_improvement_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.ttfb_improvement_pct),
@@ -2717,9 +2719,9 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     reqwest_median_bytes_per_sec: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].bytes_per_sec),
-                    specter_median_bytes_per_sec: comparable_threshold
+                    warpsock_median_bytes_per_sec: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["specter"].bytes_per_sec),
+                        .map(|_| protocol_metrics["warpsock"].bytes_per_sec),
                     throughput_improvement_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.throughput_improvement_pct),
@@ -2732,36 +2734,36 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     reqwest_p95_bytes_per_sec: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].p95_bytes_per_sec),
-                    specter_p95_bytes_per_sec: comparable_threshold
+                    warpsock_p95_bytes_per_sec: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["specter"].p95_bytes_per_sec),
+                        .map(|_| protocol_metrics["warpsock"].p95_bytes_per_sec),
                     p95_throughput_regression_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.p95_throughput_regression_pct),
                     reqwest_p95_ttfb_ns: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].p95_ns),
-                    specter_p95_ttfb_ns: comparable_threshold
+                    warpsock_p95_ttfb_ns: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["specter"].p95_ns),
+                        .map(|_| protocol_metrics["warpsock"].p95_ns),
                     p95_ttfb_regression_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.p95_ttfb_regression_pct),
                     status: if is_row_pass { "pass" } else { "fail" },
                     reason: match (protocol, client) {
-                        ("h3", "specter") => "reqwest H3 comparison unavailable; Specter H3 row is gated by explicit TTFB, throughput, chunk-rate, and pool-reuse regression thresholds",
+                        ("h3", "warpsock") => "reqwest H3 comparison unavailable; Warpsock H3 row is gated by explicit TTFB, throughput, chunk-rate, and pool-reuse regression thresholds",
                         ("h3", "reqwest") => "reqwest H3 comparison unavailable and excluded from threshold math",
-                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable threshold: Specter median TTFB must improve by >=5%, median throughput must improve by >=5% using final fixture DATA write-stamp delivery overhead for response rows, paired Wilcoxon signed-rank p-values for TTFB and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 TTFB must not regress by more than 5%",
+                        ("h1" | "h2", "warpsock") => "deterministic localhost reqwest-comparable threshold: Warpsock median TTFB must improve by >=5%, median throughput must improve by >=5% using final fixture DATA write-stamp delivery overhead for response rows, paired Wilcoxon signed-rank p-values for TTFB and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 TTFB must not regress by more than 5%",
                         ("h1" | "h2", "reqwest") => "deterministic localhost reqwest baseline row; excluded as a failing threshold subject but included in threshold math",
                         _ => "non-comparable deterministic row excluded from primary H1/H2 reqwest threshold math",
                     },
                 },
-                specter_api_path: if client == "specter" {
-                    Some("specter::Client -> RequestBuilder::send_streaming -> specter::Body::chunk")
+                warpsock_api_path: if client == "warpsock" {
+                    Some("warpsock::Client -> RequestBuilder::send_streaming -> warpsock::Body::chunk")
                 } else {
                     None
                 },
-                protocol_selected_by_normal_dispatch: client == "specter",
+                protocol_selected_by_normal_dispatch: client == "warpsock",
                 pool_reuse_metadata: PoolReuse {
                     connection_reuse_count,
                     cold_or_warm_pool: "warm",
@@ -2778,7 +2780,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
 
     // -------------------------------------------------------------------
     // Request-body streaming rows (H1, H2): 5 chunks * 1024B at 2ms pacing,
-    // 8 requests per sample. Specter uses RequestBuilder::body_stream_sized;
+    // 8 requests per sample. Warpsock uses RequestBuilder::body_stream_sized;
     // reqwest uses reqwest::Body::wrap with a size-hinted HttpBody so H1/H2 request rows compare known-length streaming uploads.
     // -------------------------------------------------------------------
     let request_payload_schedule = request_payload_schedule_ms();
@@ -2812,16 +2814,17 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
             )
             .await
             {
-                Ok((reqwest, specter)) => {
-                    Some(BTreeMap::from([("reqwest", reqwest), ("specter", specter)]))
-                }
+                Ok((reqwest, warpsock)) => Some(BTreeMap::from([
+                    ("reqwest", reqwest),
+                    ("warpsock", warpsock),
+                ])),
                 Err(_) => None,
             }
         } else {
             None
         };
 
-        for client in ["reqwest", "specter"] {
+        for client in ["reqwest", "warpsock"] {
             let mut measurement_source = "localhost_real_measurement";
             let mut metrics = if let Some(metrics) = paired_request_metrics
                 .as_ref()
@@ -2849,9 +2852,9 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
             };
 
             // Negative self-test: --self-test-threshold-failure (and the
-            // request-specific variant) must force a failing Specter request
+            // request-specific variant) must force a failing Warpsock request
             // row identically to the response row.
-            if options.force_request_threshold_failure && client == "specter" {
+            if options.force_request_threshold_failure && client == "warpsock" {
                 measurement_source = "self_test_induced_threshold_failure";
                 metrics.ttfb_ns = 1_100_000.0;
                 metrics.chunks_per_sec = 1000.0;
@@ -2875,21 +2878,21 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     .get("reqwest")
                     .expect("reqwest metrics captured"),
                 protocol_metrics
-                    .get("specter")
-                    .expect("specter metrics captured"),
+                    .get("warpsock")
+                    .expect("warpsock metrics captured"),
             ))
         } else {
             None
         };
 
-        for client in ["reqwest", "specter"] {
+        for client in ["reqwest", "warpsock"] {
             let mut metrics = protocol_metrics
                 .get(client)
                 .expect("client metrics captured")
                 .clone();
             let row_threshold_required = is_comparable;
             let is_row_pass = match (&comparable_threshold, client) {
-                (Some(result), "specter") => result.pass,
+                (Some(result), "warpsock") => result.pass,
                 (Some(_), "reqwest") => true,
                 _ => metrics.pass,
             };
@@ -2930,9 +2933,9 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     reqwest_median_ttfb_ns: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].ttfb_ns),
-                    specter_median_ttfb_ns: comparable_threshold
+                    warpsock_median_ttfb_ns: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["specter"].ttfb_ns),
+                        .map(|_| protocol_metrics["warpsock"].ttfb_ns),
                     ttfb_improvement_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.ttfb_improvement_pct),
@@ -2942,9 +2945,9 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     reqwest_median_bytes_per_sec: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].bytes_per_sec),
-                    specter_median_bytes_per_sec: comparable_threshold
+                    warpsock_median_bytes_per_sec: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["specter"].bytes_per_sec),
+                        .map(|_| protocol_metrics["warpsock"].bytes_per_sec),
                     throughput_improvement_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.throughput_improvement_pct),
@@ -2957,34 +2960,34 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
                     reqwest_p95_bytes_per_sec: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].p95_bytes_per_sec),
-                    specter_p95_bytes_per_sec: comparable_threshold
+                    warpsock_p95_bytes_per_sec: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["specter"].p95_bytes_per_sec),
+                        .map(|_| protocol_metrics["warpsock"].p95_bytes_per_sec),
                     p95_throughput_regression_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.p95_throughput_regression_pct),
                     reqwest_p95_ttfb_ns: comparable_threshold
                         .as_ref()
                         .map(|_| protocol_metrics["reqwest"].p95_ns),
-                    specter_p95_ttfb_ns: comparable_threshold
+                    warpsock_p95_ttfb_ns: comparable_threshold
                         .as_ref()
-                        .map(|_| protocol_metrics["specter"].p95_ns),
+                        .map(|_| protocol_metrics["warpsock"].p95_ns),
                     p95_ttfb_regression_pct: comparable_threshold
                         .as_ref()
                         .map(|result| result.p95_ttfb_regression_pct),
                     status: if is_row_pass { "pass" } else { "fail" },
                     reason: match (protocol, client) {
-                        ("h1" | "h2", "specter") => "deterministic localhost reqwest-comparable request-body streaming threshold: Specter median corrected upload-complete TTFB must improve by >=5% using per-chunk yielded/consumed timestamps with the fixture upload-complete timestamp as the final endpoint, median upload throughput must improve by >=5% measured against the same corrected upload-complete write-overhead denominator, paired Wilcoxon signed-rank p-values for corrected upload-complete TTFB and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 corrected upload-complete TTFB must not regress by more than 5%; client_write_overhead_duration_ns is retained as duplicate denominator-floor evidence for request rows",
+                        ("h1" | "h2", "warpsock") => "deterministic localhost reqwest-comparable request-body streaming threshold: Warpsock median corrected upload-complete TTFB must improve by >=5% using per-chunk yielded/consumed timestamps with the fixture upload-complete timestamp as the final endpoint, median upload throughput must improve by >=5% measured against the same corrected upload-complete write-overhead denominator, paired Wilcoxon signed-rank p-values for corrected upload-complete TTFB and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 corrected upload-complete TTFB must not regress by more than 5%; client_write_overhead_duration_ns is retained as duplicate denominator-floor evidence for request rows",
                         ("h1" | "h2", "reqwest") => "deterministic localhost reqwest baseline request-body streaming row; excluded as a failing threshold subject but included in threshold math",
                         _ => "non-comparable deterministic request-body row excluded from primary H1/H2 reqwest threshold math",
                     },
                 },
-                specter_api_path: if client == "specter" {
-                    Some("specter::Client -> RequestBuilder::body_stream_sized -> send_streaming -> specter::Body::chunk")
+                warpsock_api_path: if client == "warpsock" {
+                    Some("warpsock::Client -> RequestBuilder::body_stream_sized -> send_streaming -> warpsock::Body::chunk")
                 } else {
                     None
                 },
-                protocol_selected_by_normal_dispatch: client == "specter",
+                protocol_selected_by_normal_dispatch: client == "warpsock",
                 pool_reuse_metadata: PoolReuse {
                     connection_reuse_count,
                     cold_or_warm_pool: "warm",
@@ -3000,7 +3003,7 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
     }
 
     let h3_selected = options.protocols.contains(&"h3");
-    let h3_metrics = h3_specter_metrics.unwrap_or(Metrics {
+    let h3_metrics = h3_warpsock_metrics.unwrap_or(Metrics {
         ttfb_ns: 0.0,
         chunks_per_sec: 0.0,
         bytes_per_sec: 0.0,
@@ -3027,10 +3030,10 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
     });
     let h3_gate = H3Gate {
         fixture_address: "127.0.0.1:3203/udp",
-        comparison_mode: "reqwest_h3_unavailable_specter_regression_gate",
+        comparison_mode: "reqwest_h3_unavailable_warpsock_regression_gate",
         reqwest_comparison_available: false,
-        reqwest_unavailable_reason: "reqwest 0.12 in this benchmark profile lacks a stable, directly comparable high-level HTTP/3 streaming mode; H3 release evidence uses the local Specter regression gate instead",
-        specter_thresholds: H3RegressionThresholds::default_specter_gate(),
+        reqwest_unavailable_reason: "reqwest 0.12 in this benchmark profile lacks a stable, directly comparable high-level HTTP/3 streaming mode; H3 release evidence uses the local Warpsock regression gate instead",
+        warpsock_thresholds: H3RegressionThresholds::default_warpsock_gate(),
         pass: h3_metrics.pass,
         status: if !h3_selected {
             "skipped_by_protocol_filter"
@@ -3039,11 +3042,11 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
         } else {
             "fail"
         },
-        specter_metrics: h3_metrics,
+        warpsock_metrics: h3_metrics,
     };
 
     // Run RFC 8441 coexistence check
-    let client_coexist = specter::Client::builder()
+    let client_coexist = warpsock::Client::builder()
         .danger_accept_invalid_certs(true)
         .prefer_http2(true)
         .build()
@@ -3163,30 +3166,30 @@ async fn build_artifact(preflight: PortCheck, options: &BenchmarkOptions) -> io:
 
 /// Shared threshold evaluation for comparable H1/H2 response and request rows.
 ///
-/// Both response and request rows require Specter to beat reqwest by at least
+/// Both response and request rows require Warpsock to beat reqwest by at least
 /// 5% on median TTFB and median throughput, paired Wilcoxon p-values below
 /// 0.01 for both distributions, and no p95 throughput or TTFB regression
 /// above 5%.
 pub(crate) fn evaluate_comparable_threshold(
     reqwest: &Metrics,
-    specter: &Metrics,
+    warpsock: &Metrics,
 ) -> ComparableThresholdResult {
-    let ttfb_improvement_pct = pct_lower_is_better(reqwest.ttfb_ns, specter.ttfb_ns);
+    let ttfb_improvement_pct = pct_lower_is_better(reqwest.ttfb_ns, warpsock.ttfb_ns);
     let throughput_improvement_pct =
-        pct_higher_is_better(reqwest.bytes_per_sec, specter.bytes_per_sec);
+        pct_higher_is_better(reqwest.bytes_per_sec, warpsock.bytes_per_sec);
     let median_throughput_regression_pct =
-        pct_lower_is_worse(reqwest.bytes_per_sec, specter.bytes_per_sec);
+        pct_lower_is_worse(reqwest.bytes_per_sec, warpsock.bytes_per_sec);
     let p95_throughput_regression_pct =
-        pct_lower_is_worse(reqwest.p95_bytes_per_sec, specter.p95_bytes_per_sec);
-    let p95_ttfb_regression_pct = pct_higher_is_worse(reqwest.p95_ns, specter.p95_ns);
+        pct_lower_is_worse(reqwest.p95_bytes_per_sec, warpsock.p95_bytes_per_sec);
+    let p95_ttfb_regression_pct = pct_higher_is_worse(reqwest.p95_ns, warpsock.p95_ns);
     let ttfb_wilcoxon_signed_rank_p_value = paired_wilcoxon_signed_rank_p_value(
         &reqwest.ttfb_samples_ns,
-        &specter.ttfb_samples_ns,
+        &warpsock.ttfb_samples_ns,
         true,
     );
     let throughput_wilcoxon_signed_rank_p_value = paired_wilcoxon_signed_rank_p_value(
         &reqwest.bytes_per_sec_samples,
-        &specter.bytes_per_sec_samples,
+        &warpsock.bytes_per_sec_samples,
         false,
     );
     let pass = ttfb_improvement_pct >= 5.0
@@ -3210,24 +3213,24 @@ pub(crate) fn evaluate_comparable_threshold(
 
 pub(crate) fn paired_wilcoxon_signed_rank_p_value(
     baseline_samples: &[f64],
-    specter_samples: &[f64],
+    warpsock_samples: &[f64],
     lower_is_better: bool,
 ) -> f64 {
-    if baseline_samples.len() != specter_samples.len() || baseline_samples.len() < 2 {
+    if baseline_samples.len() != warpsock_samples.len() || baseline_samples.len() < 2 {
         return 1.0;
     }
 
     let mut differences: Vec<(f64, bool)> = baseline_samples
         .iter()
-        .zip(specter_samples.iter())
-        .filter_map(|(baseline, specter)| {
-            if !baseline.is_finite() || !specter.is_finite() {
+        .zip(warpsock_samples.iter())
+        .filter_map(|(baseline, warpsock)| {
+            if !baseline.is_finite() || !warpsock.is_finite() {
                 return None;
             }
             let improvement = if lower_is_better {
-                baseline - specter
+                baseline - warpsock
             } else {
-                specter - baseline
+                warpsock - baseline
             };
             if improvement == 0.0 {
                 None
@@ -3553,17 +3556,17 @@ async fn run_real_measurement(
     let mut samples = ResponseSampleSet::default();
     let scheduled_duration = payload_schedule_duration(payload_schedule_ms, BENCH_REQUEST_COUNT);
 
-    if client == "specter" {
-        let specter_client = specter::Client::builder()
+    if client == "warpsock" {
+        let warpsock_client = warpsock::Client::builder()
             .danger_accept_invalid_certs(true)
             .prefer_http2(protocol == "h2")
             .h2_direct_streaming_responses(protocol == "h2")
             .build()?;
         if protocol != "h1" {
             for _ in 0..warmup_count {
-                let _ = measure_specter_streaming_batch(
+                let _ = measure_warpsock_streaming_batch(
                     protocol,
-                    &specter_client,
+                    &warpsock_client,
                     url,
                     BENCH_REQUEST_COUNT,
                 )
@@ -3573,16 +3576,16 @@ async fn run_real_measurement(
         for _ in 0..sample_count {
             let h1_client;
             let client_ref = if protocol == "h1" {
-                h1_client = specter::Client::builder()
+                h1_client = warpsock::Client::builder()
                     .danger_accept_invalid_certs(true)
                     .prefer_http2(false)
                     .build()?;
                 &h1_client
             } else {
-                &specter_client
+                &warpsock_client
             };
             if let Ok((ttfb, total_duration, delivery_overhead, bytes, chunks, gaps_ns)) =
-                measure_specter_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT)
+                measure_warpsock_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT)
                     .await
             {
                 samples.record(
@@ -3643,7 +3646,7 @@ async fn run_paired_real_measurements(
     payload_schedule_ms: &[u64],
 ) -> Result<(Metrics, Metrics), Box<dyn std::error::Error>> {
     let scheduled_duration = payload_schedule_duration(payload_schedule_ms, BENCH_REQUEST_COUNT);
-    let specter_client = specter::Client::builder()
+    let warpsock_client = warpsock::Client::builder()
         .danger_accept_invalid_certs(true)
         .prefer_http2(protocol == "h2")
         .h2_direct_streaming_responses(protocol == "h2")
@@ -3656,9 +3659,9 @@ async fn run_paired_real_measurements(
         for _ in 0..warmup_count {
             let _ =
                 measure_reqwest_streaming_batch(&reqwest_client, url, BENCH_REQUEST_COUNT).await;
-            let _ = measure_specter_streaming_batch(
+            let _ = measure_warpsock_streaming_batch(
                 protocol,
-                &specter_client,
+                &warpsock_client,
                 url,
                 BENCH_REQUEST_COUNT,
             )
@@ -3667,7 +3670,7 @@ async fn run_paired_real_measurements(
     }
 
     let mut reqwest_samples = ResponseSampleSet::default();
-    let mut specter_samples = ResponseSampleSet::default();
+    let mut warpsock_samples = ResponseSampleSet::default();
 
     for index in 0..sample_count {
         if index % 2 == 0 {
@@ -3679,21 +3682,21 @@ async fn run_paired_real_measurements(
                 &mut reqwest_samples,
             )
             .await;
-            record_specter_response_sample(
+            record_warpsock_response_sample(
                 protocol,
-                &specter_client,
+                &warpsock_client,
                 url,
                 scheduled_duration,
-                &mut specter_samples,
+                &mut warpsock_samples,
             )
             .await;
         } else {
-            record_specter_response_sample(
+            record_warpsock_response_sample(
                 protocol,
-                &specter_client,
+                &warpsock_client,
                 url,
                 scheduled_duration,
-                &mut specter_samples,
+                &mut warpsock_samples,
             )
             .await;
             record_reqwest_response_sample(
@@ -3709,7 +3712,7 @@ async fn run_paired_real_measurements(
 
     Ok((
         reqwest_samples.into_metrics(protocol, warmup_count, sample_count)?,
-        specter_samples.into_metrics(protocol, warmup_count, sample_count)?,
+        warpsock_samples.into_metrics(protocol, warmup_count, sample_count)?,
     ))
 }
 
@@ -3748,16 +3751,16 @@ async fn record_reqwest_response_sample(
     }
 }
 
-async fn record_specter_response_sample(
+async fn record_warpsock_response_sample(
     protocol: &str,
-    pooled_client: &specter::Client,
+    pooled_client: &warpsock::Client,
     url: &str,
     scheduled_duration: Duration,
     samples: &mut ResponseSampleSet,
 ) {
     let h1_client;
     let client_ref = if protocol == "h1" {
-        h1_client = specter::Client::builder()
+        h1_client = warpsock::Client::builder()
             .danger_accept_invalid_certs(true)
             .prefer_http2(false)
             .build();
@@ -3770,7 +3773,7 @@ async fn record_specter_response_sample(
     };
 
     if let Ok((ttfb, total_duration, delivery_overhead, bytes, chunks, gaps_ns)) =
-        measure_specter_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT).await
+        measure_warpsock_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT).await
     {
         samples.record(
             ttfb,
@@ -3792,7 +3795,7 @@ async fn run_paired_request_body_measurements(
     payload_schedule_ms: &[u64],
 ) -> Result<(Metrics, Metrics), Box<dyn std::error::Error>> {
     let scheduled_duration = payload_schedule_duration(payload_schedule_ms, BENCH_REQUEST_COUNT);
-    let specter_client = specter::Client::builder()
+    let warpsock_client = warpsock::Client::builder()
         .danger_accept_invalid_certs(true)
         .prefer_http2(protocol == "h2")
         .build()?;
@@ -3805,9 +3808,9 @@ async fn run_paired_request_body_measurements(
             let _ =
                 measure_reqwest_request_streaming_batch(&reqwest_client, url, BENCH_REQUEST_COUNT)
                     .await;
-            let _ = measure_specter_request_streaming_batch(
+            let _ = measure_warpsock_request_streaming_batch(
                 protocol,
-                &specter_client,
+                &warpsock_client,
                 url,
                 BENCH_REQUEST_COUNT,
             )
@@ -3816,7 +3819,7 @@ async fn run_paired_request_body_measurements(
     }
 
     let mut reqwest_samples = RequestSampleSet::default();
-    let mut specter_samples = RequestSampleSet::default();
+    let mut warpsock_samples = RequestSampleSet::default();
 
     for index in 0..sample_count {
         if index % 2 == 0 {
@@ -3828,21 +3831,21 @@ async fn run_paired_request_body_measurements(
                 &mut reqwest_samples,
             )
             .await;
-            record_specter_request_sample(
+            record_warpsock_request_sample(
                 protocol,
-                &specter_client,
+                &warpsock_client,
                 url,
                 scheduled_duration,
-                &mut specter_samples,
+                &mut warpsock_samples,
             )
             .await;
         } else {
-            record_specter_request_sample(
+            record_warpsock_request_sample(
                 protocol,
-                &specter_client,
+                &warpsock_client,
                 url,
                 scheduled_duration,
-                &mut specter_samples,
+                &mut warpsock_samples,
             )
             .await;
             record_reqwest_request_sample(
@@ -3858,7 +3861,7 @@ async fn run_paired_request_body_measurements(
 
     Ok((
         reqwest_samples.into_metrics(protocol, warmup_count, sample_count)?,
-        specter_samples.into_metrics(protocol, warmup_count, sample_count)?,
+        warpsock_samples.into_metrics(protocol, warmup_count, sample_count)?,
     ))
 }
 
@@ -3898,16 +3901,16 @@ async fn record_reqwest_request_sample(
     }
 }
 
-async fn record_specter_request_sample(
+async fn record_warpsock_request_sample(
     protocol: &str,
-    pooled_client: &specter::Client,
+    pooled_client: &warpsock::Client,
     url: &str,
     scheduled_duration: Duration,
     samples: &mut RequestSampleSet,
 ) {
     let h1_client;
     let client_ref = if protocol == "h1" {
-        h1_client = specter::Client::builder()
+        h1_client = warpsock::Client::builder()
             .danger_accept_invalid_certs(true)
             .prefer_http2(false)
             .build();
@@ -3920,7 +3923,7 @@ async fn record_specter_request_sample(
     };
 
     if let Ok((ttfb, total_duration, write_overhead, bytes, chunks, fallback_count, gaps_ns)) =
-        measure_specter_request_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT)
+        measure_warpsock_request_streaming_batch(protocol, client_ref, url, BENCH_REQUEST_COUNT)
             .await
     {
         samples.record(
@@ -3958,16 +3961,16 @@ async fn run_real_request_body_measurement(
     let mut all_send_gaps_ns: Vec<f64> = Vec::new();
     let scheduled_duration = payload_schedule_duration(payload_schedule_ms, BENCH_REQUEST_COUNT);
 
-    if client == "specter" {
-        let specter_client = specter::Client::builder()
+    if client == "warpsock" {
+        let warpsock_client = warpsock::Client::builder()
             .danger_accept_invalid_certs(true)
             .prefer_http2(protocol == "h2")
             .build()?;
         if protocol != "h1" {
             for _ in 0..warmup_count {
-                let _ = measure_specter_request_streaming_batch(
+                let _ = measure_warpsock_request_streaming_batch(
                     protocol,
-                    &specter_client,
+                    &warpsock_client,
                     url,
                     BENCH_REQUEST_COUNT,
                 )
@@ -3977,13 +3980,13 @@ async fn run_real_request_body_measurement(
         for _ in 0..sample_count {
             let h1_client;
             let client_ref = if protocol == "h1" {
-                h1_client = specter::Client::builder()
+                h1_client = warpsock::Client::builder()
                     .danger_accept_invalid_certs(true)
                     .prefer_http2(false)
                     .build()?;
                 &h1_client
             } else {
-                &specter_client
+                &warpsock_client
             };
             if let Ok((
                 ttfb,
@@ -3993,7 +3996,7 @@ async fn run_real_request_body_measurement(
                 chunks,
                 fallback_count,
                 gaps_ns,
-            )) = measure_specter_request_streaming_batch(
+            )) = measure_warpsock_request_streaming_batch(
                 protocol,
                 client_ref,
                 url,
@@ -4228,7 +4231,7 @@ pub(crate) fn record_request_sample(
 
 fn environment() -> Environment {
     let mut crate_versions = BTreeMap::new();
-    crate_versions.insert("specters", env!("CARGO_PKG_VERSION"));
+    crate_versions.insert("warpsock", env!("CARGO_PKG_VERSION"));
     crate_versions.insert("reqwest", "0.12");
 
     Environment {
@@ -4263,7 +4266,7 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "bytes_per_sec",
-            "median body bytes per second over samples; response rows divide decoded response body bytes by final fixture DATA write-stamp to final observed body-chunk delivery overhead, falling back to fixed fixture schedule overhead if a stamp is unavailable; request rows divide uploaded request body bytes by corrected upload-complete write-overhead duration; applied identically to reqwest and Specter",
+            "median body bytes per second over samples; response rows divide decoded response body bytes by final fixture DATA write-stamp to final observed body-chunk delivery overhead, falling back to fixed fixture schedule overhead if a stamp is unavailable; request rows divide uploaded request body bytes by corrected upload-complete write-overhead duration; applied identically to reqwest and Warpsock",
         ),
         (
             "p95_bytes_per_sec",
@@ -4319,11 +4322,11 @@ fn metric_definitions() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "p95_regression_allowed_pct",
-            "5 means additive p95 budgets allow Specter p95 throughput or p95 TTFB to regress versus reqwest by at most 5%; median TTFB and median throughput still must each improve by at least 5%",
+            "5 means additive p95 budgets allow Warpsock p95 throughput or p95 TTFB to regress versus reqwest by at most 5%; median TTFB and median throughput still must each improve by at least 5%",
         ),
         (
             "wilcoxon_signed_rank_p_value",
-            "one-sided paired Wilcoxon signed-rank normal-approximation p-value over matched reqwest/Specter samples; TTFB ranks baseline minus Specter as improvement, corrected-overhead throughput ranks Specter minus baseline as improvement, and threshold rows require p < 0.01 for both median deltas",
+            "one-sided paired Wilcoxon signed-rank normal-approximation p-value over matched reqwest/Warpsock samples; TTFB ranks baseline minus Warpsock as improvement, corrected-overhead throughput ranks Warpsock minus baseline as improvement, and threshold rows require p < 0.01 for both median deltas",
         ),
         (
             "actual_send_gap.median_ns",

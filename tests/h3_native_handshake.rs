@@ -1,18 +1,18 @@
 use bytes::Bytes;
-use specter::fingerprint::{Http3Fingerprint, QpackHeaderBlockStrategy};
-use specter::transport::h3::handshake::{
+use warpsock::fingerprint::{Http3Fingerprint, QpackHeaderBlockStrategy};
+use warpsock::transport::h3::handshake::{
     ClientH3Event, NativeQuicHandshake, NativeQuicServerHandshake, ServerH3Event,
 };
-use specter::transport::h3::native::{
+use warpsock::transport::h3::native::{
     decode_frame as decode_h3_frame, decode_header_block, decode_unidirectional_stream,
     encode_fingerprint_settings_payload, encode_frame as encode_h3_frame, encode_header_block,
     encode_unidirectional_stream, H3Frame, H3Header, H3Setting, H3StreamType,
     H3UnidirectionalStream,
 };
-use specter::transport::h3::native_driver::{
+use warpsock::transport::h3::native_driver::{
     NativeH3DriverState, NativeH3Event, NativeH3Response, NativeH3TunnelEvent,
 };
-use specter::transport::h3::quic::{
+use warpsock::transport::h3::quic::{
     decode_frames, decode_long_header, derive_initial_key_material,
     derive_next_packet_key_material, derive_packet_key_material_from_secret, encode_frame,
     encode_initial_header, encode_long_header, initial_crypto_plaintext, open_long_header_packet,
@@ -20,13 +20,13 @@ use specter::transport::h3::quic::{
     retry_integrity_tag_v1, split_long_header_datagram, ConnectionId, LongHeaderPacket,
     LongHeaderType, QuicFrame,
 };
-use specter::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
-use specter::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
-use specter::transport::h3::tls::{
+use warpsock::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
+use warpsock::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
+use warpsock::transport::h3::tls::{
     NativeH3HandshakeStatus, NativeQuicTlsSession, QuicEncryptionLevel, QuicSecretDirection,
     QuicTlsSecret,
 };
-use specter::{DnsConfig, H3Backend, H3Client};
+use warpsock::{DnsConfig, H3Backend, H3Client};
 
 fn encoded_headers_len(headers: &[H3Header]) -> usize {
     encode_h3_frame(&H3Frame::Headers(encode_header_block(headers))).len()
@@ -767,7 +767,7 @@ fn native_h3_server_handshake_opens_client_request_stream_packet() {
         .build_client_h3_request_packet(
             &http::Method::POST,
             &uri,
-            &[("user-agent".into(), "specter-native".into())],
+            &[("user-agent".into(), "warpsock-native".into())],
             Some(Bytes::from_static(b"hello")),
         )
         .unwrap();
@@ -791,7 +791,7 @@ fn native_h3_server_handshake_opens_client_request_stream_packet() {
         .any(|header| header.name() == ":path" && header.value() == "/native?fixture=1"));
     assert!(headers
         .iter()
-        .any(|header| header.name() == "user-agent" && header.value() == "specter-native"));
+        .any(|header| header.name() == "user-agent" && header.value() == "warpsock-native"));
     assert_eq!(
         events[0].frames[1],
         H3Frame::Data(Bytes::from_static(b"hello"))
@@ -3023,7 +3023,7 @@ async fn native_h3_backend_sends_client_initial_datagram_before_timeout() {
     .unwrap();
     let frames = decode_frames(&opened.payload).unwrap();
 
-    assert!(matches!(result, Err(specter::Error::Timeout(_))));
+    assert!(matches!(result, Err(warpsock::Error::Timeout(_))));
     assert!(datagram.len() >= 1200);
     assert_eq!(packets[0].packet_type, LongHeaderType::Initial);
     assert!(matches!(
@@ -3063,7 +3063,7 @@ async fn native_h3_backend_uses_fingerprint_connection_id_lengths() {
     let datagram = received.await.unwrap();
     let packets = split_long_header_datagram(&datagram).unwrap();
 
-    assert!(matches!(result, Err(specter::Error::Timeout(_))));
+    assert!(matches!(result, Err(warpsock::Error::Timeout(_))));
     assert_eq!(packets[0].destination_cid.as_bytes().len(), 12);
     assert_eq!(packets[0].source_cid.as_bytes().len(), 8);
 }
@@ -3097,7 +3097,7 @@ async fn native_h3_backend_uses_fingerprint_initial_datagram_size() {
         .await;
     let datagram = received.await.unwrap();
 
-    assert!(matches!(result, Err(specter::Error::Timeout(_))));
+    assert!(matches!(result, Err(warpsock::Error::Timeout(_))));
     assert_eq!(datagram.len(), 1280);
 }
 
@@ -4360,7 +4360,7 @@ fn native_h3_handshake_packetizes_client_request_streams_with_bidi_ids() {
         .build_client_h3_request_packet(
             &http::Method::GET,
             &uri,
-            &[("user-agent".into(), "specter-native".into())],
+            &[("user-agent".into(), "warpsock-native".into())],
             None,
         )
         .unwrap();
@@ -4384,7 +4384,7 @@ fn native_h3_handshake_packetizes_client_request_streams_with_bidi_ids() {
     };
     assert_eq!(*stream_id, 0);
 
-    let h3_frames = specter::transport::h3::native::decode_frames(data).unwrap();
+    let h3_frames = warpsock::transport::h3::native::decode_frames(data).unwrap();
     let H3Frame::Headers(block) = &h3_frames[0] else {
         panic!("request stream must begin with HEADERS");
     };
@@ -4394,7 +4394,7 @@ fn native_h3_handshake_packetizes_client_request_streams_with_bidi_ids() {
         .any(|header| header.name() == ":path" && header.value() == "/search?q=h3"));
     assert!(headers
         .iter()
-        .any(|header| header.name() == "user-agent" && header.value() == "specter-native"));
+        .any(|header| header.name() == "user-agent" && header.value() == "warpsock-native"));
 }
 
 #[test]
@@ -4427,7 +4427,7 @@ fn native_h3_handshake_uses_fingerprint_qpack_request_strategy() {
     let QuicFrame::Stream { data, .. } = &frames[0] else {
         panic!("request packet must carry STREAM data");
     };
-    let h3_frames = specter::transport::h3::native::decode_frames(data).unwrap();
+    let h3_frames = warpsock::transport::h3::native::decode_frames(data).unwrap();
     let H3Frame::Headers(block) = &h3_frames[0] else {
         panic!("request stream must begin with HEADERS");
     };
@@ -4766,7 +4766,7 @@ fn native_h3_driver_state_maps_settings_headers_data_and_finished_events() {
     let mut state = NativeH3DriverState::default();
 
     let settings_events = state
-        .apply_stream_event(specter::transport::h3::handshake::ServerH3StreamEvent {
+        .apply_stream_event(warpsock::transport::h3::handshake::ServerH3StreamEvent {
             stream_id: 3,
             stream_type: Some(H3StreamType::Control),
             fin: false,
@@ -4786,7 +4786,7 @@ fn native_h3_driver_state_maps_settings_headers_data_and_finished_events() {
     ];
     let consumed_bytes = encoded_headers_len(&headers);
     let response_events = state
-        .apply_stream_event(specter::transport::h3::handshake::ServerH3StreamEvent {
+        .apply_stream_event(warpsock::transport::h3::handshake::ServerH3StreamEvent {
             stream_id: 0,
             stream_type: None,
             fin: true,
@@ -4826,7 +4826,7 @@ fn native_h3_driver_state_assembles_tracked_response_across_events() {
         + encode_h3_frame(&H3Frame::Data(Bytes::from_static(b"hello"))).len();
 
     let first = state
-        .apply_tracked_response_event(specter::transport::h3::handshake::ServerH3StreamEvent {
+        .apply_tracked_response_event(warpsock::transport::h3::handshake::ServerH3StreamEvent {
             stream_id: 0,
             stream_type: None,
             fin: false,
@@ -4834,7 +4834,7 @@ fn native_h3_driver_state_assembles_tracked_response_across_events() {
         })
         .unwrap();
     let completed = state
-        .apply_tracked_response_event(specter::transport::h3::handshake::ServerH3StreamEvent {
+        .apply_tracked_response_event(warpsock::transport::h3::handshake::ServerH3StreamEvent {
             stream_id: 0,
             stream_type: None,
             fin: true,
@@ -4865,7 +4865,7 @@ fn native_h3_driver_state_maps_successful_tunnel_lifecycle() {
     let consumed_bytes = encoded_headers_len(&headers);
 
     let opened = state
-        .apply_tracked_tunnel_event(specter::transport::h3::handshake::ServerH3StreamEvent {
+        .apply_tracked_tunnel_event(warpsock::transport::h3::handshake::ServerH3StreamEvent {
             stream_id: 0,
             stream_type: None,
             fin: false,
@@ -4873,7 +4873,7 @@ fn native_h3_driver_state_maps_successful_tunnel_lifecycle() {
         })
         .unwrap();
     let data = state
-        .apply_tracked_tunnel_event(specter::transport::h3::handshake::ServerH3StreamEvent {
+        .apply_tracked_tunnel_event(warpsock::transport::h3::handshake::ServerH3StreamEvent {
             stream_id: 0,
             stream_type: None,
             fin: false,
@@ -4881,7 +4881,7 @@ fn native_h3_driver_state_maps_successful_tunnel_lifecycle() {
         })
         .unwrap();
     let finished = state
-        .apply_tracked_tunnel_event(specter::transport::h3::handshake::ServerH3StreamEvent {
+        .apply_tracked_tunnel_event(warpsock::transport::h3::handshake::ServerH3StreamEvent {
             stream_id: 0,
             stream_type: None,
             fin: true,
@@ -4952,7 +4952,7 @@ fn native_h3_handshake_packetizes_open_request_start_for_streaming_body() {
     else {
         panic!("request start must keep the stream open");
     };
-    let h3_frames = specter::transport::h3::native::decode_frames(start_data).unwrap();
+    let h3_frames = warpsock::transport::h3::native::decode_frames(start_data).unwrap();
     assert!(matches!(h3_frames[0], H3Frame::Headers(_)));
 
     let opened_body =
@@ -5005,7 +5005,7 @@ fn native_h3_handshake_packetizes_websocket_connect_without_fin() {
     };
     assert_eq!(*stream_id, 0);
 
-    let h3_frames = specter::transport::h3::native::decode_frames(data).unwrap();
+    let h3_frames = warpsock::transport::h3::native::decode_frames(data).unwrap();
     let H3Frame::Headers(block) = &h3_frames[0] else {
         panic!("CONNECT stream must begin with HEADERS");
     };
@@ -5062,7 +5062,7 @@ fn native_h3_handshake_packetizes_websocket_bytes_as_h3_data_frame() {
     };
     assert_eq!(*stream_id, connect.stream_id);
     assert_eq!(
-        specter::transport::h3::native::decode_frames(data).unwrap(),
+        warpsock::transport::h3::native::decode_frames(data).unwrap(),
         vec![H3Frame::Data(Bytes::from_static(b"\x81\x02hi"))]
     );
 }

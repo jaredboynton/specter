@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::Mutex;
 
-use ::specter::{Client as RustClient, Message, WebSocket as RustWebSocket};
+use ::warpsock::{Client as RustClient, Message, WebSocket as RustWebSocket};
 
 use crate::ws_types::{CloseFrame, WebSocketMessage};
 
@@ -150,7 +150,7 @@ impl WebSocketBuilder {
     }
 
     fn __repr__(&self) -> String {
-        format!("<specter.WebSocketBuilder url={:?}>", self.url)
+        format!("<warpsock.WebSocketBuilder url={:?}>", self.url)
     }
 }
 
@@ -254,7 +254,7 @@ impl WebSocket {
     }
 
     fn __repr__(&self) -> String {
-        format!("<specter.WebSocket url={:?}>", self.url)
+        format!("<warpsock.WebSocket url={:?}>", self.url)
     }
 }
 

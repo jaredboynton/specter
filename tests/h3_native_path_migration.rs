@@ -1,11 +1,11 @@
-use specter::fingerprint::Http3Fingerprint;
-use specter::transport::h3::handshake::{
-    NativeQuicHandshake, NativeQuicServerHandshake, ServerH3Event,
-};
-use specter::transport::h3::path::QuicPathSet;
-use specter::transport::h3::quic::ConnectionId;
 use std::net::SocketAddr;
 use std::time::Instant;
+use warpsock::fingerprint::Http3Fingerprint;
+use warpsock::transport::h3::handshake::{
+    NativeQuicHandshake, NativeQuicServerHandshake, ServerH3Event,
+};
+use warpsock::transport::h3::path::QuicPathSet;
+use warpsock::transport::h3::quic::ConnectionId;
 
 mod helpers;
 
@@ -117,9 +117,9 @@ fn native_server_connection_migration_close_uses_transport_error_code() {
 }
 
 #[test]
-#[ignore = "run with SPECTER_MIGRATION_SOAK=1 for long peer-address migration soak"]
+#[ignore = "run with WARPSOCK_MIGRATION_SOAK=1 for long peer-address migration soak"]
 fn native_path_migration_soak_across_active_peer_address_changes() {
-    if std::env::var("SPECTER_MIGRATION_SOAK").ok().as_deref() != Some("1") {
+    if std::env::var("WARPSOCK_MIGRATION_SOAK").ok().as_deref() != Some("1") {
         return;
     }
     let mut path_set = QuicPathSet::new();

@@ -1,5 +1,5 @@
 /**
- * Tests for the gRPC surface of the Specter Node.js bindings:
+ * Tests for the gRPC surface of the Warpsock Node.js bindings:
  * message framing (encodeMessage / GrpcFramer), grpcRequest header presets,
  * and Response.trailers().
  */

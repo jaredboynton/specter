@@ -3,17 +3,17 @@ requires = ["maturin>=1.8,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "specters"
-version = "4.2.3"
-description = "Python bindings for Specter, a Chrome-accurate HTTP client with TLS, HTTP/1.1, HTTP/2, HTTP/3, and WebSocket fingerprinting. Improved TTFT and TPS for LLMs."
+name = "warpsock"
+version = "4.2.4"
+description = "Python bindings for Warpsock, a Chrome-accurate HTTP client with TLS, HTTP/1.1, HTTP/2, HTTP/3, and WebSocket fingerprinting. Improved TTFT and TPS for LLMs."
 readme = "README_PYPI.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -26,18 +26,18 @@ classifiers = [
 keywords = ["http", "http2", "http3", "tls", "fingerprint", "chrome", "browser", "impersonate", "websocket", "client", "async", "scraping", "llm", "streaming", "sse", "ttfb"]
 
 [project.urls]
-Homepage = "https://github.com/jaredboynton/specter"
-Repository = "https://github.com/jaredboynton/specter"
-Documentation = "https://github.com/jaredboynton/specter#readme"
-Issues = "https://github.com/jaredboynton/specter/issues"
-Changelog = "https://github.com/jaredboynton/specter/releases"
+Homepage = "https://github.com/jaredboynton/warpsock"
+Repository = "https://github.com/jaredboynton/warpsock"
+Documentation = "https://github.com/jaredboynton/warpsock#readme"
+Issues = "https://github.com/jaredboynton/warpsock/issues"
+Changelog = "https://github.com/jaredboynton/warpsock/releases"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "maturin"]
 
 [tool.maturin]
 python-source = "python"
-module-name = "specter"
+module-name = "warpsock.warpsock"
 features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]

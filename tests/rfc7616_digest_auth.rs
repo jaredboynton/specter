@@ -2,7 +2,7 @@
 //!
 //! https://www.rfc-editor.org/rfc/rfc7616
 
-use specter::auth::{digest_auth, parse_digest_challenge};
+use warpsock::auth::{digest_auth, parse_digest_challenge};
 
 #[test]
 fn test_digest_auth_sha256_rfc7616_example() {

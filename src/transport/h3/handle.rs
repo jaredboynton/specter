@@ -362,7 +362,7 @@ impl H3Handle {
     ) -> Result<(u16, Headers, Body)> {
         let headers = headers.into();
 
-        if std::env::var_os("SPECTER_NATIVE_H3_DIRECT_IDLE_GET").is_some()
+        if std::env::var_os("WARPSOCK_NATIVE_H3_DIRECT_IDLE_GET").is_some()
             && method == http::Method::GET
             && body.is_empty()
         {
@@ -627,7 +627,7 @@ impl H3Handle {
         let headers = headers.into();
         let headers_vec = headers.to_vec();
 
-        if std::env::var_os("SPECTER_NATIVE_H3_DIRECT_RFC9220_TUNNEL").is_some() {
+        if std::env::var_os("WARPSOCK_NATIVE_H3_DIRECT_RFC9220_TUNNEL").is_some() {
             if let Some(slot) = self.direct_driver.clone() {
                 if let Some(driver) = slot.take() {
                     match driver

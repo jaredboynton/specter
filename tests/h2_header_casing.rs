@@ -1,4 +1,4 @@
-use specter::transport::h2::{HpackDecoder, HpackEncoder};
+use warpsock::transport::h2::{HpackDecoder, HpackEncoder};
 
 #[test]
 fn test_uppercase_headers_are_not_lowercased() {

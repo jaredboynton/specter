@@ -15,11 +15,11 @@ use tokio::time::timeout;
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};
 use helpers::tls::generate_cert_bundle;
-use specter::transport::h2::hpack_impl::Encoder;
-use specter::Client;
+use warpsock::transport::h2::hpack_impl::Encoder;
+use warpsock::Client;
 
 /// Build an ALPN-h2 TLS acceptor and a client trusting its CA.
-fn h2_tls_setup() -> (boring::ssl::SslAcceptor, specter::Client) {
+fn h2_tls_setup() -> (boring::ssl::SslAcceptor, warpsock::Client) {
     let (mut builder, ca_cert) = generate_cert_bundle();
     builder.set_alpn_select_callback(|_, client_protos| {
         boring::ssl::select_next_proto(b"\x02h2", client_protos)
@@ -35,7 +35,7 @@ fn h2_tls_setup() -> (boring::ssl::SslAcceptor, specter::Client) {
 }
 
 /// Drain the streaming body to end, ignoring chunk contents.
-async fn drain_body(response: &mut specter::Response) {
+async fn drain_body(response: &mut warpsock::Response) {
     while let Some(frame) = response.body_mut().frame().await {
         // Surface a transport error (case 3 may reset mid-body); the trailers()
         // assertion is what distinguishes the cases.

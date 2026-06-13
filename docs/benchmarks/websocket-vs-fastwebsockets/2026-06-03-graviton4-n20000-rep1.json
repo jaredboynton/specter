@@ -23,15 +23,15 @@
       "bytes_per_sec": 44658989.70056629
     },
     {
-      "client": "specter",
+      "client": "warpsock",
       "elapsed_ns": 475943206,
       "messages_per_sec": 42021.82056150624,
       "bytes_per_sec": 43030344.25498239
     }
   ],
   "comparison": {
-    "specter_vs_fastwebsockets_messages_per_sec_pct": -3.357345540089496,
-    "specter_vs_tungstenite_messages_per_sec_pct": -3.6468479392476056,
+    "warpsock_vs_fastwebsockets_messages_per_sec_pct": -3.357345540089496,
+    "warpsock_vs_tungstenite_messages_per_sec_pct": -3.6468479392476056,
     "pass_match_or_exceed": false,
     "pass_tungstenite_match_or_exceed": false
   }

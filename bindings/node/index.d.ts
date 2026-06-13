@@ -1,5 +1,5 @@
 /**
- * Specter - Node.js bindings for the Specter HTTP client.
+ * Warpsock - Node.js bindings for the Warpsock HTTP client.
  *
  * gRPC surface (unary + message framing + trailers). The full generated type
  * surface for the rest of the binding is emitted to index.gen.d.ts at build time.

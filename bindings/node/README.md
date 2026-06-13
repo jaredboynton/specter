@@ -1,6 +1,6 @@
-# Specter Node.js Bindings
+# Warpsock Node.js Bindings
 
-Node.js bindings for Specter, a high-performance async HTTP client with TLS, HTTP/2, HTTP/3, RFC 6455 WebSocket, and RFC 8441 Extended CONNECT support.
+Node.js bindings for Warpsock, a high-performance async HTTP client with TLS, HTTP/2, HTTP/3, RFC 6455 WebSocket, and RFC 8441 Extended CONNECT support.
 
 ## Features
 
@@ -15,13 +15,13 @@ Supported Chrome profiles are `FingerprintProfile.Chrome142` through `Fingerprin
 ## Installation
 
 ```bash
-npm install specters
+npm install warpsock
 ```
 
 ## HTTP
 
 ```javascript
-const { clientBuilder, FingerprintProfile } = require('specters');
+const { clientBuilder, FingerprintProfile } = require('warpsock');
 
 const client = clientBuilder()
   .fingerprint(FingerprintProfile.Chrome148)
@@ -41,7 +41,7 @@ console.log(response.text());
 ## RFC 6455 WebSockets
 
 ```javascript
-const { CLOSE_NORMAL, clientBuilder } = require('specters');
+const { CLOSE_NORMAL, clientBuilder } = require('warpsock');
 
 const client = clientBuilder()
   .cookieStore(true)
@@ -70,7 +70,7 @@ RFC 6455 sockets are framed message connections. `send*`, `next`, and `close` op
 ## RFC 8441 HTTP/2 Tunnels
 
 ```javascript
-const { clientBuilder } = require('specters');
+const { clientBuilder } = require('warpsock');
 
 const client = clientBuilder()
   .http2PriorKnowledge(true)

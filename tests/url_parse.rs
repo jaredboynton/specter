@@ -1,6 +1,6 @@
 //! Parity corpus for the internal RFC 3986 URL helper.
 
-use specter::Url;
+use warpsock::Url;
 
 #[test]
 fn parse_basic_https_url() {

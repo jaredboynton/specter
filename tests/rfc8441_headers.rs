@@ -1,4 +1,4 @@
-use specter::transport::h2::{HpackDecoder, HpackEncoder};
+use warpsock::transport::h2::{HpackDecoder, HpackEncoder};
 
 fn decode(block: &[u8]) -> Vec<(String, String)> {
     let mut decoder = HpackDecoder::new();

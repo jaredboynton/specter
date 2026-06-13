@@ -2,7 +2,7 @@
 //!
 //! https://www.rfc-editor.org/rfc/rfc7541
 
-use specter::transport::h2::{HpackDecoder, HpackEncoder};
+use warpsock::transport::h2::{HpackDecoder, HpackEncoder};
 
 #[test]
 fn test_dynamic_table_size_update_rfc7541_section_6_3() {

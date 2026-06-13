@@ -1,11 +1,11 @@
 use bytes::Bytes;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use specter::transport::h3::H3TunnelEvent as RustH3TunnelEvent;
-use specter::{Client as RustClient, Error as RustError};
 use std::result::Result as StdResult;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
+use warpsock::transport::h3::H3TunnelEvent as RustH3TunnelEvent;
+use warpsock::{Client as RustClient, Error as RustError};
 
 use crate::to_napi_err;
 use crate::Client;
@@ -138,7 +138,7 @@ impl WebSocketH3Builder {
 
 impl WebSocketH3Tunnel {
     fn new(
-        mut tunnel: specter::transport::h3::H3Tunnel,
+        mut tunnel: warpsock::transport::h3::H3Tunnel,
         read_timeout: Option<Duration>,
         write_timeout: Option<Duration>,
     ) -> Self {

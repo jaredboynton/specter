@@ -957,7 +957,7 @@ fn native_h3_early_data_context(
     transport_parameters: &Bytes,
 ) -> Bytes {
     let mut context = Vec::new();
-    context.extend_from_slice(b"specter-native-h3-0rtt-v1");
+    context.extend_from_slice(b"warpsock-native-h3-0rtt-v1");
     context.extend_from_slice(&(fingerprint.alpn_protocols.len() as u16).to_be_bytes());
     for protocol in &fingerprint.alpn_protocols {
         context.extend_from_slice(&(protocol.len() as u16).to_be_bytes());

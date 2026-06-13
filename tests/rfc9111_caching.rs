@@ -4,9 +4,9 @@
 
 use bytes::Bytes;
 use http::Method;
-use specter::cache::{CacheStatus, HttpCache};
-use specter::response::Response;
-use specter::Headers;
+use warpsock::cache::{CacheStatus, HttpCache};
+use warpsock::response::Response;
+use warpsock::Headers;
 
 #[test]
 fn test_cache_no_store_rfc9111_section_5_2_2_3() {

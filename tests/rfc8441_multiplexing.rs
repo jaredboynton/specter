@@ -4,7 +4,6 @@
 //! expected to add. They should fail to compile until that API exists.
 
 use bytes::Bytes;
-use specter::Client;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -12,6 +11,7 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::{watch, Mutex};
 use tokio::time::timeout;
+use warpsock::Client;
 
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};

@@ -2,7 +2,7 @@ name: GitHub Release
 
 on:
   workflow_run:
-    workflows: ['Node Release', 'Python Release', 'Crates Release']
+    workflows: ['Node Release', 'Python Release', 'Crates Release', 'Deprecation Bridge Release']
     types: [completed]
 
 permissions:
@@ -12,7 +12,7 @@ permissions:
 jobs:
   release:
     name: Create GitHub release
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    if: github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.name == 'Deprecation Bridge Release')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -38,12 +38,16 @@ jobs:
 
           for attempt in {1..30}; do
             ready=true
-            for workflow in "Node Release" "Python Release" "Crates Release"; do
+            for workflow in "Node Release" "Python Release" "Crates Release" "Deprecation Bridge Release"; do
+              event_filter="push"
+              if [[ "$workflow" == "Deprecation Bridge Release" ]]; then
+                event_filter="workflow_run"
+              fi
               run_state="$(
                 gh run list \
                   --workflow "$workflow" \
                   --commit "$HEAD_SHA" \
-                  --event push \
+                  --event "$event_filter" \
                   --json databaseId,status,conclusion \
                   --jq '[.[] | select(.status == "completed")] | .[0] | if . == null then "missing" else "\(.databaseId):\(.conclusion)" end'
               )"

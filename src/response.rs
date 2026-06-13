@@ -357,7 +357,7 @@ impl Clone for Body {
             | BodyInner::H2Direct(_)
             | BodyInner::H3(_)
             | BodyInner::H3Direct(_) => {
-                panic!("specter::Body::clone is not supported for streaming bodies")
+                panic!("warpsock::Body::clone is not supported for streaming bodies")
             }
         }
     }

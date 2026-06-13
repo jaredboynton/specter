@@ -1,10 +1,11 @@
 # Build artifacts
 target/
 .boringssl-build/
+*.egg-info/
 .boringssl-src/
 __pycache__/
 *.py[cod]
-bindings/python/python/specter/*.so
+bindings/python/python/warpsock/*.so
 bindings/python/uv.lock
 
 # Agent files

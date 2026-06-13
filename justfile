@@ -1,5 +1,5 @@
 #!/usr/bin/env just --justfile
-# Specter Build Commands
+# Warpsock Build Commands
 # Run `just` to see all available commands
 
 default:

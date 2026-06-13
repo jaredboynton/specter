@@ -15,7 +15,7 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use specter::{Client, Timeouts};
+//! use warpsock::{Client, Timeouts};
 //! use std::time::Duration;
 //!
 //! // For normal API calls
@@ -230,7 +230,7 @@ impl Timeouts {
 /// # Example
 ///
 /// ```rust,ignore
-/// use specter::timeouts::recv_with_idle_timeout;
+/// use warpsock::timeouts::recv_with_idle_timeout;
 /// use std::time::Duration;
 ///
 /// let idle_timeout = Duration::from_secs(60);

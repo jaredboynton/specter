@@ -1,6 +1,6 @@
-use specter::Client;
 use std::time::Duration;
 use tokio::time::timeout;
+use warpsock::Client;
 
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};

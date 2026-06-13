@@ -1,6 +1,6 @@
-# Specter Python Bindings
+# Warpsock Python Bindings
 
-Python bindings for Specter, a high-performance HTTP client with TLS, HTTP/2, HTTP/3, RFC 6455 WebSocket, and RFC 8441 Extended CONNECT support.
+Python bindings for Warpsock, a high-performance HTTP client with TLS, HTTP/2, HTTP/3, RFC 6455 WebSocket, and RFC 8441 Extended CONNECT support.
 
 ## Features
 
@@ -10,12 +10,12 @@ Python bindings for Specter, a high-performance HTTP client with TLS, HTTP/2, HT
 - Cookie store and shared cookie jar support across HTTP and WebSocket handshakes
 - Granular connect, TTFB, read/write idle, total, pool, and WebSocket handshake timeouts
 
-Supported Chrome profiles are `specter.FingerprintProfile.Chrome142` through `specter.FingerprintProfile.Chrome148`. Supported Firefox profiles are `specter.FingerprintProfile.Firefox133` through `specter.FingerprintProfile.Firefox151`, plus ESR branches `FirefoxEsr115`, `FirefoxEsr128`, and `FirefoxEsr140`; examples use `Chrome148`, the latest implemented Chrome profile.
+Supported Chrome profiles are `warpsock.FingerprintProfile.Chrome142` through `warpsock.FingerprintProfile.Chrome148`. Supported Firefox profiles are `warpsock.FingerprintProfile.Firefox133` through `warpsock.FingerprintProfile.Firefox151`, plus ESR branches `FirefoxEsr115`, `FirefoxEsr128`, and `FirefoxEsr140`; examples use `Chrome148`, the latest implemented Chrome profile.
 
 ## Installation
 
 ```bash
-pip install specters
+pip install warpsock
 ```
 
 ## HTTP
@@ -23,10 +23,10 @@ pip install specters
 Synchronous HTTP is the default ergonomic path for scripts, tools, and agents:
 
 ```python
-import specter
+import warpsock
 
-builder = specter.SyncClient.builder()
-builder.fingerprint(specter.FingerprintProfile.Chrome148)
+builder = warpsock.SyncClient.builder()
+builder.fingerprint(warpsock.FingerprintProfile.Chrome148)
 builder.cookie_store(True)
 client = builder.build()
 
@@ -42,10 +42,10 @@ print(response.text())
 Use `AsyncClient` when your application already owns an event loop:
 
 ```python
-import specter
+import warpsock
 
-builder = specter.AsyncClient.builder()
-builder.fingerprint(specter.FingerprintProfile.Chrome148)
+builder = warpsock.AsyncClient.builder()
+builder.fingerprint(warpsock.FingerprintProfile.Chrome148)
 builder.cookie_store(True)
 client = builder.build()
 
@@ -61,9 +61,9 @@ print(response.text())
 ## RFC 6455 WebSockets
 
 ```python
-import specter
+import warpsock
 
-builder = specter.Client.builder()
+builder = warpsock.Client.builder()
 builder.cookie_store(True)
 builder.http2_prior_knowledge(False)
 client = builder.build()
@@ -81,7 +81,7 @@ message = await ws.next()
 if message.kind == "text":
     print(message.text)
 
-await ws.close(specter.CloseFrame(specter.CLOSE_NORMAL, "done"))
+await ws.close(warpsock.CloseFrame(warpsock.CLOSE_NORMAL, "done"))
 ```
 
 RFC 6455 sockets are framed message connections. `send_*`, `next`, and `close` operations are serialized per socket to preserve Rust's mutable socket contract; avoid running multiple receive loops on the same socket.
@@ -89,15 +89,15 @@ RFC 6455 sockets are framed message connections. `send_*`, `next`, and `close` o
 ## RFC 8441 HTTP/2 Tunnels
 
 ```python
-import specter
+import warpsock
 
-builder = specter.Client.builder()
+builder = warpsock.Client.builder()
 builder.http2_prior_knowledge(True)
 client = builder.build()
 
 tunnel_builder = client.websocket_h2("https://example.com/h2-tunnel")
 tunnel_builder.header("Origin", "https://example.com")
-tunnel = await tunnel_builder.open()
+tunnel = await tunnel_builder.connect()
 
 await tunnel.send_bytes(b"raw bytes", end_stream=False)
 data = await tunnel.recv_bytes()

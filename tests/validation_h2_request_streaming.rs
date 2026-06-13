@@ -3,7 +3,6 @@
 use bytes::Bytes;
 use futures_core::Stream;
 use serde_json::json;
-use specter::{Client, Error};
 use std::fs;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -12,11 +11,12 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::timeout;
+use warpsock::{Client, Error};
 
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};
 use helpers::tls::generate_cert_bundle;
-use specter::transport::h2::hpack_impl::Encoder;
+use warpsock::transport::h2::hpack_impl::Encoder;
 
 fn init_validation_dir() {
     fs::create_dir_all("target/validation/h2").unwrap();

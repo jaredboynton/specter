@@ -3,8 +3,8 @@
 //! https://www.rfc-editor.org/rfc/rfc6265
 
 use chrono::{TimeZone, Utc};
-use specter::cookie::{Cookie, CookieJar, SameSite};
-use specter::Headers;
+use warpsock::cookie::{Cookie, CookieJar, SameSite};
+use warpsock::Headers;
 
 #[test]
 fn test_cookie_domain_normalization() {
@@ -65,7 +65,7 @@ fn test_samesite_secure_requirement_rfc6265bis() {
     // SameSite=None requires Secure
     // If Secure is missing, parsing handles it (either rejects or ignores SameSite).
     // Browsers reject "SameSite=None" without "Secure".
-    // Let's verify Specter behavior (should ideally reject or ignore SameSite=None).
+    // Let's verify Warpsock behavior (should ideally reject or ignore SameSite=None).
 
     // Test: SameSite=None without Secure
     // Note: Use a domain that isn't a public suffix or default logic applies

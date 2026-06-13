@@ -2897,14 +2897,14 @@ impl NativeH3Driver {
         if body_started {
             *BODY_BUDGET.get_or_init(|| {
                 Self::configured_spin_budget(
-                    "SPECTER_NATIVE_H3_DIRECT_GET_BODY_SPIN_US",
+                    "WARPSOCK_NATIVE_H3_DIRECT_GET_BODY_SPIN_US",
                     H3_DIRECT_GET_BODY_SPIN_DEFAULT_US,
                 )
             })
         } else {
             *READY_BUDGET.get_or_init(|| {
                 Self::configured_spin_budget(
-                    "SPECTER_NATIVE_H3_DIRECT_GET_READY_SPIN_US",
+                    "WARPSOCK_NATIVE_H3_DIRECT_GET_READY_SPIN_US",
                     H3_DIRECT_GET_READY_SPIN_DEFAULT_US,
                 )
             })
@@ -4278,7 +4278,7 @@ impl NativeH3Driver {
     fn direct_get_ack_send_defer_enabled() -> bool {
         static ENABLED: OnceLock<bool> = OnceLock::new();
         *ENABLED.get_or_init(|| {
-            std::env::var("SPECTER_NATIVE_H3_DIRECT_GET_ACK_SEND_DEFER")
+            std::env::var("WARPSOCK_NATIVE_H3_DIRECT_GET_ACK_SEND_DEFER")
                 .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
                 .unwrap_or(true)
         })
@@ -4287,7 +4287,7 @@ impl NativeH3Driver {
     fn direct_get_io_epoch_enabled() -> bool {
         static ENABLED: OnceLock<bool> = OnceLock::new();
         *ENABLED.get_or_init(|| {
-            std::env::var("SPECTER_NATIVE_H3_DIRECT_GET_IO_EPOCH")
+            std::env::var("WARPSOCK_NATIVE_H3_DIRECT_GET_IO_EPOCH")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(true)
         })

@@ -1,8 +1,8 @@
-//! # Specter
+//! # Warpsock
 //!
 //! HTTP client with full TLS/HTTP2 fingerprint control.
 //!
-//! Specter provides HTTP/1.1, HTTP/2, and HTTP/3 support with BoringSSL-based
+//! Warpsock provides HTTP/1.1, HTTP/2, and HTTP/3 support with BoringSSL-based
 //! TLS fingerprinting (JA3/JA4) across all protocols.
 
 // Opt-in mimalloc as the global allocator. Enabled via the `mimalloc`

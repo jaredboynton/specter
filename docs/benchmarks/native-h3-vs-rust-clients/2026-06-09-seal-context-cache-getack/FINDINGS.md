@@ -46,12 +46,12 @@ Every quantile improves ~1.5-1.8us. The only delta is the seal-path context.
 
 | client                  | p95 reps (us)          | median | worst |
 |-------------------------|------------------------|--------|-------|
-| **specter open+seal**   | 12.37 / 11.94 / 11.62  | 11.94  | 12.37 |
+| **warpsock open+seal**   | 12.37 / 11.94 / 11.62  | 11.94  | 12.37 |
 | tokio_quiche            | 18.72 / 17.50 / 15.09  | 17.50  | 18.72 |
 
-Specter's **worst (12.37us) now beats tokio's best (15.09us)** — the distributions
-no longer overlap. Open-cache-only was a centers-favor-Specter win with worst-vs-best
-overlap; the seal cache pushes Specter clear of tokio entirely on this workload.
+Warpsock's **worst (12.37us) now beats tokio's best (15.09us)** — the distributions
+no longer overlap. Open-cache-only was a centers-favor-Warpsock win with worst-vs-best
+overlap; the seal cache pushes Warpsock clear of tokio entirely on this workload.
 
 Full GET p95 ledger-tail journey: pre-AEAD ~16.5 -> open cache ~13.7 -> +seal ~11.9us.
 

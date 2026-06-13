@@ -5393,6 +5393,7 @@ struct PendingStreamData {
     fin_emitted: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_h3_stream_frame(
     buffers: &mut BTreeMap<u64, BytesMut>,
     buffer_offsets: &mut BTreeMap<u64, u64>,

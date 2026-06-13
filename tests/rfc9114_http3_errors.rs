@@ -2,7 +2,7 @@
 //!
 //! https://www.rfc-editor.org/rfc/rfc9114
 
-use specter::transport::h3::H3Client;
+use warpsock::transport::h3::H3Client;
 
 #[tokio::test]
 async fn test_h3_unsupported_scheme_rfc9114() {

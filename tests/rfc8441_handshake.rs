@@ -1,12 +1,12 @@
 use bytes::Bytes;
 use http::Uri;
-use specter::fingerprint::http2::Http2Settings;
-use specter::transport::h2::{
+use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
+use tokio::time::{timeout, Duration};
+use warpsock::fingerprint::http2::Http2Settings;
+use warpsock::transport::h2::{
     flags, FrameHeader, FrameType, HpackDecoder, PseudoHeaderOrder, RawH2Connection, SettingsFrame,
     CONNECTION_PREFACE, FRAME_HEADER_SIZE,
 };
-use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
-use tokio::time::{timeout, Duration};
 
 async fn read_client_preface_and_settings(server: &mut DuplexStream) {
     let mut preface = vec![0; CONNECTION_PREFACE.len()];
@@ -82,7 +82,7 @@ async fn write_settings(server: &mut DuplexStream, settings: &[(u16, u32)]) {
 
 async fn write_headers(server: &mut DuplexStream, stream_id: u32, header_block: &[u8]) {
     let header =
-        specter::transport::h2::HeadersFrame::new(stream_id, Bytes::copy_from_slice(header_block))
+        warpsock::transport::h2::HeadersFrame::new(stream_id, Bytes::copy_from_slice(header_block))
             .end_headers(true)
             .end_stream(false);
     server.write_all(&header.serialize()).await.unwrap();

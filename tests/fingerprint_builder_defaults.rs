@@ -1,7 +1,7 @@
-use specter::fingerprint::http2::Http2Settings;
-use specter::fingerprint::FingerprintProfile;
-use specter::transport::h2::PseudoHeaderOrder;
-use specter::Client;
+use warpsock::fingerprint::http2::Http2Settings;
+use warpsock::fingerprint::FingerprintProfile;
+use warpsock::transport::h2::PseudoHeaderOrder;
+use warpsock::Client;
 
 #[test]
 fn fingerprint_profile_drives_h2_defaults_without_live_network() {

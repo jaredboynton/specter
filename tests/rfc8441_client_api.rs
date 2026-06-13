@@ -3,9 +3,9 @@
 //! These tests define the intended API shape for client-side WebSockets over
 //! HTTP/2 Extended CONNECT. They should fail to compile until the API exists.
 
-use specter::{Client, Error};
 use std::time::Duration;
 use tokio::time::timeout;
+use warpsock::{Client, Error};
 
 mod helpers;
 use helpers::mock_h2_server::{MockH2Connection, MockH2Server};

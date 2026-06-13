@@ -1,6 +1,7 @@
 use bytes::Bytes;
-use specter::fingerprint::QuicTransportParams;
-use specter::transport::h3::quic::{
+use std::time::{Duration, Instant};
+use warpsock::fingerprint::QuicTransportParams;
+use warpsock::transport::h3::quic::{
     build_initial_crypto_packet, decode_frame, decode_frames, decode_long_header,
     decode_retry_packet, decode_transport_parameters, decode_version_negotiation_packet,
     derive_initial_key_material, derive_next_application_secret, derive_next_packet_key_material,
@@ -16,7 +17,6 @@ use specter::transport::h3::quic::{
     QuicEcnMark, QuicFrame, QuicLossDetector, QuicPathValidator, QuicPmtuProbePolicy,
     ShortHeaderPacket, TransportParameter,
 };
-use std::time::{Duration, Instant};
 
 #[test]
 fn native_quic_initial_header_round_trips_connection_ids_token_and_packet_number() {
@@ -590,7 +590,7 @@ fn native_quic_server_transport_parameters_include_required_connection_ids() {
 #[test]
 fn native_quic_frame_decoder_accepts_reset_stream_and_stop_sending() {
     assert_eq!(
-        specter::transport::h3::quic::decode_frame(&[0x04, 0x00, 0x01, 0x05]).unwrap(),
+        warpsock::transport::h3::quic::decode_frame(&[0x04, 0x00, 0x01, 0x05]).unwrap(),
         QuicFrame::ResetStream {
             stream_id: 0,
             error_code: 1,
@@ -598,7 +598,7 @@ fn native_quic_frame_decoder_accepts_reset_stream_and_stop_sending() {
         }
     );
     assert_eq!(
-        specter::transport::h3::quic::decode_frame(&[0x05, 0x00, 0x01]).unwrap(),
+        warpsock::transport::h3::quic::decode_frame(&[0x05, 0x00, 0x01]).unwrap(),
         QuicFrame::StopSending {
             stream_id: 0,
             error_code: 1,

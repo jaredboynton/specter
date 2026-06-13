@@ -9,7 +9,7 @@
     "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
     "crate_versions": {
       "reqwest": "0.12",
-      "specters": "4.2.0"
+      "warpsock": "4.2.0"
     }
   },
   "git": {
@@ -96,7 +96,7 @@
       "127.0.0.1:3202"
     ],
     "comparable_clients_share_workload": true,
-    "throughput_timing_window": "corrected client overhead: response rows use paired reqwest/Specter sample order and divide by final fixture DATA write-stamp to final observed body-chunk delivery overhead, falling back to fixed fixture schedule overhead if a stamp is unavailable; per-gap response pacing overage is emitted as jitter evidence only; request rows use per-chunk yielded/consumed timestamps with fixture upload-complete as the final endpoint and response headers only as an emitted fallback count; identical for reqwest and Specter"
+    "throughput_timing_window": "corrected client overhead: response rows use paired reqwest/Warpsock sample order and divide by final fixture DATA write-stamp to final observed body-chunk delivery overhead, falling back to fixed fixture schedule overhead if a stamp is unavailable; per-gap response pacing overage is emitted as jitter evidence only; request rows use per-chunk yielded/consumed timestamps with fixture upload-complete as the final endpoint and response headers only as an emitted fallback count; identical for reqwest and Warpsock"
   },
   "metric_definitions": {
     "actual_send_gap.median_minus_target_ns": "median observed inter-chunk wall-clock gap minus the target inter-chunk pacing (BENCH_CHUNK_DELAY_MS); near-zero values prove monotonic deadline spin-wait is in effect rather than scheduler-sleep jitter",
@@ -104,7 +104,7 @@
     "actual_send_gap.over_budget_fraction": "fraction of observed inter-chunk gaps that exceeded the target pacing by more than 500us; intended as a guard against scheduler-sleep regressions in the fixture",
     "actual_send_gap.p95_ns": "client-observed p95 wall-clock interval in nanoseconds between successive received body chunks across all samples on this row; releases require this to remain near BENCH_CHUNK_DELAY_MS so scheduler/kqueue jitter cannot dominate the corrected client-overhead denominator",
     "body_transfer_duration_ns": "median raw body-transfer duration denominator in nanoseconds before subtracting fixture pacing; response rows measure first observed response body byte through final observed response body byte, while request rows measure first yielded request body chunk through fixture upload-complete",
-    "bytes_per_sec": "median body bytes per second over samples; response rows divide decoded response body bytes by final fixture DATA write-stamp to final observed body-chunk delivery overhead, falling back to fixed fixture schedule overhead if a stamp is unavailable; request rows divide uploaded request body bytes by corrected upload-complete write-overhead duration; applied identically to reqwest and Specter",
+    "bytes_per_sec": "median body bytes per second over samples; response rows divide decoded response body bytes by final fixture DATA write-stamp to final observed body-chunk delivery overhead, falling back to fixed fixture schedule overhead if a stamp is unavailable; request rows divide uploaded request body bytes by corrected upload-complete write-overhead duration; applied identically to reqwest and Warpsock",
     "chunks_per_sec": "response rows: decoded body chunks received divided by corrected client-overhead duration; request rows: uploaded request chunks divided by corrected upload-complete write-overhead duration",
     "client_overhead_denominator_floor_count": "number of measured samples whose corrected client-overhead denominator reached the 1ns floor/clamp",
     "client_overhead_duration_ns": "median corrected client-overhead duration denominator in nanoseconds; gates response-row bytes_per_sec and chunks_per_sec using final fixture DATA write-stamp delivery overhead, and gates request-row TTFB, bytes_per_sec, and chunks_per_sec using the corrected upload-complete write-overhead timing window",
@@ -118,11 +118,11 @@
     "p50_ns": "nearest-rank 50th percentile over sample TTFB values",
     "p95_bytes_per_sec": "nearest-rank 95th percentile of body bytes per second over samples using the same corrected client-overhead duration denominator as bytes_per_sec; enforced for comparable H1/H2 threshold rows so p95 throughput cannot regress by more than the additive 5% budget",
     "p95_ns": "nearest-rank 95th percentile over sample TTFB values",
-    "p95_regression_allowed_pct": "5 means additive p95 budgets allow Specter p95 throughput or p95 TTFB to regress versus reqwest by at most 5%; median TTFB and median throughput still must each improve by at least 5%",
+    "p95_regression_allowed_pct": "5 means additive p95 budgets allow Warpsock p95 throughput or p95 TTFB to regress versus reqwest by at most 5%; median TTFB and median throughput still must each improve by at least 5%",
     "p99_ns": "nearest-rank 99th percentile over sample TTFB values",
     "ttfb_ns": "response rows: elapsed nanoseconds from request start until first response body byte is observable; request rows: corrected upload-complete write-overhead in nanoseconds using per-chunk yielded/consumed timestamps and the fixture upload-complete timestamp as the final endpoint",
     "upload_complete_fallback_count": "request-row evidence: number of request uploads that could not match the fixture upload-complete timestamp and therefore fell back to response-headers timing; release evidence should be zero",
-    "wilcoxon_signed_rank_p_value": "one-sided paired Wilcoxon signed-rank normal-approximation p-value over matched reqwest/Specter samples; TTFB ranks baseline minus Specter as improvement, corrected-overhead throughput ranks Specter minus baseline as improvement, and threshold rows require p < 0.01 for both median deltas"
+    "wilcoxon_signed_rank_p_value": "one-sided paired Wilcoxon signed-rank normal-approximation p-value over matched reqwest/Warpsock samples; TTFB ranks baseline minus Warpsock as improvement, corrected-overhead throughput ranks Warpsock minus baseline as improvement, and threshold rows require p < 0.01 for both median deltas"
   },
   "rows": [
     {
@@ -400,24 +400,24 @@
         "p95_regression_allowed_pct": 5.0,
         "wilcoxon_p_value_required_less_than": 0.01,
         "reqwest_median_ttfb_ns": 119091.5,
-        "specter_median_ttfb_ns": 43453.0,
+        "warpsock_median_ttfb_ns": 43453.0,
         "ttfb_improvement_pct": 63.5129291343211,
         "ttfb_wilcoxon_signed_rank_p_value": 0.0,
         "reqwest_median_bytes_per_sec": 4362698765.227175,
-        "specter_median_bytes_per_sec": 4960339103.866398,
+        "warpsock_median_bytes_per_sec": 4960339103.866398,
         "throughput_improvement_pct": 13.698867852227306,
         "throughput_wilcoxon_signed_rank_p_value": 0.0,
         "median_throughput_regression_pct": -13.698867852227306,
         "reqwest_p95_bytes_per_sec": 4477338268.679281,
-        "specter_p95_bytes_per_sec": 5115963185.299099,
+        "warpsock_p95_bytes_per_sec": 5115963185.299099,
         "p95_throughput_regression_pct": -14.263494922580383,
         "reqwest_p95_ttfb_ns": 122832.15,
-        "specter_p95_ttfb_ns": 45041.450000000004,
+        "warpsock_p95_ttfb_ns": 45041.450000000004,
         "p95_ttfb_regression_pct": -63.33089504661441,
         "status": "pass",
         "reason": "deterministic localhost reqwest baseline row; excluded as a failing threshold subject but included in threshold math"
       },
-      "specter_api_path": null,
+      "warpsock_api_path": null,
       "protocol_selected_by_normal_dispatch": false,
       "pool_reuse_metadata": {
         "connection_reuse_count": 700,
@@ -426,7 +426,7 @@
     },
     {
       "protocol": "h1",
-      "client": "specter",
+      "client": "warpsock",
       "direction": "response",
       "endpoint": "127.0.0.1:3201",
       "comparable": true,
@@ -699,24 +699,24 @@
         "p95_regression_allowed_pct": 5.0,
         "wilcoxon_p_value_required_less_than": 0.01,
         "reqwest_median_ttfb_ns": 119091.5,
-        "specter_median_ttfb_ns": 43453.0,
+        "warpsock_median_ttfb_ns": 43453.0,
         "ttfb_improvement_pct": 63.5129291343211,
         "ttfb_wilcoxon_signed_rank_p_value": 0.0,
         "reqwest_median_bytes_per_sec": 4362698765.227175,
-        "specter_median_bytes_per_sec": 4960339103.866398,
+        "warpsock_median_bytes_per_sec": 4960339103.866398,
         "throughput_improvement_pct": 13.698867852227306,
         "throughput_wilcoxon_signed_rank_p_value": 0.0,
         "median_throughput_regression_pct": -13.698867852227306,
         "reqwest_p95_bytes_per_sec": 4477338268.679281,
-        "specter_p95_bytes_per_sec": 5115963185.299099,
+        "warpsock_p95_bytes_per_sec": 5115963185.299099,
         "p95_throughput_regression_pct": -14.263494922580383,
         "reqwest_p95_ttfb_ns": 122832.15,
-        "specter_p95_ttfb_ns": 45041.450000000004,
+        "warpsock_p95_ttfb_ns": 45041.450000000004,
         "p95_ttfb_regression_pct": -63.33089504661441,
         "status": "pass",
-        "reason": "deterministic localhost reqwest-comparable threshold: Specter median TTFB must improve by >=5%, median throughput must improve by >=5% using final fixture DATA write-stamp delivery overhead for response rows, paired Wilcoxon signed-rank p-values for TTFB and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 TTFB must not regress by more than 5%"
+        "reason": "deterministic localhost reqwest-comparable threshold: Warpsock median TTFB must improve by >=5%, median throughput must improve by >=5% using final fixture DATA write-stamp delivery overhead for response rows, paired Wilcoxon signed-rank p-values for TTFB and corrected-overhead throughput must be <0.01, p95 throughput must not regress by more than 5%, and p95 TTFB must not regress by more than 5%"
       },
-      "specter_api_path": "specter::Client -> RequestBuilder::send_streaming -> specter::Body::chunk",
+      "warpsock_api_path": "warpsock::Client -> RequestBuilder::send_streaming -> warpsock::Body::chunk",
       "protocol_selected_by_normal_dispatch": true,
       "pool_reuse_metadata": {
         "connection_reuse_count": 700,
@@ -746,16 +746,16 @@
   },
   "h3_gate": {
     "fixture_address": "127.0.0.1:3203/udp",
-    "comparison_mode": "reqwest_h3_unavailable_specter_regression_gate",
+    "comparison_mode": "reqwest_h3_unavailable_warpsock_regression_gate",
     "reqwest_comparison_available": false,
-    "reqwest_unavailable_reason": "reqwest 0.12 in this benchmark profile lacks a stable, directly comparable high-level HTTP/3 streaming mode; H3 release evidence uses the local Specter regression gate instead",
-    "specter_thresholds": {
+    "reqwest_unavailable_reason": "reqwest 0.12 in this benchmark profile lacks a stable, directly comparable high-level HTTP/3 streaming mode; H3 release evidence uses the local Warpsock regression gate instead",
+    "warpsock_thresholds": {
       "max_median_ttfb_p50_ns": 2000000.0,
       "min_median_bytes_per_sec": 30000.0,
       "min_median_chunks_per_sec": 2000.0,
       "min_connection_reuse_count": 1
     },
-    "specter_metrics": {
+    "warpsock_metrics": {
       "ttfb_ns": 0.0,
       "chunks_per_sec": 0.0,
       "bytes_per_sec": 0.0,

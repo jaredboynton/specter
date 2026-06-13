@@ -5,8 +5,8 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use ::specter::transport::h3::{H3Tunnel, H3TunnelEvent as RustH3TunnelEvent};
-use ::specter::{Client as RustClient, Error as RustError};
+use ::warpsock::transport::h3::{H3Tunnel, H3TunnelEvent as RustH3TunnelEvent};
+use ::warpsock::{Client as RustClient, Error as RustError};
 
 const H3_FORBIDDEN_HEADERS: &[&str] = &[
     "connection",
@@ -84,7 +84,7 @@ impl WebSocketH3Builder {
     }
 
     fn __repr__(&self) -> String {
-        format!("<specter.WebSocketH3Builder url={}>", self.url)
+        format!("<warpsock.WebSocketH3Builder url={}>", self.url)
     }
 }
 
@@ -152,7 +152,7 @@ impl WebSocketH3Tunnel {
     }
 
     fn __repr__(&self) -> String {
-        "<specter.WebSocketH3Tunnel>".to_string()
+        "<warpsock.WebSocketH3Tunnel>".to_string()
     }
 }
 
@@ -167,7 +167,7 @@ impl H3TunnelEvent {
 
     fn __repr__(&self) -> String {
         format!(
-            "<specter.H3TunnelEvent kind={} last_stream_id={:?}>",
+            "<warpsock.H3TunnelEvent kind={} last_stream_id={:?}>",
             self.kind, self.last_stream_id
         )
     }

@@ -4,7 +4,7 @@ Date: 2026-06-09. Owned tree base: ca97f5f. Host: awsdev (c8gd.metal-24xl, Gravi
 
 ## Symptom
 
-Specter's native H3 GET deterministically failed to complete (timeout, exit 124, zero
+Warpsock's native H3 GET deterministically failed to complete (timeout, exit 124, zero
 samples) under `tc qdisc add dev lo root netem delay 200us` (pure delay: no loss, no
 jitter, no reorder option) while tokio_quiche, quiche_direct, h3_quinn, and reqwest_h3
 all completed cleanly under the same qdisc. Reproduced at 200us/500us/1ms, on BOTH the
@@ -80,7 +80,7 @@ Receive-side only: no wire byte, frame, ACK cadence, or fingerprint change.
 - Netem 200us repro: publishable profile 5/5 trials and shipping driver 3/3 trials
   now complete with 30/30 measured samples (previously 0/8 completions).
 - Full suite: 1004 passed, 2 skipped (was 999 + the 5 new tests).
-- RTT0 hot-path check (n=100, publishable profile): Specter p50/p95 TTFB
+- RTT0 hot-path check (n=100, publishable profile): Warpsock p50/p95 TTFB
   24.7us/35.0us vs tokio_quiche 38.8us/45.6us; throughput 18.0MB/s vs 17.8MB/s. The
   TTFB win and throughput parity are unchanged by the reassembly bookkeeping.
 

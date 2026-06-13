@@ -1,4 +1,4 @@
-//! DNS resolution hooks and lightweight caching for Specter transports.
+//! DNS resolution hooks and lightweight caching for Warpsock transports.
 
 use crate::error::{Error, Result};
 use std::collections::HashMap;

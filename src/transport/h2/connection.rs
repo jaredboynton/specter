@@ -17,7 +17,7 @@ use tracing;
 use crate::error::{Error, Result};
 use crate::fingerprint::http2::Http2Settings;
 use crate::headers::Headers;
-use crate::response::Response as SpecterResponse;
+use crate::response::Response as WarpsockResponse;
 
 use super::frame::{
     flags, ContinuationFrame, DataFrame, ErrorCode, FrameHeader, FrameType, GoAwayFrame,
@@ -590,7 +590,7 @@ where
         uri: &Uri,
         headers: &Headers,
         body: Option<Bytes>,
-    ) -> Result<SpecterResponse> {
+    ) -> Result<WarpsockResponse> {
         // Construct http::Request
         let mut builder = http::Request::builder().method(method).uri(uri);
 
@@ -1869,7 +1869,7 @@ where
     }
 
     /// Read response for a stream.
-    async fn read_response(&mut self, stream_id: u32) -> Result<SpecterResponse> {
+    async fn read_response(&mut self, stream_id: u32) -> Result<WarpsockResponse> {
         let read_start = std::time::Instant::now();
         tracing::debug!(
             "H2Connection: Starting read_response for stream {}",
@@ -1970,7 +1970,7 @@ where
 
         // Build Final Response
         if let Some(stream) = self.streams.remove(&stream_id) {
-            let response = SpecterResponse::new(
+            let response = WarpsockResponse::new(
                 status,
                 crate::headers::Headers::from(stream.response_headers),
                 stream.response_data.freeze(),

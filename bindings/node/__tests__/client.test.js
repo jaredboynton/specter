@@ -1,5 +1,5 @@
 /**
- * Tests for Specter Node.js bindings.
+ * Tests for Warpsock Node.js bindings.
  */
 
 const http = require('http');

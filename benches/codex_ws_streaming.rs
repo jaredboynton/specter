@@ -1,4 +1,4 @@
-//! Real Codex backend WebSocket streaming benchmark: Specter vs tokio-tungstenite.
+//! Real Codex backend WebSocket streaming benchmark: Warpsock vs tokio-tungstenite.
 //!
 //! Hits wss://chatgpt.com/backend-api/codex/responses with paired samples
 //! from both clients. Measures TTFB (time to first response.output_text.delta
@@ -11,17 +11,17 @@
 //! Skips gracefully when ~/.codex/auth.json is absent.
 
 use serde::Serialize;
-use specter::Message;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::timeout;
+use warpsock::Message;
 
 const ENDPOINT: &str = "wss://chatgpt.com/backend-api/codex/responses";
 const MODEL: &str = "gpt-5.4-mini";
 const PROMPT: &str = "List the numbers 1 through 10 spelled out in English, one per line.";
 const INSTRUCTIONS: &str = "You are a helpful assistant. Be concise.";
 const OPENAI_BETA_HEADER: &str = "responses_websockets=2026-02-06";
-const ORIGINATOR: &str = "specter_bench";
+const ORIGINATOR: &str = "warpsock_bench";
 const STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const INTER_REQUEST_DELAY: Duration = Duration::from_secs(2);
@@ -90,7 +90,7 @@ struct Comparison {
 
 #[derive(Serialize)]
 struct Summary {
-    specter: ClientSummary,
+    warpsock: ClientSummary,
     tungstenite: ClientSummary,
     comparison: Comparison,
 }
@@ -99,8 +99,8 @@ struct Summary {
 struct Environment {
     os: &'static str,
     arch: &'static str,
-    specter_version: &'static str,
-    specter_fingerprint: String,
+    warpsock_version: &'static str,
+    warpsock_fingerprint: String,
     tokio_tungstenite_version: &'static str,
 }
 
@@ -431,10 +431,10 @@ impl StreamObservation {
     }
 }
 
-// ---- Specter sample ----
+// ---- Warpsock sample ----
 
-async fn run_specter_sample(
-    client: &specter::Client,
+async fn run_warpsock_sample(
+    client: &warpsock::Client,
     token: &str,
     account_id: Option<&str>,
 ) -> Result<SampleResult, Box<dyn std::error::Error>> {
@@ -474,7 +474,7 @@ async fn run_specter_sample(
                 delta_count: 0,
                 frame_count: 0,
                 completed: false,
-                error: Some(format!("specter handshake error: {e}")),
+                error: Some(format!("warpsock handshake error: {e}")),
             });
         }
         Err(_) => {
@@ -488,7 +488,7 @@ async fn run_specter_sample(
                 delta_count: 0,
                 frame_count: 0,
                 completed: false,
-                error: Some("specter handshake timeout".into()),
+                error: Some("warpsock handshake timeout".into()),
             });
         }
     };
@@ -507,7 +507,7 @@ async fn run_specter_sample(
             delta_count: 0,
             frame_count: 0,
             completed: false,
-            error: Some(format!("specter send_text error: {e}")),
+            error: Some(format!("warpsock send_text error: {e}")),
         });
     }
 
@@ -533,7 +533,7 @@ async fn run_specter_sample(
                 Ok(Some(Message::Close(_))) => break,
                 Ok(None) => break,
                 Err(e) => {
-                    return Err(format!("specter ws next error: {e}"));
+                    return Err(format!("warpsock ws next error: {e}"));
                 }
             }
         }
@@ -849,8 +849,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 now_iso_compact()
             ))
         });
-    let specter_fingerprint =
-        option_value(&args, "--specter-fingerprint").unwrap_or_else(|| "chrome146".to_string());
+    let warpsock_fingerprint =
+        option_value(&args, "--warpsock-fingerprint").unwrap_or_else(|| "chrome146".to_string());
 
     if sample_count < MIN_SAMPLES {
         eprintln!("--samples must be >= {MIN_SAMPLES}");
@@ -873,35 +873,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Codex WS streaming bench: endpoint={ENDPOINT}, model={MODEL}, samples={sample_count}, warmup={warmup_count}"
     );
 
-    let specter_fp = match specter_fingerprint.as_str() {
-        "none" => specter::FingerprintProfile::None,
-        "chrome142" => specter::FingerprintProfile::Chrome142,
-        "chrome143" => specter::FingerprintProfile::Chrome143,
-        "chrome144" => specter::FingerprintProfile::Chrome144,
-        "chrome145" => specter::FingerprintProfile::Chrome145,
-        "chrome146" => specter::FingerprintProfile::Chrome146,
+    let warpsock_fp = match warpsock_fingerprint.as_str() {
+        "none" => warpsock::FingerprintProfile::None,
+        "chrome142" => warpsock::FingerprintProfile::Chrome142,
+        "chrome143" => warpsock::FingerprintProfile::Chrome143,
+        "chrome144" => warpsock::FingerprintProfile::Chrome144,
+        "chrome145" => warpsock::FingerprintProfile::Chrome145,
+        "chrome146" => warpsock::FingerprintProfile::Chrome146,
         other => {
-            eprintln!("--specter-fingerprint must be one of: none, chrome142..146 (got {other})");
+            eprintln!("--warpsock-fingerprint must be one of: none, chrome142..146 (got {other})");
             std::process::exit(1);
         }
     };
-    println!("specter_fingerprint={specter_fingerprint}");
-    let specter_client = specter::Client::builder().fingerprint(specter_fp).build()?;
+    println!("warpsock_fingerprint={warpsock_fingerprint}");
+    let warpsock_client = warpsock::Client::builder()
+        .fingerprint(warpsock_fp)
+        .build()?;
 
     let mut rows: Vec<Row> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
 
     // Warmup
     for w in 0..warmup_count {
-        let lead_specter = w % 2 == 0;
-        let order = if lead_specter { ["s", "t"] } else { ["t", "s"] };
+        let lead_warpsock = w % 2 == 0;
+        let order = if lead_warpsock {
+            ["s", "t"]
+        } else {
+            ["t", "s"]
+        };
         for (i, c) in order.iter().enumerate() {
             let sample = if *c == "s" {
-                run_specter_sample(&specter_client, &token, account_id.as_deref()).await?
+                run_warpsock_sample(&warpsock_client, &token, account_id.as_deref()).await?
             } else {
                 run_tungstenite_sample(&token, account_id.as_deref()).await?
             };
-            let client_name = if *c == "s" { "specter" } else { "tungstenite" };
+            let client_name = if *c == "s" { "warpsock" } else { "tungstenite" };
             rows.push(row_from_sample(
                 sample,
                 client_name,
@@ -917,23 +923,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Counted samples
     let pair_count = sample_count / 2;
     for p in 0..pair_count {
-        let lead_specter = p % 2 == 0;
-        let order = if lead_specter {
-            ("specter", "tungstenite")
+        let lead_warpsock = p % 2 == 0;
+        let order = if lead_warpsock {
+            ("warpsock", "tungstenite")
         } else {
-            ("tungstenite", "specter")
+            ("tungstenite", "warpsock")
         };
 
-        let sample1 = if order.0 == "specter" {
-            run_specter_sample(&specter_client, &token, account_id.as_deref()).await?
+        let sample1 = if order.0 == "warpsock" {
+            run_warpsock_sample(&warpsock_client, &token, account_id.as_deref()).await?
         } else {
             run_tungstenite_sample(&token, account_id.as_deref()).await?
         };
         rows.push(row_from_sample(sample1, order.0, false, p * 2, p, true));
         tokio::time::sleep(INTER_REQUEST_DELAY).await;
 
-        let sample2 = if order.1 == "specter" {
-            run_specter_sample(&specter_client, &token, account_id.as_deref()).await?
+        let sample2 = if order.1 == "warpsock" {
+            run_warpsock_sample(&warpsock_client, &token, account_id.as_deref()).await?
         } else {
             run_tungstenite_sample(&token, account_id.as_deref()).await?
         };
@@ -956,7 +962,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let s_ok = rows.iter().any(|r| {
             !r.warmup
                 && r.pair_index == p
-                && r.client == "specter"
+                && r.client == "warpsock"
                 && r.status == "ok"
                 && r.completed
                 && r.delta_count >= 1
@@ -972,7 +978,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if s_ok && t_ok {
             passed_pairs += 1;
         } else {
-            failures.push(format!("pair {p}: specter_ok={s_ok} tungstenite_ok={t_ok}"));
+            failures.push(format!(
+                "pair {p}: warpsock_ok={s_ok} tungstenite_ok={t_ok}"
+            ));
         }
     }
 
@@ -984,24 +992,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Stats
-    let specter_summary = sample_summary(&rows, "specter");
+    let warpsock_summary = sample_summary(&rows, "warpsock");
     let tungstenite_summary = sample_summary(&rows, "tungstenite");
 
-    let ttfb_diffs = paired_diffs(&rows, "specter", "tungstenite", |r| r.ttfb_ms);
-    let wall_diffs = paired_diffs(&rows, "specter", "tungstenite", |r| r.total_wall_time_ms);
-    let hs_diffs = paired_diffs(&rows, "specter", "tungstenite", |r| r.handshake_ms);
+    let ttfb_diffs = paired_diffs(&rows, "warpsock", "tungstenite", |r| r.ttfb_ms);
+    let wall_diffs = paired_diffs(&rows, "warpsock", "tungstenite", |r| r.total_wall_time_ms);
+    let hs_diffs = paired_diffs(&rows, "warpsock", "tungstenite", |r| r.handshake_ms);
 
     let (ttfb_diff_mean, ttfb_ci) = t_ci_95(&ttfb_diffs);
     let (wall_diff_mean, wall_ci) = t_ci_95(&wall_diffs);
     let (hs_diff_mean, hs_ci) = t_ci_95(&hs_diffs);
 
-    let specter_ttfbs = paired_values(&rows, "specter", pair_count, |r| r.ttfb_ms);
+    let warpsock_ttfbs = paired_values(&rows, "warpsock", pair_count, |r| r.ttfb_ms);
     let tung_ttfbs = paired_values(&rows, "tungstenite", pair_count, |r| r.ttfb_ms);
-    let specter_walls = paired_values(&rows, "specter", pair_count, |r| r.total_wall_time_ms);
+    let warpsock_walls = paired_values(&rows, "warpsock", pair_count, |r| r.total_wall_time_ms);
     let tung_walls = paired_values(&rows, "tungstenite", pair_count, |r| r.total_wall_time_ms);
 
-    let ttfb_wilcoxon = paired_wilcoxon_signed_rank_p_value(&tung_ttfbs, &specter_ttfbs);
-    let wall_wilcoxon = paired_wilcoxon_signed_rank_p_value(&tung_walls, &specter_walls);
+    let ttfb_wilcoxon = paired_wilcoxon_signed_rank_p_value(&tung_ttfbs, &warpsock_ttfbs);
+    let wall_wilcoxon = paired_wilcoxon_signed_rank_p_value(&tung_walls, &warpsock_walls);
 
     let ttfb_ci_covers_zero = ttfb_ci[0] <= 0.0 && ttfb_ci[1] >= 0.0;
     let wall_ci_covers_zero = wall_ci[0] <= 0.0 && wall_ci[1] >= 0.0;
@@ -1013,7 +1021,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     } else if !ttfb_ci_covers_zero && ttfb_diff_mean < 0.0 {
         format!(
-            "Specter WS TTFB measurably faster: {ttfb_diff_mean:.1} ms [{:.1}, {:.1}] (95% CI excludes zero). Wall CI {}, handshake CI {}.",
+            "Warpsock WS TTFB measurably faster: {ttfb_diff_mean:.1} ms [{:.1}, {:.1}] (95% CI excludes zero). Wall CI {}, handshake CI {}.",
             ttfb_ci[0],
             ttfb_ci[1],
             if wall_ci_covers_zero { "covers zero" } else { "excludes zero" },
@@ -1021,7 +1029,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     } else if !ttfb_ci_covers_zero && ttfb_diff_mean > 0.0 {
         format!(
-            "tungstenite WS TTFB measurably faster by {:.1} ms [{:.1}, {:.1}]. Investigate Specter WS read loop.",
+            "tungstenite WS TTFB measurably faster by {:.1} ms [{:.1}, {:.1}]. Investigate Warpsock WS read loop.",
             ttfb_diff_mean.abs(),
             ttfb_ci[0],
             ttfb_ci[1]
@@ -1034,7 +1042,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let summary = Summary {
-        specter: specter_summary,
+        warpsock: warpsock_summary,
         tungstenite: tungstenite_summary,
         comparison: Comparison {
             ttfb_difference_ms: ttfb_diff_mean,
@@ -1071,8 +1079,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         environment: Environment {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
-            specter_version: env!("CARGO_PKG_VERSION"),
-            specter_fingerprint: specter_fingerprint.clone(),
+            warpsock_version: env!("CARGO_PKG_VERSION"),
+            warpsock_fingerprint: warpsock_fingerprint.clone(),
             tokio_tungstenite_version: "0.24",
         },
         rows,

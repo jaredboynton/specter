@@ -1,6 +1,6 @@
-//! Python bindings for Specter HTTP client.
+//! Python bindings for Warpsock HTTP client.
 //!
-//! Provides Python async access to Specter's HTTP client with full
+//! Provides Python async access to Warpsock's HTTP client with full
 //! TLS/HTTP2/HTTP3 fingerprint control.
 
 use bytes::Bytes;
@@ -22,8 +22,8 @@ mod websocket_h2;
 mod websocket_h3;
 mod ws_types;
 
-// Re-export specter types - use ::specter to disambiguate from pymodule name
-use ::specter::{
+// Re-export warpsock types - use ::warpsock to disambiguate from pymodule name
+use ::warpsock::{
     encode_message as rust_encode_message, Body as RustBody, Client as RustClient,
     ClientBuilder as RustClientBuilder, CookieJar as RustCookieJar, Error as RustError,
     FingerprintProfile as RustFingerprintProfile, GrpcEncoding as RustGrpcEncoding,
@@ -31,7 +31,7 @@ use ::specter::{
     Timeouts as RustTimeouts,
 };
 
-/// Python wrapper for Specter HTTP client.
+/// Python wrapper for Warpsock HTTP client.
 #[pyclass]
 #[derive(Clone)]
 pub struct Client {
@@ -67,7 +67,7 @@ pub struct Response {
     effective_url: Option<String>,
 }
 
-/// Python wrapper for synchronous Specter HTTP client.
+/// Python wrapper for synchronous Warpsock HTTP client.
 #[pyclass]
 #[derive(Clone)]
 pub struct SyncClient {
@@ -337,7 +337,7 @@ impl GrpcFramer {
 
     /// Get the string representation.
     fn __repr__(&self) -> String {
-        "<specter.GrpcFramer>".to_string()
+        "<warpsock.GrpcFramer>".to_string()
     }
 }
 
@@ -519,7 +519,7 @@ impl Client {
 
     /// Get the response string representation.
     fn __repr__(&self) -> String {
-        "<specter.Client>".to_string()
+        "<warpsock.Client>".to_string()
     }
 }
 
@@ -670,7 +670,7 @@ impl SyncClient {
 
     /// Get the response string representation.
     fn __repr__(&self) -> String {
-        "<specter.SyncClient>".to_string()
+        "<warpsock.SyncClient>".to_string()
     }
 }
 
@@ -858,7 +858,7 @@ impl RequestBuilder {
 
     /// Get the string representation.
     fn __repr__(&self) -> String {
-        format!("<specter.RequestBuilder {} {}>", self.method, self.url)
+        format!("<warpsock.RequestBuilder {} {}>", self.method, self.url)
     }
 }
 
@@ -947,7 +947,7 @@ impl SyncRequestBuilder {
 
     /// Get the string representation.
     fn __repr__(&self) -> String {
-        format!("<specter.SyncRequestBuilder {} {}>", self.method, self.url)
+        format!("<warpsock.SyncRequestBuilder {} {}>", self.method, self.url)
     }
 }
 
@@ -1069,7 +1069,7 @@ impl ClientBuilder {
         Ok(())
     }
 
-    /// Enable or disable Specter's built-in DNS result cache.
+    /// Enable or disable Warpsock's built-in DNS result cache.
     fn hickory_dns(&mut self, enable: bool) -> PyResult<()> {
         let old = std::mem::replace(&mut self.inner, RustClient::builder());
         self.inner = old.hickory_dns(enable);
@@ -1100,7 +1100,7 @@ impl ClientBuilder {
 
     /// Get the string representation.
     fn __repr__(&self) -> String {
-        "<specter.ClientBuilder>".to_string()
+        "<warpsock.ClientBuilder>".to_string()
     }
 }
 
@@ -1220,7 +1220,7 @@ impl SyncClientBuilder {
         Ok(())
     }
 
-    /// Enable or disable Specter's built-in DNS result cache.
+    /// Enable or disable Warpsock's built-in DNS result cache.
     fn hickory_dns(&mut self, enable: bool) -> PyResult<()> {
         let old = std::mem::replace(&mut self.inner, RustClient::builder());
         self.inner = old.hickory_dns(enable);
@@ -1254,7 +1254,7 @@ impl SyncClientBuilder {
 
     /// Get the string representation.
     fn __repr__(&self) -> String {
-        "<specter.SyncClientBuilder>".to_string()
+        "<warpsock.SyncClientBuilder>".to_string()
     }
 }
 
@@ -1519,7 +1519,7 @@ impl Response {
 
     /// Get the string representation.
     fn __repr__(&self) -> String {
-        format!("<specter.Response status={}>", self.status)
+        format!("<warpsock.Response status={}>", self.status)
     }
 }
 
@@ -1607,7 +1607,7 @@ impl SyncResponse {
 
     /// Get the string representation.
     fn __repr__(&self) -> String {
-        format!("<specter.SyncResponse status={}>", self.inner.status)
+        format!("<warpsock.SyncResponse status={}>", self.inner.status)
     }
 }
 
@@ -1706,7 +1706,7 @@ impl CookieJar {
             .try_read()
             .map_err(|_| PyRuntimeError::new_err("CookieJar is currently locked"))?
             .len();
-        Ok(format!("<specter.CookieJar cookies={len}>"))
+        Ok(format!("<warpsock.CookieJar cookies={len}>"))
     }
 }
 
@@ -1826,20 +1826,20 @@ impl Timeouts {
     /// Get the string representation.
     fn __repr__(&self) -> String {
         format!(
-            "<specter.Timeouts connect={:?} ttfb={:?} total={:?}>",
+            "<warpsock.Timeouts connect={:?} ttfb={:?} total={:?}>",
             self.connect, self.ttfb, self.total
         )
     }
 }
 
-/// Convert a specter Error to a Python exception.
+/// Convert a warpsock Error to a Python exception.
 pub(crate) fn to_py_err(e: RustError) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
 }
 
-/// The specter Python module.
+/// The warpsock Python module.
 #[pymodule]
-pub fn specter(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn warpsock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Client>()?;
     m.add_class::<ClientBuilder>()?;
     m.add_class::<RequestBuilder>()?;
@@ -1866,7 +1866,7 @@ pub fn specter(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{to_rust_fingerprint_profile, FingerprintProfile};
-    use specter::FingerprintProfile as RustFingerprintProfile;
+    use warpsock::FingerprintProfile as RustFingerprintProfile;
 
     #[test]
     fn fingerprint_profile_numeric_values_remain_compatible() {

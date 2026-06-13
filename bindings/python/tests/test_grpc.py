@@ -1,4 +1,4 @@
-"""Tests for the unary gRPC surface of the Specter Python binding.
+"""Tests for the unary gRPC surface of the Warpsock Python binding.
 
 Covers message framing (identity and gzip), incremental deframing across a
 chunk boundary, the gRPC request header presets, and the Response.trailers
@@ -14,7 +14,7 @@ import struct
 
 import pytest
 
-import specter
+import warpsock
 
 
 def _frame_header(framed: bytes) -> tuple[int, int]:
@@ -25,7 +25,7 @@ def _frame_header(framed: bytes) -> tuple[int, int]:
 
 def test_encode_message_identity_layout() -> None:
     payload = b"hello grpc"
-    framed = specter.encode_message(payload, False, specter.GrpcEncoding.Identity)
+    framed = warpsock.encode_message(payload, False, warpsock.GrpcEncoding.Identity)
     flag, length = _frame_header(framed)
     assert flag == 0
     assert length == len(payload)
@@ -34,9 +34,9 @@ def test_encode_message_identity_layout() -> None:
 
 def test_framer_identity_round_trip() -> None:
     payload = b"\x0a\x05world"
-    framed = specter.encode_message(payload, False, specter.GrpcEncoding.Identity)
+    framed = warpsock.encode_message(payload, False, warpsock.GrpcEncoding.Identity)
 
-    framer = specter.GrpcFramer(specter.GrpcEncoding.Identity)
+    framer = warpsock.GrpcFramer(warpsock.GrpcEncoding.Identity)
     framer.push(framed)
     assert framer.next_message() == payload
     assert framer.next_message() is None
@@ -44,13 +44,13 @@ def test_framer_identity_round_trip() -> None:
 
 def test_framer_gzip_round_trip() -> None:
     payload = b"the quick brown fox jumps over the lazy dog" * 8
-    framed = specter.encode_message(payload, True, specter.GrpcEncoding.Gzip)
+    framed = warpsock.encode_message(payload, True, warpsock.GrpcEncoding.Gzip)
 
     # Compressed flag is set and the framed body is not the raw payload.
     flag, _ = _frame_header(framed)
     assert flag == 1
 
-    framer = specter.GrpcFramer(specter.GrpcEncoding.Gzip)
+    framer = warpsock.GrpcFramer(warpsock.GrpcEncoding.Gzip)
     framer.push(framed)
     assert framer.next_message() == payload
     assert framer.next_message() is None
@@ -58,9 +58,9 @@ def test_framer_gzip_round_trip() -> None:
 
 def test_framer_partial_frame_across_header_boundary() -> None:
     payload = b"partial-delivery-message"
-    framed = specter.encode_message(payload, False, specter.GrpcEncoding.Identity)
+    framed = warpsock.encode_message(payload, False, warpsock.GrpcEncoding.Identity)
 
-    framer = specter.GrpcFramer(specter.GrpcEncoding.Identity)
+    framer = warpsock.GrpcFramer(warpsock.GrpcEncoding.Identity)
     # Split inside the 5-byte prefix so neither slice carries a full header.
     framer.push(framed[:3])
     assert framer.next_message() is None
@@ -70,14 +70,14 @@ def test_framer_partial_frame_across_header_boundary() -> None:
 
 
 def test_framer_encoding_property() -> None:
-    framer = specter.GrpcFramer(specter.GrpcEncoding.Gzip)
-    assert framer.encoding == specter.GrpcEncoding.Gzip
+    framer = warpsock.GrpcFramer(warpsock.GrpcEncoding.Gzip)
+    assert framer.encoding == warpsock.GrpcEncoding.Gzip
 
 
 def test_grpc_request_header_presets_gzip() -> None:
-    client = specter.Client.builder().build()
+    client = warpsock.Client.builder().build()
     request = client.grpc_request(
-        "https://host/helloworld.Greeter/SayHello", specter.GrpcEncoding.Gzip
+        "https://host/helloworld.Greeter/SayHello", warpsock.GrpcEncoding.Gzip
     )
     assert request.method == "POST"
     headers = request.headers_list()
@@ -89,9 +89,9 @@ def test_grpc_request_header_presets_gzip() -> None:
 
 
 def test_grpc_request_header_presets_identity() -> None:
-    client = specter.Client.builder().build()
+    client = warpsock.Client.builder().build()
     request = client.grpc_request(
-        "https://host/helloworld.Greeter/SayHello", specter.GrpcEncoding.Identity
+        "https://host/helloworld.Greeter/SayHello", warpsock.GrpcEncoding.Identity
     )
     assert request.method == "POST"
     headers = request.headers_list()
@@ -134,7 +134,7 @@ async def test_trailers_none_on_non_trailers_response() -> None:
     server_task = asyncio.ensure_future(_serve_one_plain_response(ready))
     try:
         port = await ready
-        client = specter.Client.builder().build()
+        client = warpsock.Client.builder().build()
         response = await client.get(f"http://127.0.0.1:{port}/").send()
         assert response.status == 200
         # A plain HTTP/1.1 buffered response carries no trailers.

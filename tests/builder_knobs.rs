@@ -2,8 +2,6 @@
 //! pool sizing/idle timeout, custom resolver, H3 max idle timeout) actually
 //! affect runtime behavior end-to-end via `Client::builder()`.
 
-use specter::transport::dns::{Resolve, ResolveFuture};
-use specter::{CapacityPolicy, Client, RequestBody};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -11,6 +9,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex, Notify};
+use warpsock::transport::dns::{Resolve, ResolveFuture};
+use warpsock::{CapacityPolicy, Client, RequestBody};
 
 mod helpers;
 use helpers::mock_h3_server::{MockEvent, MockH3Server};
@@ -82,7 +82,7 @@ async fn resolve_to_addrs_override_routes_traffic_to_loopback_for_h1() {
 
     // Use a hostname that does not resolve via the system resolver. The DNS
     // override must redirect it to the loopback fixture.
-    let host = "specter-resolve-override.test";
+    let host = "warpsock-resolve-override.test";
     let url = format!("http://{}:{}/hello", host, fixture.addr.port());
 
     let client = Client::builder()
@@ -137,7 +137,7 @@ async fn custom_dns_resolver_is_invoked_for_each_new_connection() {
         .build()
         .unwrap();
 
-    let host = "specter-custom-resolver.test";
+    let host = "warpsock-custom-resolver.test";
     let url = format!("http://{}:{}/hello", host, fixture.addr.port());
 
     for _ in 0..3 {
@@ -168,7 +168,7 @@ async fn custom_dns_resolver_is_cached_by_default() {
         .build()
         .unwrap();
 
-    let host = "specter-cached-resolver.test";
+    let host = "warpsock-cached-resolver.test";
     let url = format!("http://{}:{}/hello", host, fixture.addr.port());
 
     for _ in 0..3 {
