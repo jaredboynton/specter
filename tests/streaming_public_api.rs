@@ -531,8 +531,29 @@ async fn public_streaming_api_is_transport_neutral_for_h1_h2_h3() {
     .unwrap();
 }
 
-#[tokio::test]
-async fn public_streaming_preserves_high_level_request_semantics() {
+// Drives five sequential end-to-end streaming scenarios in one async body. In
+// debug builds the combined future exceeds the default 2 MiB test-thread stack
+// and aborts with a stack overflow, so run the body on a dedicated thread with a
+// larger stack. This is a test-harness concern only; the streaming runtime and
+// wire behavior are unchanged. current_thread runtime preserves the original
+// #[tokio::test] single-threaded semantics.
+#[test]
+fn public_streaming_preserves_high_level_request_semantics() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(public_streaming_preserves_high_level_request_semantics_inner());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn public_streaming_preserves_high_level_request_semantics_inner() {
     fs::create_dir_all("target/validation/cross").unwrap();
     let fixture = H1Fixture::start().await;
 

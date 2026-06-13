@@ -2373,8 +2373,10 @@ mod tests {
 
     #[test]
     fn connection_flow_control_zero_initial_update_falls_back_to_default_increment() {
-        let mut settings = Http2Settings::default();
-        settings.initial_window_update = 0;
+        let settings = Http2Settings {
+            initial_window_update: 0,
+            ..Default::default()
+        };
         let mut recv_window =
             H2Connection::<DuplexStream>::initial_connection_recv_window(&settings);
 

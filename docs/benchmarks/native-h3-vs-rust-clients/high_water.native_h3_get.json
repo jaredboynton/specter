@@ -1,0 +1,31 @@
+{
+  "kind": "native_h3_get_high_water",
+  "workload": "http3_streaming_get",
+  "source": "docs/benchmarks/native-h3-vs-rust-clients/2026-06-07-portable-main-n100",
+  "source_manifest": "docs/benchmarks/native-h3-vs-rust-clients/2026-06-07-portable-main-n100/current_rows.portablemain_100.manifest.json",
+  "recorded_at": "2026-06-07T21:40:00Z",
+  "notes": [
+    "Portable n100 selected-row archive. Strict parser replay fails only warpsock_native GET p50 and p95 versus quiche_direct.",
+    "This file exists so current_rows_high_water.py and current_rows_awsdev.sh use an explicit repo-owned high-water artifact rather than falling back to embedded defaults.",
+    "2026-06-09: backfilled ledger_paced_bytes_per_sec = bytes_per_sec for both clients (schema migration; the 2026-06-07 source archive predates the ledger-paced throughput metric, and DEFAULT_HIGH_WATER in current_rows_high_water.py uses the same mirror convention for this source)."
+  ],
+  "warpsock_native": {
+    "p50_ttfb_ns": 56230.0,
+    "p95_ttfb_ns": 68117.0,
+    "bytes_per_sec": 9801039.201774033,
+    "throughput_mib_per_sec": 9.347,
+    "ledger_paced_bytes_per_sec": 9801039.201774033
+  },
+  "quiche_direct": {
+    "p50_ttfb_ns": 47415.0,
+    "p95_ttfb_ns": 62889.0,
+    "bytes_per_sec": 9752265.586528454,
+    "throughput_mib_per_sec": 9.3,
+    "ledger_paced_bytes_per_sec": 9752265.586528454
+  },
+  "strict_percent_behind": {
+    "p50_ttfb_ns": 18.59221765264157,
+    "p95_ttfb_ns": 8.315125860404068,
+    "bytes_per_sec": -0.500126515547957
+  }
+}

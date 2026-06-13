@@ -21,7 +21,9 @@ use crate::transport::h3::tls::NativeH3HandshakeStatus;
 use crate::transport::h3::udp_ecn::{enable_udp_ecn_receive, recv_from_with_ecn};
 use crate::transport::h3::H3TransportConfig;
 
-use crate::transport::h3::native_driver::{spawn_native_h3_driver, NativeH3PendingResponse};
+use crate::transport::h3::native_driver::{
+    build_native_h3_driver, NativeH3DriverStart, NativeH3PendingResponse,
+};
 use bytes::Bytes;
 use getrandom::fill as getrandom_fill;
 
@@ -122,6 +124,60 @@ impl H3Connection {
         .handle)
     }
 
+    /// Connect to an HTTP/3 server and return the unspawned native driver start.
+    ///
+    /// This is the production direct-core construction hook: callers that can
+    /// prove exclusive ownership may drive the returned native H3 core directly,
+    /// while ordinary multiplexed use keeps going through `connect` and the
+    /// spawned-driver `H3Handle` path.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn connect_direct_start(
+        url: &str,
+        tls_fingerprint: Option<TlsFingerprint>,
+        fingerprint: Http3Fingerprint,
+        max_idle_timeout: u64,
+        verify_peer: bool,
+        root_certs: Vec<Vec<u8>>,
+        use_platform_roots: bool,
+        dns_config: &DnsConfig,
+        transport_config: H3TransportConfig,
+        session_cache: NativeH3SessionCache,
+        session_cache_key: NativeH3SessionCacheKey,
+    ) -> Result<NativeH3DriverStart> {
+        let (host, port, _path) = parse_url(url)?;
+        let peer_addr = dns_config
+            .resolve(&host, port)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Connection("DNS/IP not found".into()))?;
+        let local_addr: SocketAddr = if peer_addr.is_ipv4() {
+            "0.0.0.0:0".parse().unwrap()
+        } else {
+            "[::]:0".parse().unwrap()
+        };
+        let socket = Arc::new(bind_udp_socket(local_addr, &fingerprint.transport)?);
+        let (start, zero_rtt_response_rx) = Self::connect_native_start(NativeH3Connect {
+            host,
+            socket,
+            peer_addr,
+            tls_fingerprint,
+            fingerprint,
+            max_idle_timeout,
+            verify_peer,
+            root_certs,
+            use_platform_roots,
+            transport_config,
+            session_cache,
+            session_cache_key,
+            zero_rtt_request: None,
+        })
+        .await?;
+        debug_assert!(zero_rtt_response_rx.is_none());
+        Ok(start)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn connect_with_zero_rtt_request(
         url: &str,
@@ -206,6 +262,20 @@ impl H3Connection {
     }
 
     async fn connect_native(request: NativeH3Connect) -> Result<H3ConnectResult> {
+        let (start, zero_rtt_response_rx) = Self::connect_native_start(request).await?;
+        let handle = start.spawn();
+        Ok(H3ConnectResult {
+            handle,
+            zero_rtt_response_rx,
+        })
+    }
+
+    async fn connect_native_start(
+        request: NativeH3Connect,
+    ) -> Result<(
+        NativeH3DriverStart,
+        Option<oneshot::Receiver<Result<StreamResponse>>>,
+    )> {
         let NativeH3Connect {
             host,
             socket,
@@ -332,7 +402,7 @@ impl H3Connection {
                     let ecn_mark = received.ecn_mark;
                     if buf[..len].first().is_some_and(|first| first & 0x80 == 0) {
                         if handshake.is_application_ready() {
-                            return Self::finish_native_connect(
+                            return Self::finish_native_start(
                                 handshake,
                                 fingerprint,
                                 socket,
@@ -380,7 +450,7 @@ impl H3Connection {
                         }
                     }
                     if handshake.is_application_ready() {
-                        return Self::finish_native_connect(
+                        return Self::finish_native_start(
                             handshake,
                             fingerprint,
                             socket,
@@ -410,7 +480,7 @@ impl H3Connection {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn finish_native_connect(
+    async fn finish_native_start(
         mut handshake: NativeQuicHandshake,
         fingerprint: Http3Fingerprint,
         socket: Arc<UdpSocket>,
@@ -421,7 +491,10 @@ impl H3Connection {
         session_cache: NativeH3SessionCache,
         session_cache_key: NativeH3SessionCacheKey,
         pending_zero_rtt: Option<PendingZeroRttRequest>,
-    ) -> Result<H3ConnectResult> {
+    ) -> Result<(
+        NativeH3DriverStart,
+        Option<oneshot::Receiver<Result<StreamResponse>>>,
+    )> {
         let mut zero_rtt_response_rx = None;
         let mut pending_zero_rtt_response = None;
         let mut native_handshake_report_override = None;
@@ -456,7 +529,7 @@ impl H3Connection {
             zero_rtt_response_rx = Some(response_rx);
         }
 
-        let handle = spawn_native_h3_driver(
+        let start = build_native_h3_driver(
             handshake,
             fingerprint,
             socket,
@@ -470,10 +543,7 @@ impl H3Connection {
             native_handshake_report_override,
         )?;
 
-        Ok(H3ConnectResult {
-            handle,
-            zero_rtt_response_rx,
-        })
+        Ok((start, zero_rtt_response_rx))
     }
 
     async fn handle_client_loss_detection_timeout(

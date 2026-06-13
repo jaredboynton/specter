@@ -1,12 +1,14 @@
 //! Native HTTP/3 frame and SETTINGS codec.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use std::borrow::Cow;
+use std::sync::OnceLock;
 
 use crate::error::{Error, Result};
 use crate::fingerprint::{
     H3Settings, Http3Fingerprint, QpackHeaderBlockStrategy, QpackStringEncodingStrategy,
 };
-use crate::headers::Headers;
+use crate::headers::{Headers, HeadersBuilder};
 use crate::transport::h2::hpack_impl::{
     huffman_decode_bytes, huffman_encode_bytes, huffman_encode_if_smaller_bytes,
 };
@@ -59,8 +61,8 @@ pub struct H3UnidirectionalStream {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H3Header {
-    name: String,
-    value: String,
+    name: Cow<'static, str>,
+    value: Cow<'static, str>,
 }
 
 pub(crate) fn data_frame_encoded_len(payload_len: usize) -> usize {
@@ -69,20 +71,33 @@ pub(crate) fn data_frame_encoded_len(payload_len: usize) -> usize {
         .saturating_add(payload_len)
 }
 
+pub(crate) fn headers_frame_encoded_len(payload_len: usize) -> usize {
+    varint_len(FRAME_HEADERS)
+        .saturating_add(varint_len(payload_len as u64))
+        .saturating_add(payload_len)
+}
+
 impl H3Header {
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
-            value: value.into(),
+            name: Cow::Owned(name.into()),
+            value: Cow::Owned(value.into()),
+        }
+    }
+
+    pub(crate) fn from_static(name: &'static str, value: &'static str) -> Self {
+        Self {
+            name: Cow::Borrowed(name),
+            value: Cow::Borrowed(value),
         }
     }
 
     pub fn name(&self) -> &str {
-        &self.name
+        self.name.as_ref()
     }
 
     pub fn value(&self) -> &str {
-        &self.value
+        self.value.as_ref()
     }
 }
 
@@ -250,6 +265,10 @@ pub fn decode_frame(bytes: &[u8]) -> Result<H3Frame> {
     }
     let payload = input.copy_to_bytes(len);
 
+    decode_frame_payload(frame_type, payload)
+}
+
+fn decode_frame_payload(frame_type: u64, payload: Bytes) -> Result<H3Frame> {
     match frame_type {
         FRAME_DATA => Ok(H3Frame::Data(payload)),
         FRAME_HEADERS => Ok(H3Frame::Headers(payload)),
@@ -277,9 +296,62 @@ pub fn decode_frames(bytes: &[u8]) -> Result<Vec<H3Frame>> {
             return Err(Error::HttpProtocol("truncated HTTP/3 frame".into()));
         }
         let payload = input.copy_to_bytes(len);
-        frames.push(decode_frame(&encode_frame_parts(frame_type, payload))?);
+        frames.push(decode_frame_payload(frame_type, payload)?);
     }
     Ok(frames)
+}
+
+pub fn h3_frame_block_is_complete(bytes: &[u8]) -> Result<bool> {
+    let mut input = bytes;
+    while !input.is_empty() {
+        let Some((_, used)) = peek_varint(input)? else {
+            return Ok(false);
+        };
+        input = &input[used..];
+
+        let Some((payload_len, used)) = peek_varint(input)? else {
+            return Ok(false);
+        };
+        input = &input[used..];
+
+        let payload_len = usize::try_from(payload_len)
+            .map_err(|_| Error::HttpProtocol("HTTP/3 frame length exceeds usize".into()))?;
+        if input.len() < payload_len {
+            return Ok(false);
+        }
+        input = &input[payload_len..];
+    }
+    Ok(true)
+}
+
+fn peek_varint(input: &[u8]) -> Result<Option<(u64, usize)>> {
+    let Some(&first) = input.first() else {
+        return Ok(None);
+    };
+    let len = 1usize << (first >> 6);
+    if input.len() < len {
+        return Ok(None);
+    }
+
+    let value = match len {
+        1 => u64::from(first) & 0x3f,
+        2 => {
+            let raw = u16::from_be_bytes([input[0], input[1]]);
+            u64::from(raw & 0x3fff)
+        }
+        4 => {
+            let raw = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
+            u64::from(raw & 0x3fff_ffff)
+        }
+        8 => {
+            let raw = u64::from_be_bytes([
+                input[0], input[1], input[2], input[3], input[4], input[5], input[6], input[7],
+            ]);
+            raw & 0x3fff_ffff_ffff_ffff
+        }
+        _ => unreachable!(),
+    };
+    Ok(Some((value, len)))
 }
 
 pub fn encode_request_stream(headers: &[H3Header], body: Option<Bytes>) -> Bytes {
@@ -494,7 +566,10 @@ fn encode_header_block_with_options(
 }
 
 pub fn decode_header_block(bytes: &[u8]) -> Result<Vec<H3Header>> {
-    let mut input = Bytes::copy_from_slice(bytes);
+    decode_header_block_bytes(Bytes::copy_from_slice(bytes))
+}
+
+pub(crate) fn decode_header_block_bytes(mut input: Bytes) -> Result<Vec<H3Header>> {
     let first = get_byte(&mut input)?;
     let _required_insert_count = get_prefixed_int(first, 8, &mut input)?;
     let first = get_byte(&mut input)?;
@@ -513,7 +588,7 @@ pub fn decode_header_block(bytes: &[u8]) -> Result<Vec<H3Header>> {
             let (name, value) = static_by_index(index).ok_or_else(|| {
                 Error::HttpProtocol(format!("unknown QPACK static index {index}"))
             })?;
-            headers.push(H3Header::new(name, value));
+            headers.push(H3Header::from_static(name, value));
         } else if first & 0x40 != 0 {
             if first & 0x10 == 0 {
                 return Err(Error::HttpProtocol(
@@ -538,6 +613,120 @@ pub fn decode_header_block(bytes: &[u8]) -> Result<Vec<H3Header>> {
     }
 
     Ok(headers)
+}
+
+pub(crate) fn decode_response_headers(mut input: Bytes) -> Result<(Option<u16>, Headers)> {
+    if let Some(decoded) = try_decode_response_headers_template(&input) {
+        return Ok(decoded);
+    }
+
+    let first = get_byte(&mut input)?;
+    let _required_insert_count = get_prefixed_int(first, 8, &mut input)?;
+    let first = get_byte(&mut input)?;
+    let _delta_base = get_prefixed_int(first, 7, &mut input)?;
+
+    let mut status = None;
+    let mut headers = HeadersBuilder::with_capacity(8, input.len());
+    while input.has_remaining() {
+        let first = get_byte(&mut input)?;
+        if first & 0x80 != 0 {
+            if first & 0x40 == 0 {
+                return Err(Error::HttpProtocol(
+                    "native QPACK decoder only supports static indexed fields".into(),
+                ));
+            }
+            let index = get_prefixed_int(first, 6, &mut input)?;
+            let (name, value) = static_by_index(index).ok_or_else(|| {
+                Error::HttpProtocol(format!("unknown QPACK static index {index}"))
+            })?;
+            push_response_header_to_builder(
+                Cow::Borrowed(name),
+                Cow::Borrowed(value),
+                &mut status,
+                &mut headers,
+            );
+        } else if first & 0x40 != 0 {
+            if first & 0x10 == 0 {
+                return Err(Error::HttpProtocol(
+                    "native QPACK decoder only supports static name refs".into(),
+                ));
+            }
+            let index = get_prefixed_int(first, 4, &mut input)?;
+            let (name, _) = static_by_index(index).ok_or_else(|| {
+                Error::HttpProtocol(format!("unknown QPACK static index {index}"))
+            })?;
+            let value = get_prefixed_string(&mut input, 7)?;
+            push_response_header_to_builder(
+                Cow::Borrowed(name),
+                Cow::Owned(value),
+                &mut status,
+                &mut headers,
+            );
+        } else if first & 0x20 != 0 {
+            let name = get_prefixed_string_with_first(first, 3, &mut input)?;
+            let value = get_prefixed_string(&mut input, 7)?;
+            push_response_header_to_builder(
+                Cow::Owned(name),
+                Cow::Owned(value),
+                &mut status,
+                &mut headers,
+            );
+        } else {
+            return Err(Error::HttpProtocol(
+                "unsupported native QPACK field representation".into(),
+            ));
+        }
+    }
+
+    Ok((status, headers.build()))
+}
+
+static H3_RESPONSE_OCTET_STREAM_HEADERS: OnceLock<Headers> = OnceLock::new();
+static H3_RESPONSE_TEXT_PLAIN_HEADERS: OnceLock<Headers> = OnceLock::new();
+
+fn try_decode_response_headers_template(input: &Bytes) -> Option<(Option<u16>, Headers)> {
+    match input.as_ref() {
+        b"\x00\x00\xd9\x27\x05content-type\x18application/octet-stream" => Some((
+            Some(200),
+            H3_RESPONSE_OCTET_STREAM_HEADERS
+                .get_or_init(|| {
+                    Headers::from_static(vec![("content-type", "application/octet-stream")])
+                })
+                .clone(),
+        )),
+        b"\x00\x00\xd9\xf5" => Some((
+            Some(200),
+            H3_RESPONSE_TEXT_PLAIN_HEADERS
+                .get_or_init(|| Headers::from_static(vec![("content-type", "text/plain")]))
+                .clone(),
+        )),
+        _ => None,
+    }
+}
+
+fn push_response_header_to_builder(
+    name: Cow<'static, str>,
+    value: Cow<'static, str>,
+    status: &mut Option<u16>,
+    headers: &mut HeadersBuilder,
+) {
+    if name.as_ref() == ":status" {
+        *status = parse_h3_status(value.as_ref());
+    } else if !name.as_ref().starts_with(':') {
+        headers.push(name.as_ref().as_bytes(), value.as_ref().as_bytes());
+    }
+}
+
+pub(crate) fn parse_h3_status(value: &str) -> Option<u16> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 3 || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(
+        ((bytes[0] - b'0') as u16) * 100
+            + ((bytes[1] - b'0') as u16) * 10
+            + (bytes[2] - b'0') as u16,
+    )
 }
 
 fn encode_stream_type(stream_type: H3StreamType) -> u64 {
@@ -577,16 +766,6 @@ fn encode_settings(settings: &[H3Setting]) -> Bytes {
     out.freeze()
 }
 
-fn encode_frame_parts(frame_type: u64, payload: Bytes) -> Bytes {
-    let mut out = BytesMut::with_capacity(
-        varint_len(frame_type) + varint_len(payload.len() as u64) + payload.len(),
-    );
-    put_varint(&mut out, frame_type);
-    put_varint(&mut out, payload.len() as u64);
-    out.extend_from_slice(&payload);
-    out.freeze()
-}
-
 fn decode_settings(mut payload: Bytes) -> Result<Vec<H3Setting>> {
     let mut settings = Vec::new();
     while payload.has_remaining() {
@@ -613,48 +792,81 @@ fn put_varint(out: &mut BytesMut, value: u64) {
 }
 
 fn static_lookup(name: &str, value: &str) -> Option<(u64, bool)> {
-    let lower_name = name.to_ascii_lowercase();
-    for (index, static_name, static_value) in STATIC_TABLE {
-        if *static_name == lower_name {
-            if static_value.is_empty() {
-                return Some((*index, false));
-            }
-            if *static_value == value {
-                return Some((*index, true));
-            }
-        }
+    if name.eq_ignore_ascii_case(":authority") {
+        return Some((0, false));
+    }
+    if name.eq_ignore_ascii_case("user-agent") {
+        return Some((95, false));
+    }
+    if name.eq_ignore_ascii_case(":path") {
+        return (value == "/").then_some((1, true));
+    }
+    if name.eq_ignore_ascii_case(":method") {
+        return match value {
+            "CONNECT" => Some((15, true)),
+            "DELETE" => Some((16, true)),
+            "GET" => Some((17, true)),
+            "HEAD" => Some((18, true)),
+            "OPTIONS" => Some((19, true)),
+            "POST" => Some((20, true)),
+            "PUT" => Some((21, true)),
+            _ => None,
+        };
+    }
+    if name.eq_ignore_ascii_case(":scheme") {
+        return match value {
+            "http" => Some((22, true)),
+            "https" => Some((23, true)),
+            _ => None,
+        };
+    }
+    if name.eq_ignore_ascii_case(":status") {
+        return match value {
+            "103" => Some((24, true)),
+            "200" => Some((25, true)),
+            "304" => Some((26, true)),
+            "404" => Some((27, true)),
+            "503" => Some((28, true)),
+            _ => None,
+        };
+    }
+    if name.eq_ignore_ascii_case("accept") {
+        return (value == "*/*").then_some((29, true));
+    }
+    if name.eq_ignore_ascii_case("content-type") {
+        return (value == "text/plain").then_some((53, true));
+    }
+    if name.eq_ignore_ascii_case("range") {
+        return (value == "bytes=0-").then_some((55, true));
     }
     None
 }
 
 fn static_by_index(index: u64) -> Option<(&'static str, &'static str)> {
-    STATIC_TABLE
-        .iter()
-        .find_map(|(entry_index, name, value)| (*entry_index == index).then_some((*name, *value)))
+    match index {
+        0 => Some((":authority", "")),
+        1 => Some((":path", "/")),
+        15 => Some((":method", "CONNECT")),
+        16 => Some((":method", "DELETE")),
+        17 => Some((":method", "GET")),
+        18 => Some((":method", "HEAD")),
+        19 => Some((":method", "OPTIONS")),
+        20 => Some((":method", "POST")),
+        21 => Some((":method", "PUT")),
+        22 => Some((":scheme", "http")),
+        23 => Some((":scheme", "https")),
+        24 => Some((":status", "103")),
+        25 => Some((":status", "200")),
+        26 => Some((":status", "304")),
+        27 => Some((":status", "404")),
+        28 => Some((":status", "503")),
+        29 => Some(("accept", "*/*")),
+        53 => Some(("content-type", "text/plain")),
+        55 => Some(("range", "bytes=0-")),
+        95 => Some(("user-agent", "")),
+        _ => None,
+    }
 }
-
-const STATIC_TABLE: &[(u64, &str, &str)] = &[
-    (0, ":authority", ""),
-    (1, ":path", "/"),
-    (15, ":method", "CONNECT"),
-    (16, ":method", "DELETE"),
-    (17, ":method", "GET"),
-    (18, ":method", "HEAD"),
-    (19, ":method", "OPTIONS"),
-    (20, ":method", "POST"),
-    (21, ":method", "PUT"),
-    (22, ":scheme", "http"),
-    (23, ":scheme", "https"),
-    (24, ":status", "103"),
-    (25, ":status", "200"),
-    (26, ":status", "304"),
-    (27, ":status", "404"),
-    (28, ":status", "503"),
-    (29, "accept", "*/*"),
-    (53, "content-type", "text/plain"),
-    (55, "range", "bytes=0-"),
-    (95, "user-agent", ""),
-];
 
 fn put_prefixed_string_with_strategy(
     out: &mut BytesMut,

@@ -350,7 +350,7 @@ mod tests {
             "https",
             "example.com",
             "/",
-            &Headers::from(vec![("user-agent".to_string(), "test".to_string())]),
+            Headers::from(vec![("user-agent".to_string(), "test".to_string())]),
         );
 
         // Block should be non-empty
@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn test_encoder_standard_order() {
         let mut encoder = HpackEncoder::new(PseudoHeaderOrder::Standard);
-        let block = encoder.encode_request("GET", "https", "example.com", "/", &Headers::new());
+        let block = encoder.encode_request("GET", "https", "example.com", "/", Headers::new());
 
         let mut decoder = HpackDecoder::new();
         let headers = decoder.decode(&block).unwrap();
@@ -399,7 +399,7 @@ mod tests {
             "https",
             "example.com",
             "/",
-            &Headers::from(vec![
+            Headers::from(vec![
                 ("connection".to_string(), "keep-alive".to_string()),
                 ("keep-alive".to_string(), "timeout=5".to_string()),
                 ("user-agent".to_string(), "test".to_string()),

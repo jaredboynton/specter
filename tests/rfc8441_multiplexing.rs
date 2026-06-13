@@ -76,6 +76,7 @@ async fn serve_rfc8441_tunnel_and_normal_request(
     assert_eq!(normal_stream_id % 2, 1);
 }
 
+#[allow(clippy::type_complexity)]
 async fn serve_direct_stream_or_rfc8441_tunnel(
     conn: MockH2Connection,
     observed: Arc<Mutex<Vec<(usize, u32, &'static str)>>>,

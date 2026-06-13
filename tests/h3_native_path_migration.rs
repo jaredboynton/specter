@@ -126,7 +126,7 @@ fn native_path_migration_soak_across_active_peer_address_changes() {
     let base = SocketAddr::from(([127, 0, 0, 1], 50_000));
     path_set.install_primary(base);
     for cycle in 0..20_u16 {
-        let migrated = SocketAddr::from(([127, 0, 0, 1], 50_001 + cycle as u16));
+        let migrated = SocketAddr::from(([127, 0, 0, 1], 50_001 + cycle));
         path_set.observe_packet_from(migrated, 1200, Instant::now());
         let mut token = [0u8; 8];
         token[..2].copy_from_slice(&cycle.to_be_bytes());

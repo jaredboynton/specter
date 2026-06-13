@@ -93,11 +93,7 @@ build:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    if [[ "$(uname -m)" == "arm64" ]]; then
-        TARGET="aarch64-apple-darwin"
-    else
-        TARGET="x86_64-apple-darwin"
-    fi
+    TARGET="$(./scripts/native-rust-target.sh)"
 
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 
@@ -154,11 +150,7 @@ check-lib:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    if [[ "$(uname -m)" == "arm64" ]]; then
-        TARGET="aarch64-apple-darwin"
-    else
-        TARGET="x86_64-apple-darwin"
-    fi
+    TARGET="$(./scripts/native-rust-target.sh)"
 
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 
@@ -170,11 +162,7 @@ check-changed base="main":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    if [[ "$(uname -m)" == "arm64" ]]; then
-        TARGET="aarch64-apple-darwin"
-    else
-        TARGET="x86_64-apple-darwin"
-    fi
+    TARGET="$(./scripts/native-rust-target.sh)"
 
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 
@@ -247,11 +235,7 @@ test:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    if [[ "$(uname -m)" == "arm64" ]]; then
-        TARGET="aarch64-apple-darwin"
-    else
-        TARGET="x86_64-apple-darwin"
-    fi
+    TARGET="$(./scripts/native-rust-target.sh)"
 
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 
@@ -263,11 +247,7 @@ test-one binary filter="":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    if [[ "$(uname -m)" == "arm64" ]]; then
-        TARGET="aarch64-apple-darwin"
-    else
-        TARGET="x86_64-apple-darwin"
-    fi
+    TARGET="$(./scripts/native-rust-target.sh)"
 
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 
@@ -290,11 +270,7 @@ bench-gate:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    if [[ "$(uname -m)" == "arm64" ]]; then
-        TARGET="aarch64-apple-darwin"
-    else
-        TARGET="x86_64-apple-darwin"
-    fi
+    TARGET="$(./scripts/native-rust-target.sh)"
 
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 
@@ -310,11 +286,7 @@ bench-gate-selftest:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    if [[ "$(uname -m)" == "arm64" ]]; then
-        TARGET="aarch64-apple-darwin"
-    else
-        TARGET="x86_64-apple-darwin"
-    fi
+    TARGET="$(./scripts/native-rust-target.sh)"
 
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 
@@ -338,11 +310,7 @@ clippy:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    if [[ "$(uname -m)" == "arm64" ]]; then
-        TARGET="aarch64-apple-darwin"
-    else
-        TARGET="x86_64-apple-darwin"
-    fi
+    TARGET="$(./scripts/native-rust-target.sh)"
 
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 

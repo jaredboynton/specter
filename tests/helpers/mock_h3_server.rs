@@ -188,6 +188,7 @@ impl MockH3Server {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_native_connection<F, Fut>(
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
@@ -304,16 +305,14 @@ impl NativeMockH3Connection {
             {
                 break;
             }
-            if self.handshake.close_state().is_closing()
-                || self.handshake.close_state().is_draining()
-            {
-                if self
+            if (self.handshake.close_state().is_closing()
+                || self.handshake.close_state().is_draining())
+                && self
                     .handshake
                     .server_is_close_window_expired(Instant::now())
-                {
-                    self.closed = true;
-                    break;
-                }
+            {
+                self.closed = true;
+                break;
             }
             if !self.closed && self.last_activity.elapsed() >= MOCK_IDLE_TIMEOUT {
                 if self.handshake.is_application_ready() {

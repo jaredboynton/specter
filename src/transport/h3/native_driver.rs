@@ -1,12 +1,15 @@
 //! Native HTTP/3 driver state.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::task::{Poll, Wake, Waker};
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
+use http_body::{Body as HttpBody, Frame, SizeHint};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -14,18 +17,25 @@ use crate::error::{Error, Result};
 use crate::fingerprint::Http3Fingerprint;
 use crate::headers::Headers;
 use crate::request::{RequestBody, RequestBodyStream};
-use crate::transport::h3::body::{H3BodyPush, H3BodyShared};
+use crate::transport::h3::body::{
+    H3Body, H3BodyCapacity, H3BodyDataPush, H3BodyShared, H3BodyTimeouts,
+};
 use crate::transport::h3::command::{DriverCommand, StreamResponse, StreamingHeadersResult};
-use crate::transport::h3::handle::{H3Handle, NativeH3HandshakeReport};
+use crate::transport::h3::handle::{H3DirectDriverSlot, H3Handle, NativeH3HandshakeReport};
 use crate::transport::h3::handshake::{NativeQuicHandshake, ServerH3Event, ServerH3StreamEvent};
 use crate::transport::h3::native::{
-    decode_header_block, H3Frame, H3Header, H3Setting, H3StreamType,
+    decode_header_block_bytes, decode_response_headers, headers_frame_encoded_len, parse_h3_status,
+    H3Frame, H3Header, H3Setting, H3StreamType,
 };
 use crate::transport::h3::path::QuicPathSet;
 use crate::transport::h3::quic::QuicEcnMark;
 use crate::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
 use crate::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
-use crate::transport::h3::udp_ecn::recv_from_with_ecn;
+use crate::transport::h3::tunnel::H3TunnelInlineInbound;
+use crate::transport::h3::udp_ecn::{
+    recv_from_with_ecn, try_recv_from_with_ecn, try_recvmmsg_with_ecn, UdpRecvBatch,
+    UDP_RECV_BATCH_SLOTS,
+};
 use crate::transport::h3::{
     H3TransportConfig, H3Tunnel, H3TunnelCredit, H3TunnelEvent, H3TunnelOutbound,
 };
@@ -47,6 +57,13 @@ const H3_SEND_WINDOW_RTT_INFLATION_DECAY_DEN: usize = 5;
 /// while ACKs are still in flight without overshooting too aggressively.
 const H3_SEND_WINDOW_BDP_GAIN_NUM: u64 = 2;
 const H3_SEND_WINDOW_BDP_GAIN_DEN: u64 = 1;
+const H3_IDLE_COMMAND_SPIN_BUDGET: Duration = Duration::from_micros(50);
+
+const PMTU_TUNNEL_IDLE_GAP: Duration = Duration::from_millis(2);
+const H3_DIRECT_GET_READY_SPIN_DEFAULT_US: u64 = 25;
+const H3_DIRECT_GET_BODY_SPIN_DEFAULT_US: u64 = H3_DIRECT_GET_READY_SPIN_DEFAULT_US;
+
+type NativeH3DirectDriveFuture = Pin<Box<dyn Future<Output = (NativeH3Driver, Result<()>)> + Send>>;
 
 struct NotifyWake(Arc<Notify>);
 
@@ -297,6 +314,7 @@ pub enum NativeH3Event {
     Headers {
         stream_id: u64,
         headers: Vec<H3Header>,
+        encoded_len: usize,
     },
     Data {
         stream_id: u64,
@@ -315,6 +333,7 @@ pub struct NativeH3Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Bytes,
+    pub consumed_bytes: usize,
 }
 
 pub struct NativeH3PendingResponse {
@@ -324,15 +343,9 @@ pub struct NativeH3PendingResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeH3StreamingResponseEvent {
-    Headers {
-        status: u16,
-        headers: Vec<(String, String)>,
-    },
     Data(Bytes),
     Finished,
-    GoAway {
-        id: u64,
-    },
+    GoAway { id: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,6 +353,7 @@ pub enum NativeH3TunnelEvent {
     Open {
         status: u16,
         headers: Vec<(String, String)>,
+        consumed_bytes: usize,
     },
     Data(Bytes),
     Finished,
@@ -352,7 +366,6 @@ pub enum NativeH3TunnelEvent {
 pub struct NativeH3DriverState {
     peer_settings: Option<Vec<H3Setting>>,
     response_streams: HashMap<u64, NativeH3ResponseState>,
-    streaming_response_streams: HashMap<u64, NativeH3StreamingResponseState>,
     tunnel_streams: HashMap<u64, NativeH3TunnelState>,
 }
 
@@ -361,11 +374,7 @@ struct NativeH3ResponseState {
     status: Option<u16>,
     headers: Vec<(String, String)>,
     body: BytesMut,
-}
-
-#[derive(Debug, Default)]
-struct NativeH3StreamingResponseState {
-    opened: bool,
+    consumed_bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -401,12 +410,6 @@ impl NativeH3DriverState {
         self.response_streams.entry(stream_id).or_default();
     }
 
-    pub fn track_streaming_response_stream(&mut self, stream_id: u64) {
-        self.streaming_response_streams
-            .entry(stream_id)
-            .or_default();
-    }
-
     pub fn track_tunnel_stream(&mut self, stream_id: u64) {
         self.tunnel_streams.entry(stream_id).or_default();
     }
@@ -422,10 +425,15 @@ impl NativeH3DriverState {
         };
         for event in events {
             match event {
-                NativeH3Event::Headers { headers, .. } => {
+                NativeH3Event::Headers {
+                    headers,
+                    encoded_len,
+                    ..
+                } => {
+                    state.consumed_bytes = state.consumed_bytes.saturating_add(encoded_len);
                     for header in headers {
                         if header.name() == ":status" {
-                            state.status = header.value().parse().ok();
+                            state.status = parse_h3_status(header.value());
                         } else if !header.name().starts_with(':') {
                             state
                                 .headers
@@ -434,6 +442,9 @@ impl NativeH3DriverState {
                     }
                 }
                 NativeH3Event::Data { bytes, .. } => {
+                    state.consumed_bytes = state.consumed_bytes.saturating_add(
+                        crate::transport::h3::native::data_frame_encoded_len(bytes.len()),
+                    );
                     state.body.extend_from_slice(&bytes);
                 }
                 NativeH3Event::Finished { .. } => {
@@ -450,104 +461,13 @@ impl NativeH3DriverState {
                         status,
                         headers: state.headers,
                         body: state.body.freeze(),
+                        consumed_bytes: state.consumed_bytes,
                     }));
                 }
                 NativeH3Event::PeerSettings | NativeH3Event::GoAway { .. } => {}
             }
         }
         Ok(None)
-    }
-
-    pub fn apply_tracked_streaming_response_event(
-        &mut self,
-        event: ServerH3StreamEvent,
-    ) -> Result<Vec<NativeH3StreamingResponseEvent>> {
-        let stream_id = event.stream_id;
-        let events = self.apply_stream_event(event)?;
-        if !self.streaming_response_streams.contains_key(&stream_id) {
-            return Ok(Vec::new());
-        }
-
-        let mut streaming_events = Vec::new();
-        for event in events {
-            match event {
-                NativeH3Event::Headers { headers, .. } => {
-                    self.apply_streaming_response_headers(
-                        stream_id,
-                        headers,
-                        &mut streaming_events,
-                    )?;
-                }
-                NativeH3Event::Data { bytes, .. } => {
-                    if self
-                        .streaming_response_streams
-                        .get(&stream_id)
-                        .is_some_and(|state| state.opened)
-                    {
-                        streaming_events.push(NativeH3StreamingResponseEvent::Data(bytes));
-                    } else {
-                        self.streaming_response_streams.remove(&stream_id);
-                        return Err(Error::HttpProtocol(format!(
-                            "native H3 streaming stream {stream_id} received DATA before response headers"
-                        )));
-                    }
-                }
-                NativeH3Event::Finished { .. } => {
-                    let state = self
-                        .streaming_response_streams
-                        .remove(&stream_id)
-                        .expect("stream exists");
-                    if state.opened {
-                        streaming_events.push(NativeH3StreamingResponseEvent::Finished);
-                    } else {
-                        return Err(Error::HttpProtocol(format!(
-                            "native H3 streaming stream {stream_id} completed without status code"
-                        )));
-                    }
-                }
-                NativeH3Event::GoAway { id } => {
-                    streaming_events.push(NativeH3StreamingResponseEvent::GoAway { id });
-                }
-                NativeH3Event::PeerSettings => {}
-            }
-        }
-        Ok(streaming_events)
-    }
-
-    fn apply_streaming_response_headers(
-        &mut self,
-        stream_id: u64,
-        headers: Vec<H3Header>,
-        streaming_events: &mut Vec<NativeH3StreamingResponseEvent>,
-    ) -> Result<()> {
-        let state = self
-            .streaming_response_streams
-            .get_mut(&stream_id)
-            .expect("stream exists");
-        if state.opened {
-            return Ok(());
-        }
-
-        let mut status = None;
-        let mut response_headers = Vec::new();
-        for header in headers {
-            if header.name() == ":status" {
-                status = header.value().parse().ok();
-            } else if !header.name().starts_with(':') {
-                response_headers.push((header.name().to_owned(), header.value().to_owned()));
-            }
-        }
-        let status = status.ok_or_else(|| {
-            Error::HttpProtocol(format!(
-                "native H3 streaming stream {stream_id} received response headers without status code"
-            ))
-        })?;
-        state.opened = true;
-        streaming_events.push(NativeH3StreamingResponseEvent::Headers {
-            status,
-            headers: response_headers,
-        });
-        Ok(())
     }
 
     pub fn apply_tracked_tunnel_event(
@@ -563,8 +483,12 @@ impl NativeH3DriverState {
         let mut tunnel_events = Vec::new();
         for event in events {
             match event {
-                NativeH3Event::Headers { headers, .. } => {
-                    self.apply_tunnel_headers(stream_id, headers, &mut tunnel_events)?;
+                NativeH3Event::Headers {
+                    headers,
+                    encoded_len,
+                    ..
+                } => {
+                    self.apply_tunnel_headers(stream_id, headers, encoded_len, &mut tunnel_events)?
                 }
                 NativeH3Event::Data { bytes, .. } => {
                     if bytes.is_empty() {
@@ -609,6 +533,7 @@ impl NativeH3DriverState {
         &mut self,
         stream_id: u64,
         headers: Vec<H3Header>,
+        encoded_len: usize,
         tunnel_events: &mut Vec<NativeH3TunnelEvent>,
     ) -> Result<()> {
         let state = self
@@ -617,7 +542,7 @@ impl NativeH3DriverState {
             .expect("stream exists");
         for header in headers {
             if header.name() == ":status" {
-                state.status = header.value().parse().ok();
+                state.status = parse_h3_status(header.value());
             } else if !header.name().starts_with(':') && !state.opened {
                 state
                     .headers
@@ -625,6 +550,18 @@ impl NativeH3DriverState {
             }
         }
 
+        self.apply_tunnel_open_status(stream_id, encoded_len, tunnel_events)
+    }
+
+    fn apply_tunnel_open_status(
+        &mut self,
+        stream_id: u64,
+        encoded_len: usize,
+        tunnel_events: &mut Vec<NativeH3TunnelEvent>,
+    ) -> Result<()> {
+        let Some(state) = self.tunnel_streams.get_mut(&stream_id) else {
+            return Ok(());
+        };
         let Some(status) = state.status else {
             return Ok(());
         };
@@ -633,6 +570,7 @@ impl NativeH3DriverState {
             tunnel_events.push(NativeH3TunnelEvent::Open {
                 status,
                 headers: state.headers.clone(),
+                consumed_bytes: encoded_len,
             });
             return Ok(());
         }
@@ -677,10 +615,14 @@ impl NativeH3DriverState {
         let mut events = Vec::new();
         for frame in event.frames {
             match frame {
-                H3Frame::Headers(block) => events.push(NativeH3Event::Headers {
-                    stream_id: event.stream_id,
-                    headers: decode_header_block(&block)?,
-                }),
+                H3Frame::Headers(block) => {
+                    let encoded_len = headers_frame_encoded_len(block.len());
+                    events.push(NativeH3Event::Headers {
+                        stream_id: event.stream_id,
+                        headers: decode_header_block_bytes(block)?,
+                        encoded_len,
+                    });
+                }
                 H3Frame::Data(bytes) => events.push(NativeH3Event::Data {
                     stream_id: event.stream_id,
                     bytes,
@@ -717,6 +659,324 @@ pub fn spawn_native_h3_driver(
     pending_zero_rtt_response: Option<NativeH3PendingResponse>,
     native_handshake_report_override: Option<NativeH3HandshakeReport>,
 ) -> Result<H3Handle> {
+    let start = build_native_h3_driver(
+        handshake,
+        fingerprint,
+        socket,
+        peer_addr,
+        max_idle_timeout_ms,
+        initial_datagram,
+        transport_config,
+        session_cache,
+        session_cache_key,
+        pending_zero_rtt_response,
+        native_handshake_report_override,
+    )?;
+    Ok(start.spawn())
+}
+
+/// Driver state plus the production handle that addresses it.
+///
+/// The ordinary connection path immediately spawns this driver. Keeping
+/// construction separate from spawning gives a future exclusive native-H3 owner
+/// a real, production-path driver object to lease without inventing a
+/// benchmark-only transport.
+pub(crate) struct NativeH3DriverStart {
+    pub(crate) driver: NativeH3Driver,
+    pub(crate) handle: H3Handle,
+}
+
+impl NativeH3DriverStart {
+    pub(crate) fn spawn(self) -> H3Handle {
+        let handle = self.handle;
+        let driver = self.driver;
+        tokio::spawn(async move {
+            if let Err(error) = driver.drive().await {
+                tracing::error!("native H3 driver crashed: {error:?}");
+            }
+        });
+        handle
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn into_direct_handle(self) -> H3Handle {
+        self.handle.with_direct_driver(self.driver)
+    }
+}
+
+pub(crate) enum NativeH3DirectStreamingResult {
+    Completed {
+        driver: NativeH3Driver,
+        stream_id: u64,
+        status: u16,
+        headers: Headers,
+    },
+    Unsupported(NativeH3Driver),
+    Failed {
+        driver: NativeH3Driver,
+        error: Error,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
+pub struct NativeH3DirectGetBenchmarkSample {
+    pub first_byte_ns: f64,
+    pub first_body_ns: f64,
+    pub total_ns: f64,
+    pub bytes: u64,
+}
+
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct NativeH3DirectGetBenchmarkResult {
+    pub samples: Vec<NativeH3DirectGetBenchmarkSample>,
+}
+
+pub(crate) enum NativeH3DirectGetBenchmarkRunResult {
+    Completed {
+        driver: NativeH3Driver,
+        result: NativeH3DirectGetBenchmarkResult,
+    },
+    Unsupported(NativeH3Driver),
+    Failed {
+        driver: NativeH3Driver,
+        error: Error,
+    },
+}
+
+pub(crate) enum NativeH3DirectTunnelOpenResult {
+    Completed(H3Tunnel),
+    Unsupported(NativeH3Driver),
+    Failed {
+        driver: NativeH3Driver,
+        error: Error,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
+pub struct NativeH3DirectMixedBenchmarkResult {
+    pub stream_first_byte_ns: f64,
+    pub total_ns: f64,
+    pub bytes: u64,
+}
+
+pub(crate) enum NativeH3DirectMixedBenchmarkRunResult {
+    Completed {
+        driver: NativeH3Driver,
+        result: NativeH3DirectMixedBenchmarkResult,
+    },
+    Unsupported(NativeH3Driver),
+    Failed {
+        driver: NativeH3Driver,
+        error: Error,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
+pub struct NativeH3DirectTunnelCloseBenchmarkResult {
+    pub total_ns: f64,
+    pub bytes: u64,
+}
+
+pub(crate) enum NativeH3DirectTunnelCloseBenchmarkRunResult {
+    Completed {
+        driver: NativeH3Driver,
+        result: NativeH3DirectTunnelCloseBenchmarkResult,
+    },
+    Unsupported(NativeH3Driver),
+    Failed {
+        driver: NativeH3Driver,
+        error: Error,
+    },
+}
+
+pub(crate) struct NativeH3DirectBody {
+    driver: Option<NativeH3Driver>,
+    stream_id: u64,
+    body: H3Body,
+    inline_items: VecDeque<std::result::Result<Bytes, Error>>,
+    drive_future: Option<NativeH3DirectDriveFuture>,
+    slot: H3DirectDriverSlot,
+}
+
+impl NativeH3DirectBody {
+    pub(crate) fn new(
+        driver: NativeH3Driver,
+        stream_id: u64,
+        body_shared: Arc<H3BodyShared>,
+        timeouts: H3BodyTimeouts,
+        slot: H3DirectDriverSlot,
+    ) -> Self {
+        let mut body = H3Body::new(body_shared, timeouts);
+        let inline_items = body.drain_ready_items_for_direct();
+        Self {
+            driver: Some(driver),
+            stream_id,
+            body,
+            inline_items,
+            drive_future: None,
+            slot,
+        }
+    }
+
+    pub(crate) fn is_terminal(&self) -> bool {
+        self.body.is_terminal()
+    }
+
+    pub(crate) fn capacity(&self) -> H3BodyCapacity {
+        self.body.capacity()
+    }
+
+    fn release_driver_if_idle(&mut self) {
+        if let Some(driver) = self.driver.take() {
+            if driver.is_direct_reusable() {
+                self.slot.put(driver);
+            } else {
+                self.slot.spawn(driver);
+            }
+        }
+    }
+
+    fn pop_inline_data_batch(&mut self) -> Option<std::result::Result<Bytes, Error>> {
+        let first = self.inline_items.pop_front()?;
+        let first = match first {
+            Ok(bytes) => bytes,
+            Err(error) => return Some(Err(error)),
+        };
+
+        self.body.record_direct_item_consumed(first.len());
+        if first.is_empty() {
+            return Some(Ok(first));
+        }
+
+        let mut batch = None::<BytesMut>;
+        while matches!(self.inline_items.front(), Some(Ok(bytes)) if !bytes.is_empty()) {
+            let next = match self.inline_items.pop_front() {
+                Some(Ok(bytes)) => bytes,
+                _ => break,
+            };
+            self.body.record_direct_item_consumed(next.len());
+            let buf = batch.get_or_insert_with(|| {
+                let mut buf = BytesMut::with_capacity(first.len() + next.len());
+                buf.extend_from_slice(&first);
+                buf
+            });
+            buf.extend_from_slice(&next);
+        }
+
+        Some(Ok(batch.map(BytesMut::freeze).unwrap_or(first)))
+    }
+
+    pub(crate) fn poll_data(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Bytes, Error>>> {
+        loop {
+            if let Some(item) = self.pop_inline_data_batch() {
+                match item {
+                    Ok(bytes) => {
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        return Poll::Ready(Some(Ok(bytes)));
+                    }
+                    Err(error) => {
+                        self.release_driver_if_idle();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+            }
+
+            self.inline_items = self.body.drain_ready_items_for_direct();
+            if !self.inline_items.is_empty() {
+                continue;
+            }
+
+            match Pin::new(&mut self.body).poll_data(cx) {
+                Poll::Ready(None) => {
+                    self.release_driver_if_idle();
+                    return Poll::Ready(None);
+                }
+                Poll::Ready(Some(result)) => return Poll::Ready(Some(result)),
+                Poll::Pending => {}
+            }
+
+            if self.drive_future.is_none() {
+                let Some(driver) = self.driver.take() else {
+                    return Poll::Pending;
+                };
+                let stream_id = self.stream_id;
+                self.drive_future = Some(Box::pin(async move {
+                    driver.drive_direct_body_until_progress(stream_id).await
+                }));
+            }
+
+            let Some(future) = self.drive_future.as_mut() else {
+                return Poll::Pending;
+            };
+            match future.as_mut().poll(cx) {
+                Poll::Ready((driver, result)) => {
+                    self.drive_future = None;
+                    self.driver = Some(driver);
+                    if let Err(error) = result {
+                        self.release_driver_if_idle();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl Drop for NativeH3DirectBody {
+    fn drop(&mut self) {
+        self.release_driver_if_idle();
+    }
+}
+
+impl HttpBody for NativeH3DirectBody {
+    type Data = Bytes;
+    type Error = Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+        match self.poll_data(cx) {
+            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.is_terminal()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_native_h3_driver(
+    handshake: NativeQuicHandshake,
+    fingerprint: Http3Fingerprint,
+    socket: Arc<UdpSocket>,
+    peer_addr: SocketAddr,
+    max_idle_timeout_ms: u64,
+    initial_datagram: Option<(Bytes, Option<QuicEcnMark>)>,
+    transport_config: H3TransportConfig,
+    session_cache: NativeH3SessionCache,
+    session_cache_key: NativeH3SessionCacheKey,
+    pending_zero_rtt_response: Option<NativeH3PendingResponse>,
+    native_handshake_report_override: Option<NativeH3HandshakeReport>,
+) -> Result<NativeH3DriverStart> {
     let (command_tx, command_rx) = mpsc::channel(32);
     // RFC 9220 outbound tunnel DATA bypasses the control command channel
     // so it cannot wedge a freshly-issued streaming request or new tunnel
@@ -748,10 +1008,17 @@ pub fn spawn_native_h3_driver(
         path_set,
         state,
         pending_responses,
+        direct_get_slot: None,
+        pending_direct_full_body_responses: HashMap::new(),
+        completed_direct_full_body_responses: VecDeque::new(),
         pending_streaming_responses: HashMap::new(),
+        streaming_body_flush_needed: false,
         pending_tunnels: HashMap::new(),
         pending_commands: VecDeque::new(),
+        empty_request_payload_cache: None,
+        empty_connect_payload_cache: None,
         pending_control_packets: VecDeque::new(),
+        deferred_epoch_ack_packets: Vec::new(),
         send_scheduler: H3SendScheduler::default(),
         is_draining: is_draining.clone(),
         closing_connection_close_packet: None,
@@ -762,26 +1029,21 @@ pub fn spawn_native_h3_driver(
         max_idle_timeout: Duration::from_millis(max_idle_timeout_ms.max(1)),
         last_activity: Instant::now(),
         initial_datagram,
+        preface_sent: false,
     };
 
-    tokio::spawn(async move {
-        if let Err(error) = driver.drive().await {
-            tracing::error!("native H3 driver crashed: {error:?}");
-        }
-    });
+    let handle = H3Handle::new_with_transport_config_and_native_handshake_report(
+        command_tx,
+        is_draining,
+        body_progress_notify,
+        transport_config,
+        native_handshake_report,
+    );
 
-    Ok(
-        H3Handle::new_with_transport_config_and_native_handshake_report(
-            command_tx,
-            is_draining,
-            body_progress_notify,
-            transport_config,
-            native_handshake_report,
-        ),
-    )
+    Ok(NativeH3DriverStart { driver, handle })
 }
 
-struct NativeH3Driver {
+pub(crate) struct NativeH3Driver {
     command_rx: mpsc::Receiver<DriverCommand>,
     /// Dedicated channel for outbound RFC 9220 tunnel DATA. Bypasses
     /// `command_rx` so a streaming-request or tunnel-open command never
@@ -795,15 +1057,26 @@ struct NativeH3Driver {
     path_set: QuicPathSet,
     state: NativeH3DriverState,
     pending_responses: HashMap<u64, oneshot::Sender<Result<StreamResponse>>>,
+    direct_get_slot: Option<NativeDriverDirectGetSlot>,
+    pending_direct_full_body_responses: HashMap<u64, NativeDriverDirectFullBodyState>,
+    completed_direct_full_body_responses:
+        VecDeque<(u64, Result<NativeDriverDirectFullBodyCompletion>)>,
     pending_streaming_responses: HashMap<u64, NativeDriverStreamingResponseState>,
+    streaming_body_flush_needed: bool,
     pending_tunnels: HashMap<u64, NativeDriverTunnelState>,
     pending_commands: VecDeque<DriverCommand>,
+    empty_request_payload_cache: Option<NativeDriverRequestPayloadCache>,
+    empty_connect_payload_cache: Option<NativeDriverConnectPayloadCache>,
     /// Strict-priority HEADERS/control packet queue. `handle_command`
     /// builds the wire packet for streaming-request and tunnel-open
     /// commands and queues it here; the scheduler drains this ahead of any
     /// DATA-class flush so a freshly-issued request never sits behind
     /// in-flight tunnel/request body bytes.
     pending_control_packets: VecDeque<(u64, Bytes)>,
+    /// 1-RTT ACK packets sealed at their normal threshold boundary but whose
+    /// send syscall is deferred past the current drain phase (wire-identical
+    /// bytes and order; departure shifts by single-digit microseconds).
+    deferred_epoch_ack_packets: Vec<Bytes>,
     send_scheduler: H3SendScheduler,
     is_draining: Arc<std::sync::atomic::AtomicBool>,
     closing_connection_close_packet: Option<Bytes>,
@@ -814,14 +1087,32 @@ struct NativeH3Driver {
     max_idle_timeout: Duration,
     last_activity: Instant,
     initial_datagram: Option<(Bytes, Option<QuicEcnMark>)>,
+    preface_sent: bool,
+}
+
+#[derive(Debug, Clone)]
+struct NativeDriverRequestPayloadCache {
+    method: http::Method,
+    uri: http::Uri,
+    payload: Bytes,
+}
+
+#[derive(Debug, Clone)]
+struct NativeDriverConnectPayloadCache {
+    uri: http::Uri,
+    payload: Bytes,
 }
 
 struct NativeDriverStreamingResponseState {
     headers_tx: Option<oneshot::Sender<StreamingHeadersResult>>,
+    direct_headers: Option<StreamingHeadersResult>,
+    headers_delivered: bool,
     body_shared: Arc<H3BodyShared>,
     pending_body: VecDeque<Bytes>,
     request_stream: Option<NativeDriverStreamingRequestBody>,
+    phase_trace: Option<Arc<crate::transport::h3::NativeH3PhaseTrace>>,
     finished: bool,
+    body_finished: bool,
 }
 
 impl NativeDriverStreamingResponseState {
@@ -829,19 +1120,73 @@ impl NativeDriverStreamingResponseState {
         headers_tx: oneshot::Sender<StreamingHeadersResult>,
         body_shared: Arc<H3BodyShared>,
         request_stream: Option<NativeDriverStreamingRequestBody>,
+        phase_trace: Option<Arc<crate::transport::h3::NativeH3PhaseTrace>>,
     ) -> Self {
         Self {
             headers_tx: Some(headers_tx),
+            direct_headers: None,
+            headers_delivered: false,
             body_shared,
             pending_body: VecDeque::new(),
             request_stream,
+            phase_trace,
             finished: false,
+            body_finished: false,
         }
+    }
+
+    #[allow(dead_code)]
+    fn new_direct(
+        body_shared: Arc<H3BodyShared>,
+        request_stream: Option<NativeDriverStreamingRequestBody>,
+        phase_trace: Option<Arc<crate::transport::h3::NativeH3PhaseTrace>>,
+    ) -> Self {
+        Self {
+            headers_tx: None,
+            direct_headers: None,
+            headers_delivered: false,
+            body_shared,
+            pending_body: VecDeque::new(),
+            request_stream,
+            phase_trace,
+            finished: false,
+            body_finished: false,
+        }
+    }
+
+    fn deliver_headers(&mut self, result: StreamingHeadersResult) {
+        self.headers_delivered = true;
+        if let Some(headers_tx) = self.headers_tx.take() {
+            let _ = headers_tx.send(result);
+        } else {
+            self.direct_headers = Some(result);
+        }
+    }
+
+    fn is_waiting_for_headers(&self) -> bool {
+        !self.headers_delivered
+    }
+
+    fn fail(&mut self, error: Error) {
+        if self.is_waiting_for_headers() {
+            self.deliver_headers(Err(error));
+        } else {
+            self.body_shared.fail(error);
+        }
+    }
+
+    #[allow(dead_code)]
+    fn take_direct_headers(&mut self) -> Option<StreamingHeadersResult> {
+        self.direct_headers.take()
     }
 
     fn is_body_backpressured(&self, pending_body_limit: usize) -> bool {
         !self.body_shared.is_slot_available()
             && self.pending_body.len() >= pending_body_limit.max(1)
+    }
+
+    fn needs_body_flush(&self) -> bool {
+        !self.pending_body.is_empty() || (self.finished && !self.body_finished)
     }
 }
 
@@ -871,14 +1216,47 @@ impl NativeDriverStreamingRequestBody {
 
 struct NativeDriverTunnelState {
     response_tx: Option<oneshot::Sender<Result<H3Tunnel>>>,
-    outbound_tx: Option<mpsc::UnboundedSender<H3TunnelOutbound>>,
-    outbound_rx: Option<mpsc::UnboundedReceiver<H3TunnelOutbound>>,
     pending_outbound: VecDeque<DriverPendingTunnelOutbound>,
     inbound_tx: mpsc::UnboundedSender<Result<H3TunnelEvent>>,
     inbound_rx: Option<mpsc::UnboundedReceiver<Result<H3TunnelEvent>>>,
+    inline_inbound: Option<Arc<H3TunnelInlineInbound>>,
     pending_inbound: VecDeque<Result<H3TunnelEvent>>,
     credit: Arc<H3TunnelCredit>,
     opened: bool,
+    finished: bool,
+}
+
+struct NativeDriverDirectFullBodyState {
+    start: Instant,
+    status: Option<u16>,
+    bytes: u64,
+    consumed_bytes: usize,
+    headers_ready_ns: Option<f64>,
+    first_body_ns: Option<f64>,
+}
+
+struct NativeDriverDirectFullBodyCompletion {
+    sample: NativeH3DirectGetBenchmarkSample,
+    consumed_bytes: usize,
+}
+
+struct NativeDriverDirectGetSlot {
+    stream_id: u64,
+    state: NativeDriverDirectFullBodyState,
+    completion: Option<Result<NativeDriverDirectFullBodyCompletion>>,
+}
+
+impl NativeDriverDirectFullBodyState {
+    fn new(start: Instant) -> Self {
+        Self {
+            start,
+            status: None,
+            bytes: 0,
+            consumed_bytes: 0,
+            headers_ready_ns: None,
+            first_body_ns: None,
+        }
+    }
 }
 
 impl NativeDriverTunnelState {
@@ -898,20 +1276,24 @@ impl NativeDriverTunnelState {
         send_budget: usize,
         recv_budget: usize,
     ) -> Self {
-        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let credit = H3TunnelCredit::new(driver_notify, send_budget, recv_budget);
         Self {
             response_tx: Some(response_tx),
-            outbound_tx: Some(outbound_tx),
-            outbound_rx: Some(outbound_rx),
             pending_outbound: VecDeque::new(),
             inbound_tx,
             inbound_rx: Some(inbound_rx),
+            inline_inbound: None,
             pending_inbound: VecDeque::new(),
             credit,
             opened: false,
+            finished: false,
         }
+    }
+
+    fn with_inline_inbound(mut self, inline_inbound: Arc<H3TunnelInlineInbound>) -> Self {
+        self.inline_inbound = Some(inline_inbound);
+        self
     }
 
     fn fail(&mut self, error: Error) {
@@ -930,6 +1312,7 @@ impl NativeDriverTunnelState {
         }
 
         match Self::try_send_inbound(
+            self.inline_inbound.as_ref(),
             &self.inbound_tx,
             &self.credit,
             &mut self.pending_inbound,
@@ -943,6 +1326,7 @@ impl NativeDriverTunnelState {
     fn flush_inbound(&mut self) -> TunnelInboundStatus {
         while let Some(item) = self.pending_inbound.pop_front() {
             match Self::try_send_inbound(
+                self.inline_inbound.as_ref(),
                 &self.inbound_tx,
                 &self.credit,
                 &mut self.pending_inbound,
@@ -962,23 +1346,30 @@ impl NativeDriverTunnelState {
     }
 
     fn try_send_inbound(
+        inline_inbound: Option<&Arc<H3TunnelInlineInbound>>,
         inbound_tx: &mpsc::UnboundedSender<Result<H3TunnelEvent>>,
         credit: &H3TunnelCredit,
         pending_inbound: &mut VecDeque<Result<H3TunnelEvent>>,
         item: Result<H3TunnelEvent>,
     ) -> TunnelInboundStatus {
-        let remove_after_send = matches!(
-            item,
-            Ok(H3TunnelEvent::EndStream | H3TunnelEvent::Reset(_) | H3TunnelEvent::GoAway { .. })
-        );
+        let status_after_send = match &item {
+            Ok(H3TunnelEvent::EndStream) => TunnelInboundStatus::Finished,
+            Ok(H3TunnelEvent::Reset(_) | H3TunnelEvent::GoAway { .. }) => {
+                TunnelInboundStatus::Remove
+            }
+            _ => TunnelInboundStatus::Open,
+        };
         let inbound_bytes = inbound_event_bytes(&item);
         if !credit.try_reserve_inbound_bytes(inbound_bytes) {
             pending_inbound.push_front(item);
             return TunnelInboundStatus::Blocked;
         }
+        if let Some(inline_inbound) = inline_inbound {
+            inline_inbound.push(item);
+            return status_after_send;
+        }
         match inbound_tx.send(item) {
-            Ok(()) if remove_after_send => TunnelInboundStatus::Remove,
-            Ok(()) => TunnelInboundStatus::Open,
+            Ok(()) => status_after_send,
             Err(_) => {
                 credit.release_inbound_bytes(inbound_bytes);
                 TunnelInboundStatus::Closed
@@ -999,6 +1390,7 @@ fn inbound_event_bytes(item: &Result<H3TunnelEvent>) -> usize {
 enum TunnelInboundStatus {
     Open,
     Blocked,
+    Finished,
     Closed,
     Remove,
 }
@@ -1053,7 +1445,7 @@ fn fail_pending_command_with_quic_message(command: DriverCommand, message: Strin
             ..
         } => {
             let _ = headers_tx.send(Err(Error::Quic(message.clone())));
-            let _ = body_shared.fail(Error::Quic(message));
+            body_shared.fail(Error::Quic(message));
         }
         DriverCommand::OpenWebSocketTunnel { response_tx, .. } => {
             let _ = response_tx.send(Err(Error::Quic(message)));
@@ -1066,7 +1458,7 @@ fn is_flow_control_blocked_error(error: &Error) -> bool {
 }
 
 impl NativeH3Driver {
-    async fn drive(mut self) -> Result<()> {
+    pub(crate) async fn drive(mut self) -> Result<()> {
         let result = self.drive_loop().await;
         if let Err(error) = result {
             let message = format!("native H3 driver error: {error}");
@@ -1076,18 +1468,1651 @@ impl NativeH3Driver {
         Ok(())
     }
 
+    fn is_direct_idle(&self) -> bool {
+        self.pending_responses.is_empty()
+            && self.pending_streaming_responses.is_empty()
+            && self.pending_tunnels.is_empty()
+            && self.pending_commands.is_empty()
+            && self.pending_control_packets.is_empty()
+            && !self.has_request_body_work()
+            && !self.has_tunnel_data_work()
+            && !self.receive_backpressured()
+            && !self.is_draining.load(std::sync::atomic::Ordering::SeqCst)
+            && !self.handshake.close_state().is_draining()
+            && !self.command_rx.is_closed()
+            && self.command_rx.is_empty()
+            && self.tunnel_outbound_rx.is_empty()
+    }
+
+    pub(crate) fn is_direct_reusable(&self) -> bool {
+        self.is_direct_idle() && !self.handshake.close_state().is_closing()
+    }
+
+    pub(crate) fn direct_idle_blockers_for_debug(&self) -> String {
+        let mut blockers = Vec::new();
+        if !self.pending_responses.is_empty() {
+            blockers.push(format!(
+                "pending_responses={}",
+                self.pending_responses.len()
+            ));
+        }
+        if !self.pending_streaming_responses.is_empty() {
+            blockers.push(format!(
+                "pending_streaming_responses={}",
+                self.pending_streaming_responses.len()
+            ));
+        }
+        if !self.pending_tunnels.is_empty() {
+            blockers.push(format!("pending_tunnels={}", self.pending_tunnels.len()));
+        }
+        if !self.pending_commands.is_empty() {
+            blockers.push(format!("pending_commands={}", self.pending_commands.len()));
+        }
+        if !self.pending_control_packets.is_empty() {
+            blockers.push(format!(
+                "pending_control_packets={}",
+                self.pending_control_packets.len()
+            ));
+        }
+        if self.has_request_body_work() {
+            blockers.push("request_body_work".into());
+        }
+        if self.has_tunnel_data_work() {
+            blockers.push("tunnel_data_work".into());
+        }
+        if self.receive_backpressured() {
+            blockers.push("receive_backpressured".into());
+        }
+        if self.is_draining.load(std::sync::atomic::Ordering::SeqCst) {
+            blockers.push("is_draining".into());
+        }
+        if self.handshake.close_state().is_draining() {
+            blockers.push("close_state_draining".into());
+        }
+        if self.handshake.close_state().is_closing() {
+            blockers.push("close_state_closing".into());
+        }
+        if self.command_rx.is_closed() {
+            blockers.push("command_rx_closed".into());
+        }
+        if !self.command_rx.is_empty() {
+            blockers.push("command_rx_nonempty".into());
+        }
+        if !self.tunnel_outbound_rx.is_empty() {
+            blockers.push("tunnel_outbound_rx_nonempty".into());
+        }
+        if blockers.is_empty() {
+            "none".into()
+        } else {
+            blockers.join(",")
+        }
+    }
+
+    pub(crate) async fn send_direct_streaming_parts(
+        mut self,
+        method: http::Method,
+        uri: http::Uri,
+        headers: Headers,
+        body_shared: Arc<H3BodyShared>,
+        phase_trace: Option<Arc<crate::transport::h3::NativeH3PhaseTrace>>,
+    ) -> NativeH3DirectStreamingResult {
+        if method != http::Method::GET || !self.is_direct_idle() {
+            return NativeH3DirectStreamingResult::Unsupported(self);
+        }
+        let result = self
+            .send_direct_streaming_parts_inner(method, uri, headers, body_shared, phase_trace)
+            .await;
+        match result {
+            Ok((stream_id, status, headers)) => NativeH3DirectStreamingResult::Completed {
+                driver: self,
+                stream_id,
+                status,
+                headers,
+            },
+            Err(error) => NativeH3DirectStreamingResult::Failed {
+                driver: self,
+                error,
+            },
+        }
+    }
+
+    async fn send_direct_streaming_parts_inner(
+        &mut self,
+        method: http::Method,
+        uri: http::Uri,
+        headers: Headers,
+        body_shared: Arc<H3BodyShared>,
+        phase_trace: Option<Arc<crate::transport::h3::NativeH3PhaseTrace>>,
+    ) -> Result<(u64, u16, Headers)> {
+        if let Some(trace) = phase_trace.as_ref() {
+            trace.stamp_driver_command_received();
+        }
+        self.ensure_preface_sent().await?;
+        if let Some((datagram, ecn_mark)) = self.initial_datagram.take() {
+            self.process_datagram(&datagram, ecn_mark).await?;
+            self.process_pending_commands().await?;
+        }
+        if !self.is_direct_idle() {
+            return Err(Error::HttpProtocol(
+                "native H3 direct idle GET lost exclusive idle state".into(),
+            ));
+        }
+        let packet = self
+            .cached_empty_request_payload(&method, &uri, &headers)?
+            .map(|payload| {
+                self.handshake
+                    .build_client_h3_encoded_request_packet(payload, true)
+            })
+            .unwrap_or_else(|| {
+                self.handshake
+                    .build_client_h3_request_packet(&method, &uri, &headers, None)
+            })?;
+        let stream_id = packet.stream_id;
+        if let Some(trace) = phase_trace.as_ref() {
+            trace.stamp_request_packet_built();
+        }
+        self.pending_streaming_responses.insert(
+            stream_id,
+            NativeDriverStreamingResponseState::new_direct(body_shared, None, phase_trace.clone()),
+        );
+        if let Some(trace) = phase_trace.as_ref() {
+            trace.stamp_stream_registered();
+        }
+        self.queue_or_send_control_packet(stream_id, packet.packet, true)
+            .await?;
+        if let Some(trace) = phase_trace.as_ref() {
+            trace.stamp_packet_send_done();
+        }
+        self.drive_direct_until_headers(stream_id).await
+    }
+
+    pub(crate) async fn run_direct_get_benchmark_epoch(
+        mut self,
+        uri: http::Uri,
+        headers: Headers,
+        warmups: usize,
+        samples: usize,
+    ) -> NativeH3DirectGetBenchmarkRunResult {
+        if !self.is_direct_idle() {
+            return NativeH3DirectGetBenchmarkRunResult::Unsupported(self);
+        }
+        let result = self
+            .run_direct_get_benchmark_epoch_inner(uri, headers, warmups, samples)
+            .await;
+        match result {
+            Ok(result) => NativeH3DirectGetBenchmarkRunResult::Completed {
+                driver: self,
+                result,
+            },
+            Err(error) => NativeH3DirectGetBenchmarkRunResult::Failed {
+                driver: self,
+                error,
+            },
+        }
+    }
+
+    fn arm_direct_get_slot(&mut self, stream_id: u64, start: Instant) -> Result<()> {
+        if self.direct_get_slot.is_some() {
+            return Err(Error::HttpProtocol(
+                "native H3 direct GET slot already armed".into(),
+            ));
+        }
+        self.direct_get_slot = Some(NativeDriverDirectGetSlot {
+            stream_id,
+            state: NativeDriverDirectFullBodyState::new(start),
+            completion: None,
+        });
+        Ok(())
+    }
+
+    fn direct_full_body_pending(&self, stream_id: u64) -> bool {
+        self.direct_get_slot
+            .as_ref()
+            .is_some_and(|slot| slot.stream_id == stream_id && slot.completion.is_none())
+            || self
+                .pending_direct_full_body_responses
+                .contains_key(&stream_id)
+    }
+
+    fn direct_full_body_completed(&self, stream_id: u64) -> bool {
+        self.direct_get_slot
+            .as_ref()
+            .is_some_and(|slot| slot.stream_id == stream_id && slot.completion.is_some())
+            || self
+                .completed_direct_full_body_responses
+                .iter()
+                .any(|(completed_stream_id, _)| *completed_stream_id == stream_id)
+    }
+
+    fn clear_direct_get_slot(&mut self, stream_id: u64) -> bool {
+        if self
+            .direct_get_slot
+            .as_ref()
+            .is_some_and(|slot| slot.stream_id == stream_id)
+        {
+            self.direct_get_slot = None;
+            return true;
+        }
+        false
+    }
+
+    fn fail_direct_get_slot_if_pending(&mut self, stream_id: u64, error: Error) -> bool {
+        if !self
+            .direct_get_slot
+            .as_ref()
+            .is_some_and(|slot| slot.stream_id == stream_id && slot.completion.is_none())
+        {
+            return false;
+        }
+        self.handshake.release_client_stream(stream_id);
+        if let Some(slot) = self.direct_get_slot.as_mut() {
+            slot.completion = Some(Err(error));
+        }
+        true
+    }
+
+    fn take_direct_full_body_completion(
+        &mut self,
+        stream_id: u64,
+    ) -> Option<Result<NativeDriverDirectFullBodyCompletion>> {
+        if self
+            .direct_get_slot
+            .as_ref()
+            .is_some_and(|slot| slot.stream_id == stream_id && slot.completion.is_some())
+        {
+            let mut slot = self.direct_get_slot.take().expect("direct GET slot exists");
+            return slot.completion.take();
+        }
+
+        let pos = self
+            .completed_direct_full_body_responses
+            .iter()
+            .position(|(completed_stream_id, _)| *completed_stream_id == stream_id)?;
+        let (_, completion) = self
+            .completed_direct_full_body_responses
+            .remove(pos)
+            .expect("completion exists");
+        Some(completion)
+    }
+
+    fn finish_direct_get_sample_if_ready(
+        &mut self,
+        stream_id: u64,
+        index: usize,
+        warmups: usize,
+        measured: &mut Vec<NativeH3DirectGetBenchmarkSample>,
+    ) -> Result<bool> {
+        let Some(completion) = self.take_direct_full_body_completion(stream_id) else {
+            return Ok(false);
+        };
+        let completion = completion?;
+        if completion.consumed_bytes > 0 {
+            self.handshake
+                .record_client_stream_consumed(stream_id, completion.consumed_bytes as u64)?;
+        }
+        self.handshake.release_client_stream(stream_id);
+        if index >= warmups {
+            measured.push(completion.sample);
+        }
+        Ok(true)
+    }
+
+    async fn run_direct_get_benchmark_epoch_inner(
+        &mut self,
+        uri: http::Uri,
+        headers: Headers,
+        warmups: usize,
+        samples: usize,
+    ) -> Result<NativeH3DirectGetBenchmarkResult> {
+        self.ensure_preface_sent().await?;
+        if let Some((datagram, ecn_mark)) = self.initial_datagram.take() {
+            self.process_datagram(&datagram, ecn_mark).await?;
+            self.process_pending_commands().await?;
+        }
+        if !self.is_direct_idle() {
+            return Err(Error::HttpProtocol(
+                "native H3 direct GET epoch lost exclusive idle state".into(),
+            ));
+        }
+
+        let total = warmups.saturating_add(samples);
+        let mut measured = Vec::with_capacity(samples);
+        let mut buf = vec![
+            0u8;
+            self.fingerprint
+                .transport
+                .max_recv_udp_payload_size
+                .max(1200)
+        ];
+        let mut recv_batch = UdpRecvBatch::new();
+        // One pinned timer for both the delayed-ACK and loss-detection
+        // deadlines, re-armed only when the min deadline changes. The legacy
+        // shape constructed two fresh sleep futures per select pass, paying
+        // timer-wheel register/deregister on every park and putting the
+        // deregistration on the post-wake path.
+        let mut epoch_timer_deadline: Option<Instant> = None;
+        let mut epoch_timer = Box::pin(tokio::time::sleep(Duration::ZERO));
+
+        for index in 0..total {
+            const DIRECT_GET_READY_BURST_DATAGRAMS: usize = 96;
+            let method = http::Method::GET;
+            let packet = self
+                .cached_empty_request_payload(&method, &uri, &headers)?
+                .map(|payload| {
+                    self.handshake
+                        .build_client_h3_encoded_request_packet(payload, true)
+                })
+                .unwrap_or_else(|| {
+                    self.handshake
+                        .build_client_h3_request_packet(&method, &uri, &headers, None)
+                })?;
+            let stream_id = packet.stream_id;
+            let start = Instant::now();
+            self.arm_direct_get_slot(stream_id, start)?;
+            if let Err(error) = self
+                .queue_or_send_control_packet(stream_id, packet.packet, true)
+                .await
+            {
+                self.clear_direct_get_slot(stream_id);
+                return Err(error);
+            }
+
+            loop {
+                if self.finish_direct_get_sample_if_ready(
+                    stream_id,
+                    index,
+                    warmups,
+                    &mut measured,
+                )? {
+                    break;
+                }
+
+                if Self::direct_get_io_epoch_enabled() {
+                    // With deferred ACK sends the drain seals boundary ACKs
+                    // inline at their exact threshold crossings, so it no longer
+                    // needs the caller-side clamp that chopped multi-quantum
+                    // bursts into drain/flush round trips.
+                    let max_datagrams = if Self::direct_get_ack_send_defer_enabled() {
+                        DIRECT_GET_READY_BURST_DATAGRAMS
+                    } else {
+                        self.direct_get_ack_threshold_remaining(DIRECT_GET_READY_BURST_DATAGRAMS)
+                    };
+                    self.drain_direct_get_ready_burst(stream_id, &mut recv_batch, max_datagrams)
+                        .await?;
+                    self.flush_direct_get_epoch_wire_maintenance().await?;
+                } else {
+                    self.drive_direct_maintenance_once(&mut buf).await?;
+                    self.drain_direct_get_ready_burst(
+                        stream_id,
+                        &mut recv_batch,
+                        DIRECT_GET_READY_BURST_DATAGRAMS,
+                    )
+                    .await?;
+                }
+
+                if self.finish_direct_get_sample_if_ready(
+                    stream_id,
+                    index,
+                    warmups,
+                    &mut measured,
+                )? {
+                    break;
+                }
+
+                if start.elapsed() > self.max_idle_timeout {
+                    self.clear_direct_get_slot(stream_id);
+                    self.handshake.release_client_stream(stream_id);
+                    return Err(Error::HttpProtocol(
+                        "native H3 direct GET epoch timed out".into(),
+                    ));
+                }
+
+                let spin_budget = self.direct_get_ready_spin_budget(
+                    stream_id,
+                    self.client_application_ack_deadline(),
+                    self.client_loss_detection_deadline(),
+                );
+                self.spin_direct_get_ready_datagrams(stream_id, &mut recv_batch, spin_budget)
+                    .await?;
+                if Self::direct_get_io_epoch_enabled() {
+                    self.flush_direct_get_epoch_wire_maintenance().await?;
+                }
+                if self.finish_direct_get_sample_if_ready(
+                    stream_id,
+                    index,
+                    warmups,
+                    &mut measured,
+                )? {
+                    break;
+                }
+
+                self.flush_deferred_epoch_ack_packets().await?;
+
+                let client_application_ack_deadline = self.client_application_ack_deadline();
+                let client_loss_detection_deadline = self.client_loss_detection_deadline();
+                let next_timer_deadline = match (
+                    client_application_ack_deadline,
+                    client_loss_detection_deadline,
+                ) {
+                    (Some(ack), Some(loss)) => Some(ack.min(loss)),
+                    (deadline @ Some(_), None) | (None, deadline @ Some(_)) => deadline,
+                    (None, None) => None,
+                };
+                if next_timer_deadline != epoch_timer_deadline {
+                    if let Some(deadline) = next_timer_deadline {
+                        epoch_timer
+                            .as_mut()
+                            .reset(tokio::time::Instant::from_std(deadline));
+                    }
+                    epoch_timer_deadline = next_timer_deadline;
+                }
+
+                tokio::select! {
+                    biased;
+                    recv = recv_from_with_ecn(&self.socket, &mut buf), if !self.receive_backpressured() => {
+                        self.last_activity = Instant::now();
+                        let received = recv.map_err(Error::Io)?;
+                        self.process_direct_get_received_datagram(stream_id, received, &buf).await?;
+                        if Self::direct_get_io_epoch_enabled() {
+                            // Wake straight into the burst drain so the rest of
+                            // the final burst (including the fin) is applied
+                            // before any wire maintenance runs; the loop top
+                            // performs the finish check and the maintenance
+                            // flush immediately after.
+                            self.drain_direct_get_ready_burst(
+                                stream_id,
+                                &mut recv_batch,
+                                DIRECT_GET_READY_BURST_DATAGRAMS,
+                            )
+                            .await?;
+                        }
+                    }
+                    command = self.command_rx.recv() => {
+                        self.last_activity = Instant::now();
+                        if let Some(command) = command {
+                            self.handle_command(command, true).await?;
+                        } else {
+                            return Err(Error::HttpProtocol("H3 direct GET epoch driver channel closed".into()));
+                        }
+                    }
+                    _ = self.body_progress_notify.notified() => {
+                        if Self::direct_get_io_epoch_enabled() {
+                            self.flush_direct_get_epoch_wire_maintenance().await?;
+                        } else {
+                            self.drive_direct_maintenance_once(&mut buf).await?;
+                        }
+                    }
+                    _ = epoch_timer.as_mut(), if epoch_timer_deadline.is_some() => {
+                        let now = Instant::now();
+                        if client_application_ack_deadline.is_some_and(|deadline| deadline <= now) {
+                            self.send_delayed_application_ack().await?;
+                        }
+                        if client_loss_detection_deadline.is_some_and(|deadline| deadline <= now) {
+                            self.handle_loss_detection_timeout().await?;
+                        }
+                        // Force a re-arm next pass: the fired sleep stays in
+                        // the completed state, and the handlers above may not
+                        // have moved their deadline.
+                        epoch_timer_deadline = None;
+                    }
+                }
+
+                if self.finish_direct_get_sample_if_ready(
+                    stream_id,
+                    index,
+                    warmups,
+                    &mut measured,
+                )? {
+                    break;
+                }
+            }
+
+            self.flush_deferred_epoch_ack_packets().await?;
+        }
+
+        Ok(NativeH3DirectGetBenchmarkResult { samples: measured })
+    }
+
+    pub(crate) async fn run_direct_rfc9220_tunnel_close_benchmark_epoch(
+        mut self,
+        tunnel_uri: http::Uri,
+        tunnel_headers: Vec<(String, String)>,
+        payload: Bytes,
+    ) -> NativeH3DirectTunnelCloseBenchmarkRunResult {
+        if !self.is_direct_idle() {
+            return NativeH3DirectTunnelCloseBenchmarkRunResult::Unsupported(self);
+        }
+        let result = self
+            .run_direct_rfc9220_tunnel_close_benchmark_epoch_inner(
+                tunnel_uri,
+                tunnel_headers,
+                payload,
+            )
+            .await;
+        match result {
+            Ok(result) => NativeH3DirectTunnelCloseBenchmarkRunResult::Completed {
+                driver: self,
+                result,
+            },
+            Err(error) => NativeH3DirectTunnelCloseBenchmarkRunResult::Failed {
+                driver: self,
+                error,
+            },
+        }
+    }
+
+    async fn run_direct_rfc9220_tunnel_close_benchmark_epoch_inner(
+        &mut self,
+        tunnel_uri: http::Uri,
+        tunnel_headers: Vec<(String, String)>,
+        payload: Bytes,
+    ) -> Result<NativeH3DirectTunnelCloseBenchmarkResult> {
+        let start = Instant::now();
+        self.ensure_preface_sent().await?;
+        if let Some((datagram, ecn_mark)) = self.initial_datagram.take() {
+            self.process_datagram(&datagram, ecn_mark).await?;
+            self.process_pending_commands().await?;
+        }
+        if !self.state.peer_settings_received() {
+            self.drive_direct_until_peer_settings().await?;
+        }
+        if !self.state.extended_connect_enabled_by_peer() {
+            return Err(Error::WebSocketUnsupported(
+                "RFC 9220 requires peer SETTINGS_ENABLE_CONNECT_PROTOCOL = 1".into(),
+            ));
+        }
+        if !self.is_direct_idle() {
+            return Err(Error::HttpProtocol(
+                "native H3 direct tunnel close epoch lost exclusive idle state".into(),
+            ));
+        }
+
+        let connect_packet = self
+            .cached_empty_connect_payload(&tunnel_uri, &tunnel_headers)?
+            .map(|payload| {
+                self.handshake
+                    .build_client_h3_encoded_request_packet(payload, false)
+            })
+            .unwrap_or_else(|| {
+                self.handshake
+                    .build_client_h3_websocket_connect_packet(&tunnel_uri, tunnel_headers)
+            })?;
+        let tunnel_stream_id = connect_packet.stream_id;
+        let (tunnel_response_tx, mut tunnel_response_rx) = oneshot::channel();
+        let tunnel_inline = Arc::new(H3TunnelInlineInbound::default());
+        self.state.track_tunnel_stream(tunnel_stream_id);
+        self.pending_tunnels.insert(
+            tunnel_stream_id,
+            NativeDriverTunnelState::new_with_notify(
+                tunnel_response_tx,
+                self.body_progress_notify.clone(),
+                self.transport_config.tunnel_outbound_byte_budget,
+                self.transport_config.tunnel_inbound_byte_budget,
+            )
+            .with_inline_inbound(tunnel_inline.clone()),
+        );
+        self.queue_or_send_control_packet(tunnel_stream_id, connect_packet.packet, true)
+            .await?;
+
+        let expected_tunnel_bytes = payload.len();
+        let mut opened_tunnel: Option<H3Tunnel> = None;
+        let mut tunnel_sent = false;
+        let mut tunnel_echoed = 0usize;
+        let mut tunnel_finished = false;
+        let mut buf = vec![
+            0u8;
+            self.fingerprint
+                .transport
+                .max_recv_udp_payload_size
+                .max(1200)
+        ];
+
+        loop {
+            self.drive_direct_maintenance_once(&mut buf).await?;
+
+            if opened_tunnel.is_none() {
+                match tunnel_response_rx.try_recv() {
+                    Ok(tunnel) => opened_tunnel = Some(tunnel?),
+                    Err(oneshot::error::TryRecvError::Empty) => {}
+                    Err(oneshot::error::TryRecvError::Closed) => {
+                        return Err(Error::HttpProtocol(
+                            "H3 direct tunnel close response channel closed".into(),
+                        ));
+                    }
+                }
+            }
+
+            if opened_tunnel.is_some() && !tunnel_sent {
+                self.send_direct_tunnel_outbound(
+                    tunnel_stream_id,
+                    H3TunnelOutbound {
+                        bytes: payload.clone(),
+                        fin: true,
+                    },
+                )
+                .await?;
+                tunnel_sent = true;
+            }
+
+            while let Some(item) = tunnel_inline.pop() {
+                match item {
+                    Ok(H3TunnelEvent::Data(bytes)) => {
+                        let len = bytes.len();
+                        tunnel_echoed = tunnel_echoed.saturating_add(len);
+                        if let Some(tunnel) = self.pending_tunnels.get(&tunnel_stream_id) {
+                            tunnel.credit.release_recv_data_bytes(len);
+                        }
+                    }
+                    Ok(H3TunnelEvent::EndStream) => {
+                        tunnel_finished = true;
+                        self.apply_tunnel_inbound_status(
+                            tunnel_stream_id,
+                            TunnelInboundStatus::Finished,
+                        );
+                    }
+                    Ok(H3TunnelEvent::Reset(reason)) => {
+                        return Err(Error::HttpProtocol(format!(
+                            "native H3 direct tunnel close reset: {reason}"
+                        )));
+                    }
+                    Ok(H3TunnelEvent::GoAway { id }) => {
+                        return Err(Error::HttpProtocol(format!(
+                            "native H3 direct tunnel close GOAWAY id={id}"
+                        )));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+
+            if tunnel_sent
+                && tunnel_echoed >= expected_tunnel_bytes
+                && tunnel_finished
+                && !self.pending_tunnels.contains_key(&tunnel_stream_id)
+            {
+                return Ok(NativeH3DirectTunnelCloseBenchmarkResult {
+                    total_ns: start.elapsed().as_nanos() as f64,
+                    bytes: tunnel_echoed as u64,
+                });
+            }
+
+            if start.elapsed() > self.max_idle_timeout {
+                return Err(Error::HttpProtocol(
+                    "native H3 direct tunnel close epoch timed out".into(),
+                ));
+            }
+
+            let client_application_ack_deadline = self.client_application_ack_deadline();
+            let client_application_ack_delay = client_application_ack_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+            let client_loss_detection_deadline = self.client_loss_detection_deadline();
+            let client_loss_detection_delay = client_loss_detection_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+
+            tokio::select! {
+                biased;
+                recv = recv_from_with_ecn(&self.socket, &mut buf), if !self.receive_backpressured() => {
+                    self.last_activity = Instant::now();
+                    let received = recv.map_err(Error::Io)?;
+                    self.process_received_datagram(received, &buf).await?;
+                }
+                command = self.command_rx.recv() => {
+                    self.last_activity = Instant::now();
+                    if let Some(command) = command {
+                        self.handle_command(command, true).await?;
+                    } else {
+                        return Err(Error::HttpProtocol("H3 direct tunnel close driver channel closed".into()));
+                    }
+                }
+                _ = self.body_progress_notify.notified() => {
+                    self.drive_direct_maintenance_once(&mut buf).await?;
+                }
+                _ = tokio::time::sleep(client_application_ack_delay), if client_application_ack_deadline.is_some() => {
+                    self.send_delayed_application_ack().await?;
+                }
+                _ = tokio::time::sleep(client_loss_detection_delay), if client_loss_detection_deadline.is_some() => {
+                    self.handle_loss_detection_timeout().await?;
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn run_direct_mixed_rfc9220_benchmark_epoch(
+        mut self,
+        stream_uri: http::Uri,
+        tunnel_uri: http::Uri,
+        stream_headers: Headers,
+        tunnel_headers: Vec<(String, String)>,
+        tunnel_payload: Bytes,
+        tunnel_messages: usize,
+        slow_consumer_delay: Duration,
+        slow_read_delay: Duration,
+    ) -> NativeH3DirectMixedBenchmarkRunResult {
+        if !self.is_direct_idle() {
+            return NativeH3DirectMixedBenchmarkRunResult::Unsupported(self);
+        }
+        let result = self
+            .run_direct_mixed_rfc9220_benchmark_epoch_inner(
+                stream_uri,
+                tunnel_uri,
+                stream_headers,
+                tunnel_headers,
+                tunnel_payload,
+                tunnel_messages,
+                slow_consumer_delay,
+                slow_read_delay,
+            )
+            .await;
+        match result {
+            Ok(result) => NativeH3DirectMixedBenchmarkRunResult::Completed {
+                driver: self,
+                result,
+            },
+            Err(error) => NativeH3DirectMixedBenchmarkRunResult::Failed {
+                driver: self,
+                error,
+            },
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_direct_mixed_rfc9220_benchmark_epoch_inner(
+        &mut self,
+        stream_uri: http::Uri,
+        tunnel_uri: http::Uri,
+        stream_headers: Headers,
+        tunnel_headers: Vec<(String, String)>,
+        tunnel_payload: Bytes,
+        tunnel_messages: usize,
+        slow_consumer_delay: Duration,
+        slow_read_delay: Duration,
+    ) -> Result<NativeH3DirectMixedBenchmarkResult> {
+        let start = Instant::now();
+        self.ensure_preface_sent().await?;
+        if let Some((datagram, ecn_mark)) = self.initial_datagram.take() {
+            self.process_datagram(&datagram, ecn_mark).await?;
+            self.process_pending_commands().await?;
+        }
+        if !self.state.peer_settings_received() {
+            self.drive_direct_until_peer_settings().await?;
+        }
+        if !self.state.extended_connect_enabled_by_peer() {
+            return Err(Error::WebSocketUnsupported(
+                "RFC 9220 requires peer SETTINGS_ENABLE_CONNECT_PROTOCOL = 1".into(),
+            ));
+        }
+        if !self.is_direct_idle() {
+            return Err(Error::HttpProtocol(
+                "native H3 direct mixed epoch lost exclusive idle state".into(),
+            ));
+        }
+
+        let stream_packet = self
+            .cached_empty_request_payload(&http::Method::GET, &stream_uri, &stream_headers)?
+            .map(|payload| {
+                self.handshake
+                    .build_client_h3_encoded_request_packet(payload, true)
+            })
+            .unwrap_or_else(|| {
+                self.handshake.build_client_h3_request_packet(
+                    &http::Method::GET,
+                    &stream_uri,
+                    &stream_headers,
+                    None,
+                )
+            })?;
+        let stream_id = stream_packet.stream_id;
+        let stream_body = H3BodyShared::new_with_capacity(
+            self.body_progress_notify.clone(),
+            self.transport_config.streaming_body_buffer_slots,
+        );
+        self.pending_streaming_responses.insert(
+            stream_id,
+            NativeDriverStreamingResponseState::new_direct(stream_body.clone(), None, None),
+        );
+
+        let connect_packet = self
+            .cached_empty_connect_payload(&tunnel_uri, &tunnel_headers)?
+            .map(|payload| {
+                self.handshake
+                    .build_client_h3_encoded_request_packet(payload, false)
+            })
+            .unwrap_or_else(|| {
+                self.handshake
+                    .build_client_h3_websocket_connect_packet(&tunnel_uri, tunnel_headers)
+            })?;
+        let tunnel_stream_id = connect_packet.stream_id;
+        let (tunnel_response_tx, mut tunnel_response_rx) = oneshot::channel();
+        let tunnel_inline = Arc::new(H3TunnelInlineInbound::default());
+        self.state.track_tunnel_stream(tunnel_stream_id);
+        self.pending_tunnels.insert(
+            tunnel_stream_id,
+            NativeDriverTunnelState::new_with_notify(
+                tunnel_response_tx,
+                self.body_progress_notify.clone(),
+                self.transport_config.tunnel_outbound_byte_budget,
+                self.transport_config.tunnel_inbound_byte_budget,
+            )
+            .with_inline_inbound(tunnel_inline.clone()),
+        );
+
+        self.queue_or_send_control_packet(stream_id, stream_packet.packet, true)
+            .await?;
+        self.queue_or_send_control_packet(tunnel_stream_id, connect_packet.packet, true)
+            .await?;
+
+        let expected_tunnel_bytes = tunnel_payload.len().saturating_mul(tunnel_messages);
+        let mut opened_tunnel: Option<H3Tunnel> = None;
+        let mut tunnel_sent = tunnel_messages == 0;
+        let mut tunnel_echoed = 0usize;
+        let mut tunnel_finished = tunnel_messages == 0;
+        let mut next_tunnel_read_at: Option<Instant> = None;
+        let mut stream_first_byte_ns = None;
+        let mut stream_bytes = 0u64;
+        let mut stream_done = false;
+        let mut stream_retired = false;
+        let mut buf = vec![
+            0u8;
+            self.fingerprint
+                .transport
+                .max_recv_udp_payload_size
+                .max(1200)
+        ];
+
+        loop {
+            self.drive_direct_maintenance_once(&mut buf).await?;
+
+            if opened_tunnel.is_none() {
+                match tunnel_response_rx.try_recv() {
+                    Ok(tunnel) => opened_tunnel = Some(tunnel?),
+                    Err(oneshot::error::TryRecvError::Empty) => {}
+                    Err(oneshot::error::TryRecvError::Closed) => {
+                        return Err(Error::HttpProtocol(
+                            "H3 direct mixed tunnel response channel closed".into(),
+                        ));
+                    }
+                }
+            }
+
+            if stream_first_byte_ns.is_none() {
+                if let Some(result) = self
+                    .pending_streaming_responses
+                    .get_mut(&stream_id)
+                    .and_then(NativeDriverStreamingResponseState::take_direct_headers)
+                {
+                    let (status, _headers) = result?;
+                    if !(200..300).contains(&status) {
+                        return Err(Error::HttpProtocol(format!(
+                            "native H3 direct mixed stream returned status {status}"
+                        )));
+                    }
+                    stream_first_byte_ns = Some(start.elapsed().as_nanos() as f64);
+                }
+            }
+
+            let mut ready_body_items = stream_body.drain_ready_items_for_direct();
+            while let Some(item) = ready_body_items.pop_front() {
+                match item {
+                    Ok(bytes) => {
+                        if !bytes.is_empty() {
+                            stream_bytes = stream_bytes.saturating_add(bytes.len() as u64);
+                            stream_body.release_direct_item_bytes(bytes.len());
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let stream_capacity = stream_body.capacity();
+            if stream_capacity.ended && stream_capacity.buffered_chunks == 0 {
+                stream_done = true;
+            }
+            if stream_done && !stream_retired {
+                let released_credit = self.apply_released_body_credits().await?;
+                if released_credit > 0 && !self.receive_backpressured() {
+                    self.send_receive_flow_control_updates().await?;
+                }
+                self.handshake.release_client_stream(stream_id);
+                self.pending_streaming_responses.remove(&stream_id);
+                stream_retired = true;
+            }
+
+            if opened_tunnel.is_some() && !tunnel_sent {
+                for index in 0..tunnel_messages {
+                    self.send_direct_tunnel_outbound(
+                        tunnel_stream_id,
+                        H3TunnelOutbound {
+                            bytes: tunnel_payload.clone(),
+                            fin: index + 1 == tunnel_messages,
+                        },
+                    )
+                    .await?;
+                }
+                tunnel_sent = true;
+                next_tunnel_read_at = Some(Instant::now() + slow_consumer_delay + slow_read_delay);
+            }
+
+            if tunnel_sent
+                && (!tunnel_finished || tunnel_echoed < expected_tunnel_bytes)
+                && next_tunnel_read_at.is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                if let Some(item) = tunnel_inline.pop() {
+                    match item {
+                        Ok(H3TunnelEvent::Data(bytes)) => {
+                            let len = bytes.len();
+                            tunnel_echoed = tunnel_echoed.saturating_add(len);
+                            if let Some(tunnel) = self.pending_tunnels.get(&tunnel_stream_id) {
+                                tunnel.credit.release_recv_data_bytes(len);
+                            }
+                            if tunnel_echoed < expected_tunnel_bytes {
+                                next_tunnel_read_at = Some(Instant::now() + slow_read_delay);
+                            }
+                        }
+                        Ok(H3TunnelEvent::EndStream) => {
+                            tunnel_finished = true;
+                            self.apply_tunnel_inbound_status(
+                                tunnel_stream_id,
+                                TunnelInboundStatus::Finished,
+                            );
+                        }
+                        Ok(H3TunnelEvent::Reset(reason)) => {
+                            return Err(Error::HttpProtocol(format!(
+                                "native H3 direct mixed tunnel reset: {reason}"
+                            )));
+                        }
+                        Ok(H3TunnelEvent::GoAway { id }) => {
+                            return Err(Error::HttpProtocol(format!(
+                                "native H3 direct mixed tunnel GOAWAY id={id}"
+                            )));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+
+            if stream_first_byte_ns.is_some()
+                && stream_done
+                && stream_retired
+                && tunnel_echoed >= expected_tunnel_bytes
+                && tunnel_finished
+                && !self.pending_tunnels.contains_key(&tunnel_stream_id)
+            {
+                return Ok(NativeH3DirectMixedBenchmarkResult {
+                    stream_first_byte_ns: stream_first_byte_ns.unwrap_or_default(),
+                    total_ns: start.elapsed().as_nanos() as f64,
+                    bytes: stream_bytes.saturating_add(tunnel_echoed as u64),
+                });
+            }
+
+            if start.elapsed() > self.max_idle_timeout {
+                return Err(Error::HttpProtocol(
+                    "native H3 direct mixed epoch timed out".into(),
+                ));
+            }
+
+            let client_application_ack_deadline = self.client_application_ack_deadline();
+            let client_application_ack_delay = client_application_ack_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+            let client_loss_detection_deadline = self.client_loss_detection_deadline();
+            let client_loss_detection_delay = client_loss_detection_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+            let tunnel_read_delay = next_tunnel_read_at
+                .and_then(|deadline| deadline.checked_duration_since(Instant::now()));
+
+            tokio::select! {
+                biased;
+                recv = recv_from_with_ecn(&self.socket, &mut buf), if !self.receive_backpressured() => {
+                    self.last_activity = Instant::now();
+                    let received = recv.map_err(Error::Io)?;
+                    self.process_received_datagram(received, &buf).await?;
+                }
+                _ = tokio::time::sleep(tunnel_read_delay.unwrap_or(Duration::ZERO)), if tunnel_read_delay.is_some() => {}
+                command = self.command_rx.recv() => {
+                    self.last_activity = Instant::now();
+                    if let Some(command) = command {
+                        self.handle_command(command, true).await?;
+                    } else {
+                        return Err(Error::HttpProtocol("H3 direct mixed driver channel closed".into()));
+                    }
+                }
+                _ = self.body_progress_notify.notified() => {
+                    self.drive_direct_maintenance_once(&mut buf).await?;
+                }
+                _ = tokio::time::sleep(client_application_ack_delay), if client_application_ack_deadline.is_some() => {
+                    self.send_delayed_application_ack().await?;
+                }
+                _ = tokio::time::sleep(client_loss_detection_delay), if client_loss_detection_deadline.is_some() => {
+                    self.handle_loss_detection_timeout().await?;
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn open_direct_owned_websocket_tunnel(
+        mut self,
+        uri: http::Uri,
+        headers: Vec<(String, String)>,
+        slot: H3DirectDriverSlot,
+    ) -> NativeH3DirectTunnelOpenResult {
+        if !self.is_direct_idle() {
+            return NativeH3DirectTunnelOpenResult::Unsupported(self);
+        }
+        let result = async {
+            self.ensure_preface_sent().await?;
+            if let Some((datagram, ecn_mark)) = self.initial_datagram.take() {
+                self.process_datagram(&datagram, ecn_mark).await?;
+                self.process_pending_commands().await?;
+            }
+            if !self.state.peer_settings_received() {
+                self.drive_direct_until_peer_settings().await?;
+            }
+            if !self.state.extended_connect_enabled_by_peer() {
+                return Err(Error::WebSocketUnsupported(
+                    "RFC 9220 requires peer SETTINGS_ENABLE_CONNECT_PROTOCOL = 1".into(),
+                ));
+            }
+            if !self.is_direct_idle() {
+                return Err(Error::HttpProtocol(
+                    "native H3 direct RFC9220 tunnel lost exclusive idle state".into(),
+                ));
+            }
+
+            let packet_result = self
+                .cached_empty_connect_payload(&uri, &headers)?
+                .map(|payload| {
+                    self.handshake
+                        .build_client_h3_encoded_request_packet(payload, false)
+                })
+                .unwrap_or_else(|| {
+                    self.handshake
+                        .build_client_h3_websocket_connect_packet(&uri, headers)
+                });
+            let packet = packet_result?;
+            let stream_id = packet.stream_id;
+            let (response_tx, response_rx) = oneshot::channel();
+            let inline_inbound = Arc::new(H3TunnelInlineInbound::default());
+            self.state.track_tunnel_stream(stream_id);
+            self.pending_tunnels.insert(
+                stream_id,
+                NativeDriverTunnelState::new_with_notify(
+                    response_tx,
+                    self.body_progress_notify.clone(),
+                    self.transport_config.tunnel_outbound_byte_budget,
+                    self.transport_config.tunnel_inbound_byte_budget,
+                )
+                .with_inline_inbound(inline_inbound),
+            );
+            self.queue_or_send_control_packet(stream_id, packet.packet, true)
+                .await?;
+            self.drive_direct_until_tunnel_open(response_rx)
+                .await
+                .map(|tunnel| (stream_id, tunnel))
+        }
+        .await;
+
+        match result {
+            Ok((stream_id, tunnel)) => NativeH3DirectTunnelOpenResult::Completed(
+                tunnel.into_owned_direct(stream_id, self, slot),
+            ),
+            Err(error) => NativeH3DirectTunnelOpenResult::Failed {
+                driver: self,
+                error,
+            },
+        }
+    }
+
+    async fn drive_direct_until_headers(&mut self, stream_id: u64) -> Result<(u64, u16, Headers)> {
+        let mut buf = vec![
+            0u8;
+            self.fingerprint
+                .transport
+                .max_recv_udp_payload_size
+                .max(1200)
+        ];
+        loop {
+            self.drive_direct_maintenance_once(&mut buf).await?;
+            if let Some(result) = self
+                .pending_streaming_responses
+                .get_mut(&stream_id)
+                .and_then(NativeDriverStreamingResponseState::take_direct_headers)
+            {
+                let (status, headers) = result?;
+                return Ok((stream_id, status, headers));
+            }
+            if self.handshake.close_state().is_draining()
+                || self.handshake.close_state().is_closing()
+            {
+                return Err(Error::Quic(
+                    "native H3 direct GET closed before headers".into(),
+                ));
+            }
+            let client_application_ack_deadline = self.client_application_ack_deadline();
+            let client_application_ack_delay = client_application_ack_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+            let client_loss_detection_deadline = self.client_loss_detection_deadline();
+            let client_loss_detection_delay = client_loss_detection_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+
+            tokio::select! {
+                biased;
+                recv = recv_from_with_ecn(&self.socket, &mut buf), if !self.receive_backpressured() => {
+                    self.last_activity = Instant::now();
+                    let received = recv.map_err(Error::Io)?;
+                    if let Some(trace) = self.pending_streaming_header_phase_trace() {
+                        trace.stamp_udp_recv_return();
+                    }
+                    self.process_received_datagram(received, &buf).await?;
+                }
+                command = self.command_rx.recv() => {
+                    self.last_activity = Instant::now();
+                    if let Some(command) = command {
+                        self.handle_command(command, true).await?;
+                    } else {
+                        return Err(Error::HttpProtocol("H3 direct driver channel closed".into()));
+                    }
+                }
+                _ = self.body_progress_notify.notified() => {
+                    self.drive_direct_maintenance_once(&mut buf).await?;
+                }
+                _ = tokio::time::sleep(client_application_ack_delay), if client_application_ack_deadline.is_some() => {
+                    self.send_delayed_application_ack().await?;
+                }
+                _ = tokio::time::sleep(client_loss_detection_delay), if client_loss_detection_deadline.is_some() => {
+                    self.handle_loss_detection_timeout().await?;
+                }
+            }
+        }
+    }
+
+    async fn drive_direct_until_peer_settings(&mut self) -> Result<()> {
+        let mut buf = vec![
+            0u8;
+            self.fingerprint
+                .transport
+                .max_recv_udp_payload_size
+                .max(1200)
+        ];
+        loop {
+            self.drive_direct_maintenance_once(&mut buf).await?;
+            if self.state.peer_settings_received() {
+                return Ok(());
+            }
+            if self.handshake.close_state().is_draining()
+                || self.handshake.close_state().is_closing()
+            {
+                return Err(Error::Quic(
+                    "native H3 direct RFC9220 tunnel closed before SETTINGS".into(),
+                ));
+            }
+            self.drive_direct_wait_once(&mut buf).await?;
+        }
+    }
+
+    async fn drive_direct_until_tunnel_open(
+        &mut self,
+        mut response_rx: oneshot::Receiver<Result<H3Tunnel>>,
+    ) -> Result<H3Tunnel> {
+        let mut buf = vec![
+            0u8;
+            self.fingerprint
+                .transport
+                .max_recv_udp_payload_size
+                .max(1200)
+        ];
+        loop {
+            self.drive_direct_maintenance_once(&mut buf).await?;
+            match response_rx.try_recv() {
+                Ok(result) => return result,
+                Err(oneshot::error::TryRecvError::Empty) => {}
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    return Err(Error::HttpProtocol(
+                        "H3 direct tunnel response channel closed".into(),
+                    ));
+                }
+            }
+            if self.handshake.close_state().is_draining()
+                || self.handshake.close_state().is_closing()
+            {
+                return Err(Error::Quic(
+                    "native H3 direct RFC9220 tunnel closed before open".into(),
+                ));
+            }
+            self.drive_direct_wait_once(&mut buf).await?;
+        }
+    }
+
+    async fn drive_direct_wait_once(&mut self, buf: &mut [u8]) -> Result<()> {
+        let client_application_ack_deadline = self.client_application_ack_deadline();
+        let client_application_ack_delay = client_application_ack_deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::ZERO);
+        let client_loss_detection_deadline = self.client_loss_detection_deadline();
+        let client_loss_detection_delay = client_loss_detection_deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::ZERO);
+
+        tokio::select! {
+            biased;
+            recv = recv_from_with_ecn(&self.socket, buf), if !self.receive_backpressured() => {
+                self.last_activity = Instant::now();
+                let received = recv.map_err(Error::Io)?;
+                self.process_received_datagram(received, buf).await?;
+            }
+            command = self.command_rx.recv() => {
+                self.last_activity = Instant::now();
+                if let Some(command) = command {
+                    self.handle_command(command, true).await?;
+                } else {
+                    return Err(Error::HttpProtocol("H3 direct tunnel driver channel closed".into()));
+                }
+            }
+            _ = self.body_progress_notify.notified() => {
+                self.drive_direct_maintenance_once(buf).await?;
+            }
+            _ = tokio::time::sleep(client_application_ack_delay), if client_application_ack_deadline.is_some() => {
+                self.send_delayed_application_ack().await?;
+            }
+            _ = tokio::time::sleep(client_loss_detection_delay), if client_loss_detection_deadline.is_some() => {
+                self.handle_loss_detection_timeout().await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn send_direct_tunnel_outbound(
+        &mut self,
+        stream_id: u64,
+        outbound: H3TunnelOutbound,
+    ) -> Result<()> {
+        self.send_tunnel_data(stream_id, outbound).await
+    }
+
+    pub(crate) fn direct_recv_buffer_len(&self) -> usize {
+        self.fingerprint
+            .transport
+            .max_recv_udp_payload_size
+            .max(1200)
+    }
+
+    pub(crate) async fn drive_direct_tunnel_once_with_buf(&mut self, buf: &mut [u8]) -> Result<()> {
+        self.drive_direct_maintenance_once(buf).await?;
+        if self.handshake.close_state().is_draining() || self.handshake.close_state().is_closing() {
+            return Err(Error::Quic(
+                "native H3 direct RFC9220 tunnel closed before inbound event".into(),
+            ));
+        }
+        self.drive_direct_wait_once(buf).await
+    }
+
+    async fn drive_direct_body_until_progress(mut self, stream_id: u64) -> (Self, Result<()>) {
+        let result = self.drive_direct_body_until_progress_inner(stream_id).await;
+        (self, result)
+    }
+
+    async fn drive_direct_body_until_progress_inner(&mut self, stream_id: u64) -> Result<()> {
+        const DIRECT_BODY_READY_BURST_DATAGRAMS: usize = 96;
+        let mut buf = vec![
+            0u8;
+            self.fingerprint
+                .transport
+                .max_recv_udp_payload_size
+                .max(1200)
+        ];
+        loop {
+            self.drive_direct_maintenance_once(&mut buf).await?;
+            if self.direct_body_has_progress(stream_id) {
+                self.drain_direct_body_ready_burst(
+                    stream_id,
+                    &mut buf,
+                    DIRECT_BODY_READY_BURST_DATAGRAMS,
+                )
+                .await?;
+                return Ok(());
+            }
+            let client_application_ack_deadline = self.client_application_ack_deadline();
+            let client_application_ack_delay = client_application_ack_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+            let client_loss_detection_deadline = self.client_loss_detection_deadline();
+            let client_loss_detection_delay = client_loss_detection_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+            tokio::select! {
+                biased;
+                recv = recv_from_with_ecn(&self.socket, &mut buf), if !self.receive_backpressured() => {
+                    self.last_activity = Instant::now();
+                    let received = recv.map_err(Error::Io)?;
+                    self.process_received_datagram(received, &buf).await?;
+                }
+                command = self.command_rx.recv() => {
+                    self.last_activity = Instant::now();
+                    if let Some(command) = command {
+                        self.handle_command(command, true).await?;
+                    } else {
+                        return Ok(());
+                    }
+                }
+                _ = self.body_progress_notify.notified() => {
+                    self.drive_direct_maintenance_once(&mut buf).await?;
+                }
+                _ = tokio::time::sleep(client_application_ack_delay), if client_application_ack_deadline.is_some() => {
+                    self.send_delayed_application_ack().await?;
+                }
+                _ = tokio::time::sleep(client_loss_detection_delay), if client_loss_detection_deadline.is_some() => {
+                    self.handle_loss_detection_timeout().await?;
+                }
+            }
+        }
+    }
+
+    async fn drain_direct_body_ready_burst(
+        &mut self,
+        stream_id: u64,
+        buf: &mut [u8],
+        max_datagrams: usize,
+    ) -> Result<()> {
+        for _ in 0..max_datagrams {
+            if self.has_control_work() || self.receive_backpressured() {
+                return Ok(());
+            }
+            let Some(stream) = self.pending_streaming_responses.get(&stream_id) else {
+                return Ok(());
+            };
+            let capacity = stream.body_shared.capacity();
+            if capacity.closed || capacity.ended || capacity.available_slots == 0 {
+                return Ok(());
+            }
+            if !self.try_process_ready_datagram(buf).await? {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    async fn drain_direct_get_ready_burst(
+        &mut self,
+        stream_id: u64,
+        batch: &mut UdpRecvBatch,
+        max_datagrams: usize,
+    ) -> Result<()> {
+        let inline_ack_seal =
+            Self::direct_get_io_epoch_enabled() && Self::direct_get_ack_send_defer_enabled();
+        let mut processed = 0;
+        while processed < max_datagrams {
+            if self.has_control_work()
+                || self.receive_backpressured()
+                || !self.direct_full_body_pending(stream_id)
+                || self.direct_full_body_completed(stream_id)
+                || (Self::direct_get_io_epoch_enabled()
+                    && !inline_ack_seal
+                    && self.direct_get_ack_threshold_reached())
+            {
+                return Ok(());
+            }
+            // Coalesce the chunk burst into one recvmmsg syscall instead of one
+            // recvmsg per datagram, capped at the batch slot count per syscall.
+            // Boundary ACKs are sealed inline at their exact threshold
+            // crossings (identical observation boundaries to the legacy
+            // clamped drain), so the burst drains uninterrupted. Stop
+            // conditions are re-checked between batches, not within one, so no
+            // received datagram is ever dropped.
+            let want = (max_datagrams - processed).min(UDP_RECV_BATCH_SLOTS);
+            let received = try_recvmmsg_with_ecn(&self.socket, batch, want).map_err(Error::Io)?;
+            if received == 0 {
+                return Ok(());
+            }
+            self.last_activity = Instant::now();
+            // Deliver in arrival order (slot 0 first) so the first body byte is
+            // delivered before the rest of the batch, preserving TTFB.
+            for index in 0..received {
+                let meta = batch.meta(index);
+                let slot = batch.datagram_slot(index);
+                self.process_direct_get_received_datagram(stream_id, meta, slot)
+                    .await?;
+                if inline_ack_seal && self.direct_get_ack_threshold_reached() {
+                    self.seal_direct_get_boundary_ack_deferred()?;
+                }
+            }
+            processed += received;
+        }
+        Ok(())
+    }
+
+    fn configured_spin_budget(env_key: &str, default_us: u64) -> Duration {
+        std::env::var(env_key)
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map(Duration::from_micros)
+            .unwrap_or_else(|| Duration::from_micros(default_us))
+    }
+
+    fn direct_get_ready_spin_configured_budget(body_started: bool) -> Duration {
+        static READY_BUDGET: OnceLock<Duration> = OnceLock::new();
+        static BODY_BUDGET: OnceLock<Duration> = OnceLock::new();
+        if body_started {
+            *BODY_BUDGET.get_or_init(|| {
+                Self::configured_spin_budget(
+                    "SPECTER_NATIVE_H3_DIRECT_GET_BODY_SPIN_US",
+                    H3_DIRECT_GET_BODY_SPIN_DEFAULT_US,
+                )
+            })
+        } else {
+            *READY_BUDGET.get_or_init(|| {
+                Self::configured_spin_budget(
+                    "SPECTER_NATIVE_H3_DIRECT_GET_READY_SPIN_US",
+                    H3_DIRECT_GET_READY_SPIN_DEFAULT_US,
+                )
+            })
+        }
+    }
+
+    fn direct_get_body_started(&self, stream_id: u64) -> bool {
+        self.direct_get_slot
+            .as_ref()
+            .filter(|slot| slot.stream_id == stream_id)
+            .is_some_and(|slot| slot.state.first_body_ns.is_some())
+            || self
+                .pending_direct_full_body_responses
+                .get(&stream_id)
+                .is_some_and(|state| state.first_body_ns.is_some())
+    }
+
+    fn direct_get_ack_threshold_remaining(&self, max_datagrams: usize) -> usize {
+        let threshold = self.fingerprint.transport.ack_eliciting_threshold.max(1);
+        let pending = self.handshake.client_application_pending_ack_count();
+        let until_threshold = threshold.saturating_sub(pending).max(1);
+        max_datagrams.min(until_threshold)
+    }
+
+    fn direct_get_ack_threshold_reached(&self) -> bool {
+        self.handshake.client_application_pending_ack_count()
+            >= self.fingerprint.transport.ack_eliciting_threshold.max(1)
+    }
+
+    /// Seal the boundary ACK at its exact threshold crossing during a burst
+    /// drain. The packet number is consumed and the ACK tracker is marked at
+    /// the same observation boundary as the legacy clamped drain (every Nth
+    /// ack-eliciting packet), so wire bytes and ACK cadence are unchanged;
+    /// only the send syscall is deferred past the drain phase.
+    fn seal_direct_get_boundary_ack_deferred(&mut self) -> Result<()> {
+        if let Some(packet) = self
+            .handshake
+            .build_client_application_ack_packet_after_or_delay(
+                self.fingerprint.transport.ack_eliciting_threshold,
+                Duration::from_millis(self.fingerprint.transport.max_ack_delay_ms),
+                Instant::now(),
+                self.fingerprint.transport.ack_delay_exponent,
+            )?
+        {
+            self.deferred_epoch_ack_packets.push(packet.packet);
+        }
+        Ok(())
+    }
+
+    /// Send any ACK packets whose dispatch was deferred past a drain phase.
+    /// Packets were sealed (packet number consumed, tracker marked) at their
+    /// normal boundary, so this only performs the postponed syscalls, in order.
+    async fn flush_deferred_epoch_ack_packets(&mut self) -> Result<()> {
+        if self.deferred_epoch_ack_packets.is_empty() {
+            return Ok(());
+        }
+        let packets = std::mem::take(&mut self.deferred_epoch_ack_packets);
+        for packet in packets {
+            self.send_packet_to_peer(packet.as_ref()).await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_direct_get_epoch_wire_maintenance(&mut self) -> Result<()> {
+        self.flush_deferred_epoch_ack_packets().await?;
+        self.drain_session_tickets();
+        if let Some(packet) = self
+            .handshake
+            .build_client_application_ack_packet_after_or_delay(
+                self.fingerprint.transport.ack_eliciting_threshold,
+                Duration::from_millis(self.fingerprint.transport.max_ack_delay_ms),
+                Instant::now(),
+                self.fingerprint.transport.ack_delay_exponent,
+            )?
+        {
+            if Self::direct_get_ack_send_defer_enabled() {
+                // Defer only the send syscall: the packet is already sealed at
+                // its normal threshold boundary, so wire bytes and ACK cadence
+                // are byte-identical; dispatch happens at the next flush, the
+                // pre-park drain, or the sample exit, whichever comes first.
+                self.deferred_epoch_ack_packets.push(packet.packet);
+            } else {
+                self.send_packet_to_peer(packet.packet.as_ref()).await?;
+            }
+        }
+        self.observe_recovery_signals();
+        self.send_lost_application_stream_retransmits().await?;
+        // Epoch mode skips the per-datagram send epilog, so the connection-level
+        // MAX_DATA frames that normally re-open the peer's receive window are
+        // never emitted while a buffered GET body streams in. Flush any pending
+        // receive flow-control credit here at the burst boundary; the credit is
+        // accumulated by record_client_stream_consumed at sample completion and
+        // would otherwise starve the peer's connection data window and stall the
+        // transfer. send_receive_flow_control_updates is a no-op when nothing is
+        // pending, and receive_backpressured() is false for a GET (no streaming or
+        // tunnel consumers), so this is cheap. MAX_DATA is not a fingerprinted
+        // frame, so per-burst emission is wire-invisible.
+        if !self.receive_backpressured() {
+            self.send_receive_flow_control_updates().await?;
+        }
+        Ok(())
+    }
+
+    fn direct_get_ready_spin_budget(
+        &self,
+        stream_id: u64,
+        ack_deadline: Option<Instant>,
+        loss_deadline: Option<Instant>,
+    ) -> Duration {
+        let now = Instant::now();
+        let mut budget =
+            Self::direct_get_ready_spin_configured_budget(self.direct_get_body_started(stream_id));
+        for deadline in [ack_deadline, loss_deadline].into_iter().flatten() {
+            let until_deadline = deadline.saturating_duration_since(now);
+            if until_deadline.is_zero() {
+                return Duration::ZERO;
+            }
+            budget = budget.min(until_deadline);
+        }
+        budget
+    }
+
+    async fn spin_direct_get_ready_datagrams(
+        &mut self,
+        stream_id: u64,
+        batch: &mut UdpRecvBatch,
+        budget: Duration,
+    ) -> Result<()> {
+        if budget.is_zero() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        loop {
+            if self.has_control_work()
+                || self.receive_backpressured()
+                || !self.direct_full_body_pending(stream_id)
+                || self.direct_full_body_completed(stream_id)
+            {
+                return Ok(());
+            }
+            // Drain whatever is ready in one recvmmsg rather than one recvmsg
+            // per datagram. The spin path is the dominant body drainer, so
+            // batching it here is what collapses the per-datagram syscall floor.
+            let received = try_recvmmsg_with_ecn(&self.socket, batch, UDP_RECV_BATCH_SLOTS)
+                .map_err(Error::Io)?;
+            if received > 0 {
+                self.last_activity = Instant::now();
+                for index in 0..received {
+                    let meta = batch.meta(index);
+                    let slot = batch.datagram_slot(index);
+                    self.process_direct_get_received_datagram(stream_id, meta, slot)
+                        .await?;
+                }
+                continue;
+            }
+            if start.elapsed() >= budget {
+                return Ok(());
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    async fn drive_direct_maintenance_once(&mut self, buf: &mut [u8]) -> Result<()> {
+        self.flush_scheduled_send_work().await?;
+        self.flush_tunnel_inbound();
+        self.flush_streaming_responses();
+        let released_credit = H3ReleasedReceiveCredit::new(
+            self.apply_released_body_credits().await?,
+            self.apply_released_tunnel_credits()?,
+        );
+        if released_credit.has_credit() && !self.receive_backpressured() {
+            self.send_receive_flow_control_updates().await?;
+        }
+        self.send_client_pmtu_probe_if_available().await?;
+        if self.has_streaming_header_waiter()
+            && !self.has_control_work()
+            && !self.receive_backpressured()
+        {
+            let _ = self.try_process_ready_datagram(buf).await?;
+        }
+        Ok(())
+    }
+
+    fn direct_body_has_progress(&self, stream_id: u64) -> bool {
+        let Some(stream) = self.pending_streaming_responses.get(&stream_id) else {
+            return true;
+        };
+        let capacity = stream.body_shared.capacity();
+        capacity.buffered_chunks > 0 || capacity.ended || capacity.closed
+    }
+
     fn fail_all_with_quic_message(&mut self, message: String) {
         self.is_draining
             .store(true, std::sync::atomic::Ordering::SeqCst);
         for (_, response_tx) in self.pending_responses.drain() {
             let _ = response_tx.send(Err(Error::Quic(message.clone())));
         }
-        for (_, mut stream) in self.pending_streaming_responses.drain() {
-            if let Some(headers_tx) = stream.headers_tx.take() {
-                let _ = headers_tx.send(Err(Error::Quic(message.clone())));
-            } else {
-                let _ = stream.body_shared.fail(Error::Quic(message.clone()));
+        if let Some(slot) = self.direct_get_slot.as_mut() {
+            if slot.completion.is_none() {
+                slot.completion = Some(Err(Error::Quic(message.clone())));
             }
+        }
+        for (stream_id, _) in self.pending_direct_full_body_responses.drain() {
+            self.completed_direct_full_body_responses
+                .push_back((stream_id, Err(Error::Quic(message.clone()))));
+        }
+        for (_, mut stream) in self.pending_streaming_responses.drain() {
+            stream.fail(Error::Quic(message.clone()));
         }
         for (_, mut tunnel) in self.pending_tunnels.drain() {
             tunnel.fail(Error::Quic(message.clone()));
@@ -1098,7 +3123,7 @@ impl NativeH3Driver {
     }
 
     async fn drive_loop(&mut self) -> Result<()> {
-        self.send_preface().await?;
+        self.ensure_preface_sent().await?;
         if let Some((datagram, ecn_mark)) = self.initial_datagram.take() {
             self.process_datagram(&datagram, ecn_mark).await?;
             self.process_pending_commands().await?;
@@ -1124,6 +3149,13 @@ impl NativeH3Driver {
             }
             self.send_client_pmtu_probe_if_available().await?;
             if sent_scheduled_data && self.has_outbound_send_work() {
+                if self.has_streaming_header_waiter()
+                    && !self.has_control_work()
+                    && !self.receive_backpressured()
+                    && self.try_process_ready_datagram(&mut buf).await?
+                {
+                    continue;
+                }
                 continue;
             }
             let has_pending_work = self.has_pending_work();
@@ -1158,6 +3190,21 @@ impl NativeH3Driver {
                 .checked_sub(self.last_activity.elapsed())
                 .unwrap_or(Duration::ZERO);
             let receive_paused_for_body = self.receive_backpressured();
+            if self.has_streaming_header_waiter()
+                && !self.has_control_work()
+                && !receive_paused_for_body
+                && self.try_process_ready_datagram(&mut buf).await?
+            {
+                continue;
+            }
+            if !has_pending_work
+                && client_application_ack_deadline.is_none()
+                && client_loss_detection_deadline.is_none()
+                && !receive_paused_for_body
+                && self.try_recv_idle_command_before_park().await?
+            {
+                continue;
+            }
 
             tokio::select! {
                 biased;
@@ -1165,7 +3212,7 @@ impl NativeH3Driver {
                 command = self.command_rx.recv() => {
                     self.last_activity = Instant::now();
                     match command {
-                        Some(command) => self.handle_command(command).await?,
+                        Some(command) => self.handle_command(command, true).await?,
                         None => {
                             self.send_connection_close(0x00, Bytes::from_static(b"Client shutdown"))
                                 .await?;
@@ -1174,32 +3221,18 @@ impl NativeH3Driver {
                         }
                     }
                 }
+                recv = recv_from_with_ecn(&self.socket, &mut buf), if !receive_paused_for_body => {
+                    self.last_activity = Instant::now();
+                    let received = recv.map_err(Error::Io)?;
+                    if let Some(trace) = self.pending_streaming_header_phase_trace() {
+                        trace.stamp_udp_recv_return();
+                    }
+                    self.process_received_datagram(received, &buf).await?;
+                }
                 tunnel_outbound = self.tunnel_outbound_rx.recv() => {
                     self.last_activity = Instant::now();
                     if let Some((stream_id, outbound)) = tunnel_outbound {
                         self.send_tunnel_data(stream_id, outbound).await?;
-                    }
-                }
-                recv = recv_from_with_ecn(&self.socket, &mut buf), if !receive_paused_for_body => {
-                    self.last_activity = Instant::now();
-                    let received = recv.map_err(Error::Io)?;
-                    if received.peer == self.peer_addr
-                        || buf[..received.len]
-                            .first()
-                            .is_some_and(|first| first & 0x80 == 0)
-                    {
-                        if let Err(error) = self
-                            .process_datagram_from(
-                                received.peer,
-                                &buf[..received.len],
-                                received.ecn_mark,
-                            )
-                            .await
-                        {
-                            if received.peer == self.peer_addr {
-                                return Err(error);
-                            }
-                        }
                     }
                 }
                 _ = tokio::time::sleep(remaining_idle), if !has_pending_work => {
@@ -1231,6 +3264,26 @@ impl NativeH3Driver {
         }
     }
 
+    async fn try_recv_idle_command_before_park(&mut self) -> Result<bool> {
+        let start = Instant::now();
+        loop {
+            match self.command_rx.try_recv() {
+                Ok(command) => {
+                    self.last_activity = Instant::now();
+                    self.handle_command(command, true).await?;
+                    return Ok(true);
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    if start.elapsed() >= H3_IDLE_COMMAND_SPIN_BUDGET {
+                        return Ok(false);
+                    }
+                    std::hint::spin_loop();
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => return Ok(false),
+            }
+        }
+    }
+
     fn has_pending_work(&self) -> bool {
         !self.pending_responses.is_empty()
             || !self.pending_streaming_responses.is_empty()
@@ -1246,6 +3299,12 @@ impl NativeH3Driver {
 
     fn has_control_work(&self) -> bool {
         !self.pending_control_packets.is_empty()
+    }
+
+    fn has_streaming_header_waiter(&self) -> bool {
+        self.pending_streaming_responses
+            .values()
+            .any(NativeDriverStreamingResponseState::is_waiting_for_headers)
     }
 
     fn has_request_body_work(&self) -> bool {
@@ -1308,7 +3367,27 @@ impl NativeH3Driver {
         Ok(())
     }
 
+    async fn ensure_preface_sent(&mut self) -> Result<()> {
+        if self.preface_sent {
+            return Ok(());
+        }
+        self.send_preface().await?;
+        self.preface_sent = true;
+        Ok(())
+    }
+
     async fn send_client_pmtu_probe_if_available(&mut self) -> Result<()> {
+        // DPLPMTUD probe packets are low priority (RFC 8899 Section 5.2). A
+        // full-size probe is a large build + AEAD seal + send_to; emitting one
+        // on the recv->send turn of an actively exchanging tunnel injects a
+        // one-shot latency spike into the proxied round-trip (the tunnel echo
+        // p99). Defer probing until the tunnel has been briefly quiescent so
+        // the probe rides genuine idle instead of the interactive path. GET /
+        // streaming connections (no open tunnel) are unaffected and keep
+        // discovering MTU immediately.
+        if !self.pending_tunnels.is_empty() && self.last_activity.elapsed() < PMTU_TUNNEL_IDLE_GAP {
+            return Ok(());
+        }
         if self.handshake.client_pmtu_pending_probe_size().is_some() {
             return Ok(());
         }
@@ -1506,7 +3585,11 @@ impl NativeH3Driver {
         }
     }
 
-    async fn handle_command(&mut self, command: DriverCommand) -> Result<()> {
+    async fn handle_command(
+        &mut self,
+        command: DriverCommand,
+        allow_immediate_control: bool,
+    ) -> Result<()> {
         match command {
             DriverCommand::SendRequest {
                 method,
@@ -1521,12 +3604,30 @@ impl NativeH3Driver {
                     )));
                     return Ok(());
                 }
-                let packet = match self.handshake.build_client_h3_request_packet(
-                    &method,
-                    &uri,
-                    &headers,
-                    body.clone(),
-                ) {
+                let empty_body = body.as_ref().is_none_or(|body| body.is_empty());
+                let packet_result = if empty_body {
+                    self.cached_empty_request_payload(&method, &uri, &headers)?
+                        .map(|payload| {
+                            self.handshake
+                                .build_client_h3_encoded_request_packet(payload, true)
+                        })
+                        .unwrap_or_else(|| {
+                            self.handshake.build_client_h3_request_packet(
+                                &method,
+                                &uri,
+                                &headers,
+                                body.clone(),
+                            )
+                        })
+                } else {
+                    self.handshake.build_client_h3_request_packet(
+                        &method,
+                        &uri,
+                        &headers,
+                        body.clone(),
+                    )
+                };
+                let packet = match packet_result {
                     Ok(packet) => packet,
                     Err(error) if is_flow_control_blocked_error(&error) => {
                         self.queue_flow_control_blocked_command(DriverCommand::SendRequest {
@@ -1543,8 +3644,12 @@ impl NativeH3Driver {
                 };
                 self.state.track_response_stream(packet.stream_id);
                 self.pending_responses.insert(packet.stream_id, response_tx);
-                self.pending_control_packets
-                    .push_back((packet.stream_id, packet.packet));
+                self.queue_or_send_control_packet(
+                    packet.stream_id,
+                    packet.packet,
+                    allow_immediate_control,
+                )
+                .await?;
             }
             DriverCommand::SendStreamingRequest {
                 method,
@@ -1553,86 +3658,19 @@ impl NativeH3Driver {
                 body,
                 headers_tx,
                 body_shared,
+                phase_trace,
             } => {
-                if self.is_draining.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = headers_tx.send(Err(Error::HttpProtocol(
-                        "HTTP/3 GOAWAY received; refusing new streaming request".into(),
-                    )));
-                    return Ok(());
-                }
-                let (packet, request_stream) = if let RequestBody::Stream {
-                    stream,
-                    content_length,
-                } = body
-                {
-                    match self
-                        .handshake
-                        .build_client_h3_request_start_packet(&method, &uri, &headers, None, false)
-                    {
-                        Ok(packet) => (
-                            packet,
-                            Some(NativeDriverStreamingRequestBody::new(
-                                stream,
-                                content_length,
-                            )),
-                        ),
-                        Err(error) if is_flow_control_blocked_error(&error) => {
-                            self.queue_flow_control_blocked_command(
-                                DriverCommand::SendStreamingRequest {
-                                    method,
-                                    uri,
-                                    headers,
-                                    body: RequestBody::Stream {
-                                        stream,
-                                        content_length,
-                                    },
-                                    headers_tx,
-                                    body_shared,
-                                },
-                            )
-                            .await?;
-                            return Ok(());
-                        }
-                        Err(error) => return Err(error),
-                    }
-                } else {
-                    let retry_body = body.clone();
-                    let body = body.into_bytes()?;
-                    match self.handshake.build_client_h3_request_packet(
-                        &method,
-                        &uri,
-                        &headers,
-                        (!body.is_empty()).then_some(body),
-                    ) {
-                        Ok(packet) => (packet, None),
-                        Err(error) if is_flow_control_blocked_error(&error) => {
-                            self.queue_flow_control_blocked_command(
-                                DriverCommand::SendStreamingRequest {
-                                    method,
-                                    uri,
-                                    headers,
-                                    body: retry_body,
-                                    headers_tx,
-                                    body_shared,
-                                },
-                            )
-                            .await?;
-                            return Ok(());
-                        }
-                        Err(error) => return Err(error),
-                    }
-                };
-                self.state.track_streaming_response_stream(packet.stream_id);
-                self.pending_streaming_responses.insert(
-                    packet.stream_id,
-                    NativeDriverStreamingResponseState::new(
-                        headers_tx,
-                        body_shared,
-                        request_stream,
-                    ),
-                );
-                self.pending_control_packets
-                    .push_back((packet.stream_id, packet.packet));
+                self.handle_send_streaming_request(
+                    method,
+                    uri,
+                    headers,
+                    body,
+                    headers_tx,
+                    body_shared,
+                    phase_trace,
+                    allow_immediate_control,
+                )
+                .await?;
             }
             DriverCommand::OpenWebSocketTunnel {
                 uri,
@@ -1660,10 +3698,17 @@ impl NativeH3Driver {
                     )));
                     return Ok(());
                 }
-                let packet = match self
-                    .handshake
-                    .build_client_h3_websocket_connect_packet(&uri, &headers)
-                {
+                let packet_result = self
+                    .cached_empty_connect_payload(&uri, &headers)?
+                    .map(|payload| {
+                        self.handshake
+                            .build_client_h3_encoded_request_packet(payload, false)
+                    })
+                    .unwrap_or_else(|| {
+                        self.handshake
+                            .build_client_h3_websocket_connect_packet(&uri, &headers)
+                    });
+                let packet = match packet_result {
                     Ok(packet) => packet,
                     Err(error) if is_flow_control_blocked_error(&error) => {
                         self.queue_flow_control_blocked_command(
@@ -1691,9 +3736,140 @@ impl NativeH3Driver {
                         self.transport_config.tunnel_inbound_byte_budget,
                     ),
                 );
-                self.pending_control_packets
-                    .push_back((packet.stream_id, packet.packet));
+                self.queue_or_send_control_packet(
+                    packet.stream_id,
+                    packet.packet,
+                    allow_immediate_control,
+                )
+                .await?;
             }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_send_streaming_request(
+        &mut self,
+        method: http::Method,
+        uri: http::Uri,
+        headers: Headers,
+        body: RequestBody,
+        headers_tx: oneshot::Sender<StreamingHeadersResult>,
+        body_shared: Arc<H3BodyShared>,
+        phase_trace: Option<Arc<crate::transport::h3::NativeH3PhaseTrace>>,
+        allow_immediate_control: bool,
+    ) -> Result<()> {
+        if let Some(trace) = phase_trace.as_ref() {
+            trace.stamp_driver_command_received();
+        }
+        if self.is_draining.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = headers_tx.send(Err(Error::HttpProtocol(
+                "HTTP/3 GOAWAY received; refusing new streaming request".into(),
+            )));
+            return Ok(());
+        }
+        let (packet, request_stream) = if let RequestBody::Stream {
+            stream,
+            content_length,
+        } = body
+        {
+            match self
+                .handshake
+                .build_client_h3_request_start_packet(&method, &uri, &headers, None, false)
+            {
+                Ok(packet) => (
+                    packet,
+                    Some(NativeDriverStreamingRequestBody::new(
+                        stream,
+                        content_length,
+                    )),
+                ),
+                Err(error) if is_flow_control_blocked_error(&error) => {
+                    self.queue_flow_control_blocked_command(DriverCommand::SendStreamingRequest {
+                        method,
+                        uri,
+                        headers,
+                        body: RequestBody::Stream {
+                            stream,
+                            content_length,
+                        },
+                        headers_tx,
+                        body_shared,
+                        phase_trace,
+                    })
+                    .await?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            let retry_body = body.clone();
+            let body = body.into_bytes()?;
+            let packet_result = if body.is_empty() {
+                self.cached_empty_request_payload(&method, &uri, &headers)?
+                    .map(|payload| {
+                        self.handshake
+                            .build_client_h3_encoded_request_packet(payload, true)
+                    })
+                    .unwrap_or_else(|| {
+                        self.handshake
+                            .build_client_h3_request_packet(&method, &uri, &headers, None)
+                    })
+            } else {
+                self.handshake
+                    .build_client_h3_request_packet(&method, &uri, &headers, Some(body))
+            };
+            match packet_result {
+                Ok(packet) => (packet, None),
+                Err(error) if is_flow_control_blocked_error(&error) => {
+                    self.queue_flow_control_blocked_command(DriverCommand::SendStreamingRequest {
+                        method,
+                        uri,
+                        headers,
+                        body: retry_body,
+                        headers_tx,
+                        body_shared,
+                        phase_trace,
+                    })
+                    .await?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        if let Some(trace) = phase_trace.as_ref() {
+            trace.stamp_request_packet_built();
+        }
+        self.pending_streaming_responses.insert(
+            packet.stream_id,
+            NativeDriverStreamingResponseState::new(
+                headers_tx,
+                body_shared,
+                request_stream,
+                phase_trace.clone(),
+            ),
+        );
+        if let Some(trace) = phase_trace.as_ref() {
+            trace.stamp_stream_registered();
+        }
+        self.queue_or_send_control_packet(packet.stream_id, packet.packet, allow_immediate_control)
+            .await?;
+        if let Some(trace) = phase_trace.as_ref() {
+            trace.stamp_packet_send_done();
+        }
+        Ok(())
+    }
+
+    async fn queue_or_send_control_packet(
+        &mut self,
+        stream_id: u64,
+        packet: Bytes,
+        allow_immediate_control: bool,
+    ) -> Result<()> {
+        if allow_immediate_control && self.pending_control_packets.is_empty() {
+            self.send_packet_to_peer(packet.as_ref()).await?;
+        } else {
+            self.pending_control_packets.push_back((stream_id, packet));
         }
         Ok(())
     }
@@ -1716,7 +3892,7 @@ impl NativeH3Driver {
             let Some(command) = self.pending_commands.pop_front() else {
                 break;
             };
-            self.handle_command(command).await?;
+            self.handle_command(command, false).await?;
         }
         Ok(())
     }
@@ -1731,8 +3907,26 @@ impl NativeH3Driver {
                 outbound,
                 self.transport_config.tunnel_outbound_byte_budget,
             ));
+        if self.can_flush_single_tunnel_immediately(stream_id)
+            && self.flush_tunnel_data_once(stream_id).await?
+        {
+            self.send_scheduler
+                .record_stream_progress(H3SendClass::TunnelData, stream_id);
+            return Ok(());
+        }
         self.flush_scheduled_send_work().await?;
         Ok(())
+    }
+
+    fn can_flush_single_tunnel_immediately(&self, stream_id: u64) -> bool {
+        !self.has_control_work()
+            && !self.has_request_body_work()
+            && !self.has_streaming_header_waiter()
+            && self
+                .pending_tunnels
+                .iter()
+                .filter(|(_, tunnel)| !tunnel.pending_outbound.is_empty())
+                .all(|(pending_stream_id, _)| *pending_stream_id == stream_id)
     }
 
     async fn flush_scheduled_send_work(&mut self) -> Result<bool> {
@@ -1783,6 +3977,26 @@ impl NativeH3Driver {
         Ok(None)
     }
 
+    /// Maximum STREAM-frame payload that fits a single path-MTU datagram once
+    /// the short header, STREAM frame header, and AEAD tag are reserved. QUIC
+    /// requires every packet to fit one datagram, so per-packet stream payload
+    /// is bounded by the PMTU independently of the congestion send window (which
+    /// governs total bytes in flight, not per-packet size). Without this cap a
+    /// single large tunnel or request-body write builds one oversized packet:
+    /// above the PMTU it is undeliverable on real paths, and above 65507 the UDP
+    /// send fails outright with EMSGSIZE. Callers re-queue any remainder, so a
+    /// smaller cap simply produces more correctly sized packets per drain.
+    fn max_stream_payload_per_packet(&self) -> usize {
+        // Reserve worst-case overhead: 1 flags + up to 20 DCID + 2 packet
+        // number + STREAM frame header (type + stream_id/offset/length varints)
+        // + 16 AEAD tag. 80 covers the maximum with margin at PMTU >= 1200.
+        const H3_STREAM_PACKET_OVERHEAD: usize = 80;
+        self.handshake
+            .client_pmtu_current_size()
+            .saturating_sub(H3_STREAM_PACKET_OVERHEAD)
+            .max(1)
+    }
+
     async fn flush_tunnel_data_once(&mut self, stream_id: u64) -> Result<bool> {
         let Some(mut outbound) = self
             .pending_tunnels
@@ -1796,7 +4010,10 @@ impl NativeH3Driver {
         let (bytes, fin, remaining_start) = if outbound.bytes.is_empty() {
             (Bytes::new(), outbound.fin, None)
         } else {
-            let send_len = self.send_scheduler.data_budget(outbound.bytes.len());
+            let send_len = self
+                .send_scheduler
+                .data_budget(outbound.bytes.len())
+                .min(self.max_stream_payload_per_packet());
             let bytes = outbound.bytes.slice(..send_len);
             let remaining_start = (send_len < outbound.bytes.len()).then_some(send_len);
             let fin = outbound.fin && remaining_start.is_none();
@@ -1999,7 +4216,10 @@ impl NativeH3Driver {
                 )
             };
             let remaining = chunk.slice(offset..);
-            let send_len = self.send_scheduler.data_budget(remaining.len());
+            let send_len = self
+                .send_scheduler
+                .data_budget(remaining.len())
+                .min(self.max_stream_payload_per_packet());
             let data = remaining.slice(..send_len);
             let packet =
                 match self
@@ -2040,6 +4260,109 @@ impl NativeH3Driver {
         ecn_mark: Option<QuicEcnMark>,
     ) -> Result<()> {
         self.process_datagram_from(self.peer_addr, datagram, ecn_mark)
+            .await
+    }
+
+    async fn try_process_ready_datagram(&mut self, buf: &mut [u8]) -> Result<bool> {
+        let Some(received) = try_recv_from_with_ecn(&self.socket, buf).map_err(Error::Io)? else {
+            return Ok(false);
+        };
+        if let Some(trace) = self.pending_streaming_header_phase_trace() {
+            trace.stamp_udp_recv_return();
+        }
+        self.last_activity = Instant::now();
+        self.process_received_datagram(received, buf).await?;
+        Ok(true)
+    }
+
+    fn direct_get_ack_send_defer_enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("SPECTER_NATIVE_H3_DIRECT_GET_ACK_SEND_DEFER")
+                .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+                .unwrap_or(true)
+        })
+    }
+
+    fn direct_get_io_epoch_enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("SPECTER_NATIVE_H3_DIRECT_GET_IO_EPOCH")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(true)
+        })
+    }
+
+    fn pending_streaming_header_phase_trace(
+        &self,
+    ) -> Option<Arc<crate::transport::h3::NativeH3PhaseTrace>> {
+        self.pending_streaming_responses
+            .values()
+            .find(|stream| stream.is_waiting_for_headers())
+            .and_then(|stream| stream.phase_trace.clone())
+    }
+
+    async fn process_received_datagram(
+        &mut self,
+        received: crate::transport::h3::udp_ecn::UdpDatagramEcn,
+        buf: &[u8],
+    ) -> Result<()> {
+        if received.peer == self.peer_addr
+            || buf[..received.len]
+                .first()
+                .is_some_and(|first| first & 0x80 == 0)
+        {
+            if let Err(error) = self
+                .process_datagram_from(received.peer, &buf[..received.len], received.ecn_mark)
+                .await
+            {
+                if received.peer == self.peer_addr {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn process_direct_get_received_datagram(
+        &mut self,
+        stream_id: u64,
+        received: crate::transport::h3::udp_ecn::UdpDatagramEcn,
+        buf: &[u8],
+    ) -> Result<()> {
+        if !Self::direct_get_io_epoch_enabled() || received.peer != self.peer_addr {
+            return self.process_received_datagram(received, buf).await;
+        }
+        if !self.direct_full_body_pending(stream_id) {
+            return self.process_received_datagram(received, buf).await;
+        }
+        let datagram = &buf[..received.len];
+        if datagram.first().is_none_or(|first| first & 0x80 != 0) {
+            return self
+                .process_datagram_from(received.peer, datagram, received.ecn_mark)
+                .await;
+        }
+        self.process_direct_get_datagram_from(received.peer, datagram, received.ecn_mark)
+            .await
+    }
+
+    async fn process_direct_get_datagram_from(
+        &mut self,
+        remote_address: SocketAddr,
+        datagram: &[u8],
+        ecn_mark: Option<QuicEcnMark>,
+    ) -> Result<()> {
+        if self.handshake.close_state().is_draining()
+            || self.handshake.close_state().is_closing()
+            || (self.is_draining.load(std::sync::atomic::Ordering::SeqCst)
+                && self.closing_connection_close_packet.is_some())
+        {
+            return self
+                .process_datagram_from(remote_address, datagram, ecn_mark)
+                .await;
+        }
+        self.observe_path_packet_from(remote_address, datagram.len());
+        self.process_application_h3_event_packet_from(remote_address, datagram, ecn_mark, true)
             .await
     }
 
@@ -2094,6 +4417,15 @@ impl NativeH3Driver {
             if remote_address != self.peer_addr {
                 return Ok(());
             }
+            // RFC 9001 4.9.1/4.9.2: once the Initial and Handshake keys are
+            // discarded at handshake completion, packets in those spaces are
+            // dropped without processing. Acking them here would re-arm the
+            // peer's ACK tracker (`observe_packet` marks pending even for
+            // ack-only packets), producing an unbounded Initial/Handshake
+            // ACK-of-ACK ping-pong on the steady-state path.
+            if self.handshake.initial_handshake_spaces_discarded() {
+                return Ok(());
+            }
             let processed_packets = self
                 .handshake
                 .process_server_datagram_with_ecn(datagram, ecn_mark)?;
@@ -2115,14 +4447,51 @@ impl NativeH3Driver {
             return Ok(());
         }
 
+        self.process_application_h3_event_packet_from(remote_address, datagram, ecn_mark, false)
+            .await
+    }
+
+    async fn process_application_h3_event_packet_from(
+        &mut self,
+        remote_address: SocketAddr,
+        datagram: &[u8],
+        ecn_mark: Option<QuicEcnMark>,
+        direct_get_epoch: bool,
+    ) -> Result<()> {
         let events = self.handshake.open_server_h3_event_packet_from_with_ecn(
             datagram,
             remote_address,
             ecn_mark,
         )?;
+        if let Some(trace) = self.pending_streaming_header_phase_trace() {
+            trace.stamp_h3_events_decoded();
+        }
         self.sync_path_set_with_handshake(remote_address);
         self.promote_peer_address_if_validated(remote_address);
+        // Deliver to the application before emitting any wire work. The decoded
+        // H3 events are applied and the tunnel/streaming/GET callers are woken
+        // first; ACK, recovery, and retransmit bookkeeping then run off the recv
+        // critical path. Reference QUIC stacks emit ACKs from their batched send only after
+        // delivering reads, so this ordering matches it and keeps ACK timing
+        // within max_ack_delay (the deadline math is time-based, and the apply +
+        // flush it now follows takes microseconds).
+        for event in events {
+            match event {
+                ServerH3Event::PathChallenge(data) => {
+                    let packet = self.handshake.build_client_path_response_packet(data)?;
+                    self.send_packet_to_peer(packet.packet.as_ref()).await?;
+                }
+                event => self.apply_h3_event(event)?,
+            }
+        }
+        if !direct_get_epoch {
+            self.flush_tunnel_inbound();
+            self.flush_streaming_responses();
+        }
         self.drain_session_tickets();
+        if direct_get_epoch {
+            return Ok(());
+        }
         if let Some(packet) = self
             .handshake
             .build_client_application_ack_packet_after_or_delay(
@@ -2136,30 +4505,21 @@ impl NativeH3Driver {
         }
         self.observe_recovery_signals();
         self.send_lost_application_stream_retransmits().await?;
-        for event in events {
-            match event {
-                ServerH3Event::PathChallenge(data) => {
-                    let packet = self.handshake.build_client_path_response_packet(data)?;
-                    self.send_packet_to_peer(packet.packet.as_ref()).await?;
-                }
-                event => self.apply_h3_event(event)?,
+        if !direct_get_epoch {
+            self.cancel_closed_streaming_bodies().await?;
+            let released_credit = H3ReleasedReceiveCredit::new(
+                self.apply_released_body_credits().await?,
+                self.apply_released_tunnel_credits()?,
+            );
+            let has_streaming_responses = !self.pending_streaming_responses.is_empty();
+            let has_tunnels = !self.pending_tunnels.is_empty();
+            if ((!has_streaming_responses && !has_tunnels) || released_credit.has_credit())
+                && !self.receive_backpressured()
+            {
+                self.send_receive_flow_control_updates().await?;
             }
+            self.process_pending_commands().await?;
         }
-        self.cancel_closed_streaming_bodies().await?;
-        self.flush_tunnel_inbound();
-        self.flush_streaming_responses();
-        let released_credit = H3ReleasedReceiveCredit::new(
-            self.apply_released_body_credits().await?,
-            self.apply_released_tunnel_credits()?,
-        );
-        let has_streaming_responses = !self.pending_streaming_responses.is_empty();
-        let has_tunnels = !self.pending_tunnels.is_empty();
-        if ((!has_streaming_responses && !has_tunnels) || released_credit.has_credit())
-            && !self.receive_backpressured()
-        {
-            self.send_receive_flow_control_updates().await?;
-        }
-        self.process_pending_commands().await?;
         Ok(())
     }
 
@@ -2207,11 +4567,15 @@ impl NativeH3Driver {
                 "native QUIC anti-amplification budget exhausted for unvalidated path".into(),
             ));
         }
-        let sent = self
-            .socket
-            .send_to(packet, remote_address)
-            .await
-            .map_err(Error::Io)?;
+        let sent = match self.socket.try_send_to(packet, remote_address) {
+            Ok(sent) => sent,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => self
+                .socket
+                .send_to(packet, remote_address)
+                .await
+                .map_err(Error::Io)?,
+            Err(error) => return Err(Error::Io(error)),
+        };
         self.path_set.record_sent_to(remote_address, sent);
         Ok(())
     }
@@ -2293,13 +4657,37 @@ impl NativeH3Driver {
             return Ok(());
         }
 
+        if self
+            .direct_get_slot
+            .as_ref()
+            .is_some_and(|slot| slot.stream_id == stream_id)
+        {
+            let mut slot = self.direct_get_slot.take().expect("direct GET slot exists");
+            if let Some(completion) = self.apply_direct_full_body_response_event_to_state(
+                stream_id,
+                &mut slot.state,
+                event,
+            )? {
+                slot.completion = Some(Ok(completion));
+            }
+            self.direct_get_slot = Some(slot);
+            return Ok(());
+        }
+
+        if self
+            .pending_direct_full_body_responses
+            .contains_key(&stream_id)
+        {
+            if let Some(completion) = self.apply_direct_full_body_response_event(event)? {
+                self.completed_direct_full_body_responses
+                    .push_back((stream_id, Ok(completion)));
+            }
+            return Ok(());
+        }
+
         if self.pending_streaming_responses.contains_key(&stream_id) {
-            match self.state.apply_tracked_streaming_response_event(event) {
-                Ok(events) => {
-                    for event in events {
-                        self.apply_streaming_response_event(stream_id, event);
-                    }
-                }
+            match self.apply_streaming_response_stream_event(event) {
+                Ok(()) => {}
                 Err(error) => {
                     self.fail_streaming_response(stream_id, error);
                 }
@@ -2309,6 +4697,11 @@ impl NativeH3Driver {
 
         if let Some(response) = self.state.apply_tracked_response_event(event)? {
             if let Some(response_tx) = self.pending_responses.remove(&stream_id) {
+                if response.consumed_bytes > 0 {
+                    self.handshake
+                        .record_client_stream_consumed(stream_id, response.consumed_bytes as u64)?;
+                }
+                self.handshake.release_client_stream(stream_id);
                 let _ = response_tx.send(Ok(StreamResponse {
                     status: response.status,
                     headers: response.headers,
@@ -2319,8 +4712,221 @@ impl NativeH3Driver {
         Ok(())
     }
 
+    fn apply_streaming_response_stream_event(&mut self, event: ServerH3StreamEvent) -> Result<()> {
+        let stream_id = event.stream_id;
+        for frame in event.frames {
+            match frame {
+                H3Frame::Headers(block) => {
+                    if self
+                        .pending_streaming_responses
+                        .get(&stream_id)
+                        .is_some_and(|stream| !stream.is_waiting_for_headers())
+                    {
+                        continue;
+                    }
+                    let encoded_len = headers_frame_encoded_len(block.len());
+                    let (status, response_headers) = decode_response_headers(block)?;
+                    let status = status.ok_or_else(|| {
+                        Error::HttpProtocol(format!(
+                            "native H3 streaming stream {stream_id} received response headers without status code"
+                        ))
+                    })?;
+                    apply_streaming_response_headers_parts(
+                        &mut self.handshake,
+                        &mut self.pending_streaming_responses,
+                        stream_id,
+                        status,
+                        response_headers,
+                        encoded_len,
+                    );
+                }
+                H3Frame::Data(bytes) => {
+                    if self
+                        .pending_streaming_responses
+                        .get(&stream_id)
+                        .is_some_and(|stream| !stream.is_waiting_for_headers())
+                    {
+                        apply_streaming_response_event_parts(
+                            &mut self.pending_streaming_responses,
+                            &self.is_draining,
+                            &mut self.streaming_body_flush_needed,
+                            stream_id,
+                            NativeH3StreamingResponseEvent::Data(bytes),
+                        );
+                    } else {
+                        self.pending_streaming_responses.remove(&stream_id);
+                        return Err(Error::HttpProtocol(format!(
+                            "native H3 streaming stream {stream_id} received DATA before response headers"
+                        )));
+                    }
+                }
+                H3Frame::GoAway { id } => {
+                    apply_streaming_response_event_parts(
+                        &mut self.pending_streaming_responses,
+                        &self.is_draining,
+                        &mut self.streaming_body_flush_needed,
+                        stream_id,
+                        NativeH3StreamingResponseEvent::GoAway { id },
+                    );
+                }
+                H3Frame::Unknown { .. } => {}
+                H3Frame::Settings(_) => {
+                    return Err(Error::HttpProtocol(
+                        "request stream carried SETTINGS frame".into(),
+                    ));
+                }
+            }
+        }
+        if event.fin {
+            if self
+                .pending_streaming_responses
+                .get(&stream_id)
+                .is_some_and(|stream| !stream.is_waiting_for_headers())
+            {
+                apply_streaming_response_event_parts(
+                    &mut self.pending_streaming_responses,
+                    &self.is_draining,
+                    &mut self.streaming_body_flush_needed,
+                    stream_id,
+                    NativeH3StreamingResponseEvent::Finished,
+                );
+            } else {
+                self.pending_streaming_responses.remove(&stream_id);
+                return Err(Error::HttpProtocol(format!(
+                    "native H3 streaming stream {stream_id} completed without status code"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_direct_full_body_response_event(
+        &mut self,
+        event: ServerH3StreamEvent,
+    ) -> Result<Option<NativeDriverDirectFullBodyCompletion>> {
+        let stream_id = event.stream_id;
+        let Some(mut state) = self.pending_direct_full_body_responses.remove(&stream_id) else {
+            return Ok(None);
+        };
+        match self.apply_direct_full_body_response_event_to_state(stream_id, &mut state, event) {
+            Ok(Some(completion)) => Ok(Some(completion)),
+            Ok(None) => {
+                self.pending_direct_full_body_responses
+                    .insert(stream_id, state);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn apply_direct_full_body_response_event_to_state(
+        &mut self,
+        stream_id: u64,
+        state: &mut NativeDriverDirectFullBodyState,
+        event: ServerH3StreamEvent,
+    ) -> Result<Option<NativeDriverDirectFullBodyCompletion>> {
+        debug_assert_eq!(event.stream_id, stream_id);
+        for frame in event.frames {
+            match frame {
+                H3Frame::Headers(block) => {
+                    if state.status.is_some() {
+                        continue;
+                    }
+                    let encoded_len = headers_frame_encoded_len(block.len());
+                    let (status, _response_headers) = decode_response_headers(block)?;
+                    let status = status.ok_or_else(|| {
+                        Error::HttpProtocol(format!(
+                            "native H3 direct GET stream {stream_id} received response headers without status code"
+                        ))
+                    })?;
+                    state.status = Some(status);
+                    state.consumed_bytes = state.consumed_bytes.saturating_add(encoded_len);
+                    state.headers_ready_ns = Some(state.start.elapsed().as_nanos() as f64);
+                }
+                H3Frame::Data(bytes) => {
+                    if state.status.is_none() {
+                        self.handshake.release_client_stream(stream_id);
+                        return Err(Error::HttpProtocol(format!(
+                            "native H3 direct GET stream {stream_id} received DATA before response headers"
+                        )));
+                    }
+                    state.consumed_bytes = state.consumed_bytes.saturating_add(
+                        crate::transport::h3::native::data_frame_encoded_len(bytes.len()),
+                    );
+                    if !bytes.is_empty() {
+                        state
+                            .first_body_ns
+                            .get_or_insert_with(|| state.start.elapsed().as_nanos() as f64);
+                    }
+                    state.bytes = state.bytes.saturating_add(bytes.len() as u64);
+                }
+                H3Frame::GoAway { id } => {
+                    self.handshake.release_client_stream(stream_id);
+                    return Err(Error::HttpProtocol(format!(
+                        "native H3 direct GET stream {stream_id} received GOAWAY id={id}"
+                    )));
+                }
+                H3Frame::Unknown { .. } => {}
+                H3Frame::Settings(_) => {
+                    self.handshake.release_client_stream(stream_id);
+                    return Err(Error::HttpProtocol(
+                        "request stream carried SETTINGS frame".into(),
+                    ));
+                }
+            }
+        }
+        if event.fin {
+            let status = state.status.ok_or_else(|| {
+                self.handshake.release_client_stream(stream_id);
+                Error::HttpProtocol(format!(
+                    "native H3 direct GET stream {stream_id} completed without status code"
+                ))
+            })?;
+            if !(200..300).contains(&status) {
+                if state.consumed_bytes > 0 {
+                    self.handshake
+                        .record_client_stream_consumed(stream_id, state.consumed_bytes as u64)?;
+                }
+                self.handshake.release_client_stream(stream_id);
+                return Err(Error::HttpProtocol(format!(
+                    "native H3 direct GET stream {stream_id} returned status {status}"
+                )));
+            }
+            return Ok(Some(NativeDriverDirectFullBodyCompletion {
+                sample: NativeH3DirectGetBenchmarkSample {
+                    first_byte_ns: state
+                        .headers_ready_ns
+                        .unwrap_or_else(|| state.start.elapsed().as_nanos() as f64),
+                    first_body_ns: state
+                        .first_body_ns
+                        .unwrap_or_else(|| state.start.elapsed().as_nanos() as f64),
+                    total_ns: state.start.elapsed().as_nanos() as f64,
+                    bytes: state.bytes,
+                },
+                consumed_bytes: state.consumed_bytes,
+            }));
+        }
+        Ok(None)
+    }
+
     fn apply_reset_event(&mut self, stream_id: u64, error_code: u64) {
+        if self.direct_full_body_pending(stream_id) {
+            let error = Error::Quic(format!("Stream reset: {error_code}"));
+            if self.fail_direct_get_slot_if_pending(stream_id, error) {
+                return;
+            }
+        }
         let error = Error::Quic(format!("Stream reset: {error_code}"));
+        if self
+            .pending_direct_full_body_responses
+            .remove(&stream_id)
+            .is_some()
+        {
+            self.handshake.release_client_stream(stream_id);
+            self.completed_direct_full_body_responses
+                .push_back((stream_id, Err(error)));
+            return;
+        }
         if let Some(response_tx) = self.pending_responses.remove(&stream_id) {
             let _ = response_tx.send(Err(error));
             return;
@@ -2346,7 +4952,23 @@ impl NativeH3Driver {
     }
 
     fn apply_stop_sending_event(&mut self, stream_id: u64, error_code: u64) {
+        if self.direct_full_body_pending(stream_id) {
+            let error = Error::Quic(format!("Stream stopped: {error_code}"));
+            if self.fail_direct_get_slot_if_pending(stream_id, error) {
+                return;
+            }
+        }
         let error = Error::Quic(format!("Stream stopped: {error_code}"));
+        if self
+            .pending_direct_full_body_responses
+            .remove(&stream_id)
+            .is_some()
+        {
+            self.handshake.release_client_stream(stream_id);
+            self.completed_direct_full_body_responses
+                .push_back((stream_id, Err(error)));
+            return;
+        }
         if let Some(response_tx) = self.pending_responses.remove(&stream_id) {
             let _ = response_tx.send(Err(error));
             return;
@@ -2364,7 +4986,9 @@ impl NativeH3Driver {
         let stream_ids = self
             .pending_streaming_responses
             .iter()
-            .filter_map(|(stream_id, stream)| stream.body_shared.is_closed().then_some(*stream_id))
+            .filter_map(|(stream_id, stream)| {
+                (stream.body_shared.is_closed() && !stream.body_finished).then_some(*stream_id)
+            })
             .collect::<Vec<_>>();
 
         for stream_id in stream_ids {
@@ -2375,6 +4999,18 @@ impl NativeH3Driver {
     }
 
     fn flush_tunnel_inbound(&mut self) {
+        if self.pending_tunnels.len() == 1 {
+            let Some(stream_id) = self.pending_tunnels.keys().next().copied() else {
+                return;
+            };
+            let status = self
+                .pending_tunnels
+                .get_mut(&stream_id)
+                .map(NativeDriverTunnelState::flush_inbound)
+                .unwrap_or(TunnelInboundStatus::Open);
+            self.apply_tunnel_inbound_status(stream_id, status);
+            return;
+        }
         let stream_ids = self.pending_tunnels.keys().copied().collect::<Vec<_>>();
         for stream_id in stream_ids {
             let status = self
@@ -2389,6 +5025,11 @@ impl NativeH3Driver {
     fn apply_tunnel_inbound_status(&mut self, stream_id: u64, status: TunnelInboundStatus) {
         match status {
             TunnelInboundStatus::Open | TunnelInboundStatus::Blocked => {}
+            TunnelInboundStatus::Finished => {
+                if let Some(tunnel) = self.pending_tunnels.get_mut(&stream_id) {
+                    tunnel.finished = true;
+                }
+            }
             TunnelInboundStatus::Remove | TunnelInboundStatus::Closed => {
                 self.pending_tunnels.remove(&stream_id);
             }
@@ -2404,16 +5045,15 @@ impl NativeH3Driver {
         let mut released_body_credit = 0usize;
 
         for stream_id in stream_ids {
-            let (released, closed) = self
+            let (released, closed, body_finished) = self
                 .pending_streaming_responses
                 .get(&stream_id)
                 .map(|stream| {
-                    (
-                        stream.body_shared.take_released_recv_bytes(),
-                        stream.body_shared.is_closed(),
-                    )
+                    let released = stream.body_shared.take_released_recv_bytes();
+                    let closed = stream.body_finished && stream.body_shared.is_closed();
+                    (released, closed, stream.body_finished)
                 })
-                .unwrap_or((0, false));
+                .unwrap_or((0, false, false));
 
             if released > 0 {
                 self.handshake
@@ -2421,7 +5061,10 @@ impl NativeH3Driver {
                 released_body_credit = released_body_credit.saturating_add(released);
             }
             if closed {
-                self.send_stream_cancel(stream_id).await?;
+                if !body_finished {
+                    self.send_stream_cancel(stream_id).await?;
+                }
+                self.handshake.release_client_stream(stream_id);
                 self.pending_streaming_responses.remove(&stream_id);
                 continue;
             }
@@ -2431,27 +5074,69 @@ impl NativeH3Driver {
     }
 
     fn apply_released_tunnel_credits(&mut self) -> Result<usize> {
+        if self.pending_tunnels.len() == 1 {
+            let Some(stream_id) = self.pending_tunnels.keys().next().copied() else {
+                return Ok(0);
+            };
+            let (released, closed, finished, pending_inbound_empty, inbound_pending_bytes) = self
+                .pending_tunnels
+                .get(&stream_id)
+                .map(|tunnel| {
+                    let inbound_pending_bytes = if tunnel.finished {
+                        tunnel.credit.capacity().inbound_pending_bytes
+                    } else {
+                        usize::MAX
+                    };
+                    (
+                        tunnel.credit.take_released_recv_bytes(),
+                        tunnel.inbound_tx.is_closed(),
+                        tunnel.finished,
+                        tunnel.pending_inbound.is_empty(),
+                        inbound_pending_bytes,
+                    )
+                })
+                .unwrap_or((0, false, false, false, 0));
+
+            if released > 0 {
+                self.handshake
+                    .record_client_stream_consumed(stream_id, released as u64)?;
+            }
+            if closed || (finished && pending_inbound_empty && inbound_pending_bytes == 0) {
+                self.handshake.release_client_stream(stream_id);
+                self.pending_tunnels.remove(&stream_id);
+            }
+            return Ok(released);
+        }
         let stream_ids = self.pending_tunnels.keys().copied().collect::<Vec<_>>();
         let mut released_tunnel_credit = 0usize;
 
         for stream_id in stream_ids {
-            let (released, closed) = self
+            let (released, closed, finished, pending_inbound_empty, inbound_pending_bytes) = self
                 .pending_tunnels
                 .get(&stream_id)
                 .map(|tunnel| {
+                    let inbound_pending_bytes = if tunnel.finished {
+                        tunnel.credit.capacity().inbound_pending_bytes
+                    } else {
+                        usize::MAX
+                    };
                     (
                         tunnel.credit.take_released_recv_bytes(),
                         tunnel.inbound_tx.is_closed(),
+                        tunnel.finished,
+                        tunnel.pending_inbound.is_empty(),
+                        inbound_pending_bytes,
                     )
                 })
-                .unwrap_or((0, false));
+                .unwrap_or((0, false, false, false, 0));
 
             if released > 0 {
                 self.handshake
                     .record_client_stream_consumed(stream_id, released as u64)?;
                 released_tunnel_credit = released_tunnel_credit.saturating_add(released);
             }
-            if closed {
+            if closed || (finished && pending_inbound_empty && inbound_pending_bytes == 0) {
+                self.handshake.release_client_stream(stream_id);
                 self.pending_tunnels.remove(&stream_id);
                 continue;
             }
@@ -2487,49 +5172,69 @@ impl NativeH3Driver {
         }
     }
 
-    fn apply_streaming_response_event(
+    fn cached_empty_request_payload(
         &mut self,
-        stream_id: u64,
-        event: NativeH3StreamingResponseEvent,
-    ) {
-        let Some(stream) = self.pending_streaming_responses.get_mut(&stream_id) else {
-            return;
-        };
-        match event {
-            NativeH3StreamingResponseEvent::Headers { status, headers } => {
-                if let Some(headers_tx) = stream.headers_tx.take() {
-                    let _ = headers_tx.send(Ok((status, Headers::from(headers))));
-                }
-            }
-            NativeH3StreamingResponseEvent::Data(bytes) => {
-                push_streaming_body(stream, bytes);
-            }
-            NativeH3StreamingResponseEvent::Finished => {
-                stream.finished = true;
-            }
-            NativeH3StreamingResponseEvent::GoAway { .. } => {
-                self.is_draining
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+        method: &http::Method,
+        uri: &http::Uri,
+        headers: &Headers,
+    ) -> Result<Option<Bytes>> {
+        if !headers.is_empty() {
+            return Ok(None);
+        }
+        if let Some(cache) = &self.empty_request_payload_cache {
+            if cache.method == *method && cache.uri == *uri {
+                return Ok(Some(cache.payload.clone()));
             }
         }
-        self.flush_streaming_response(stream_id);
+
+        let payload = self
+            .handshake
+            .encode_client_h3_request_payload(method, uri, headers, None)?;
+        self.empty_request_payload_cache = Some(NativeDriverRequestPayloadCache {
+            method: method.clone(),
+            uri: uri.clone(),
+            payload: payload.clone(),
+        });
+        Ok(Some(payload))
+    }
+
+    fn cached_empty_connect_payload(
+        &mut self,
+        uri: &http::Uri,
+        headers: &[(String, String)],
+    ) -> Result<Option<Bytes>> {
+        if !headers.is_empty() {
+            return Ok(None);
+        }
+        if let Some(cache) = &self.empty_connect_payload_cache {
+            if cache.uri == *uri {
+                return Ok(Some(cache.payload.clone()));
+            }
+        }
+
+        let payload = self
+            .handshake
+            .encode_client_h3_websocket_connect_payload(uri, headers)?;
+        self.empty_connect_payload_cache = Some(NativeDriverConnectPayloadCache {
+            uri: uri.clone(),
+            payload: payload.clone(),
+        });
+        Ok(Some(payload))
     }
 
     fn fail_streaming_response(&mut self, stream_id: u64, error: Error) {
-        if let Some(mut stream) = self.pending_streaming_responses.remove(&stream_id) {
-            if let Some(headers_tx) = stream.headers_tx.take() {
-                let _ = headers_tx.send(Err(error));
-            } else {
-                let _ = stream.body_shared.fail(error);
-            }
-        }
+        fail_streaming_response_parts(&mut self.pending_streaming_responses, stream_id, error);
     }
 
     fn flush_streaming_responses(&mut self) {
+        if !self.streaming_body_flush_needed {
+            return;
+        }
+        self.streaming_body_flush_needed = false;
         let stream_ids = self
             .pending_streaming_responses
-            .keys()
-            .copied()
+            .iter()
+            .filter_map(|(stream_id, stream)| stream.needs_body_flush().then_some(*stream_id))
             .collect::<Vec<_>>();
         for stream_id in stream_ids {
             self.flush_streaming_response(stream_id);
@@ -2537,43 +5242,27 @@ impl NativeH3Driver {
     }
 
     fn flush_streaming_response(&mut self, stream_id: u64) {
-        let mut remove = false;
-        if let Some(stream) = self.pending_streaming_responses.get_mut(&stream_id) {
-            loop {
-                if stream.body_shared.is_closed() {
-                    break;
-                }
-                if stream.pending_body.is_empty() || !stream.body_shared.is_slot_available() {
-                    break;
-                }
-                let Some(bytes) = stream.pending_body.pop_front() else {
-                    break;
-                };
-                match stream.body_shared.push(Ok(bytes.clone())) {
-                    H3BodyPush::Accepted => {}
-                    H3BodyPush::Full => {
-                        stream.pending_body.push_front(bytes);
-                        break;
-                    }
-                    H3BodyPush::Closed => {
-                        remove = true;
-                        break;
-                    }
-                }
-            }
-            if stream.finished && stream.pending_body.is_empty() {
-                stream.body_shared.finish();
-                remove = true;
-            }
-        }
-        if remove {
-            self.pending_streaming_responses.remove(&stream_id);
-        }
+        flush_streaming_response_parts(
+            &mut self.pending_streaming_responses,
+            &mut self.streaming_body_flush_needed,
+            stream_id,
+        );
     }
 
     fn apply_tunnel_event(&mut self, stream_id: u64, event: NativeH3TunnelEvent) {
         match event {
-            NativeH3TunnelEvent::Open { .. } => {
+            NativeH3TunnelEvent::Open { consumed_bytes, .. } => {
+                if consumed_bytes > 0 {
+                    if let Err(error) = self
+                        .handshake
+                        .record_client_stream_consumed(stream_id, consumed_bytes as u64)
+                    {
+                        if let Some(mut tunnel) = self.pending_tunnels.remove(&stream_id) {
+                            tunnel.fail(error);
+                        }
+                        return;
+                    }
+                }
                 let Some(tunnel) = self.pending_tunnels.get_mut(&stream_id) else {
                     return;
                 };
@@ -2583,33 +5272,30 @@ impl NativeH3Driver {
                 let Some(response_tx) = tunnel.response_tx.take() else {
                     return;
                 };
-                let Some(outbound_tx) = tunnel.outbound_tx.take() else {
-                    return;
-                };
                 let Some(inbound_rx) = tunnel.inbound_rx.take() else {
                     return;
                 };
-                let Some(mut outbound_rx) = tunnel.outbound_rx.take() else {
-                    return;
-                };
-                let tunnel_outbound_tx = self.tunnel_outbound_tx.clone();
-                tokio::spawn(async move {
-                    while let Some(outbound) = outbound_rx.recv().await {
-                        if tunnel_outbound_tx
-                            .send((stream_id, outbound))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                });
                 tunnel.opened = true;
-                let _ = response_tx.send(Ok(H3Tunnel::new_with_credit(
-                    outbound_tx,
-                    inbound_rx,
-                    tunnel.credit.clone(),
-                )));
+                // The handle posts `(stream_id, frame)` straight onto the shared
+                // bounded outbound channel the driver already polls; there is no
+                // per-tunnel relay task between the application and the driver.
+                let h3_tunnel = if let Some(inline_inbound) = tunnel.inline_inbound.clone() {
+                    H3Tunnel::new_direct_with_credit_and_inline(
+                        stream_id,
+                        self.tunnel_outbound_tx.clone(),
+                        inbound_rx,
+                        tunnel.credit.clone(),
+                        inline_inbound,
+                    )
+                } else {
+                    H3Tunnel::new_direct_with_credit(
+                        stream_id,
+                        self.tunnel_outbound_tx.clone(),
+                        inbound_rx,
+                        tunnel.credit.clone(),
+                    )
+                };
+                let _ = response_tx.send(Ok(h3_tunnel));
             }
             NativeH3TunnelEvent::Data(bytes) => {
                 if let Some(tunnel) = self.pending_tunnels.get_mut(&stream_id) {
@@ -2633,6 +5319,126 @@ impl NativeH3Driver {
     }
 }
 
+fn apply_streaming_response_event_parts(
+    pending_streaming_responses: &mut HashMap<u64, NativeDriverStreamingResponseState>,
+    is_draining: &Arc<std::sync::atomic::AtomicBool>,
+    streaming_body_flush_needed: &mut bool,
+    stream_id: u64,
+    event: NativeH3StreamingResponseEvent,
+) {
+    let flush_needed = match event {
+        NativeH3StreamingResponseEvent::Data(bytes) => {
+            if let Some(stream) = pending_streaming_responses.get_mut(&stream_id) {
+                push_streaming_body(stream, bytes);
+                stream.needs_body_flush()
+            } else {
+                false
+            }
+        }
+        NativeH3StreamingResponseEvent::Finished => {
+            if let Some(stream) = pending_streaming_responses.get_mut(&stream_id) {
+                stream.finished = true;
+                true
+            } else {
+                false
+            }
+        }
+        NativeH3StreamingResponseEvent::GoAway { .. } => {
+            is_draining.store(true, std::sync::atomic::Ordering::SeqCst);
+            false
+        }
+    };
+    if flush_needed {
+        *streaming_body_flush_needed = true;
+        flush_streaming_response_parts(
+            pending_streaming_responses,
+            streaming_body_flush_needed,
+            stream_id,
+        );
+    }
+}
+
+fn apply_streaming_response_headers_parts(
+    handshake: &mut NativeQuicHandshake,
+    pending_streaming_responses: &mut HashMap<u64, NativeDriverStreamingResponseState>,
+    stream_id: u64,
+    status: u16,
+    headers: Headers,
+    consumed_bytes: usize,
+) {
+    if consumed_bytes > 0 {
+        if let Err(error) =
+            handshake.record_client_stream_consumed(stream_id, consumed_bytes as u64)
+        {
+            fail_streaming_response_parts(pending_streaming_responses, stream_id, error);
+            return;
+        }
+    }
+    let Some(stream) = pending_streaming_responses.get_mut(&stream_id) else {
+        return;
+    };
+    if let Some(trace) = stream.phase_trace.as_ref() {
+        trace.stamp_streaming_headers_event();
+    }
+    stream.deliver_headers(Ok((status, headers)));
+    if let Some(trace) = stream.phase_trace.as_ref() {
+        trace.stamp_headers_oneshot_sent();
+    }
+}
+
+fn fail_streaming_response_parts(
+    pending_streaming_responses: &mut HashMap<u64, NativeDriverStreamingResponseState>,
+    stream_id: u64,
+    error: Error,
+) {
+    if let Some(mut stream) = pending_streaming_responses.remove(&stream_id) {
+        stream.fail(error);
+    }
+}
+
+fn flush_streaming_response_parts(
+    pending_streaming_responses: &mut HashMap<u64, NativeDriverStreamingResponseState>,
+    streaming_body_flush_needed: &mut bool,
+    stream_id: u64,
+) {
+    let mut remove = false;
+    let mut still_needs_flush = false;
+    if let Some(stream) = pending_streaming_responses.get_mut(&stream_id) {
+        let drain = stream.body_shared.push_pending_data(
+            &mut stream.pending_body,
+            stream.finished && !stream.body_finished,
+        );
+        if drain.closed {
+            remove = true;
+        }
+        if drain.finished {
+            stream.body_finished = true;
+        }
+        still_needs_flush = stream.needs_body_flush();
+    }
+    if remove {
+        pending_streaming_responses.remove(&stream_id);
+        still_needs_flush = false;
+    }
+    if still_needs_flush {
+        *streaming_body_flush_needed = true;
+    } else if *streaming_body_flush_needed {
+        refresh_streaming_body_flush_needed_parts(
+            pending_streaming_responses,
+            streaming_body_flush_needed,
+        );
+    }
+}
+
+fn refresh_streaming_body_flush_needed_parts(
+    pending_streaming_responses: &HashMap<u64, NativeDriverStreamingResponseState>,
+    streaming_body_flush_needed: &mut bool,
+) {
+    *streaming_body_flush_needed = pending_streaming_responses
+        .values()
+        .any(NativeDriverStreamingResponseState::needs_body_flush);
+}
+
 fn push_streaming_body(stream: &mut NativeDriverStreamingResponseState, bytes: Bytes) {
     if bytes.is_empty() {
         return;
@@ -2641,12 +5447,12 @@ fn push_streaming_body(stream: &mut NativeDriverStreamingResponseState, bytes: B
         stream.pending_body.push_back(bytes);
         return;
     }
-    match stream.body_shared.push(Ok(bytes.clone())) {
-        H3BodyPush::Accepted => {}
-        H3BodyPush::Full => {
+    match stream.body_shared.push_data(bytes) {
+        H3BodyDataPush::Accepted => {}
+        H3BodyDataPush::Full(bytes) => {
             stream.pending_body.push_back(bytes);
         }
-        H3BodyPush::Closed => {
+        H3BodyDataPush::Closed => {
             stream.finished = true;
         }
     }
@@ -2909,7 +5715,8 @@ mod tests {
     fn streaming_response_body_reports_backpressure_when_shared_and_pending_slots_are_full() {
         let (headers_tx, _headers_rx) = oneshot::channel();
         let body_shared = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 1);
-        let mut stream = NativeDriverStreamingResponseState::new(headers_tx, body_shared, None);
+        let mut stream =
+            NativeDriverStreamingResponseState::new(headers_tx, body_shared, None, None);
 
         push_streaming_body(&mut stream, Bytes::from_static(b"one"));
         assert!(
@@ -2929,13 +5736,13 @@ mod tests {
         let (blocked_headers_tx, _blocked_headers_rx) = oneshot::channel();
         let blocked_body = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 1);
         let mut blocked =
-            NativeDriverStreamingResponseState::new(blocked_headers_tx, blocked_body, None);
+            NativeDriverStreamingResponseState::new(blocked_headers_tx, blocked_body, None, None);
         push_streaming_body(&mut blocked, Bytes::from_static(b"blocked-public"));
         push_streaming_body(&mut blocked, Bytes::from_static(b"blocked-pending"));
 
         let (open_headers_tx, _open_headers_rx) = oneshot::channel();
         let open_body = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 1);
-        let open = NativeDriverStreamingResponseState::new(open_headers_tx, open_body, None);
+        let open = NativeDriverStreamingResponseState::new(open_headers_tx, open_body, None, None);
 
         let mut streams = HashMap::new();
         streams.insert(0, blocked);
@@ -3048,6 +5855,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finished_tunnel_waits_for_final_data_credit_before_driver_removal() {
+        let stream_id = 0;
+        let (response_tx, response_rx) = oneshot::channel();
+        let tunnel = NativeDriverTunnelState::new(response_tx);
+
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (tunnel_outbound_tx, tunnel_outbound_rx) = mpsc::channel(1);
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("socket"));
+        let peer_addr = socket.local_addr().expect("socket addr");
+        let fingerprint = Http3Fingerprint::default();
+        let handshake = NativeQuicHandshake::client_with_verify_peer(
+            "localhost",
+            &fingerprint,
+            crate::transport::h3::quic::ConnectionId::from_static(b"dst"),
+            crate::transport::h3::quic::ConnectionId::from_static(b"src"),
+            false,
+        )
+        .expect("handshake");
+        let mut driver = NativeH3Driver {
+            command_rx,
+            tunnel_outbound_tx,
+            tunnel_outbound_rx,
+            handshake,
+            fingerprint,
+            socket,
+            peer_addr,
+            path_set: {
+                let mut path_set = QuicPathSet::new();
+                path_set.install_primary(peer_addr);
+                path_set
+            },
+            state: NativeH3DriverState::default(),
+            pending_responses: HashMap::new(),
+            direct_get_slot: None,
+            pending_direct_full_body_responses: HashMap::new(),
+            completed_direct_full_body_responses: VecDeque::new(),
+            pending_streaming_responses: HashMap::new(),
+            streaming_body_flush_needed: false,
+            pending_tunnels: HashMap::from([(stream_id, tunnel)]),
+            pending_commands: VecDeque::new(),
+            empty_request_payload_cache: None,
+            empty_connect_payload_cache: None,
+            pending_control_packets: VecDeque::new(),
+            deferred_epoch_ack_packets: Vec::new(),
+            is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            closing_connection_close_packet: None,
+            body_progress_notify: Arc::new(Notify::new()),
+            send_scheduler: H3SendScheduler::default(),
+            transport_config: H3TransportConfig::default(),
+            session_cache: crate::transport::h3::session_cache::NativeH3SessionCache::new(),
+            session_cache_key: crate::transport::h3::session_cache::NativeH3SessionCacheKey::new(
+                "localhost",
+                std::iter::empty::<Vec<u8>>(),
+                false,
+                None,
+            ),
+            max_idle_timeout: Duration::from_secs(1),
+            last_activity: Instant::now(),
+            initial_datagram: None,
+            preface_sent: false,
+        };
+
+        driver.apply_tunnel_event(
+            stream_id,
+            NativeH3TunnelEvent::Open {
+                status: 200,
+                headers: Vec::new(),
+                consumed_bytes: 0,
+            },
+        );
+        let mut public_tunnel = response_rx
+            .await
+            .expect("open response")
+            .expect("tunnel opened");
+
+        let payload = Bytes::from_static(b"final tunnel data");
+        driver.apply_tunnel_event(stream_id, NativeH3TunnelEvent::Data(payload.clone()));
+        driver.apply_tunnel_event(stream_id, NativeH3TunnelEvent::Finished);
+
+        assert!(
+            driver.pending_tunnels.contains_key(&stream_id),
+            "finished tunnel must stay tracked until final DATA credit is released"
+        );
+
+        assert_eq!(
+            public_tunnel
+                .recv_event()
+                .await
+                .expect("inbound event")
+                .expect("data event"),
+            H3TunnelEvent::Data(payload)
+        );
+        assert_eq!(
+            driver.apply_released_tunnel_credits().unwrap(),
+            crate::transport::h3::native::data_frame_encoded_len(17)
+        );
+        assert!(
+            !driver.pending_tunnels.contains_key(&stream_id),
+            "final DATA credit release retires the finished tunnel stream"
+        );
+        assert_eq!(
+            public_tunnel
+                .recv_event()
+                .await
+                .expect("end stream event")
+                .expect("end stream"),
+            H3TunnelEvent::EndStream
+        );
+    }
+
+    #[tokio::test]
     async fn reset_after_full_tunnel_inbound_budget_is_delivered_after_prior_data() {
         let stream_id = 0;
         let (response_tx, _response_rx) = oneshot::channel();
@@ -3089,10 +6007,17 @@ mod tests {
             },
             state: NativeH3DriverState::default(),
             pending_responses: HashMap::new(),
+            direct_get_slot: None,
+            pending_direct_full_body_responses: HashMap::new(),
+            completed_direct_full_body_responses: VecDeque::new(),
             pending_streaming_responses: HashMap::new(),
+            streaming_body_flush_needed: false,
             pending_tunnels: HashMap::from([(stream_id, tunnel)]),
             pending_commands: VecDeque::new(),
+            empty_request_payload_cache: None,
+            empty_connect_payload_cache: None,
             pending_control_packets: VecDeque::new(),
+            deferred_epoch_ack_packets: Vec::new(),
             is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             closing_connection_close_packet: None,
             body_progress_notify: Arc::new(Notify::new()),
@@ -3108,6 +6033,7 @@ mod tests {
             max_idle_timeout: Duration::from_secs(1),
             last_activity: Instant::now(),
             initial_datagram: None,
+            preface_sent: false,
         };
 
         driver.apply_reset_event(stream_id, 0x010c);
@@ -3221,10 +6147,17 @@ mod tests {
             },
             state: NativeH3DriverState::default(),
             pending_responses: HashMap::new(),
+            direct_get_slot: None,
+            pending_direct_full_body_responses: HashMap::new(),
+            completed_direct_full_body_responses: VecDeque::new(),
             pending_streaming_responses: HashMap::new(),
+            streaming_body_flush_needed: false,
             pending_tunnels: HashMap::new(),
             pending_commands: VecDeque::new(),
+            empty_request_payload_cache: None,
+            empty_connect_payload_cache: None,
             pending_control_packets: VecDeque::new(),
+            deferred_epoch_ack_packets: Vec::new(),
             is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             closing_connection_close_packet: None,
             body_progress_notify: Arc::new(Notify::new()),
@@ -3240,6 +6173,7 @@ mod tests {
             max_idle_timeout: Duration::from_secs(1),
             last_activity: Instant::now(),
             initial_datagram: None,
+            preface_sent: false,
         };
 
         driver
@@ -3290,10 +6224,17 @@ mod tests {
             },
             state: NativeH3DriverState::default(),
             pending_responses: HashMap::new(),
+            direct_get_slot: None,
+            pending_direct_full_body_responses: HashMap::new(),
+            completed_direct_full_body_responses: VecDeque::new(),
             pending_streaming_responses: HashMap::new(),
+            streaming_body_flush_needed: false,
             pending_tunnels: HashMap::new(),
             pending_commands: VecDeque::new(),
+            empty_request_payload_cache: None,
+            empty_connect_payload_cache: None,
             pending_control_packets: VecDeque::new(),
+            deferred_epoch_ack_packets: Vec::new(),
             is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             closing_connection_close_packet: None,
             body_progress_notify: Arc::new(Notify::new()),
@@ -3309,6 +6250,7 @@ mod tests {
             max_idle_timeout: Duration::from_secs(1),
             last_activity: Instant::now(),
             initial_datagram: None,
+            preface_sent: false,
         };
 
         driver.observe_path_packet_from(migrated_peer, 1200);

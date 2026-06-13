@@ -919,6 +919,9 @@ impl Headers {
     }
 
     pub fn from_vec(headers: Vec<(String, String)>) -> Self {
+        if headers.is_empty() {
+            return Self::new();
+        }
         let mut builder = HeadersBuilder::with_capacity(headers.len(), headers.len() * 32);
         for (name, value) in headers {
             builder.push(name.as_bytes(), value.as_bytes());

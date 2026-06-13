@@ -854,6 +854,32 @@ fn native_quic_ack_tracker_clears_pending_ack_without_forgetting_ranges() {
 }
 
 #[test]
+fn native_quic_ack_tracker_prunes_old_history_after_ack_window() {
+    let mut tracker = QuicAckTracker::default();
+    for packet_number in 0..600 {
+        tracker.observe(packet_number);
+    }
+
+    let frame = tracker.to_ack_frame(0).unwrap();
+    assert_eq!(
+        frame,
+        QuicFrame::Ack {
+            largest_acknowledged: 599,
+            ack_delay: 0,
+            first_ack_range: 511,
+            ranges: vec![],
+        }
+    );
+
+    tracker.mark_ack_sent();
+    tracker.observe(0);
+    assert!(
+        tracker.is_empty(),
+        "very old duplicates outside the retained ACK window must not reopen pending ACK state"
+    );
+}
+
+#[test]
 fn native_quic_ack_tracker_defers_until_configured_packet_threshold() {
     let mut tracker = QuicAckTracker::default();
 
@@ -911,6 +937,69 @@ fn native_quic_ack_tracker_encodes_delayed_ack_delay_units() {
             ack_delay: 3125,
             ..
         }
+    ));
+}
+
+#[test]
+fn native_quic_ack_tracker_uses_scalar_largest_ack_timestamp() {
+    let source = include_str!("../src/transport/h3/quic.rs");
+
+    assert!(
+        source.contains("largest_acknowledged_received_at: Option<(u64, Instant)>"),
+        "ACK tracker should retain only the largest acknowledged packet's receive timestamp"
+    );
+    assert!(
+        !source.contains("received_at: BTreeMap<u64, Instant>"),
+        "ACK tracker must not keep a per-packet ACK timestamp map on the hot receive path"
+    );
+    assert!(
+        !source.contains("received_at.insert(") && !source.contains("received_at.remove("),
+        "ACK tracker must not mutate a per-packet ACK timestamp map on observe/prune"
+    );
+}
+
+#[test]
+fn native_quic_ack_tracker_ack_delay_uses_largest_packet_time_after_gap_fill() {
+    let mut tracker = QuicAckTracker::default();
+    let largest_observed = Instant::now();
+    tracker.observe_at(10, largest_observed);
+    tracker.observe_at(8, largest_observed + Duration::from_millis(10));
+    tracker.observe_at(9, largest_observed + Duration::from_millis(15));
+
+    let frame = tracker
+        .to_ack_frame_with_delay(largest_observed + Duration::from_millis(25), 3)
+        .expect("ACK frame");
+
+    assert!(matches!(
+        frame,
+        QuicFrame::Ack {
+            largest_acknowledged: 10,
+            ack_delay: 3125,
+            first_ack_range: 2,
+            ranges: ref additional_ranges,
+        } if additional_ranges.is_empty()
+    ));
+}
+
+#[test]
+fn native_quic_ack_tracker_duplicate_largest_does_not_refresh_ack_delay() {
+    let mut tracker = QuicAckTracker::default();
+    let first_observed = Instant::now();
+    tracker.observe_at(10, first_observed);
+    tracker.observe_at(10, first_observed + Duration::from_millis(20));
+
+    let frame = tracker
+        .to_ack_frame_with_delay(first_observed + Duration::from_millis(25), 3)
+        .expect("ACK frame");
+
+    assert!(matches!(
+        frame,
+        QuicFrame::Ack {
+            largest_acknowledged: 10,
+            ack_delay: 3125,
+            first_ack_range: 0,
+            ranges: ref additional_ranges,
+        } if additional_ranges.is_empty()
     ));
 }
 

@@ -12,10 +12,10 @@ use crate::headers::Headers;
 use crate::transport::h3::native;
 use crate::transport::h3::path::{match_local_connection_id, QuicConnectionIdInventory};
 use crate::transport::h3::quic::{
-    build_initial_crypto_packet, decode_frames, decode_long_header, decode_transport_parameters,
-    decode_version_negotiation_packet, derive_initial_key_material,
+    build_initial_crypto_packet, decode_frames, decode_frames_bytes, decode_long_header,
+    decode_transport_parameters, decode_version_negotiation_packet, derive_initial_key_material,
     derive_next_packet_key_material, encode_frame, encode_long_header, open_long_header_packet,
-    open_short_header_packet, protect_long_header_packet, protect_short_header_packet,
+    open_short_header_packet_into, protect_long_header_packet, protect_short_header_packet,
     split_long_header_datagram, validate_retry_integrity_tag_v1, ConnectionId, LongHeaderPacket,
     LongHeaderType, OpenedShortHeaderPacket, QuicAckTracker, QuicCloseState, QuicCryptoAssembler,
     QuicEcnMark, QuicFrame, QuicLossDetector, QuicPacketKeyMaterial, QuicPathValidator,
@@ -315,10 +315,17 @@ fn try_open_one_rtt_packet(
     packet: &[u8],
     destination_cid_len: usize,
     expected_packet_number: u64,
+    scratch: &mut Vec<u8>,
+    pt_out: &mut Vec<u8>,
 ) -> Result<OneRttOpenedPacket> {
-    if let Ok(opened) =
-        open_short_header_packet(current, packet, destination_cid_len, expected_packet_number)
-    {
+    if let Ok(opened) = open_short_header_packet_into(
+        current,
+        packet,
+        destination_cid_len,
+        expected_packet_number,
+        scratch,
+        pt_out,
+    ) {
         if opened.key_phase == expected_read_phase {
             return Ok(OneRttOpenedPacket {
                 opened,
@@ -329,11 +336,13 @@ fn try_open_one_rtt_packet(
 
     if let Some(previous) = previous {
         if previous.retire_at > now {
-            if let Ok(opened) = open_short_header_packet(
+            if let Ok(opened) = open_short_header_packet_into(
                 &previous.keys,
                 packet,
                 destination_cid_len,
                 expected_packet_number,
+                scratch,
+                pt_out,
             ) {
                 if opened.key_phase == previous.phase {
                     return Ok(OneRttOpenedPacket {
@@ -347,9 +356,14 @@ fn try_open_one_rtt_packet(
 
     if let Some(next) = next {
         let expected_next_phase = !expected_read_phase;
-        if let Ok(opened) =
-            open_short_header_packet(next, packet, destination_cid_len, expected_packet_number)
-        {
+        if let Ok(opened) = open_short_header_packet_into(
+            next,
+            packet,
+            destination_cid_len,
+            expected_packet_number,
+            scratch,
+            pt_out,
+        ) {
             if opened.key_phase == expected_next_phase {
                 return Ok(OneRttOpenedPacket {
                     opened,
@@ -430,6 +444,46 @@ impl QuicApplicationFlowControl {
         }
     }
 
+    fn replace_initial_peer_transport_parameters(&mut self, parameters: &[TransportParameter]) {
+        let mut initial_max_data = 0;
+        let mut initial_max_stream_data_bidi_local = 0;
+        let mut initial_max_stream_data_bidi_remote = 0;
+        let mut initial_max_stream_data_uni = 0;
+        let mut initial_max_streams_bidi = 0;
+        let mut initial_max_streams_uni = 0;
+
+        for parameter in parameters {
+            match parameter {
+                TransportParameter::InitialMaxData(value) => initial_max_data = *value,
+                TransportParameter::InitialMaxStreamDataBidiLocal(value) => {
+                    initial_max_stream_data_bidi_local = *value;
+                }
+                TransportParameter::InitialMaxStreamDataBidiRemote(value) => {
+                    initial_max_stream_data_bidi_remote = *value;
+                }
+                TransportParameter::InitialMaxStreamDataUni(value) => {
+                    initial_max_stream_data_uni = *value;
+                }
+                TransportParameter::InitialMaxStreamsBidi(value) => {
+                    initial_max_streams_bidi = *value;
+                }
+                TransportParameter::InitialMaxStreamsUni(value) => {
+                    initial_max_streams_uni = *value;
+                }
+                _ => {}
+            }
+        }
+
+        self.max_data = initial_max_data;
+        self.initial_max_stream_data_bidi_local = initial_max_stream_data_bidi_local;
+        self.initial_max_stream_data_bidi_remote = initial_max_stream_data_bidi_remote;
+        self.initial_max_stream_data_uni = initial_max_stream_data_uni;
+        self.initial_max_streams_bidi = initial_max_streams_bidi;
+        self.initial_max_streams_uni = initial_max_streams_uni;
+        self.stream_data_overrides.clear();
+        self.last_blocked = None;
+    }
+
     fn take_blocked_frame(&mut self) -> Option<QuicFrame> {
         self.last_blocked.take()
     }
@@ -477,6 +531,38 @@ impl QuicApplicationFlowControl {
         Ok(())
     }
 
+    fn consume_final_stream_data_at_zero(&mut self, stream_id: u64, len: usize) -> Result<()> {
+        let stream_limit = self.stream_data_limit(stream_id)?;
+        let data_end = len as u64;
+        if data_end > stream_limit {
+            self.last_blocked = Some(QuicFrame::StreamDataBlocked {
+                stream_id,
+                maximum_stream_data: stream_limit,
+            });
+            return Err(Error::Quic(format!(
+                "native H3 flow control blocked stream {stream_id}: end offset {data_end} exceeds peer stream limit {stream_limit}"
+            )));
+        }
+
+        let next_sent_data = self
+            .sent_data
+            .checked_add(data_end)
+            .ok_or_else(|| Error::HttpProtocol("QUIC flow control data overflow".into()))?;
+        if next_sent_data > self.max_data {
+            self.last_blocked = Some(QuicFrame::DataBlocked {
+                maximum_data: self.max_data,
+            });
+            return Err(Error::Quic(format!(
+                "native H3 flow control blocked stream {stream_id}: connection data {next_sent_data} exceeds peer connection limit {}",
+                self.max_data
+            )));
+        }
+
+        self.sent_data = next_sent_data;
+        self.last_blocked = None;
+        Ok(())
+    }
+
     fn stream_data_limit(&mut self, stream_id: u64) -> Result<u64> {
         let initial_limit = if is_bidirectional_stream(stream_id) {
             if stream_initiator(stream_id) == self.local_initiator {
@@ -518,6 +604,21 @@ impl QuicApplicationFlowControl {
             )));
         }
         Ok(())
+    }
+
+    fn release_stream(&mut self, stream_id: u64) {
+        self.stream_sent.remove(&stream_id);
+        self.stream_data_overrides.remove(&stream_id);
+        let blocked_on_stream = matches!(
+            self.last_blocked.as_ref(),
+            Some(QuicFrame::StreamDataBlocked {
+                stream_id: blocked,
+                ..
+            }) if *blocked == stream_id
+        );
+        if blocked_on_stream {
+            self.last_blocked = None;
+        }
     }
 }
 
@@ -648,7 +749,6 @@ impl QuicReceiveFlowControl {
         }
 
         let initial_stream_limit = self.initial_stream_data_limit(stream_id)?;
-        let stream_window = self.max_stream_window.max(initial_stream_limit);
         let stream_threshold = (initial_stream_limit / 2).max(1);
 
         let stream_total = self
@@ -670,9 +770,7 @@ impl QuicReceiveFlowControl {
             .last_announced_max_stream_data
             .get(&stream_id)
             .unwrap_or(&initial_stream_limit);
-        let stream_absolute = initial_stream_limit
-            .saturating_add(stream_total)
-            .min(stream_window);
+        let stream_absolute = initial_stream_limit.saturating_add(stream_total);
         if stream_absolute > stream_announced
             && stream_absolute - stream_announced >= stream_threshold
         {
@@ -686,8 +784,7 @@ impl QuicReceiveFlowControl {
 
         let connection_absolute = self
             .initial_max_data
-            .saturating_add(self.connection_consumed)
-            .min(self.max_connection_window);
+            .saturating_add(self.connection_consumed);
         if connection_absolute > self.last_announced_max_data
             && connection_absolute - self.last_announced_max_data
                 >= self.connection_update_threshold
@@ -816,8 +913,19 @@ pub struct NativeQuicHandshake {
     server_h3_stream_buffers: BTreeMap<u64, BytesMut>,
     server_h3_stream_buffer_offsets: BTreeMap<u64, u64>,
     server_h3_stream_types: BTreeMap<u64, native::H3StreamType>,
+    server_h3_stream_pending: BTreeMap<u64, PendingStreamData>,
     close_draining: bool,
     close_state: QuicCloseState,
+    /// Reused scratch buffer for the warm 1-RTT recv path. Holds the
+    /// header-unmask copy of the inbound datagram; refilled from the datagram on
+    /// every `open_short_header_packet_into` call, so it is safe across the 1-3
+    /// key attempts per packet.
+    recv_unmask_scratch: Vec<u8>,
+    /// Reused output buffer for the warm 1-RTT recv path. Receives the AEAD
+    /// plaintext, disjoint from `recv_unmask_scratch` so the cipher input and
+    /// output never alias. Resized per call; zero per-call allocation after
+    /// warmup.
+    recv_decrypt_scratch: Vec<u8>,
 }
 
 pub struct NativeQuicServerHandshake {
@@ -839,6 +947,7 @@ pub struct NativeQuicServerHandshake {
     server_application_loss_detector: QuicLossDetector,
     server_application_flow_control: QuicApplicationFlowControl,
     server_application_receive_flow_control: QuicReceiveFlowControl,
+    server_peer_transport_parameters_applied: bool,
     server_application_sent_streams: BTreeMap<u64, SentApplicationStreamPacket>,
     server_application_recovery_lost_packets: Vec<u64>,
     server_initial_sent_crypto: BTreeMap<u64, SentCryptoPacket>,
@@ -869,8 +978,19 @@ pub struct NativeQuicServerHandshake {
     client_h3_stream_buffers: BTreeMap<u64, BytesMut>,
     client_h3_stream_buffer_offsets: BTreeMap<u64, u64>,
     client_h3_stream_types: BTreeMap<u64, native::H3StreamType>,
+    client_h3_stream_pending: BTreeMap<u64, PendingStreamData>,
     close_draining: bool,
     close_state: QuicCloseState,
+    /// Reused scratch buffer for the warm 1-RTT recv path. Holds the
+    /// header-unmask copy of the inbound datagram; refilled from the datagram on
+    /// every `open_short_header_packet_into` call, so it is safe across the 1-3
+    /// key attempts per packet.
+    recv_unmask_scratch: Vec<u8>,
+    /// Reused output buffer for the warm 1-RTT recv path. Receives the AEAD
+    /// plaintext, disjoint from `recv_unmask_scratch` so the cipher input and
+    /// output never alias. Resized per call; zero per-call allocation after
+    /// warmup.
+    recv_decrypt_scratch: Vec<u8>,
 }
 
 impl NativeQuicServerHandshake {
@@ -914,6 +1034,7 @@ impl NativeQuicServerHandshake {
             server_application_receive_flow_control: QuicReceiveFlowControl::server(
                 &fingerprint.transport,
             ),
+            server_peer_transport_parameters_applied: false,
             server_application_sent_streams: BTreeMap::new(),
             server_application_recovery_lost_packets: Vec::new(),
             server_initial_sent_crypto: BTreeMap::new(),
@@ -942,8 +1063,11 @@ impl NativeQuicServerHandshake {
             client_h3_stream_buffers: BTreeMap::new(),
             client_h3_stream_buffer_offsets: BTreeMap::new(),
             client_h3_stream_types: BTreeMap::new(),
+            client_h3_stream_pending: BTreeMap::new(),
             close_draining: false,
             close_state: QuicCloseState::default(),
+            recv_unmask_scratch: Vec::new(),
+            recv_decrypt_scratch: Vec::new(),
             recovery: recovery_state_from_transport(&fingerprint.transport),
             ack_delay_exponent: fingerprint.transport.ack_delay_exponent,
         })
@@ -992,8 +1116,11 @@ impl NativeQuicServerHandshake {
             client_h3_stream_buffers: BTreeMap::new(),
             client_h3_stream_buffer_offsets: BTreeMap::new(),
             client_h3_stream_types: BTreeMap::new(),
+            client_h3_stream_pending: BTreeMap::new(),
             close_draining: false,
             close_state: QuicCloseState::default(),
+            recv_unmask_scratch: Vec::new(),
+            recv_decrypt_scratch: Vec::new(),
             client_initial_crypto: QuicCryptoAssembler::default(),
             client_handshake_crypto: QuicCryptoAssembler::default(),
             client_initial_ack_tracker: QuicAckTracker::default(),
@@ -1008,6 +1135,7 @@ impl NativeQuicServerHandshake {
             server_application_receive_flow_control: QuicReceiveFlowControl::server(
                 &fingerprint.transport,
             ),
+            server_peer_transport_parameters_applied: false,
             server_application_sent_streams: BTreeMap::new(),
             server_application_recovery_lost_packets: Vec::new(),
             server_initial_sent_crypto: BTreeMap::new(),
@@ -1071,6 +1199,7 @@ impl NativeQuicServerHandshake {
             server_application_receive_flow_control: QuicReceiveFlowControl::server(
                 &fingerprint.transport,
             ),
+            server_peer_transport_parameters_applied: false,
             server_application_sent_streams: BTreeMap::new(),
             server_application_recovery_lost_packets: Vec::new(),
             server_initial_sent_crypto: BTreeMap::new(),
@@ -1099,8 +1228,11 @@ impl NativeQuicServerHandshake {
             client_h3_stream_buffers: BTreeMap::new(),
             client_h3_stream_buffer_offsets: BTreeMap::new(),
             client_h3_stream_types: BTreeMap::new(),
+            client_h3_stream_pending: BTreeMap::new(),
             close_draining: false,
             close_state: QuicCloseState::default(),
+            recv_unmask_scratch: Vec::new(),
+            recv_decrypt_scratch: Vec::new(),
             recovery: recovery_state_from_transport(&fingerprint.transport),
             ack_delay_exponent: fingerprint.transport.ack_delay_exponent,
         })
@@ -1108,6 +1240,21 @@ impl NativeQuicServerHandshake {
 
     pub fn is_application_ready(&self) -> bool {
         self.client_application_keys.is_some() && self.server_application_keys.is_some()
+    }
+
+    fn apply_server_peer_transport_parameters_if_available(&mut self) -> Result<()> {
+        if self.server_peer_transport_parameters_applied {
+            return Ok(());
+        }
+        let peer_transport_parameters = self.tls.peer_transport_parameters();
+        if peer_transport_parameters.is_empty() {
+            return Ok(());
+        }
+        let parameters = decode_transport_parameters(peer_transport_parameters.as_ref())?;
+        self.server_application_flow_control
+            .replace_initial_peer_transport_parameters(&parameters);
+        self.server_peer_transport_parameters_applied = true;
+        Ok(())
     }
 
     /// Native HTTP/3 TLS 1.3 resumption / QUIC 0-RTT status for this server
@@ -1591,6 +1738,8 @@ impl NativeQuicServerHandshake {
             packet,
             destination_cid_len,
             self.next_client_application_packet_number,
+            &mut self.recv_unmask_scratch,
+            &mut self.recv_decrypt_scratch,
         )?;
         if matches!(opened.outcome, OneRttOpenOutcome::Next) {
             self.commit_receive_key_update(now)?;
@@ -1873,6 +2022,7 @@ impl NativeQuicServerHandshake {
                         &mut self.client_h3_stream_buffers,
                         &mut self.client_h3_stream_buffer_offsets,
                         &mut self.client_h3_stream_types,
+                        &mut self.client_h3_stream_pending,
                         stream_id,
                         offset,
                         fin,
@@ -2077,6 +2227,13 @@ impl NativeQuicServerHandshake {
     pub fn release_server_stream(&mut self, stream_id: u64) {
         self.server_application_receive_flow_control
             .release_stream(stream_id);
+        self.server_application_flow_control
+            .release_stream(stream_id);
+        self.server_stream_offsets.remove(&stream_id);
+        self.client_h3_stream_buffers.remove(&stream_id);
+        self.client_h3_stream_buffer_offsets.remove(&stream_id);
+        self.client_h3_stream_types.remove(&stream_id);
+        self.client_h3_stream_pending.remove(&stream_id);
     }
 
     pub fn build_server_handshake_done_packet(&mut self) -> Result<ServerApplicationControlPacket> {
@@ -2194,6 +2351,25 @@ impl NativeQuicServerHandshake {
         self.build_server_application_stream_packet(stream_id, data, fin)
     }
 
+    #[doc(hidden)]
+    pub fn build_server_h3_raw_stream_packet_without_flow_control_for_test(
+        &mut self,
+        stream_id: u64,
+        data: Bytes,
+        fin: bool,
+    ) -> Result<ServerApplicationPacket> {
+        let stream_offset = *self.server_stream_offsets.get(&stream_id).unwrap_or(&0);
+        let packet = self.build_server_application_stream_packet_at_offset(
+            stream_id,
+            stream_offset,
+            data,
+            fin,
+        )?;
+        self.server_stream_offsets
+            .insert(stream_id, stream_offset + packet.data.len() as u64);
+        Ok(packet)
+    }
+
     pub fn build_server_h3_response_packet(
         &mut self,
         stream_id: u64,
@@ -2252,6 +2428,9 @@ impl NativeQuicServerHandshake {
                 }
                 _ => {}
             }
+        }
+        if self.is_application_ready() {
+            self.apply_server_peer_transport_parameters_if_available()?;
         }
         if self.is_application_ready() && !self.recovery.handshake_complete() {
             self.recovery.discard_space(PacketNumberSpace::Initial);
@@ -2737,8 +2916,11 @@ impl NativeQuicHandshake {
             server_h3_stream_buffers: BTreeMap::new(),
             server_h3_stream_buffer_offsets: BTreeMap::new(),
             server_h3_stream_types: BTreeMap::new(),
+            server_h3_stream_pending: BTreeMap::new(),
             close_draining: false,
             close_state: QuicCloseState::default(),
+            recv_unmask_scratch: Vec::new(),
+            recv_decrypt_scratch: Vec::new(),
         })
     }
 
@@ -2841,8 +3023,11 @@ impl NativeQuicHandshake {
             server_h3_stream_buffers: BTreeMap::new(),
             server_h3_stream_buffer_offsets: BTreeMap::new(),
             server_h3_stream_types: BTreeMap::new(),
+            server_h3_stream_pending: BTreeMap::new(),
             close_draining: false,
             close_state: QuicCloseState::default(),
+            recv_unmask_scratch: Vec::new(),
+            recv_decrypt_scratch: Vec::new(),
         })
     }
 
@@ -2947,8 +3132,11 @@ impl NativeQuicHandshake {
             server_h3_stream_buffers: BTreeMap::new(),
             server_h3_stream_buffer_offsets: BTreeMap::new(),
             server_h3_stream_types: BTreeMap::new(),
+            server_h3_stream_pending: BTreeMap::new(),
             close_draining: false,
             close_state: QuicCloseState::default(),
+            recv_unmask_scratch: Vec::new(),
+            recv_decrypt_scratch: Vec::new(),
         })
     }
 
@@ -3344,6 +3532,17 @@ impl NativeQuicHandshake {
         Ok(packet)
     }
 
+    /// True once the Initial and Handshake packet-number spaces have been
+    /// discarded at handshake completion (RFC 9001 4.9). After this point those
+    /// keys are gone and any inbound long-header packet must be dropped without
+    /// processing. The steady-state driver uses this to avoid acking discarded
+    /// spaces: `observe_packet` marks the ACK tracker pending even for ack-only
+    /// packets, so acking a peer that mirrors the behavior sustains an unbounded
+    /// Initial/Handshake ACK-of-ACK ping-pong.
+    pub fn initial_handshake_spaces_discarded(&self) -> bool {
+        self.recovery.handshake_complete()
+    }
+
     pub fn build_client_application_ack_packet(
         &mut self,
     ) -> Result<Option<ClientApplicationAckPacket>> {
@@ -3397,6 +3596,10 @@ impl NativeQuicHandshake {
             return Ok(None);
         }
         self.build_client_application_ack_packet()
+    }
+
+    pub fn client_application_pending_ack_count(&self) -> usize {
+        self.application_ack_tracker.pending_ack_count()
     }
 
     pub fn build_client_application_ack_packet_after_or_delay(
@@ -3970,13 +4173,47 @@ impl NativeQuicHandshake {
         Ok(packet)
     }
 
+    pub fn build_client_h3_encoded_request_packet(
+        &mut self,
+        payload: Bytes,
+        fin: bool,
+    ) -> Result<ClientApplicationPacket> {
+        if self.client_application_keys.is_none() {
+            return Err(Error::Quic(
+                "native application packet encryption is waiting for TLS application keys".into(),
+            ));
+        }
+
+        let stream_id = self.next_client_bidirectional_stream_id;
+        let packet = if fin {
+            self.build_client_final_stream_packet_at_zero(stream_id, payload)?
+        } else {
+            self.build_client_application_stream_packet(stream_id, payload, fin)?
+                .ok_or_else(|| {
+                    Error::HttpProtocol("native H3 request produced no payload".into())
+                })?
+        };
+        self.next_client_bidirectional_stream_id += 4;
+        Ok(packet)
+    }
+
+    fn build_client_final_stream_packet_at_zero(
+        &mut self,
+        stream_id: u64,
+        payload: Bytes,
+    ) -> Result<ClientApplicationPacket> {
+        self.client_application_flow_control
+            .consume_final_stream_data_at_zero(stream_id, payload.len())?;
+        self.build_client_application_stream_packet_at_offset(stream_id, 0, payload, true)
+    }
+
     pub fn retire_client_application_packet(&mut self, packet_number: u64) {
         self.client_application_loss_detector
             .retire_packet(packet_number);
         self.client_application_sent_streams.remove(&packet_number);
     }
 
-    fn encode_client_h3_request_payload(
+    pub fn encode_client_h3_request_payload(
         &self,
         method: &http::Method,
         uri: &http::Uri,
@@ -4013,6 +4250,19 @@ impl NativeQuicHandshake {
             .ok_or_else(|| Error::HttpProtocol("native H3 CONNECT produced no payload".into()))?;
         self.next_client_bidirectional_stream_id += 4;
         Ok(packet)
+    }
+
+    pub fn encode_client_h3_websocket_connect_payload(
+        &self,
+        uri: &http::Uri,
+        headers: &[(String, String)],
+    ) -> Result<Bytes> {
+        let h3_headers = native::build_websocket_connect_headers(uri, headers)?;
+        Ok(native::encode_request_stream_with_fingerprint(
+            &h3_headers,
+            None,
+            &self.fingerprint,
+        ))
     }
 
     pub fn build_client_h3_data_packet(
@@ -4210,6 +4460,13 @@ impl NativeQuicHandshake {
     pub fn release_client_stream(&mut self, stream_id: u64) {
         self.client_application_receive_flow_control
             .release_stream(stream_id);
+        self.client_application_flow_control
+            .release_stream(stream_id);
+        self.client_stream_offsets.remove(&stream_id);
+        self.server_h3_stream_buffers.remove(&stream_id);
+        self.server_h3_stream_buffer_offsets.remove(&stream_id);
+        self.server_h3_stream_types.remove(&stream_id);
+        self.server_h3_stream_pending.remove(&stream_id);
     }
 
     fn build_client_application_control_packet(
@@ -4338,13 +4595,18 @@ impl NativeQuicHandshake {
             packet,
             self.source_cid.as_bytes().len(),
             self.next_server_application_packet_number,
+            &mut self.recv_unmask_scratch,
+            &mut self.recv_decrypt_scratch,
         )?;
         if matches!(opened.outcome, OneRttOpenOutcome::Next) {
             self.commit_receive_key_update(now)?;
         }
         let opened = opened.opened;
         self.next_server_application_packet_number = opened.packet_number + 1;
-        let frames = decode_frames(&opened.payload)?;
+        // Decode from the owned payload: STREAM data becomes refcounted slices
+        // of the packet's single plaintext allocation instead of a second full
+        // copy per datagram.
+        let mut frames = decode_frames_bytes(opened.payload.clone())?;
         for frame in &frames {
             if let QuicFrame::Stream {
                 stream_id,
@@ -4443,7 +4705,8 @@ impl NativeQuicHandshake {
                 now,
             );
         }
-        Ok(frames.into_iter().filter(is_not_padding_frame).collect())
+        frames.retain(is_not_padding_frame);
+        Ok(frames)
     }
 
     pub fn open_server_h3_stream_packet(
@@ -4589,6 +4852,7 @@ impl NativeQuicHandshake {
             &mut self.server_h3_stream_buffers,
             &mut self.server_h3_stream_buffer_offsets,
             &mut self.server_h3_stream_types,
+            &mut self.server_h3_stream_pending,
             stream_id,
             offset,
             fin,
@@ -5118,25 +5382,100 @@ fn build_server_crypto_packet(
     })
 }
 
+/// Per-stream receive state for data that cannot be delivered yet: segments
+/// received ahead of the contiguous edge (RFC 9000 Section 2.2 requires the
+/// receiver to buffer reordered stream data) and the stream's final size once
+/// a FIN has been observed.
+#[derive(Debug, Default)]
+struct PendingStreamData {
+    segments: BTreeMap<u64, Bytes>,
+    fin_offset: Option<u64>,
+    fin_emitted: bool,
+}
+
 fn apply_h3_stream_frame(
     buffers: &mut BTreeMap<u64, BytesMut>,
     buffer_offsets: &mut BTreeMap<u64, u64>,
     stream_types: &mut BTreeMap<u64, native::H3StreamType>,
+    pending: &mut BTreeMap<u64, PendingStreamData>,
     stream_id: u64,
     offset: Option<u64>,
     fin: bool,
     data: Bytes,
 ) -> Result<Option<ServerH3StreamEvent>> {
-    let (stream_type, frames) = if data.is_empty() {
+    let stream_offset = offset.unwrap_or(0);
+    let data_end = stream_offset
+        .checked_add(data.len() as u64)
+        .ok_or_else(|| Error::HttpProtocol("native H3 stream range overflow".into()))?;
+    let pending_entry = pending.entry(stream_id).or_default();
+    if fin {
+        if pending_entry
+            .fin_offset
+            .is_some_and(|final_size| final_size != data_end)
+        {
+            return Err(Error::HttpProtocol(
+                "native H3 stream final size mismatch".into(),
+            ));
+        }
+        pending_entry.fin_offset = Some(data_end);
+    }
+    let mut buffer_base = *buffer_offsets.entry(stream_id).or_insert(0);
+    let buffer = buffers.entry(stream_id).or_default();
+    let mut buffered_end = buffer_base
+        .checked_add(buffer.len() as u64)
+        .ok_or_else(|| Error::HttpProtocol("native H3 stream range overflow".into()))?;
+    if !data.is_empty() && data_end > buffered_end {
+        if stream_offset > buffered_end {
+            // Ahead of the contiguous edge: hold the segment until the gap
+            // fills. The peer only retransmits on loss, never on receiver
+            // discard, so dropping it here would strand the stream.
+            let superseded = pending_entry
+                .segments
+                .get(&stream_offset)
+                .is_some_and(|existing| existing.len() >= data.len());
+            if !superseded {
+                pending_entry.segments.insert(stream_offset, data);
+            }
+        } else {
+            let already_buffered = usize::try_from(buffered_end - stream_offset).map_err(|_| {
+                Error::HttpProtocol("native H3 stream overlap exceeds usize".into())
+            })?;
+            buffer.extend_from_slice(&data[already_buffered..]);
+            buffered_end = data_end;
+        }
+    }
+    while let Some((&segment_start, _)) = pending_entry.segments.first_key_value() {
+        if segment_start > buffered_end {
+            break;
+        }
+        let Some((segment_start, segment)) = pending_entry.segments.pop_first() else {
+            break;
+        };
+        let segment_end = segment_start
+            .checked_add(segment.len() as u64)
+            .ok_or_else(|| Error::HttpProtocol("native H3 stream range overflow".into()))?;
+        if segment_end > buffered_end {
+            let already_buffered = usize::try_from(buffered_end - segment_start).map_err(|_| {
+                Error::HttpProtocol("native H3 stream overlap exceeds usize".into())
+            })?;
+            buffer.extend_from_slice(&segment[already_buffered..]);
+            buffered_end = segment_end;
+        }
+    }
+    // A FIN only completes the stream once contiguous data reaches the final
+    // size; a FIN-bearing segment buffered past a gap must not finish the
+    // stream early.
+    let fin = pending_entry.fin_offset == Some(buffered_end);
+
+    let (stream_type, frames) = if buffer.is_empty() {
+        if !fin {
+            return Ok(None);
+        }
         (stream_types.get(&stream_id).copied(), Vec::new())
     } else if is_unidirectional_stream(stream_id) {
         let stream_type = if let Some(stream_type) = stream_types.get(&stream_id).copied() {
-            let buffer = buffers.entry(stream_id).or_default();
-            buffer.extend_from_slice(&data);
             stream_type
         } else {
-            let buffer = buffers.entry(stream_id).or_default();
-            buffer.extend_from_slice(&data);
             let stream = match native::decode_unidirectional_stream(buffer.as_ref()) {
                 Ok(stream) => stream,
                 Err(error) if !fin && is_incomplete_h3_data_error(&error) => {
@@ -5145,45 +5484,49 @@ fn apply_h3_stream_frame(
                 Err(error) => return Err(error),
             };
             stream_types.insert(stream_id, stream.stream_type);
+            let prefix_len = buffer.len() - stream.payload.len();
             *buffer = BytesMut::from(stream.payload.as_ref());
+            buffer_base = buffer_base
+                .checked_add(prefix_len as u64)
+                .ok_or_else(|| Error::HttpProtocol("native H3 stream range overflow".into()))?;
+            buffer_offsets.insert(stream_id, buffer_base);
             stream.stream_type
         };
-        let buffer = buffers.entry(stream_id).or_default();
         let frames = if buffer.is_empty() {
             Vec::new()
         } else if !matches!(stream_type, native::H3StreamType::Control) {
+            let consumed = buffer.len() as u64;
             buffer.clear();
+            buffer_offsets.insert(
+                stream_id,
+                buffer_base
+                    .checked_add(consumed)
+                    .ok_or_else(|| Error::HttpProtocol("native H3 stream range overflow".into()))?,
+            );
             Vec::new()
         } else {
+            if !native::h3_frame_block_is_complete(buffer.as_ref())? && !fin {
+                return Ok(None);
+            }
             match native::decode_frames(buffer.as_ref()) {
                 Ok(frames) => {
+                    let consumed = buffer.len() as u64;
                     buffer.clear();
+                    buffer_offsets.insert(
+                        stream_id,
+                        buffer_base.checked_add(consumed).ok_or_else(|| {
+                            Error::HttpProtocol("native H3 stream range overflow".into())
+                        })?,
+                    );
                     frames
-                }
-                Err(error) if !fin && is_incomplete_h3_data_error(&error) => {
-                    return Ok(None);
                 }
                 Err(error) => return Err(error),
             }
         };
         (Some(stream_type), frames)
     } else {
-        let stream_offset = offset.unwrap_or(0);
-        let buffer_base = *buffer_offsets.entry(stream_id).or_insert(0);
-        let buffer = buffers.entry(stream_id).or_default();
-        let buffered_end = buffer_base
-            .checked_add(buffer.len() as u64)
-            .ok_or_else(|| Error::HttpProtocol("native H3 stream range overflow".into()))?;
-        let data_end = stream_offset
-            .checked_add(data.len() as u64)
-            .ok_or_else(|| Error::HttpProtocol("native H3 stream range overflow".into()))?;
-        if data_end <= buffer_base || stream_offset > buffered_end {
+        if !native::h3_frame_block_is_complete(buffer.as_ref())? && !fin {
             return Ok(None);
-        }
-        let already_buffered = usize::try_from(buffered_end - stream_offset)
-            .map_err(|_| Error::HttpProtocol("native H3 stream overlap exceeds usize".into()))?;
-        if already_buffered < data.len() {
-            buffer.extend_from_slice(&data[already_buffered..]);
         }
         match native::decode_frames(buffer.as_ref()) {
             Ok(frames) => {
@@ -5197,12 +5540,17 @@ fn apply_h3_stream_frame(
                 );
                 (None, frames)
             }
-            Err(error) if !fin && is_incomplete_h3_data_error(&error) => {
-                return Ok(None);
-            }
             Err(error) => return Err(error),
         }
     };
+
+    if fin {
+        let pending_entry = pending.entry(stream_id).or_default();
+        if pending_entry.fin_emitted {
+            return Ok(None);
+        }
+        pending_entry.fin_emitted = true;
+    }
 
     Ok(Some(ServerH3StreamEvent {
         stream_id,
@@ -5299,6 +5647,92 @@ fn build_ack_packet(
 }
 
 #[cfg(test)]
+mod stream_reassembly_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct ReassemblyState {
+        buffers: BTreeMap<u64, BytesMut>,
+        offsets: BTreeMap<u64, u64>,
+        types: BTreeMap<u64, native::H3StreamType>,
+        pending: BTreeMap<u64, PendingStreamData>,
+    }
+
+    fn apply(
+        state: &mut ReassemblyState,
+        stream_id: u64,
+        offset: u64,
+        fin: bool,
+        data: &[u8],
+    ) -> Option<ServerH3StreamEvent> {
+        apply_h3_stream_frame(
+            &mut state.buffers,
+            &mut state.offsets,
+            &mut state.types,
+            &mut state.pending,
+            stream_id,
+            Some(offset),
+            fin,
+            Bytes::copy_from_slice(data),
+        )
+        .expect("stream frame must apply")
+    }
+
+    // H3 DATA frame carrying b"hello": type 0x00, length 0x05, payload.
+    const DATA_HELLO: &[u8] = &[0x00, 0x05, b'h', b'e', b'l', b'l', b'o'];
+
+    #[test]
+    fn bidi_segment_ahead_of_a_gap_is_buffered_until_the_gap_fills() {
+        let mut state = ReassemblyState::default();
+        let (head, tail) = DATA_HELLO.split_at(3);
+        assert!(apply(&mut state, 0, 3, true, tail).is_none());
+        let event = apply(&mut state, 0, 0, false, head).expect("gap fill delivers stream");
+        assert!(event.fin);
+        assert_eq!(
+            event.frames,
+            vec![native::H3Frame::Data(Bytes::from_static(b"hello"))]
+        );
+    }
+
+    #[test]
+    fn bidi_fin_completion_is_emitted_once() {
+        let mut state = ReassemblyState::default();
+        let event = apply(&mut state, 0, 0, true, DATA_HELLO).expect("in-order fin delivers");
+        assert!(event.fin);
+        assert!(apply(&mut state, 0, 0, true, DATA_HELLO).is_none());
+    }
+
+    #[test]
+    fn duplicate_bidi_segment_does_not_corrupt_the_stream() {
+        let mut state = ReassemblyState::default();
+        let (head, tail) = DATA_HELLO.split_at(3);
+        assert!(apply(&mut state, 0, 0, false, head).is_none());
+        assert!(apply(&mut state, 0, 0, false, head).is_none());
+        let event = apply(&mut state, 0, 3, true, tail).expect("tail completes stream");
+        assert!(event.fin);
+        assert_eq!(
+            event.frames,
+            vec![native::H3Frame::Data(Bytes::from_static(b"hello"))]
+        );
+    }
+
+    #[test]
+    fn many_reordered_segments_drain_in_offset_order() {
+        let mut state = ReassemblyState::default();
+        for index in (1..DATA_HELLO.len()).rev() {
+            let fin = index == DATA_HELLO.len() - 1;
+            assert!(apply(&mut state, 0, index as u64, fin, &DATA_HELLO[index..=index]).is_none());
+        }
+        let event = apply(&mut state, 0, 0, false, &DATA_HELLO[..1]).expect("head completes");
+        assert!(event.fin);
+        assert_eq!(
+            event.frames,
+            vec![native::H3Frame::Data(Bytes::from_static(b"hello"))]
+        );
+    }
+}
+
+#[cfg(test)]
 mod receive_flow_control_tests {
     use super::*;
     use crate::fingerprint::QuicTransportParams;
@@ -5321,6 +5755,44 @@ mod receive_flow_control_tests {
 
     fn client_flow_control() -> QuicReceiveFlowControl {
         QuicReceiveFlowControl::client(&flow_control_params())
+    }
+
+    #[test]
+    fn send_flow_control_replaces_provisional_fingerprint_limits_with_peer_transport_params() {
+        let mut fingerprint = QuicTransportParams::chrome();
+        fingerprint.initial_max_data = 100;
+        fingerprint.initial_max_stream_data_bidi_local = 40;
+        fingerprint.initial_max_stream_data_bidi_remote = 40;
+        fingerprint.initial_max_stream_data_uni = 40;
+        let mut fc = QuicApplicationFlowControl::server(&fingerprint);
+
+        fc.replace_initial_peer_transport_parameters(&[
+            TransportParameter::InitialMaxData(1_000),
+            TransportParameter::InitialMaxStreamDataBidiLocal(500),
+            TransportParameter::InitialMaxStreamDataBidiRemote(600),
+            TransportParameter::InitialMaxStreamDataUni(700),
+            TransportParameter::InitialMaxStreamsBidi(50),
+            TransportParameter::InitialMaxStreamsUni(20),
+        ]);
+
+        fc.consume_stream_data(0, 0, 400)
+            .expect("server must use the peer's larger bidi-local stream limit");
+        // Connection budget (1000) now spans multiple streams; each client-bidi
+        // stream is independently capped at the peer's per-stream limit (500), so
+        // the second 400 bytes must land on a different stream. Together the two
+        // streams put 800 bytes against the connection limit, which exceeds the
+        // provisional fingerprint limit (100) and proves the peer's larger
+        // connection limit is in force. RFC 9000 keeps per-stream and connection
+        // flow control independent; a single stream cannot borrow connection
+        // credit past its own MAX_STREAM_DATA.
+        fc.consume_stream_data(4, 0, 400)
+            .expect("server must use the peer's larger connection limit");
+
+        fc.replace_initial_peer_transport_parameters(&[]);
+        assert!(
+            fc.consume_stream_data(8, 0, 1).is_err(),
+            "omitted peer flow-control transport parameters default to zero"
+        );
     }
 
     // Stream 0 (client-bidi-local) consumes exactly N bytes; the absolute
@@ -5410,6 +5882,39 @@ mod receive_flow_control_tests {
         }));
     }
 
+    // `max_connection_window` and `max_stream_window` bound buffering policy;
+    // they are not lifetime caps on the absolute MAX_DATA/MAX_STREAM_DATA
+    // number space. RFC 9000 flow-control limits are cumulative byte offsets,
+    // so a long-lived connection must keep advertising initial + consumed even
+    // after total bytes exceed the configured window size.
+    #[test]
+    fn consumed_credit_can_grow_beyond_configured_window_size() {
+        let mut params = flow_control_params();
+        params.max_connection_window = 120;
+        params.max_stream_window = 60;
+        let mut fc = QuicReceiveFlowControl::client(&params);
+        let stream_id = 0;
+
+        fc.record_stream_consumed(stream_id, 100)
+            .expect("first drain past window");
+        let _ = fc.take_update_frames();
+        fc.record_stream_consumed(stream_id, 100)
+            .expect("second drain must not hit a lifetime cap");
+
+        let frames = fc.take_update_frames();
+        assert!(
+            frames.contains(&QuicFrame::MaxData(300)),
+            "MAX_DATA must be initial_max_data(100) + consumed(200), not capped at max_connection_window"
+        );
+        assert!(
+            frames.contains(&QuicFrame::MaxStreamData {
+                stream_id,
+                max_stream_data: 240,
+            }),
+            "MAX_STREAM_DATA must be initial_stream_data(40) + consumed(200), not capped at max_stream_window"
+        );
+    }
+
     // RFC 9000 Section 19.9/19.10 forbid emitting frames for every byte
     // drained; we gate emission on a half-initial-window delta but the
     // absolute value still comes from the consumed counter.
@@ -5477,6 +5982,73 @@ mod receive_flow_control_tests {
             stream_id: stream_b,
             max_stream_data: 70,
         }));
+    }
+
+    #[test]
+    fn release_client_stream_drops_all_client_stream_local_state() {
+        let fingerprint = Http3Fingerprint::chrome();
+        let stream_id = 0;
+        let mut handshake = NativeQuicHandshake::client_with_verify_peer(
+            "example.com",
+            &fingerprint,
+            ConnectionId::from_static(b"server-dcid"),
+            ConnectionId::from_static(b"client-scid"),
+            false,
+        )
+        .expect("client handshake");
+
+        handshake.client_stream_offsets.insert(stream_id, 123);
+        handshake
+            .server_h3_stream_buffers
+            .insert(stream_id, BytesMut::from(&b"partial"[..]));
+        handshake
+            .server_h3_stream_buffer_offsets
+            .insert(stream_id, 123);
+        handshake
+            .server_h3_stream_types
+            .insert(stream_id, native::H3StreamType::Control);
+        handshake
+            .client_application_flow_control
+            .stream_sent
+            .insert(stream_id, 123);
+        handshake
+            .client_application_flow_control
+            .stream_data_overrides
+            .insert(stream_id, 456);
+        handshake.client_application_flow_control.last_blocked =
+            Some(QuicFrame::StreamDataBlocked {
+                stream_id,
+                maximum_stream_data: 456,
+            });
+        handshake
+            .client_application_receive_flow_control
+            .stream_consumed
+            .insert(stream_id, 789);
+
+        handshake.release_client_stream(stream_id);
+
+        assert!(!handshake.client_stream_offsets.contains_key(&stream_id));
+        assert!(!handshake.server_h3_stream_buffers.contains_key(&stream_id));
+        assert!(!handshake
+            .server_h3_stream_buffer_offsets
+            .contains_key(&stream_id));
+        assert!(!handshake.server_h3_stream_types.contains_key(&stream_id));
+        assert!(!handshake
+            .client_application_flow_control
+            .stream_sent
+            .contains_key(&stream_id));
+        assert!(!handshake
+            .client_application_flow_control
+            .stream_data_overrides
+            .contains_key(&stream_id));
+        assert!(handshake
+            .client_application_flow_control
+            .last_blocked
+            .is_none());
+        assert!(!handshake
+            .client_application_receive_flow_control
+            .stream_consumed
+            .contains_key(&stream_id));
     }
 
     // RFC 9000 Section 4.1: violations of an advertised limit MUST cause a

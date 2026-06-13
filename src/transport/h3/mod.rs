@@ -18,7 +18,7 @@ pub(crate) mod udp_ecn;
 
 pub use body::H3BodyCapacity;
 pub(crate) use body::{H3Body, H3BodyTimeouts, DEFAULT_H3_BODY_SLOT_CAPACITY};
-pub use command::DriverCommand;
+pub use command::{DriverCommand, NativeH3PhaseTrace, NativeH3PhaseTraceSnapshot};
 pub use connection::H3Connection;
 pub(crate) use dispatcher::H3Dispatcher;
 pub use handle::{H3Handle, NativeH3HandshakeReport};
@@ -55,12 +55,16 @@ use crate::response::Response;
 use crate::transport::dns::DnsConfig;
 use crate::transport::h3::command::StreamResponse;
 use crate::transport::h3::connection::NativeH3ZeroRttRequest;
+pub(crate) use crate::transport::h3::native_driver::NativeH3DirectBody;
+use crate::transport::h3::native_driver::NativeH3DriverStart;
 use crate::transport::h3::session_cache::{NativeH3SessionCache, NativeH3SessionCacheKey};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::LockResult;
+use std::sync::MutexGuard;
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,6 +131,29 @@ impl H3PoolKey {
     }
 }
 
+type H3DirectPoolMap = HashMap<H3PoolKey, Vec<NativeH3DriverStart>>;
+
+#[derive(Clone)]
+struct H3DirectPool(Arc<StdMutex<H3DirectPoolMap>>);
+
+impl Default for H3DirectPool {
+    fn default() -> Self {
+        Self(Arc::new(StdMutex::new(HashMap::new())))
+    }
+}
+
+impl std::fmt::Debug for H3DirectPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("H3DirectPool").finish_non_exhaustive()
+    }
+}
+
+impl H3DirectPool {
+    fn lock(&self) -> LockResult<MutexGuard<'_, H3DirectPoolMap>> {
+        self.0.lock()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct H3HotHandle {
     url: String,
@@ -148,6 +175,7 @@ pub struct H3Client {
     max_idle_timeout: Option<u64>,
     dns_config: DnsConfig,
     pool: Arc<RwLock<HashMap<H3PoolKey, H3Handle>>>,
+    direct_pool: H3DirectPool,
     hot_handle: Arc<StdRwLock<Option<H3HotHandle>>>,
     /// Origin-fair admission for slow-path requests. Shared across clones
     /// so concurrent requests through the same `H3Client` rotate origins
@@ -182,6 +210,7 @@ impl H3Client {
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
+            direct_pool: H3DirectPool::default(),
             hot_handle: Arc::new(StdRwLock::new(None)),
             dispatcher: H3Dispatcher::new(),
             pool_reuse_counter: Arc::new(AtomicUsize::new(0)),
@@ -204,6 +233,7 @@ impl H3Client {
             max_idle_timeout: None,
             dns_config: DnsConfig::new(),
             pool: Arc::new(RwLock::new(HashMap::new())),
+            direct_pool: H3DirectPool::default(),
             hot_handle: Arc::new(StdRwLock::new(None)),
             dispatcher: H3Dispatcher::new(),
             pool_reuse_counter: Arc::new(AtomicUsize::new(0)),
@@ -495,6 +525,27 @@ impl H3Client {
 
     /// Resolve a reusable HTTP/3 handle for low-overhead repeated requests to one URL.
     pub async fn handle(&self, url: &str) -> Result<H3Handle> {
+        if std::env::var_os("SPECTER_NATIVE_H3_DIRECT_IDLE_GET").is_some()
+            && self.backend == H3Backend::Native
+        {
+            let key = self.pool_key(url)?;
+            let start = H3Connection::connect_direct_start(
+                url,
+                self.tls_fingerprint.clone(),
+                self.http3_fingerprint.clone(),
+                self.max_idle_timeout.unwrap_or(30_000),
+                self.verify_peer,
+                self.root_certs.clone(),
+                self.use_platform_roots,
+                &self.dns_config,
+                self.transport_config,
+                self.session_cache.clone(),
+                self.session_cache_key(&key),
+            )
+            .await?;
+            self.record_native_handshake_report(&start.handle);
+            return Ok(start.into_direct_handle());
+        }
         let (handle, _, _) = self.resolve_handle_for_request(url).await?;
         Ok(handle)
     }
@@ -616,12 +667,41 @@ impl H3Client {
         if let Ok(mut hot) = self.hot_handle.write() {
             *hot = None;
         }
+        if let Ok(mut direct_pool) = self.direct_pool.lock() {
+            direct_pool.clear();
+        }
     }
 
     fn clear_hot_handle_for_key(&self, key: &H3PoolKey) {
         if let Ok(mut hot) = self.hot_handle.write() {
             if hot.as_ref().is_some_and(|cached| &cached.key == key) {
                 *hot = None;
+            }
+        }
+        if let Ok(mut direct_pool) = self.direct_pool.lock() {
+            direct_pool.remove(key);
+        }
+    }
+
+    #[allow(dead_code)]
+    fn take_direct_start(&self, key: &H3PoolKey) -> Option<NativeH3DriverStart> {
+        let mut direct_pool = self.direct_pool.lock().ok()?;
+        let start = direct_pool.get_mut(key).and_then(Vec::pop);
+        if direct_pool.get(key).is_some_and(Vec::is_empty) {
+            direct_pool.remove(key);
+        }
+        start
+    }
+
+    #[allow(dead_code)]
+    fn return_direct_start(&self, key: H3PoolKey, start: NativeH3DriverStart) {
+        if start.handle.is_closed() || start.handle.is_draining() {
+            return;
+        }
+        if let Ok(mut direct_pool) = self.direct_pool.lock() {
+            let entry = direct_pool.entry(key).or_default();
+            if entry.is_empty() {
+                entry.push(start);
             }
         }
     }

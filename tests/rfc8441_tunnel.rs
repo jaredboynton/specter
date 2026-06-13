@@ -315,8 +315,10 @@ async fn rfc8441_tunnel_send_bytes_wakes_idle_driver() {
 
 #[tokio::test]
 async fn rfc8441_tunnel_inbound_data_releases_stream_window() {
-    let mut settings = Http2Settings::default();
-    settings.initial_window_size = 20 * 1024;
+    let settings = Http2Settings {
+        initial_window_size: 20 * 1024,
+        ..Default::default()
+    };
     let (handle, mut server, mut driver_task) = spawn_driver_with_settings(settings);
     let uri: Uri = "wss://example.com/chat".parse().unwrap();
 
@@ -475,8 +477,10 @@ async fn rfc8441_tunnel_open_counts_against_max_concurrent_streams() {
 
 #[tokio::test]
 async fn rfc8441_tunnel_open_counts_against_local_h2_stream_cap() {
-    let mut config = H2TransportConfig::default();
-    config.max_concurrent_streams_per_connection = Some(1);
+    let config = H2TransportConfig {
+        max_concurrent_streams_per_connection: Some(1),
+        ..Default::default()
+    };
     let (handle, mut server, driver_task) =
         spawn_driver_with_settings_and_config(Http2Settings::default(), config);
     let first_uri: Uri = "wss://example.com/one".parse().unwrap();

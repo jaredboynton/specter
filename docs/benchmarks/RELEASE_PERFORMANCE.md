@@ -36,7 +36,7 @@ Absolute medians (Specter / reqwest, the rate-bearing fixture is local 127.0.0.1
 | H1 response-body | 0.041 ms | 0.115 ms | 5308.7 MB/s | 4784.5 MB/s |
 | H2 response-body | 0.070 ms | 0.093 ms | 2545.8 MB/s | 2129.4 MB/s |
 
-Artifacts: [`2026-06-03-streaming/`](./2026-06-03-streaming/) holds the twelve 100-sample JSONs (3 reps x 4 workloads) the tables above are computed from, plus a summary README. The earlier `2026-05-24-streaming/` and `2026-05-25-streaming/` directories keep the prior Mac-sourced snapshots for diff.
+Artifacts: [`2026-06-03-streaming/`](./2026-06-03-streaming/) holds the twelve 100-sample JSONs (3 reps x 4 workloads) the tables above are computed from, plus a summary README.
 
 ## WebSocket vs tokio-tungstenite
 

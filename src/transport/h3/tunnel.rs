@@ -1,12 +1,16 @@
 use bytes::Bytes;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::Notify;
-use tokio::sync::Semaphore;
 
 use crate::error::{Error, Result};
+use crate::transport::h3::handle::H3DirectDriverSlot;
 use crate::transport::h3::native::data_frame_encoded_len;
+use crate::transport::h3::native_driver::NativeH3Driver;
 
 /// Outbound bytes queued by an RFC 9220 tunnel handle for the H3 driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,10 +28,25 @@ pub enum H3TunnelEvent {
     GoAway { id: u64 },
 }
 
-/// Cap on the outbound byte budget. Tokio's `Semaphore` permits are `usize`,
-/// but acquisitions are `u32`-bounded internally; pinning the budget at
-/// `u32::MAX as usize` keeps every cast lossless without putting an arbitrary
-/// lower bound on the configured value.
+#[derive(Debug, Default)]
+pub(crate) struct H3TunnelInlineInbound {
+    queue: StdMutex<VecDeque<Result<H3TunnelEvent>>>,
+}
+
+impl H3TunnelInlineInbound {
+    pub(crate) fn push(&self, event: Result<H3TunnelEvent>) {
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.push_back(event);
+        }
+    }
+
+    pub(crate) fn pop(&self) -> Option<Result<H3TunnelEvent>> {
+        self.queue.lock().ok()?.pop_front()
+    }
+}
+
+/// Cap on the outbound byte budget. Keeping the cap at `u32::MAX` preserves
+/// the old semaphore-era bound while letting the hot path use atomic counters.
 pub(crate) const MAX_TUNNEL_OUTBOUND_BYTE_BUDGET: usize = u32::MAX as usize;
 pub(crate) const MAX_TUNNEL_INBOUND_BYTE_BUDGET: usize = u32::MAX as usize;
 
@@ -45,18 +64,14 @@ pub struct H3TunnelCapacity {
 pub(crate) struct H3TunnelCredit {
     released_recv_bytes: AtomicUsize,
     driver_notify: Arc<Notify>,
-    /// Permits represent bytes still available to push into the outbound
-    /// pipeline (`H3Tunnel` channel + driver `pending_outbound` queue +
-    /// in-flight wire bytes). `send_bytes` acquires `min(bytes.len(), budget)`
-    /// permits and `forget`s them; the driver `add_permits` them back as it
-    /// transmits each chunk on the wire.
-    send_semaphore: Arc<Semaphore>,
-    /// Permits initially available. Acquired permits per send are capped at
-    /// this value so a single oversized send waits for the queue to fully
-    /// drain rather than being split, and the same value bounds the
-    /// per-outbound credit accounting on the driver side.
+    /// Bytes still available to push into the outbound pipeline
+    /// (`H3Tunnel` channel + driver `pending_outbound` queue + in-flight wire
+    /// bytes). The hot path is an atomic decrement; only exhausted credit waits
+    /// on `send_notify`.
+    send_available: AtomicUsize,
+    send_notify: Notify,
     send_budget: usize,
-    recv_semaphore: Arc<Semaphore>,
+    recv_available: AtomicUsize,
     recv_budget: usize,
 }
 
@@ -71,9 +86,10 @@ impl H3TunnelCredit {
         Arc::new(Self {
             released_recv_bytes: AtomicUsize::new(0),
             driver_notify,
-            send_semaphore: Arc::new(Semaphore::new(send_budget)),
+            send_available: AtomicUsize::new(send_budget),
+            send_notify: Notify::new(),
             send_budget,
-            recv_semaphore: Arc::new(Semaphore::new(recv_budget)),
+            recv_available: AtomicUsize::new(recv_budget),
             recv_budget,
         })
     }
@@ -86,8 +102,22 @@ impl H3TunnelCredit {
         if bytes == 0 {
             return;
         }
+        release_credit(&self.send_available, self.send_budget, bytes);
+        self.send_notify.notify_waiters();
+    }
+
+    async fn reserve_send_bytes(&self, bytes: usize) -> Result<()> {
         let capped = bytes.min(self.send_budget);
-        self.send_semaphore.add_permits(capped);
+        if capped == 0 {
+            return Ok(());
+        }
+        loop {
+            let notified = self.send_notify.notified();
+            if reserve_credit(&self.send_available, capped) {
+                return Ok(());
+            }
+            notified.await;
+        }
     }
 
     pub(crate) fn try_reserve_inbound_bytes(&self, bytes: usize) -> bool {
@@ -95,34 +125,38 @@ impl H3TunnelCredit {
             return true;
         }
         let capped = bytes.min(self.recv_budget);
-        match self.recv_semaphore.try_acquire_many(capped as u32) {
-            Ok(permit) => {
-                permit.forget();
-                true
-            }
-            Err(_) => false,
-        }
+        reserve_credit(&self.recv_available, capped)
     }
 
     pub(crate) fn release_inbound_bytes(&self, bytes: usize) {
         if bytes == 0 {
             return;
         }
-        self.recv_semaphore.add_permits(bytes.min(self.recv_budget));
+        release_credit(&self.recv_available, self.recv_budget, bytes);
+    }
+
+    pub(crate) fn release_recv_data_bytes(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.release_inbound_bytes(bytes);
+        self.released_recv_bytes
+            .fetch_add(data_frame_encoded_len(bytes), Ordering::Relaxed);
+        self.driver_notify.notify_one();
     }
 
     pub(crate) fn has_inbound_capacity(&self) -> bool {
-        self.recv_semaphore.available_permits() > 0
+        self.recv_available.load(Ordering::Relaxed) > 0
     }
 
     pub(crate) fn capacity(&self) -> H3TunnelCapacity {
         let outbound_available_bytes = self
-            .send_semaphore
-            .available_permits()
+            .send_available
+            .load(Ordering::Relaxed)
             .min(self.send_budget);
         let inbound_available_bytes = self
-            .recv_semaphore
-            .available_permits()
+            .recv_available
+            .load(Ordering::Relaxed)
             .min(self.recv_budget);
         H3TunnelCapacity {
             outbound_budget: self.send_budget,
@@ -136,13 +170,49 @@ impl H3TunnelCredit {
 
     #[cfg(test)]
     pub(crate) fn available_send_permits(&self) -> usize {
-        self.send_semaphore.available_permits()
+        self.send_available.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
     pub(crate) fn available_inbound_permits(&self) -> usize {
-        self.recv_semaphore.available_permits()
+        self.recv_available.load(Ordering::Relaxed)
     }
+
+    #[cfg(test)]
+    pub(crate) fn reserve_send_permits_for_test(&self, bytes: usize) {
+        assert!(reserve_credit(
+            &self.send_available,
+            bytes.min(self.send_budget)
+        ));
+    }
+}
+
+fn reserve_credit(available: &AtomicUsize, bytes: usize) -> bool {
+    let mut current = available.load(Ordering::Acquire);
+    loop {
+        if current < bytes {
+            return false;
+        }
+        match available.compare_exchange_weak(
+            current,
+            current - bytes,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn release_credit(available: &AtomicUsize, budget: usize, bytes: usize) {
+    let capped = bytes.min(budget);
+    if capped == 0 {
+        return;
+    }
+    let _ = available.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        Some(current.saturating_add(capped).min(budget))
+    });
 }
 
 #[derive(Debug)]
@@ -158,14 +228,62 @@ impl H3TunnelInboundReceiver {
             Self::Unbounded(rx) => rx.recv().await,
         }
     }
+
+    fn try_recv(
+        &mut self,
+    ) -> std::result::Result<Result<H3TunnelEvent>, mpsc::error::TryRecvError> {
+        match self {
+            Self::Bounded(rx) => rx.try_recv(),
+            Self::Unbounded(rx) => rx.try_recv(),
+        }
+    }
+}
+
+/// Outbound sink for a tunnel handle. `Direct` posts a pre-tagged
+/// `(stream_id, frame)` straight onto the driver's shared bounded outbound
+/// channel, one task hop to the driver. `Unbounded` backs `H3Tunnel::new` and
+/// the in-crate test fixtures that own the receiver themselves.
+#[derive(Debug)]
+enum H3TunnelOutboundSink {
+    Unbounded(mpsc::UnboundedSender<H3TunnelOutbound>),
+    Direct {
+        stream_id: u64,
+        tx: mpsc::Sender<(u64, H3TunnelOutbound)>,
+    },
+    OwnedDirect {
+        stream_id: u64,
+    },
+}
+
+struct H3OwnedTunnelDriver {
+    driver: NativeH3Driver,
+    slot: H3DirectDriverSlot,
+    recv_buf: Vec<u8>,
+}
+
+// The owned direct driver is private state for the send_bytes_owned /
+// recv_event_owned path. Those methods require &mut H3Tunnel, and the shared
+// send_bytes(&self) API rejects OwnedDirect before touching this field.
+// Keeping H3Tunnel: Sync preserves the public tunnel type's ability to be
+// referenced from spawned tasks while still preventing shared access to the
+// non-Sync native driver.
+unsafe impl Sync for H3OwnedTunnelDriver {}
+
+impl std::fmt::Debug for H3OwnedTunnelDriver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("H3OwnedTunnelDriver")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Byte transport for an RFC 9220 WebSocket-over-HTTP/3 tunnel stream.
 #[derive(Debug)]
 pub struct H3Tunnel {
-    outbound_tx: mpsc::UnboundedSender<H3TunnelOutbound>,
+    outbound_tx: H3TunnelOutboundSink,
     inbound_rx: H3TunnelInboundReceiver,
     credit: Option<Arc<H3TunnelCredit>>,
+    owned_driver: Option<H3OwnedTunnelDriver>,
+    inline_inbound: Option<Arc<H3TunnelInlineInbound>>,
 }
 
 impl H3Tunnel {
@@ -174,22 +292,83 @@ impl H3Tunnel {
         inbound_rx: mpsc::Receiver<Result<H3TunnelEvent>>,
     ) -> Self {
         Self {
-            outbound_tx,
+            outbound_tx: H3TunnelOutboundSink::Unbounded(outbound_tx),
             inbound_rx: H3TunnelInboundReceiver::Bounded(inbound_rx),
             credit: None,
+            owned_driver: None,
+            inline_inbound: None,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_credit(
         outbound_tx: mpsc::UnboundedSender<H3TunnelOutbound>,
         inbound_rx: mpsc::UnboundedReceiver<Result<H3TunnelEvent>>,
         credit: Arc<H3TunnelCredit>,
     ) -> Self {
         Self {
-            outbound_tx,
+            outbound_tx: H3TunnelOutboundSink::Unbounded(outbound_tx),
             inbound_rx: H3TunnelInboundReceiver::Unbounded(inbound_rx),
             credit: Some(credit),
+            owned_driver: None,
+            inline_inbound: None,
         }
+    }
+
+    /// Build a tunnel handle whose send path posts directly onto the driver's
+    /// shared bounded outbound channel, pre-tagged with `stream_id`. This drops
+    /// the per-tunnel relay task and one cross-worker wake per `send_bytes`.
+    pub(crate) fn new_direct_with_credit(
+        stream_id: u64,
+        tunnel_outbound_tx: mpsc::Sender<(u64, H3TunnelOutbound)>,
+        inbound_rx: mpsc::UnboundedReceiver<Result<H3TunnelEvent>>,
+        credit: Arc<H3TunnelCredit>,
+    ) -> Self {
+        Self {
+            outbound_tx: H3TunnelOutboundSink::Direct {
+                stream_id,
+                tx: tunnel_outbound_tx,
+            },
+            inbound_rx: H3TunnelInboundReceiver::Unbounded(inbound_rx),
+            credit: Some(credit),
+            owned_driver: None,
+            inline_inbound: None,
+        }
+    }
+
+    pub(crate) fn new_direct_with_credit_and_inline(
+        stream_id: u64,
+        tunnel_outbound_tx: mpsc::Sender<(u64, H3TunnelOutbound)>,
+        inbound_rx: mpsc::UnboundedReceiver<Result<H3TunnelEvent>>,
+        credit: Arc<H3TunnelCredit>,
+        inline_inbound: Arc<H3TunnelInlineInbound>,
+    ) -> Self {
+        Self {
+            outbound_tx: H3TunnelOutboundSink::Direct {
+                stream_id,
+                tx: tunnel_outbound_tx,
+            },
+            inbound_rx: H3TunnelInboundReceiver::Unbounded(inbound_rx),
+            credit: Some(credit),
+            owned_driver: None,
+            inline_inbound: Some(inline_inbound),
+        }
+    }
+
+    pub(crate) fn into_owned_direct(
+        mut self,
+        stream_id: u64,
+        driver: NativeH3Driver,
+        slot: H3DirectDriverSlot,
+    ) -> Self {
+        let recv_buf = vec![0u8; driver.direct_recv_buffer_len()];
+        self.outbound_tx = H3TunnelOutboundSink::OwnedDirect { stream_id };
+        self.owned_driver = Some(H3OwnedTunnelDriver {
+            driver,
+            slot,
+            recv_buf,
+        });
+        self
     }
 
     pub async fn send_bytes(&self, bytes: Bytes, fin: bool) -> Result<()> {
@@ -197,22 +376,89 @@ impl H3Tunnel {
         // a fin can always be queued even when the budget is exhausted.
         if !bytes.is_empty() {
             if let Some(credit) = self.credit.as_ref() {
-                let to_acquire = bytes.len().min(credit.send_budget);
-                let permit = credit
-                    .send_semaphore
-                    .acquire_many(to_acquire as u32)
-                    .await
-                    .map_err(|_| Error::HttpProtocol("H3 tunnel outbound credit closed".into()))?;
-                permit.forget();
+                credit.reserve_send_bytes(bytes.len()).await?;
             }
         }
-        self.outbound_tx
-            .send(H3TunnelOutbound { bytes, fin })
-            .map_err(|_| Error::HttpProtocol("H3 tunnel outbound channel closed".into()))
+        match &self.outbound_tx {
+            H3TunnelOutboundSink::Unbounded(tx) => tx
+                .send(H3TunnelOutbound { bytes, fin })
+                .map_err(|_| Error::HttpProtocol("H3 tunnel outbound channel closed".into())),
+            H3TunnelOutboundSink::Direct { stream_id, tx } => {
+                let item = (*stream_id, H3TunnelOutbound { bytes, fin });
+                match tx.try_send(item) {
+                    Ok(()) => Ok(()),
+                    Err(TrySendError::Full(item)) => tx.send(item).await.map_err(|_| {
+                        Error::HttpProtocol("H3 tunnel outbound channel closed".into())
+                    }),
+                    Err(TrySendError::Closed(_)) => Err(Error::HttpProtocol(
+                        "H3 tunnel outbound channel closed".into(),
+                    )),
+                }
+            }
+            H3TunnelOutboundSink::OwnedDirect { .. } => Err(Error::HttpProtocol(
+                "owned direct H3 tunnel requires send_bytes_owned".into(),
+            )),
+        }
+    }
+
+    #[doc(hidden)]
+    pub async fn send_bytes_owned(&mut self, bytes: Bytes, fin: bool) -> Result<()> {
+        if !bytes.is_empty() {
+            if let Some(credit) = self.credit.as_ref() {
+                credit.reserve_send_bytes(bytes.len()).await?;
+            }
+        }
+        let H3TunnelOutboundSink::OwnedDirect { stream_id } = &self.outbound_tx else {
+            return self.send_bytes(bytes, fin).await;
+        };
+        let Some(owned) = self.owned_driver.as_mut() else {
+            return Err(Error::HttpProtocol(
+                "owned direct H3 tunnel driver is unavailable".into(),
+            ));
+        };
+        owned
+            .driver
+            .send_direct_tunnel_outbound(*stream_id, H3TunnelOutbound { bytes, fin })
+            .await
     }
 
     pub async fn close_send(&self) -> Result<()> {
         self.send_bytes(Bytes::new(), true).await
+    }
+
+    #[doc(hidden)]
+    pub async fn close_send_owned(&mut self) -> Result<()> {
+        self.send_bytes_owned(Bytes::new(), true).await
+    }
+
+    #[doc(hidden)]
+    pub async fn round_trip_bytes_owned(&mut self, bytes: Bytes) -> Result<Bytes> {
+        let expected = bytes.len();
+        self.send_bytes_owned(bytes, false).await?;
+        let mut echoed = Bytes::new();
+        let mut received = 0usize;
+        while received < expected {
+            let chunk = self.recv_bytes().await.ok_or_else(|| {
+                Error::HttpProtocol(format!(
+                    "owned direct H3 tunnel closed after {received} of {expected} echoed bytes"
+                ))
+            })??;
+            received = received.saturating_add(chunk.len());
+            if echoed.is_empty() {
+                echoed = chunk;
+            } else {
+                let mut combined = bytes::BytesMut::with_capacity(echoed.len() + chunk.len());
+                combined.extend_from_slice(&echoed);
+                combined.extend_from_slice(&chunk);
+                echoed = combined.freeze();
+            }
+        }
+        if received != expected {
+            return Err(Error::HttpProtocol(format!(
+                "owned direct H3 tunnel echo length mismatch: expected {expected}, got {received}"
+            )));
+        }
+        Ok(echoed)
     }
 
     pub fn capacity(&self) -> H3TunnelCapacity {
@@ -223,6 +469,9 @@ impl H3Tunnel {
     }
 
     pub async fn recv_event(&mut self) -> Option<Result<H3TunnelEvent>> {
+        if matches!(self.outbound_tx, H3TunnelOutboundSink::OwnedDirect { .. }) {
+            return self.recv_event_owned().await;
+        }
         let event = self.inbound_rx.recv().await?;
         if let Ok(H3TunnelEvent::Data(bytes)) = &event {
             self.release_recv_bytes(bytes.len());
@@ -230,6 +479,48 @@ impl H3Tunnel {
             credit.driver_notify.notify_one();
         }
         Some(event)
+    }
+
+    async fn recv_event_owned(&mut self) -> Option<Result<H3TunnelEvent>> {
+        loop {
+            if let Some(inline) = self.inline_inbound.as_ref() {
+                if let Some(event) = inline.pop() {
+                    if let Ok(H3TunnelEvent::Data(bytes)) = &event {
+                        self.release_recv_bytes(bytes.len());
+                    } else if let Some(credit) = self.credit.as_ref() {
+                        credit.driver_notify.notify_one();
+                    }
+                    return Some(event);
+                }
+            }
+            match self.inbound_rx.try_recv() {
+                Ok(event) => {
+                    if let Ok(H3TunnelEvent::Data(bytes)) = &event {
+                        self.release_recv_bytes(bytes.len());
+                    } else if let Some(credit) = self.credit.as_ref() {
+                        credit.driver_notify.notify_one();
+                    }
+                    return Some(event);
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => return None,
+                Err(mpsc::error::TryRecvError::Empty) => {}
+            }
+            let H3TunnelOutboundSink::OwnedDirect { stream_id: _ } = &self.outbound_tx else {
+                return self.inbound_rx.recv().await;
+            };
+            let Some(owned) = self.owned_driver.as_mut() else {
+                return Some(Err(Error::HttpProtocol(
+                    "owned direct H3 tunnel driver is unavailable".into(),
+                )));
+            };
+            if let Err(error) = owned
+                .driver
+                .drive_direct_tunnel_once_with_buf(&mut owned.recv_buf)
+                .await
+            {
+                return Some(Err(error));
+            }
+        }
     }
 
     pub async fn recv_bytes(&mut self) -> Option<Result<Bytes>> {
@@ -257,6 +548,18 @@ impl H3Tunnel {
                 .fetch_add(data_frame_encoded_len(released), Ordering::Relaxed);
         }
         credit.driver_notify.notify_one();
+    }
+}
+
+impl Drop for H3Tunnel {
+    fn drop(&mut self) {
+        if let Some(owned) = self.owned_driver.take() {
+            if owned.driver.is_direct_reusable() {
+                owned.slot.put(owned.driver);
+            } else {
+                owned.slot.spawn(owned.driver);
+            }
+        }
     }
 }
 
@@ -369,12 +672,7 @@ mod tests {
         // drainer releasing permits in order to proceed; otherwise the test
         // could not distinguish byte-bounded backpressure from a no-op
         // semaphore.
-        let prefill = credit
-            .send_semaphore
-            .clone()
-            .try_acquire_many_owned(budget as u32)
-            .expect("must reserve every permit before the producer starts");
-        std::mem::forget(prefill);
+        credit.reserve_send_permits_for_test(budget);
         assert_eq!(credit.available_send_permits(), 0);
 
         // 4x budget single producer payload + a small follow-up so the test
@@ -502,12 +800,7 @@ mod tests {
         let (tunnel, mut outbound_rx, credit) = make_tunnel(budget);
 
         // Drain all permits without ever returning them so the budget is exhausted.
-        let drained = credit
-            .send_semaphore
-            .clone()
-            .try_acquire_many_owned(budget as u32)
-            .expect("must reserve every permit");
-        std::mem::forget(drained);
+        credit.reserve_send_permits_for_test(budget);
         assert_eq!(credit.available_send_permits(), 0);
 
         // close_send is fin-only and must not block on the byte-credit semaphore.
@@ -531,12 +824,7 @@ mod tests {
         let budget = 16 * 1024;
         let credit = H3TunnelCredit::new(Arc::new(Notify::new()), budget, budget);
         // Drain everything.
-        let permit = credit
-            .send_semaphore
-            .clone()
-            .try_acquire_many_owned(budget as u32)
-            .expect("reserve every permit");
-        std::mem::forget(permit);
+        credit.reserve_send_permits_for_test(budget);
         assert_eq!(credit.available_send_permits(), 0);
 
         // Releasing 4x the budget must not push the semaphore above its
@@ -549,12 +837,7 @@ mod tests {
     fn capacity_snapshot_reports_tunnel_backpressure_budgets() {
         let budget = 16 * 1024;
         let (tunnel, _outbound_rx, credit) = make_tunnel(budget);
-        let send_permit = credit
-            .send_semaphore
-            .clone()
-            .try_acquire_many_owned(4 * 1024)
-            .expect("reserve outbound permits");
-        std::mem::forget(send_permit);
+        credit.reserve_send_permits_for_test(4 * 1024);
         assert!(credit.try_reserve_inbound_bytes(2 * 1024));
 
         let capacity = tunnel.capacity();

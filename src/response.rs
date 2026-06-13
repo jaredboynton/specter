@@ -34,6 +34,7 @@ enum BodyInner {
     H2(crate::transport::h2::H2Body),
     H2Direct(Box<crate::transport::h2::H2DirectBody>),
     H3(crate::transport::h3::H3Body),
+    H3Direct(Box<crate::transport::h3::NativeH3DirectBody>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +45,7 @@ pub enum BodyCapacityProtocol {
     H2,
     H2Direct,
     H3,
+    H3Direct,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +108,13 @@ impl Body {
         }
     }
 
+    /// Wrap an HTTP/3 direct-owned response body.
+    pub(crate) fn from_h3_direct(body: crate::transport::h3::NativeH3DirectBody) -> Self {
+        Self {
+            inner: BodyInner::H3Direct(Box::new(body)),
+        }
+    }
+
     /// Await HTTP/2 response trailers for this body, if any.
     ///
     /// Only H2 streaming bodies can carry trailers, and only when the caller
@@ -123,7 +132,8 @@ impl Body {
             | BodyInner::Buffered(_)
             | BodyInner::H1(_)
             | BodyInner::H2Direct(_)
-            | BodyInner::H3(_) => Ok(None),
+            | BodyInner::H3(_)
+            | BodyInner::H3Direct(_) => Ok(None),
         }
     }
 
@@ -134,9 +144,11 @@ impl Body {
             BodyInner::Empty => true,
             BodyInner::Buffered(Some(b)) => b.is_empty(),
             BodyInner::Buffered(None) => true,
-            BodyInner::H1(_) | BodyInner::H2(_) | BodyInner::H2Direct(_) | BodyInner::H3(_) => {
-                false
-            }
+            BodyInner::H1(_)
+            | BodyInner::H2(_)
+            | BodyInner::H2Direct(_)
+            | BodyInner::H3(_)
+            | BodyInner::H3Direct(_) => false,
         }
     }
 
@@ -144,7 +156,11 @@ impl Body {
     pub fn is_streaming(&self) -> bool {
         matches!(
             self.inner,
-            BodyInner::H1(_) | BodyInner::H2(_) | BodyInner::H2Direct(_) | BodyInner::H3(_)
+            BodyInner::H1(_)
+                | BodyInner::H2(_)
+                | BodyInner::H2Direct(_)
+                | BodyInner::H3(_)
+                | BodyInner::H3Direct(_)
         )
     }
 
@@ -163,7 +179,11 @@ impl Body {
             BodyInner::Empty => Some(0),
             BodyInner::Buffered(Some(b)) => Some(b.len()),
             BodyInner::Buffered(None) => Some(0),
-            BodyInner::H1(_) | BodyInner::H2(_) | BodyInner::H2Direct(_) | BodyInner::H3(_) => None,
+            BodyInner::H1(_)
+            | BodyInner::H2(_)
+            | BodyInner::H2Direct(_)
+            | BodyInner::H3(_)
+            | BodyInner::H3Direct(_) => None,
         }
     }
 
@@ -172,6 +192,7 @@ impl Body {
     pub fn h3_capacity(&self) -> Option<crate::transport::h3::H3BodyCapacity> {
         match &self.inner {
             BodyInner::H3(body) => Some(body.capacity()),
+            BodyInner::H3Direct(body) => Some(body.capacity()),
             _ => None,
         }
     }
@@ -247,6 +268,18 @@ impl Body {
                     ended: capacity.ended,
                 }
             }
+            BodyInner::H3Direct(body) => {
+                let capacity = body.capacity();
+                BodyCapacity {
+                    protocol: BodyCapacityProtocol::H3Direct,
+                    buffer_capacity: capacity.buffer_capacity,
+                    buffered_chunks: capacity.buffered_chunks,
+                    available_slots: capacity.available_slots,
+                    buffered_bytes: capacity.buffered_bytes,
+                    closed: capacity.closed,
+                    ended: capacity.ended,
+                }
+            }
         }
     }
 
@@ -304,6 +337,7 @@ impl fmt::Debug for Body {
             BodyInner::H2(_) => f.debug_struct("Body::H2Streaming").finish(),
             BodyInner::H2Direct(_) => f.debug_struct("Body::H2DirectStreaming").finish(),
             BodyInner::H3(_) => f.debug_struct("Body::H3Streaming").finish(),
+            BodyInner::H3Direct(_) => f.debug_struct("Body::H3DirectStreaming").finish(),
         }
     }
 }
@@ -318,7 +352,11 @@ impl Clone for Body {
             BodyInner::Buffered(None) => Self {
                 inner: BodyInner::Buffered(None),
             },
-            BodyInner::H1(_) | BodyInner::H2(_) | BodyInner::H2Direct(_) | BodyInner::H3(_) => {
+            BodyInner::H1(_)
+            | BodyInner::H2(_)
+            | BodyInner::H2Direct(_)
+            | BodyInner::H3(_)
+            | BodyInner::H3Direct(_) => {
                 panic!("specter::Body::clone is not supported for streaming bodies")
             }
         }
@@ -349,6 +387,7 @@ impl HttpBody for Body {
             BodyInner::H2(body) => Pin::new(body).poll_frame(cx),
             BodyInner::H2Direct(body) => Pin::new(body.as_mut()).poll_frame(cx),
             BodyInner::H3(body) => Pin::new(body).poll_frame(cx),
+            BodyInner::H3Direct(body) => Pin::new(body.as_mut()).poll_frame(cx),
         }
     }
 
@@ -361,6 +400,7 @@ impl HttpBody for Body {
             BodyInner::H2(body) => body.is_terminal(),
             BodyInner::H2Direct(body) => body.is_terminal(),
             BodyInner::H3(body) => body.is_terminal(),
+            BodyInner::H3Direct(body) => body.is_terminal(),
         }
     }
 
@@ -373,6 +413,7 @@ impl HttpBody for Body {
             BodyInner::H2(body) => body.size_hint(),
             BodyInner::H2Direct(body) => body.size_hint(),
             BodyInner::H3(body) => body.size_hint(),
+            BodyInner::H3Direct(body) => body.size_hint(),
         }
     }
 }
@@ -391,6 +432,7 @@ impl Body {
             },
             BodyInner::H2(body) => Pin::new(body).poll_data_coalesced(cx),
             BodyInner::H2Direct(body) => Pin::new(body.as_mut()).poll_data(cx),
+            BodyInner::H3Direct(body) => Pin::new(body.as_mut()).poll_data(cx),
             BodyInner::H1(body) => match Pin::new(body).poll_frame(cx) {
                 Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
                     Ok(bytes) => Poll::Ready(Some(Ok(bytes))),
@@ -400,15 +442,7 @@ impl Body {
                 Poll::Ready(None) => Poll::Ready(None),
                 Poll::Pending => Poll::Pending,
             },
-            BodyInner::H3(body) => match Pin::new(body).poll_frame(cx) {
-                Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
-                    Ok(bytes) => Poll::Ready(Some(Ok(bytes))),
-                    Err(_) => Poll::Pending,
-                },
-                Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
-                Poll::Ready(None) => Poll::Ready(None),
-                Poll::Pending => Poll::Pending,
-            },
+            BodyInner::H3(body) => Pin::new(body).poll_data(cx),
         }
     }
 }

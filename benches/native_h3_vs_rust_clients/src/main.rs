@@ -1,12 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::future::poll_fn;
-use std::io;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -16,6 +16,7 @@ use quinn::rustls;
 use quinn::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use specter::transport::h3::recovery::{LossDetectionOutcome, PacketNumberSpace};
 
 const QUICHE_MAX_DATAGRAM_SIZE: usize = 1350;
@@ -40,16 +41,273 @@ const LOCAL_FIXTURE_TRANSPORT_PAYLOAD_SIZE: usize = 1_024;
 const RFC9220_TUNNEL_MIN_SAMPLE_COUNT: usize = 100;
 const QUINN_TRANSPORT_ALPN: &[u8] = b"specter-transport-bench";
 
+fn local_fixture_stream_chunk() -> Bytes {
+    static CHUNK: OnceLock<Bytes> = OnceLock::new();
+    CHUNK
+        .get_or_init(|| Bytes::from(vec![b's'; LOCAL_FIXTURE_CHUNK_SIZE]))
+        .clone()
+}
+
+fn local_native_h3_fixture_ledger_path(client: &str) -> anyhow::Result<Option<PathBuf>> {
+    if let Some(path) = std::env::var_os("SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_PATH") {
+        return Ok(Some(PathBuf::from(path)));
+    }
+    let Some(dir) = std::env::var_os("SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_DIR") else {
+        return Ok(None);
+    };
+    let dir = PathBuf::from(dir);
+    fs::create_dir_all(&dir)?;
+    Ok(Some(dir.join(format!("fixture-ledger.{client}.jsonl"))))
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct FixtureLedgerEntry {
+    kind: String,
+    client: String,
+    stream_id: u64,
+    response_id: u64,
+    chunk_index: usize,
+    due_ns: u64,
+    send_start_ns: u64,
+    send_done_ns: u64,
+    bytes: usize,
+    fin: bool,
+}
+
+struct FixtureLedgerSummary {
+    spans: Vec<f64>,
+    sha256: String,
+    response_count: usize,
+}
+
+fn fixture_ledger_summary(
+    path: &Path,
+    expected_client: &str,
+) -> anyhow::Result<FixtureLedgerSummary> {
+    #[derive(Default)]
+    struct Response {
+        first_start_ns: Option<u64>,
+        last_done_ns: Option<u64>,
+        chunks_seen: [bool; LOCAL_FIXTURE_CHUNK_COUNT],
+    }
+
+    let ledger = fs::read_to_string(path)
+        .with_context(|| format!("failed to read fixture ledger {}", path.display()))?;
+    let sha256 = format!("{:x}", Sha256::digest(ledger.as_bytes()));
+    let mut responses: HashMap<u64, Response> = HashMap::new();
+    for (line_index, line) in ledger.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: FixtureLedgerEntry = serde_json::from_str(&line)
+            .with_context(|| format!("invalid fixture ledger entry in {}", path.display()))?;
+        if entry.kind != "local_native_h3_fixture_stream_chunk" {
+            anyhow::bail!(
+                "fixture ledger {} line {} has unexpected kind {}",
+                path.display(),
+                line_index + 1,
+                entry.kind
+            );
+        }
+        if entry.client != expected_client {
+            anyhow::bail!(
+                "fixture ledger {} line {} has client {}, expected {}",
+                path.display(),
+                line_index + 1,
+                entry.client,
+                expected_client
+            );
+        }
+        if entry.chunk_index >= LOCAL_FIXTURE_CHUNK_COUNT {
+            anyhow::bail!(
+                "fixture ledger response {} has chunk_index {}, expected < {}",
+                entry.response_id,
+                entry.chunk_index,
+                LOCAL_FIXTURE_CHUNK_COUNT
+            );
+        }
+        if entry.bytes != LOCAL_FIXTURE_CHUNK_SIZE {
+            anyhow::bail!(
+                "fixture ledger response {} chunk {} has {} bytes, expected {}",
+                entry.response_id,
+                entry.chunk_index,
+                entry.bytes,
+                LOCAL_FIXTURE_CHUNK_SIZE
+            );
+        }
+        let expected_fin = entry.chunk_index == LOCAL_FIXTURE_CHUNK_COUNT - 1;
+        if entry.fin != expected_fin {
+            anyhow::bail!(
+                "fixture ledger response {} chunk {} fin={} expected={}",
+                entry.response_id,
+                entry.chunk_index,
+                entry.fin,
+                expected_fin
+            );
+        }
+        if entry.send_done_ns < entry.send_start_ns {
+            anyhow::bail!(
+                "fixture ledger response {} chunk {} send_done_ns {} < send_start_ns {}",
+                entry.response_id,
+                entry.chunk_index,
+                entry.send_done_ns,
+                entry.send_start_ns
+            );
+        }
+        let response = responses.entry(entry.response_id).or_default();
+        if response.chunks_seen[entry.chunk_index] {
+            anyhow::bail!(
+                "fixture ledger response {} has duplicate chunk {}",
+                entry.response_id,
+                entry.chunk_index
+            );
+        }
+        response.chunks_seen[entry.chunk_index] = true;
+        response.first_start_ns = Some(
+            response
+                .first_start_ns
+                .map(|value| value.min(entry.send_start_ns))
+                .unwrap_or(entry.send_start_ns),
+        );
+        response.last_done_ns = Some(
+            response
+                .last_done_ns
+                .map(|value| value.max(entry.send_done_ns))
+                .unwrap_or(entry.send_done_ns),
+        );
+    }
+    let mut responses = responses.into_iter().collect::<Vec<_>>();
+    responses.sort_by_key(|(response_id, _)| *response_id);
+    let mut spans = Vec::with_capacity(responses.len());
+    for (expected_response_id, (response_id, response)) in responses.into_iter().enumerate() {
+        if response_id != expected_response_id as u64 {
+            anyhow::bail!(
+                "fixture ledger response id gap: expected {}, saw {}",
+                expected_response_id,
+                response_id
+            );
+        }
+        if response.chunks_seen.iter().any(|seen| !*seen) {
+            anyhow::bail!("fixture ledger response {response_id} missing one or more chunks");
+        }
+        let first = response.first_start_ns.ok_or_else(|| {
+            anyhow::anyhow!("fixture ledger response {response_id} missing start")
+        })?;
+        let last = response
+            .last_done_ns
+            .ok_or_else(|| anyhow::anyhow!("fixture ledger response {response_id} missing done"))?;
+        spans.push(last.saturating_sub(first) as f64);
+    }
+    Ok(FixtureLedgerSummary {
+        response_count: spans.len(),
+        spans,
+        sha256,
+    })
+}
+
+fn specter_direct_get_epoch_enabled() -> bool {
+    std::env::var("SPECTER_NATIVE_H3_DIRECT_GET_EPOCH")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+// When `BENCH_TUNNEL_STEADYSTATE=1` is set, the Specter and tokio-quiche tunnel
+// comparators open ONE warm Extended-CONNECT tunnel and measure per-message
+// round-trip latency for N sequential send-1/recv-1 echoes on that established
+// tunnel, instead of opening a fresh tunnel per sample. The tunnel open (CONNECT
+// 200) and the first echo (which pays the one-time first-frame wake) fall in the
+// warmups and are excluded, so the measured samples reflect amortized
+// steady-state echo latency over a long-lived tunnel - the representative
+// proxy/CONNECT workload where one tunnel carries many messages. Only one frame
+// is ever in flight (send one, fully read its echo, then send the next), so the
+// inbound path never backs up and there is no flow-control stall.
+fn rfc9220_tunnel_steadystate_enabled() -> bool {
+    std::env::var("BENCH_TUNNEL_STEADYSTATE")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn specter_direct_rfc9220_tunnel_enabled() -> bool {
+    std::env::var("SPECTER_NATIVE_H3_DIRECT_RFC9220_TUNNEL")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn specter_direct_rfc9220_fused_echo_enabled() -> bool {
+    std::env::var("SPECTER_NATIVE_H3_DIRECT_RFC9220_FUSED_ECHO")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn specter_direct_rfc9220_mixed_enabled() -> bool {
+    std::env::var("SPECTER_NATIVE_H3_DIRECT_RFC9220_MIXED")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn specter_direct_rfc9220_close_epoch_enabled() -> bool {
+    std::env::var("SPECTER_NATIVE_H3_DIRECT_RFC9220_CLOSE_EPOCH")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Serialize)]
 struct Artifact {
     benchmark: &'static str,
     benchmark_version: &'static str,
     audited_at: &'static str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_provenance: Option<RunProvenance>,
     competitors: Vec<CompetitorSpec>,
     rows: Vec<BenchmarkRow>,
     fixture_events: Vec<FixtureEvent>,
     superiority_gate: SuperiorityGate,
     rfc9220_full_suite_superiority_gate: Rfc9220TunnelSuperiorityGate,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct RunProvenance {
+    manifest_path: String,
+    manifest_sha256: String,
+    binary_path: String,
+    binary_sha256: String,
+    git_head: String,
+    git_dirty: bool,
+    target: String,
+    profile: String,
+    features: String,
+    samples: usize,
+    warmups: usize,
+    selected_client: String,
+    selected_clients_sha256: String,
+    scout_gate: bool,
+    #[serde(default)]
+    get_only_gate: bool,
+    publication_eligible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_env_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paired_scout: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scout_repeat_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scout_repeat_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_order: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_order_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_sequence_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_started_at_unix_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paired_run_sequence_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paired_run_started_at_unix_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paired_run_finished_at_unix_ns: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,6 +327,36 @@ struct BenchmarkRow {
     p50_ttfb_ns: Option<f64>,
     p95_ttfb_ns: Option<f64>,
     bytes_per_sec: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    p50_paced_body_overhead_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    p95_paced_body_overhead_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    p50_paced_tail_overhead_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    p95_paced_tail_overhead_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    p50_ledger_paced_tail_overhead_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    p95_ledger_paced_tail_overhead_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    p50_fixture_emission_span_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    p95_fixture_emission_span_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ledger_paced_bytes_per_sec: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fixture_ledger_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fixture_ledger_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fixture_ledger_response_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fixture_ledger_required_response_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fixture_ledger_sample_offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fixture_pace_span_ns: Option<f64>,
     source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     protocol: Option<String>,
@@ -78,6 +366,16 @@ struct BenchmarkRow {
     payload_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sample_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requested_samples: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completed_samples: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requested_warmups: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completed_warmups: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    raw_samples: Option<Vec<AdapterSample>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notes: Option<String>,
 }
@@ -110,8 +408,6 @@ struct LocalFixtureMeasurements {
     fixture_events: Vec<FixtureEvent>,
 }
 
-const TOKIO_QUICHE_MIXED_SAMPLE_ATTEMPTS: usize = 5;
-
 #[derive(Debug, Serialize)]
 struct SuperiorityGate {
     status: &'static str,
@@ -121,6 +417,8 @@ struct SuperiorityGate {
     no_h3_superiority_claim_without_all_required_rows: bool,
     required_h3_clients: Vec<&'static str>,
     missing_required_rows: Vec<&'static str>,
+    invalid_required_rows: Vec<&'static str>,
+    duplicate_required_rows: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,6 +433,8 @@ struct Rfc9220TunnelSuperiorityGate {
     missing_required_rfc9220_tunnel_rows: Vec<&'static str>,
     under_sampled_required_rfc9220_tunnel_rows: Vec<&'static str>,
     missing_required_rfc9220_tunnel_metrics: Vec<&'static str>,
+    invalid_required_rfc9220_tunnel_rows: Vec<&'static str>,
+    duplicate_required_rfc9220_tunnel_rows: Vec<&'static str>,
     /// Per-workload (echo / close / mixed) sub-gates so the suite artifact
     /// records exactly which sub-gate failed when `pass = false`.
     workload_sub_gates: Vec<Rfc9220TunnelWorkloadSubGate>,
@@ -157,11 +457,77 @@ struct MeasuredMetrics {
     bytes_per_sec: f64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 struct AdapterSample {
     ttfb_ns: f64,
     total_ns: f64,
     bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_body_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phase_trace: Option<PhaseTraceSample>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+struct PhaseTraceSample {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_sent_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flush_done_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handle_command_ready_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command_enqueued_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    headers_wait_start_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    caller_headers_ready_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    driver_command_received_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_packet_built_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stream_registered_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    packet_send_done_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    udp_recv_return_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    h3_events_decoded_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    streaming_headers_event_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    headers_oneshot_sent_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    headers_ready_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_body_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    done_ns: Option<f64>,
+}
+
+impl PhaseTraceSample {
+    fn with_native_trace(
+        mut self,
+        trace: specter::transport::h3::NativeH3PhaseTraceSnapshot,
+    ) -> Self {
+        fn f(value: Option<u64>) -> Option<f64> {
+            value.map(|value| value as f64)
+        }
+        self.handle_command_ready_ns = f(trace.handle_command_ready_ns);
+        self.command_enqueued_ns = f(trace.command_enqueued_ns);
+        self.headers_wait_start_ns = f(trace.headers_wait_start_ns);
+        self.caller_headers_ready_ns = f(trace.caller_headers_ready_ns);
+        self.driver_command_received_ns = f(trace.driver_command_received_ns);
+        self.request_packet_built_ns = f(trace.request_packet_built_ns);
+        self.stream_registered_ns = f(trace.stream_registered_ns);
+        self.packet_send_done_ns = f(trace.packet_send_done_ns);
+        self.udp_recv_return_ns = f(trace.udp_recv_return_ns);
+        self.h3_events_decoded_ns = f(trace.h3_events_decoded_ns);
+        self.streaming_headers_event_ns = f(trace.streaming_headers_event_ns);
+        self.headers_oneshot_sent_ns = f(trace.headers_oneshot_sent_ns);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -178,8 +544,29 @@ impl AdapterSample {
             ttfb_ns,
             total_ns,
             bytes,
+            first_body_ns: None,
+            phase_trace: None,
         }
     }
+
+    fn with_first_body_ns(mut self, first_body_ns: f64) -> Self {
+        self.first_body_ns = Some(first_body_ns);
+        self
+    }
+
+    fn with_phase_trace(mut self, phase_trace: Option<PhaseTraceSample>) -> Self {
+        self.phase_trace = phase_trace;
+        self
+    }
+}
+
+fn phase_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        env::var("SPECTER_BENCH_PHASE_TRACE")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
 }
 
 fn specter_package_version() -> &'static str {
@@ -447,10 +834,37 @@ fn adapter_row_from_samples(
         ..BenchmarkRow::default()
     };
     apply_row_context(&mut row, Some(samples.len()));
+    apply_row_measurement_contract(&mut row, samples.len());
+    if row.workload.as_deref() == Some("http3_streaming_get") {
+        row.fixture_pace_span_ns = Some(local_fixture_stream_pace_span_ns());
+        if let Some(overheads) = paced_body_overhead_samples(samples) {
+            row.p50_paced_body_overhead_ns = percentile(&overheads, 0.50);
+            row.p95_paced_body_overhead_ns = percentile(&overheads, 0.95);
+        }
+        let tail_overheads = paced_tail_overhead_samples(samples);
+        row.p50_paced_tail_overhead_ns = percentile(&tail_overheads, 0.50);
+        row.p95_paced_tail_overhead_ns = percentile(&tail_overheads, 0.95);
+    }
     if let Some(payload_bytes) = uniform_payload_bytes(samples) {
         row.payload_bytes = Some(payload_bytes);
     }
+    if !samples.is_empty() {
+        row.raw_samples = Some(samples.to_vec());
+    }
     row
+}
+
+fn apply_row_measurement_contract(row: &mut BenchmarkRow, completed_samples: usize) {
+    let Some(raw) = env::var("SPECTER_BENCH_RUN_PROVENANCE").ok() else {
+        return;
+    };
+    let Ok(provenance) = serde_json::from_str::<RunProvenance>(&raw) else {
+        return;
+    };
+    row.requested_samples = Some(provenance.samples);
+    row.completed_samples = Some(completed_samples);
+    row.requested_warmups = Some(provenance.warmups);
+    row.completed_warmups = Some(provenance.warmups);
 }
 
 fn uniform_payload_bytes(samples: &[AdapterSample]) -> Option<usize> {
@@ -569,6 +983,40 @@ fn percentile(sorted_samples: &[f64], percentile: f64) -> Option<f64> {
     let rank = (percentile * sorted_samples.len() as f64).ceil() as usize;
     let index = rank.saturating_sub(1).min(sorted_samples.len() - 1);
     Some(sorted_samples[index])
+}
+
+fn local_fixture_stream_pace_span_ns() -> f64 {
+    (LOCAL_FIXTURE_CHUNK_COUNT.saturating_sub(1) as f64)
+        * (LOCAL_FIXTURE_CHUNK_DELAY_MS as f64)
+        * 1_000_000.0
+}
+
+fn paced_body_overhead_samples(samples: &[AdapterSample]) -> Option<Vec<f64>> {
+    if samples.is_empty() {
+        return None;
+    }
+    let fixture_pace_span_ns = local_fixture_stream_pace_span_ns();
+    let mut overheads = Vec::with_capacity(samples.len());
+    for sample in samples {
+        let first_body_ns = sample.first_body_ns?;
+        let body_drain_ns = (sample.total_ns - first_body_ns).max(0.0);
+        overheads.push((body_drain_ns - fixture_pace_span_ns).max(0.0));
+    }
+    overheads.sort_by(f64::total_cmp);
+    Some(overheads)
+}
+
+fn paced_tail_overhead_samples(samples: &[AdapterSample]) -> Vec<f64> {
+    let fixture_pace_span_ns = local_fixture_stream_pace_span_ns();
+    let mut overheads = samples
+        .iter()
+        .map(|sample| {
+            let tail_ns = (sample.total_ns - sample.ttfb_ns).max(0.0);
+            (tail_ns - fixture_pace_span_ns).max(0.0)
+        })
+        .collect::<Vec<_>>();
+    overheads.sort_by(f64::total_cmp);
+    overheads
 }
 
 fn row_context(competitor_id: &str) -> Option<RowContext> {
@@ -737,6 +1185,17 @@ fn placeholder_rows(
     competitor_specs()
         .into_iter()
         .map(|spec| {
+            if has_duplicate_imported_measured_pass_rows(imported_competitor_rows, spec.id) {
+                let mut row = BenchmarkRow {
+                    competitor_id: spec.id.into(),
+                    status: "invalid_required_duplicate".into(),
+                    source: "native_h3_vs_rust_clients_harness".into(),
+                    notes: Some("duplicate measured_pass rows imported for this competitor".into()),
+                    ..BenchmarkRow::default()
+                };
+                apply_row_context(&mut row, None);
+                return row;
+            }
             if let Some(row) = best_imported_competitor_row(imported_competitor_rows, spec.id) {
                 let mut row = row.clone();
                 apply_row_context(&mut row, None);
@@ -780,6 +1239,14 @@ fn placeholder_rows(
             row
         })
         .collect()
+}
+
+fn has_duplicate_imported_measured_pass_rows(rows: &[BenchmarkRow], competitor_id: &str) -> bool {
+    rows.iter()
+        .filter(|row| row.competitor_id == competitor_id && row.status == "measured_pass")
+        .take(2)
+        .count()
+        > 1
 }
 
 fn unsupported_rfc9220_comparator_row(competitor_id: &str) -> Option<BenchmarkRow> {
@@ -827,7 +1294,10 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
         .filter(|spec| spec.required_for_superiority && spec.role != "candidate")
         .map(|spec| spec.id)
         .collect::<Vec<_>>();
-    let missing_required_rows = required_h3_clients
+    let required_h3_measurement_rows = std::iter::once("specter_native")
+        .chain(required_h3_clients.iter().copied())
+        .collect::<Vec<_>>();
+    let missing_required_rows = required_h3_measurement_rows
         .iter()
         .copied()
         .filter(|id| {
@@ -836,6 +1306,9 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
                 .is_none_or(|row| row.status != "measured_pass")
         })
         .collect::<Vec<_>>();
+    let invalid_required_rows = invalid_required_rows(rows, &required_h3_measurement_rows);
+    let duplicate_required_rows =
+        duplicate_measured_pass_required_rows(rows, &required_h3_measurement_rows);
 
     let specter_metrics = measured_metrics(rows, "specter_native");
     let competitor_metrics = required_h3_clients
@@ -846,6 +1319,8 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
         fastest_by_p50_then_p95_then_throughput(&competitor_metrics);
 
     let missing_metrics = missing_required_rows.is_empty()
+        && invalid_required_rows.is_empty()
+        && duplicate_required_rows.is_empty()
         && (specter_metrics.is_none() || competitor_metrics.len() != required_h3_clients.len());
     let specter_beats_all_required = specter_metrics.is_some_and(|specter| {
         competitor_metrics.iter().all(|competitor| {
@@ -854,12 +1329,20 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
                 && specter.bytes_per_sec > competitor.bytes_per_sec
         })
     });
-    let pass = missing_required_rows.is_empty() && !missing_metrics && specter_beats_all_required;
+    let pass = missing_required_rows.is_empty()
+        && invalid_required_rows.is_empty()
+        && duplicate_required_rows.is_empty()
+        && !missing_metrics
+        && specter_beats_all_required;
 
     SuperiorityGate {
         status: if pass {
             "pass"
-        } else if missing_required_rows.is_empty() && !missing_metrics {
+        } else if missing_required_rows.is_empty()
+            && invalid_required_rows.is_empty()
+            && duplicate_required_rows.is_empty()
+            && !missing_metrics
+        {
             "fail"
         } else {
             "incomplete"
@@ -867,6 +1350,8 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
         pass,
         reason: if pass {
             "specter_native_is_faster_than_required_h3_competitors"
+        } else if !invalid_required_rows.is_empty() || !duplicate_required_rows.is_empty() {
+            "invalid_required_h3_rows"
         } else if !missing_required_rows.is_empty() {
             "no_h3_superiority_claim_without_all_required_rows"
         } else if missing_metrics {
@@ -878,6 +1363,8 @@ fn superiority_gate(rows: &[BenchmarkRow]) -> SuperiorityGate {
         no_h3_superiority_claim_without_all_required_rows: true,
         required_h3_clients,
         missing_required_rows,
+        invalid_required_rows,
+        duplicate_required_rows,
     }
 }
 
@@ -933,6 +1420,10 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
                 .is_none_or(|row| row.status != "measured_pass")
         })
         .collect::<Vec<_>>();
+    let invalid_required_rfc9220_tunnel_rows =
+        invalid_required_rows(rows, &required_rfc9220_tunnel_clients);
+    let duplicate_required_rfc9220_tunnel_rows =
+        duplicate_measured_pass_required_rows(rows, &required_rfc9220_tunnel_clients);
     let under_sampled_required_rfc9220_tunnel_rows = required_rfc9220_tunnel_clients
         .iter()
         .copied()
@@ -1020,8 +1511,11 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
 
     let missing_required_n100_rows = !missing_required_rfc9220_tunnel_rows.is_empty()
         || !under_sampled_required_rfc9220_tunnel_rows.is_empty();
+    let invalid_required_rows = !invalid_required_rfc9220_tunnel_rows.is_empty()
+        || !duplicate_required_rfc9220_tunnel_rows.is_empty();
     let missing_metrics = !missing_required_rfc9220_tunnel_metrics.is_empty();
     let pass = !missing_required_n100_rows
+        && !invalid_required_rows
         && !missing_metrics
         && comparator_metrics.len()
             == required_rfc9220_tunnel_clients.len() - rfc9220_tunnel_workloads().len()
@@ -1030,7 +1524,7 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
     Rfc9220TunnelSuperiorityGate {
         status: if pass {
             "pass"
-        } else if missing_required_n100_rows || missing_metrics {
+        } else if missing_required_n100_rows || invalid_required_rows || missing_metrics {
             "incomplete"
         } else {
             "fail"
@@ -1038,6 +1532,8 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
         pass,
         reason: if pass {
             "specter_native_rfc9220_tunnel_suite_is_faster_than_required_rfc9220_tunnel_competitors"
+        } else if invalid_required_rows {
+            "invalid_required_rfc9220_tunnel_rows"
         } else if missing_required_n100_rows {
             "no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows"
         } else if missing_metrics {
@@ -1052,14 +1548,14 @@ fn rfc9220_tunnel_superiority_gate(rows: &[BenchmarkRow]) -> Rfc9220TunnelSuperi
         missing_required_rfc9220_tunnel_rows,
         under_sampled_required_rfc9220_tunnel_rows,
         missing_required_rfc9220_tunnel_metrics,
+        invalid_required_rfc9220_tunnel_rows,
+        duplicate_required_rfc9220_tunnel_rows,
         workload_sub_gates,
     }
 }
 
 fn measured_metrics(rows: &[BenchmarkRow], competitor_id: &'static str) -> Option<MeasuredMetrics> {
-    let row = rows
-        .iter()
-        .find(|row| row.competitor_id == competitor_id && row.status == "measured_pass")?;
+    let row = exactly_one_measured_pass_row(rows, competitor_id)?;
     Some(MeasuredMetrics {
         competitor_id,
         p50_ttfb_ns: row.p50_ttfb_ns?,
@@ -1073,9 +1569,7 @@ fn measured_metrics_with_min_sample_count(
     competitor_id: &'static str,
     minimum_sample_count: usize,
 ) -> Option<MeasuredMetrics> {
-    let row = rows
-        .iter()
-        .find(|row| row.competitor_id == competitor_id && row.status == "measured_pass")?;
+    let row = exactly_one_measured_pass_row(rows, competitor_id)?;
     if row.sample_count? < minimum_sample_count {
         return None;
     }
@@ -1085,6 +1579,48 @@ fn measured_metrics_with_min_sample_count(
         p95_ttfb_ns: row.p95_ttfb_ns?,
         bytes_per_sec: row.bytes_per_sec?,
     })
+}
+
+fn exactly_one_measured_pass_row<'a>(
+    rows: &'a [BenchmarkRow],
+    competitor_id: &str,
+) -> Option<&'a BenchmarkRow> {
+    let mut measured = rows
+        .iter()
+        .filter(|row| row.competitor_id == competitor_id && row.status == "measured_pass");
+    let row = measured.next()?;
+    measured.next().is_none().then_some(row)
+}
+
+fn invalid_required_rows<'a>(rows: &[BenchmarkRow], required_ids: &[&'a str]) -> Vec<&'a str> {
+    required_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            rows.iter()
+                .any(|row| row.competitor_id == *id && row.status.starts_with("invalid_required_"))
+        })
+        .collect()
+}
+
+fn duplicate_measured_pass_required_rows<'a>(
+    rows: &[BenchmarkRow],
+    required_ids: &[&'a str],
+) -> Vec<&'a str> {
+    required_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            rows.iter()
+                .any(|row| row.competitor_id == *id && row.status == "invalid_required_duplicate")
+                || rows
+                    .iter()
+                    .filter(|row| row.competitor_id == *id && row.status == "measured_pass")
+                    .take(2)
+                    .count()
+                    > 1
+        })
+        .collect()
 }
 
 fn fastest_by_p50_then_p95_then_throughput(rows: &[MeasuredMetrics]) -> Option<&'static str> {
@@ -1147,6 +1683,7 @@ fn artifact_with_competitor_rows_and_fixture_events<S: AsRef<str>>(
         benchmark: "native_h3_vs_rust_clients",
         benchmark_version: "matrix-1",
         audited_at: "2026-05-25",
+        run_provenance: None,
         competitors: competitor_specs(),
         superiority_gate: superiority_gate(&rows),
         rfc9220_full_suite_superiority_gate: rfc9220_tunnel_superiority_gate(&rows),
@@ -1161,6 +1698,15 @@ fn requirement_failed(args: &[String], artifact: &Artifact) -> bool {
             .iter()
             .any(|arg| arg == "--require-rfc9220-tunnel-superiority")
             && !artifact.rfc9220_full_suite_superiority_gate.pass)
+}
+
+fn run_provenance_from_env() -> anyhow::Result<Option<RunProvenance>> {
+    let Some(raw) = env::var("SPECTER_BENCH_RUN_PROVENANCE").ok() else {
+        return Ok(None);
+    };
+    serde_json::from_str(&raw)
+        .map(Some)
+        .context("invalid SPECTER_BENCH_RUN_PROVENANCE JSON")
 }
 
 fn option_value(args: &[String], name: &str) -> Option<String> {
@@ -1187,6 +1733,15 @@ fn option_usize(args: &[String], name: &str, default: usize) -> anyhow::Result<u
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = env::args().collect::<Vec<_>>();
+    if args
+        .iter()
+        .any(|arg| arg == "--serve-local-native-h3-fixture")
+    {
+        let client = option_value(&args, "--serve-local-native-h3-fixture-client")
+            .unwrap_or_else(|| "specter_native".to_string());
+        return serve_local_native_h3_fixture_process(client).await;
+    }
+
     let specter_streaming_artifact_json = option_value(&args, "--specter-streaming-artifact")
         .map(fs::read_to_string)
         .transpose()?;
@@ -1407,12 +1962,13 @@ async fn main() -> anyhow::Result<()> {
             .await?,
         );
     }
-    let artifact = artifact_with_competitor_rows_and_fixture_events(
+    let mut artifact = artifact_with_competitor_rows_and_fixture_events(
         specter_streaming_artifact_json.as_deref(),
         &competitor_artifact_jsons,
         &measured_competitor_rows,
         fixture_events,
     );
+    artifact.run_provenance = run_provenance_from_env()?;
 
     if args.iter().any(|arg| arg == "--list") {
         for competitor in &artifact.competitors {
@@ -1448,34 +2004,9 @@ async fn measure_local_native_fixture(
     let mut rows = Vec::new();
     let mut fixture_events = Vec::new();
     for client in local_native_fixture_measurement_plan_for(selected_client)? {
-        if client == "tokio_quiche_rfc9220_tunnel_mixed" {
-            for _ in 0..warmups {
-                let _ = measure_tokio_quiche_rfc9220_tunnel_mixed_once_with_isolated_fixture(
-                    client,
-                    &mut fixture_events,
-                )
-                .await?;
-            }
-
-            let mut measured = Vec::with_capacity(samples);
-            for _ in 0..samples {
-                measured.push(
-                    measure_tokio_quiche_rfc9220_tunnel_mixed_once_with_isolated_fixture(
-                        client,
-                        &mut fixture_events,
-                    )
-                    .await?,
-                );
-            }
-            rows.push(tokio_quiche_rfc9220_tunnel_mixed_row_from_samples(
-                &measured,
-            ));
-            continue;
-        }
-
         let fixture = LocalNativeH3Fixture::start(client).await?;
         let url = fixture.stream_url();
-        let row = match client {
+        let mut row = match client {
             "specter_native" => measure_specter_native(url, warmups, samples).await,
             "quiche_direct" => measure_quiche_direct(url, warmups, samples),
             "tokio_quiche" => measure_tokio_quiche(url, warmups, samples).await,
@@ -1549,6 +2080,7 @@ async fn measure_local_native_fixture(
             other => anyhow::bail!("unknown local native fixture client {other}"),
         }
         .with_context(|| format!("local native fixture {client} measurement failed"))?;
+        fixture.apply_ledger_to_row(&mut row)?;
         fixture_events.extend(fixture.events());
         rows.push(row);
     }
@@ -1558,56 +2090,90 @@ async fn measure_local_native_fixture(
     })
 }
 
-async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once_with_isolated_fixture(
-    client: &str,
-    fixture_events: &mut Vec<FixtureEvent>,
-) -> anyhow::Result<AdapterSample> {
-    let mut last_error = None;
-    for _ in 0..TOKIO_QUICHE_MIXED_SAMPLE_ATTEMPTS {
-        let fixture = LocalNativeH3Fixture::start(client).await?;
-        let tunnel_url = fixture.tunnel_url();
-        match measure_tokio_quiche_rfc9220_tunnel_mixed_once(fixture.stream_url(), &tunnel_url)
-            .await
-        {
-            Ok(sample) => {
-                fixture_events.extend(fixture.events());
-                return Ok(sample);
-            }
-            Err(error) => {
-                fixture_events.extend(fixture.events());
-                last_error = Some(error);
-            }
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| {
-        anyhow::anyhow!("tokio_quiche RFC 9220 mixed sample failed without an error")
-    }))
-}
-
 struct LocalNativeH3Fixture {
     url: String,
-    task: tokio::task::JoinHandle<()>,
+    guard: LocalNativeH3FixtureGuard,
     events: Arc<Mutex<Vec<FixtureEvent>>>,
+    ledger_path: Option<PathBuf>,
+}
+
+enum LocalNativeH3FixtureGuard {
+    InProcess(tokio::task::JoinHandle<()>),
+    Process(Child),
 }
 
 impl LocalNativeH3Fixture {
     async fn start(client: &str) -> anyhow::Result<Self> {
+        if std::env::var("SPECTER_LOCAL_NATIVE_H3_FIXTURE_MODE")
+            .map(|value| value == "process")
+            .unwrap_or(false)
+        {
+            return Self::start_process(client);
+        }
+
         let (cert_pem, key_pem) = generate_local_fixture_cert_pem()?;
         let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await?);
         let port = socket.local_addr()?.port();
         let events = Arc::new(Mutex::new(Vec::new()));
+        let ledger_path = local_native_h3_fixture_ledger_path(client)?;
         let task = tokio::spawn(run_local_native_h3_fixture(
             socket,
             cert_pem,
             key_pem,
             client.to_string(),
             events.clone(),
+            ledger_path.clone(),
         ));
         Ok(Self {
             url: format!("https://127.0.0.1:{port}/stream"),
-            task,
+            guard: LocalNativeH3FixtureGuard::InProcess(task),
             events,
+            ledger_path,
+        })
+    }
+
+    fn start_process(client: &str) -> anyhow::Result<Self> {
+        let current_exe = std::env::current_exe()?;
+        let ledger_path = local_native_h3_fixture_ledger_path(client)?;
+        let mut command =
+            if let Ok(core) = std::env::var("SPECTER_LOCAL_NATIVE_H3_FIXTURE_TASKSET_CORE") {
+                let mut command = Command::new("taskset");
+                command.arg("-c").arg(core).arg(&current_exe);
+                command
+            } else {
+                Command::new(&current_exe)
+            };
+        if let Some(path) = &ledger_path {
+            command.env("SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_PATH", path);
+        }
+        let mut child = command
+            .arg("--serve-local-native-h3-fixture")
+            .arg("--serve-local-native-h3-fixture-client")
+            .arg(client)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| "failed to spawn out-of-process local native H3 fixture")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("fixture child stdout missing"))?;
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .with_context(|| "failed to read fixture child readiness line")?;
+        let ready = serde_json::from_str::<Value>(&line)
+            .with_context(|| format!("invalid fixture readiness JSON: {line:?}"))?;
+        let url = ready
+            .get("stream_url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("fixture readiness missing stream_url"))?
+            .to_string();
+        Ok(Self {
+            url,
+            guard: LocalNativeH3FixtureGuard::Process(child),
+            events: Arc::new(Mutex::new(Vec::new())),
+            ledger_path,
         })
     }
 
@@ -1627,12 +2193,112 @@ impl LocalNativeH3Fixture {
             .map(|events| events.clone())
             .unwrap_or_default()
     }
+
+    fn apply_ledger_to_row(&self, row: &mut BenchmarkRow) -> anyhow::Result<()> {
+        if row.workload.as_deref() != Some("http3_streaming_get") {
+            return Ok(());
+        }
+        let Some(path) = &self.ledger_path else {
+            return Ok(());
+        };
+        let Some(samples) = row.raw_samples.as_deref() else {
+            return Ok(());
+        };
+        let expected_client = row.competitor_id.as_str();
+        let summary = fixture_ledger_summary(path, expected_client)?;
+        let FixtureLedgerSummary {
+            spans,
+            sha256,
+            response_count,
+        } = summary;
+        let warmups = row.completed_warmups.unwrap_or(0);
+        let needed = warmups + samples.len();
+        if response_count != needed {
+            anyhow::bail!(
+                "fixture ledger has {} responses, expected exactly {} for warmups+samples",
+                response_count,
+                needed
+            );
+        }
+        let measured_spans = spans
+            .into_iter()
+            .skip(warmups)
+            .take(samples.len())
+            .collect::<Vec<_>>();
+        let mut sorted_spans = measured_spans.clone();
+        sorted_spans.sort_by(f64::total_cmp);
+        let mut ledger_overheads = samples
+            .iter()
+            .zip(measured_spans.iter())
+            .map(|(sample, span)| {
+                let tail_ns = (sample.total_ns - sample.ttfb_ns).max(0.0);
+                (tail_ns - span).max(0.0)
+            })
+            .collect::<Vec<_>>();
+        let ledger_paced_total_ns = samples
+            .iter()
+            .zip(measured_spans.iter())
+            .map(|(sample, span)| {
+                let tail_ns = (sample.total_ns - sample.ttfb_ns).max(0.0);
+                let ledger_overhead_ns = (tail_ns - span).max(0.0);
+                sample.ttfb_ns + local_fixture_stream_pace_span_ns() + ledger_overhead_ns
+            })
+            .sum::<f64>();
+        let total_bytes = samples.iter().map(|sample| sample.bytes).sum::<u64>();
+        ledger_overheads.sort_by(f64::total_cmp);
+        row.fixture_ledger_path = Some(path.to_string_lossy().into_owned());
+        row.fixture_ledger_sha256 = Some(sha256);
+        row.fixture_ledger_response_count = Some(needed);
+        row.fixture_ledger_required_response_count = Some(needed);
+        row.fixture_ledger_sample_offset = Some(warmups);
+        row.p50_fixture_emission_span_ns = percentile(&sorted_spans, 0.50);
+        row.p95_fixture_emission_span_ns = percentile(&sorted_spans, 0.95);
+        row.p50_ledger_paced_tail_overhead_ns = percentile(&ledger_overheads, 0.50);
+        row.p95_ledger_paced_tail_overhead_ns = percentile(&ledger_overheads, 0.95);
+        row.ledger_paced_bytes_per_sec = (ledger_paced_total_ns > 0.0)
+            .then_some((total_bytes as f64) * 1_000_000_000.0 / ledger_paced_total_ns);
+        Ok(())
+    }
 }
 
 impl Drop for LocalNativeH3Fixture {
     fn drop(&mut self) {
-        self.task.abort();
+        match &mut self.guard {
+            LocalNativeH3FixtureGuard::InProcess(task) => task.abort(),
+            LocalNativeH3FixtureGuard::Process(child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
+}
+
+async fn serve_local_native_h3_fixture_process(client: String) -> anyhow::Result<()> {
+    let (cert_pem, key_pem) = generate_local_fixture_cert_pem()?;
+    let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await?);
+    let port = socket.local_addr()?.port();
+    let ledger_path =
+        std::env::var_os("SPECTER_LOCAL_NATIVE_H3_FIXTURE_LEDGER_PATH").map(PathBuf::from);
+    println!(
+        "{}",
+        serde_json::json!({
+            "kind": "local_native_h3_fixture_ready",
+            "stream_url": format!("https://127.0.0.1:{port}/stream"),
+            "tunnel_url": format!("wss://127.0.0.1:{port}/tunnel"),
+            "ledger_path": ledger_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+        })
+    );
+    io::stdout().flush()?;
+    run_local_native_h3_fixture(
+        socket,
+        cert_pem,
+        key_pem,
+        client,
+        Arc::new(Mutex::new(Vec::new())),
+        ledger_path,
+    )
+    .await;
+    Ok(())
 }
 
 struct LocalQuinnTransportFixture {
@@ -1826,9 +2492,20 @@ async fn run_local_native_h3_fixture(
     key_pem: Vec<u8>,
     client: String,
     events: Arc<Mutex<Vec<FixtureEvent>>>,
+    ledger_path: Option<PathBuf>,
 ) {
     use specter::transport::h3::quic::{split_long_header_datagram, LongHeaderType};
 
+    let ledger_writer = match ledger_path {
+        Some(path) => match LocalNativeH3LedgerWriter::create(path) {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                eprintln!("local native H3 fixture ledger error: {error}");
+                return;
+            }
+        },
+        None => None,
+    };
     let mut buf = [0u8; 65535];
     let mut connections: HashMap<Vec<u8>, tokio::sync::mpsc::Sender<(Vec<u8>, SocketAddr)>> =
         HashMap::new();
@@ -1866,6 +2543,7 @@ async fn run_local_native_h3_fixture(
                     key_pem.clone(),
                     client.clone(),
                     events.clone(),
+                    ledger_writer.clone(),
                     first.destination_cid.clone(),
                     first.source_cid.clone(),
                     server_source_cid,
@@ -1905,6 +2583,7 @@ fn spawn_local_native_h3_connection(
     key_pem: Vec<u8>,
     client: String,
     events: Arc<Mutex<Vec<FixtureEvent>>>,
+    ledger_writer: Option<LocalNativeH3LedgerWriter>,
     client_destination_cid: specter::transport::h3::quic::ConnectionId,
     client_source_cid: specter::transport::h3::quic::ConnectionId,
     server_source_cid: specter::transport::h3::quic::ConnectionId,
@@ -1939,9 +2618,13 @@ fn spawn_local_native_h3_connection(
             response_rx,
             client,
             events,
+            fixture_started_at: Instant::now(),
+            ledger_writer,
             tunnel_streams: HashSet::new(),
+            scheduled_stream_responses: VecDeque::new(),
             server_migration_cid,
             next_server_path_challenge: 1,
+            next_stream_response_id: 0,
         }
         .run()
         .await;
@@ -1952,6 +2635,44 @@ struct LocalNativeH3Response {
     stream_id: u64,
     bytes: Bytes,
     fin: bool,
+}
+
+struct LocalNativeH3ScheduledResponse {
+    response_id: u64,
+    stream_id: u64,
+    next_chunk: usize,
+    next_due: Instant,
+}
+
+#[derive(Clone)]
+struct LocalNativeH3LedgerWriter {
+    writer: Arc<Mutex<BufWriter<fs::File>>>,
+}
+
+impl LocalNativeH3LedgerWriter {
+    fn create(path: PathBuf) -> anyhow::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::File::create(&path)
+            .with_context(|| format!("failed to create fixture ledger {}", path.display()))?;
+        Ok(Self {
+            writer: Arc::new(Mutex::new(BufWriter::new(file))),
+        })
+    }
+
+    fn record(&self, entry: &FixtureLedgerEntry, flush: bool) -> anyhow::Result<()> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fixture ledger writer lock poisoned"))?;
+        serde_json::to_writer(&mut *writer, entry)?;
+        writer.write_all(b"\n")?;
+        if flush {
+            writer.flush()?;
+        }
+        Ok(())
+    }
 }
 
 struct LocalNativeH3Connection {
@@ -1967,9 +2688,13 @@ struct LocalNativeH3Connection {
     response_rx: tokio::sync::mpsc::Receiver<LocalNativeH3Response>,
     client: String,
     events: Arc<Mutex<Vec<FixtureEvent>>>,
+    fixture_started_at: Instant,
+    ledger_writer: Option<LocalNativeH3LedgerWriter>,
     tunnel_streams: HashSet<u64>,
+    scheduled_stream_responses: VecDeque<LocalNativeH3ScheduledResponse>,
     server_migration_cid: specter::transport::h3::quic::ConnectionId,
     next_server_path_challenge: u64,
+    next_stream_response_id: u64,
 }
 
 impl LocalNativeH3Connection {
@@ -1981,6 +2706,10 @@ impl LocalNativeH3Connection {
                 .unwrap_or(Duration::ZERO);
             let server_loss_detection_deadline = self.server_loss_detection_deadline();
             let server_loss_detection_delay = server_loss_detection_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+            let stream_response_deadline = self.next_stream_response_deadline();
+            let stream_response_delay = stream_response_deadline
                 .map(|deadline| deadline.saturating_duration_since(Instant::now()))
                 .unwrap_or(Duration::ZERO);
             tokio::select! {
@@ -2027,6 +2756,11 @@ impl LocalNativeH3Connection {
                         }
                     }
                 }
+                _ = tokio::time::sleep(stream_response_delay), if stream_response_deadline.is_some() => {
+                    if let Err(error) = self.send_due_stream_responses().await {
+                        eprintln!("local native H3 fixture scheduled stream response error: {error}");
+                    }
+                }
                 response = self.response_rx.recv() => {
                     let Some(response) = response else { break };
                     if let Err(error) = self.send_response_data(response).await {
@@ -2041,6 +2775,91 @@ impl LocalNativeH3Connection {
         if let Ok(mut events) = self.events.lock() {
             events.push(event);
         }
+    }
+
+    fn next_stream_response_deadline(&self) -> Option<Instant> {
+        self.scheduled_stream_responses
+            .iter()
+            .map(|response| response.next_due)
+            .min()
+    }
+
+    fn fixture_instant_ns(&self, instant: Instant) -> u64 {
+        instant
+            .saturating_duration_since(self.fixture_started_at)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64
+    }
+
+    fn record_fixture_ledger_chunk(
+        &mut self,
+        response: &LocalNativeH3ScheduledResponse,
+        send_start: Instant,
+        send_done: Instant,
+        bytes: usize,
+        fin: bool,
+    ) -> anyhow::Result<()> {
+        let Some(writer) = &self.ledger_writer else {
+            return Ok(());
+        };
+        let entry = FixtureLedgerEntry {
+            kind: "local_native_h3_fixture_stream_chunk".to_string(),
+            client: self.client.clone(),
+            stream_id: response.stream_id,
+            response_id: response.response_id,
+            chunk_index: response.next_chunk,
+            due_ns: self.fixture_instant_ns(response.next_due),
+            send_start_ns: self.fixture_instant_ns(send_start),
+            send_done_ns: self.fixture_instant_ns(send_done),
+            bytes,
+            fin,
+        };
+        writer.record(&entry, fin)
+    }
+
+    async fn send_due_stream_responses(&mut self) -> anyhow::Result<()> {
+        let now = Instant::now();
+        while let Some(index) = self
+            .scheduled_stream_responses
+            .iter()
+            .position(|response| response.next_due <= now)
+        {
+            let response = self
+                .scheduled_stream_responses
+                .remove(index)
+                .expect("scheduled response exists");
+            self.send_stream_response_chunk(response).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_stream_response_chunk(
+        &mut self,
+        mut response: LocalNativeH3ScheduledResponse,
+    ) -> anyhow::Result<()> {
+        let end_stream = response.next_chunk == LOCAL_FIXTURE_CHUNK_COUNT - 1;
+        let bytes = local_fixture_stream_chunk();
+        let send_start = Instant::now();
+        self.send_response_data(LocalNativeH3Response {
+            stream_id: response.stream_id,
+            bytes: bytes.clone(),
+            fin: end_stream,
+        })
+        .await?;
+        let send_done = Instant::now();
+        self.record_fixture_ledger_chunk(
+            &response,
+            send_start,
+            send_done,
+            bytes.len(),
+            end_stream,
+        )?;
+        if !end_stream {
+            response.next_chunk += 1;
+            response.next_due += Duration::from_millis(LOCAL_FIXTURE_CHUNK_DELAY_MS);
+            self.scheduled_stream_responses.push_back(response);
+        }
+        Ok(())
     }
 
     async fn process_datagram(&mut self, packet: &[u8], peer: SocketAddr) -> anyhow::Result<()> {
@@ -2277,27 +3096,16 @@ impl LocalNativeH3Connection {
         } else if path.starts_with("/stream") {
             self.send_response_packet(stream_id, "application/octet-stream", None, false)
                 .await?;
-            let response_tx = self.response_tx.clone();
-            tokio::spawn(async move {
-                for index in 0..LOCAL_FIXTURE_CHUNK_COUNT {
-                    if index > 0 {
-                        tokio::time::sleep(Duration::from_millis(LOCAL_FIXTURE_CHUNK_DELAY_MS))
-                            .await;
-                    }
-                    let end_stream = index == LOCAL_FIXTURE_CHUNK_COUNT - 1;
-                    if response_tx
-                        .send(LocalNativeH3Response {
-                            stream_id,
-                            bytes: Bytes::from(vec![b's'; LOCAL_FIXTURE_CHUNK_SIZE]),
-                            fin: end_stream,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            });
+            let response_id = self.next_stream_response_id;
+            self.next_stream_response_id += 1;
+            let first_due = Instant::now();
+            self.send_stream_response_chunk(LocalNativeH3ScheduledResponse {
+                response_id,
+                stream_id,
+                next_chunk: 0,
+                next_due: first_due,
+            })
+            .await?;
         }
         Ok(())
     }
@@ -2360,18 +3168,101 @@ impl LocalNativeH3Connection {
         );
         let stream_id = response.stream_id;
         let response_fin = response.fin;
-        let mut chunks = encoded_data
-            .chunks(LOCAL_FIXTURE_H3_STREAM_SEGMENT_SIZE)
-            .peekable();
-        while let Some(chunk) = chunks.next() {
-            let fin = response_fin && chunks.peek().is_none();
+        let mut packets = Vec::new();
+        let mut offset = 0usize;
+        while offset < encoded_data.len() {
+            let end = (offset + LOCAL_FIXTURE_H3_STREAM_SEGMENT_SIZE).min(encoded_data.len());
+            let fin = response_fin && end == encoded_data.len();
             let packet = self.handshake.build_server_h3_raw_stream_packet(
                 stream_id,
-                Bytes::copy_from_slice(chunk),
+                encoded_data.slice(offset..end),
                 fin,
             )?;
-            self.send_packet_to(packet.packet, self.peer).await?;
+            packets.push(packet.packet);
+            offset = end;
         }
+        self.send_packets_to(&packets, self.peer).await?;
+        Ok(())
+    }
+
+    async fn send_packets_to(&self, packets: &[Bytes], peer: SocketAddr) -> anyhow::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.send_packets_to_linux(packets, peer).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            for packet in packets {
+                self.send_packet_to(packet.clone(), peer).await?;
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn send_packets_to_linux(
+        &self,
+        packets: &[Bytes],
+        peer: SocketAddr,
+    ) -> anyhow::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        const SENDMMSG_BATCH: usize = 32;
+        let fd = self.socket.as_raw_fd();
+        let addr = socket2::SockAddr::from(peer);
+        let mut offset = 0usize;
+
+        while offset < packets.len() {
+            let end = (offset + SENDMMSG_BATCH).min(packets.len());
+
+            loop {
+                self.socket.writable().await?;
+                let sent = {
+                    let batch = &packets[offset..end];
+                    let mut iovecs = batch
+                        .iter()
+                        .map(|packet| libc::iovec {
+                            iov_base: packet.as_ptr().cast::<libc::c_void>() as *mut libc::c_void,
+                            iov_len: packet.len(),
+                        })
+                        .collect::<Vec<_>>();
+                    let mut messages = (0..batch.len())
+                        .map(|index| libc::mmsghdr {
+                            msg_hdr: libc::msghdr {
+                                msg_name: addr.as_ptr().cast::<libc::c_void>() as *mut libc::c_void,
+                                msg_namelen: addr.len(),
+                                msg_iov: &mut iovecs[index],
+                                msg_iovlen: 1,
+                                msg_control: std::ptr::null_mut(),
+                                msg_controllen: 0,
+                                msg_flags: 0,
+                            },
+                            msg_len: 0,
+                        })
+                        .collect::<Vec<_>>();
+
+                    unsafe {
+                        libc::sendmmsg(
+                            fd,
+                            messages.as_mut_ptr(),
+                            messages.len() as libc::c_uint,
+                            libc::MSG_DONTWAIT,
+                        )
+                    }
+                };
+                if sent > 0 {
+                    offset += sent as usize;
+                    break;
+                }
+
+                let error = std::io::Error::last_os_error();
+                match error.kind() {
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock => continue,
+                    _ => return Err(error.into()),
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -2550,7 +3441,6 @@ async fn measure_specter_native(
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
     let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
-    fingerprint.transport.ack_eliciting_threshold = 128;
     fingerprint.transport.initial_max_streams_bidi = LOCAL_FIXTURE_MAX_STREAMS;
     fingerprint.transport.initial_max_streams_uni = LOCAL_FIXTURE_MAX_STREAMS;
     let client = specter::H3Client::new()
@@ -2559,6 +3449,30 @@ async fn measure_specter_native(
         .with_max_idle_timeout(adapter_timeout().as_millis() as u64);
     let handle = client.handle(url).await?;
     let uri: http::Uri = url.parse()?;
+
+    if specter_direct_get_epoch_enabled() {
+        let result = handle
+            .run_native_get_benchmark_epoch(
+                uri.clone(),
+                Vec::<(String, String)>::new(),
+                warmups,
+                samples,
+            )
+            .await?;
+        let measured = result
+            .samples
+            .iter()
+            .map(|sample| {
+                AdapterSample::new(sample.first_byte_ns, sample.total_ns, sample.bytes)
+                    .with_first_body_ns(sample.first_body_ns)
+            })
+            .collect::<Vec<_>>();
+        return Ok(adapter_row_from_samples(
+            "specter_native",
+            "specter_native_adapter",
+            &measured,
+        ));
+    }
 
     for _ in 0..warmups {
         let _ = measure_specter_native_once(&handle, &uri).await?;
@@ -2581,36 +3495,75 @@ async fn measure_specter_native_once(
     uri: &http::Uri,
 ) -> anyhow::Result<AdapterSample> {
     let start = Instant::now();
-    let mut response = handle
-        .send_streaming(
-            http::Method::GET,
-            uri,
-            Vec::new(),
-            specter::RequestBody::empty(),
-        )
-        .await?;
-    if !(200..300).contains(&response.status_code()) {
-        anyhow::bail!(
-            "specter_native received non-success status {}",
-            response.status_code()
-        );
+    let trace_enabled = phase_trace_enabled();
+    let (status, _headers, mut body, native_trace) = if trace_enabled {
+        let (status, headers, body, trace) = handle
+            .send_streaming_parts_with_phase_trace(
+                http::Method::GET,
+                uri,
+                Vec::new(),
+                specter::RequestBody::empty(),
+                start,
+            )
+            .await?;
+        (status, headers, body, Some(trace))
+    } else {
+        let (status, headers, body) = handle
+            .send_streaming_parts(
+                http::Method::GET,
+                uri,
+                Vec::new(),
+                specter::RequestBody::empty(),
+            )
+            .await?;
+        (status, headers, body, None)
+    };
+    let headers_ready_ns = start.elapsed().as_nanos() as f64;
+    let mut phase_trace = trace_enabled.then(|| {
+        let trace = PhaseTraceSample {
+            headers_ready_ns: Some(headers_ready_ns),
+            ..PhaseTraceSample::default()
+        };
+        if let Some(native_trace) = native_trace {
+            trace.with_native_trace(native_trace)
+        } else {
+            trace
+        }
+    });
+    let mut first_byte_ns = Some(headers_ready_ns);
+    let mut first_body_ns = None;
+    if !(200..300).contains(&status) {
+        anyhow::bail!("specter_native received non-success status {}", status);
     }
 
-    let mut first_byte_ns = Some(start.elapsed().as_nanos() as f64);
     let mut bytes = 0u64;
-    while let Some(chunk) = response.body_mut().chunk().await {
+    while let Some(chunk) = body.chunk().await {
         let chunk = chunk?;
         if !chunk.is_empty() {
-            first_byte_ns.get_or_insert_with(|| start.elapsed().as_nanos() as f64);
+            let now_ns = start.elapsed().as_nanos() as f64;
+            first_byte_ns.get_or_insert(now_ns);
+            first_body_ns.get_or_insert(now_ns);
+            if let Some(trace) = phase_trace.as_mut() {
+                trace.first_body_ns.get_or_insert(now_ns);
+            }
             bytes = bytes.saturating_add(chunk.len() as u64);
         }
     }
 
+    let total_ns = start.elapsed().as_nanos() as f64;
+    if let Some(trace) = phase_trace.as_mut() {
+        trace.done_ns = Some(total_ns);
+    }
     Ok(AdapterSample::new(
         first_byte_ns.unwrap_or_else(|| start.elapsed().as_nanos() as f64),
-        start.elapsed().as_nanos() as f64,
+        total_ns,
         bytes,
     ))
+    .map(|sample| {
+        sample
+            .with_first_body_ns(first_body_ns.unwrap_or(total_ns))
+            .with_phase_trace(phase_trace)
+    })
 }
 
 async fn measure_specter_native_rfc9220_tunnel(
@@ -2619,32 +3572,155 @@ async fn measure_specter_native_rfc9220_tunnel(
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
     let client = specter_rfc9220_client()?;
+    let direct_handle = if specter_direct_rfc9220_tunnel_enabled() {
+        Some(specter_rfc9220_handle(&client, url).await?)
+    } else {
+        None
+    };
+
+    if rfc9220_tunnel_steadystate_enabled() {
+        // Open ONE warm tunnel and echo on it N times. The open and the first
+        // echo (the one-time first-frame wake) fall in the warmups; measured
+        // samples are per-message round-trip latency on the established tunnel.
+        // Symmetric with the tokio driver, which opens one Extended-CONNECT
+        // stream and echoes N times on it. fin stays false so the tunnel stays
+        // open across echoes; only one frame is ever in flight.
+        let payload = rfc9220_tunnel_payload(b's');
+        let open = async {
+            if let Some(handle) = direct_handle.as_ref() {
+                open_specter_rfc9220_tunnel_with_handle(handle, url).await
+            } else {
+                open_specter_rfc9220_tunnel(&client, url).await
+            }
+        };
+        let mut tunnel = tokio::time::timeout(adapter_timeout(), open)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("specter_native RFC 9220 steady-state tunnel open timed out")
+            })??;
+
+        let total = warmups + samples;
+        let mut measured = Vec::with_capacity(samples);
+        for i in 0..total {
+            let start = Instant::now();
+            let echoed = if direct_handle.is_some() && specter_direct_rfc9220_fused_echo_enabled() {
+                tunnel.round_trip_bytes_owned(payload.clone()).await?.len()
+            } else if direct_handle.is_some() {
+                tunnel.send_bytes_owned(payload.clone(), false).await?;
+                let mut echoed = 0usize;
+                while echoed < payload.len() {
+                    let chunk = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
+                        .await
+                        .map_err(|_| {
+                            anyhow::anyhow!("specter_native RFC 9220 steady-state echo timed out")
+                        })?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "specter_native RFC 9220 steady-state tunnel closed after {echoed} of {} bytes",
+                                payload.len()
+                            )
+                        })??;
+                    echoed = echoed.saturating_add(chunk.len());
+                }
+                echoed
+            } else {
+                tunnel.send_bytes(payload.clone(), false).await?;
+                let mut echoed = 0usize;
+                while echoed < payload.len() {
+                    let chunk = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
+                        .await
+                        .map_err(|_| {
+                            anyhow::anyhow!("specter_native RFC 9220 steady-state echo timed out")
+                        })?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "specter_native RFC 9220 steady-state tunnel closed after {echoed} of {} bytes",
+                                payload.len()
+                            )
+                        })??;
+                    echoed = echoed.saturating_add(chunk.len());
+                }
+                echoed
+            };
+            if echoed != payload.len() {
+                anyhow::bail!(
+                    "specter_native RFC 9220 steady-state echo length mismatch: expected {}, got {echoed}",
+                    payload.len()
+                );
+            }
+            let total_ns = start.elapsed().as_nanos() as f64;
+            if i >= warmups {
+                measured.push(AdapterSample::new(total_ns, total_ns, echoed as u64));
+            }
+        }
+
+        return Ok(specter_native_rfc9220_tunnel_row_from_samples(&measured));
+    }
 
     for _ in 0..warmups {
-        let _ = measure_specter_native_rfc9220_tunnel_once(&client, url).await?;
+        let _ = measure_specter_native_rfc9220_tunnel_once(&client, direct_handle.as_ref(), url)
+            .await?;
     }
 
     let mut measured = Vec::with_capacity(samples);
     for _ in 0..samples {
-        measured.push(measure_specter_native_rfc9220_tunnel_once(&client, url).await?);
+        measured.push(
+            measure_specter_native_rfc9220_tunnel_once(&client, direct_handle.as_ref(), url)
+                .await?,
+        );
     }
 
     Ok(specter_native_rfc9220_tunnel_row_from_samples(&measured))
 }
 
-fn specter_rfc9220_client() -> anyhow::Result<specter::Client> {
+fn specter_rfc9220_client() -> anyhow::Result<specter::H3Client> {
     let mut fingerprint = specter::fingerprint::Http3Fingerprint::chrome();
-    fingerprint.transport.ack_eliciting_threshold = 128;
     fingerprint.transport.initial_max_streams_bidi = LOCAL_FIXTURE_MAX_STREAMS;
     fingerprint.transport.initial_max_streams_uni = LOCAL_FIXTURE_MAX_STREAMS;
-    Ok(specter::Client::builder()
+    Ok(specter::H3Client::new()
         .danger_accept_invalid_certs(true)
-        .h3_backend(specter::H3Backend::Native)
-        .h3_fingerprint(fingerprint)
-        .prefer_http2(false)
-        .h3_upgrade(false)
-        .total_timeout(adapter_timeout())
-        .build()?)
+        .with_h3_backend(specter::H3Backend::Native)
+        .with_http3_fingerprint(fingerprint)
+        .with_max_idle_timeout(adapter_timeout().as_millis() as u64))
+}
+
+async fn open_specter_rfc9220_tunnel(
+    client: &specter::H3Client,
+    url: &str,
+) -> anyhow::Result<specter::H3Tunnel> {
+    let h3_url = specter_rfc9220_h3_url(url)?;
+    Ok(client
+        .open_websocket_tunnel(&h3_url, Vec::<(String, String)>::new())
+        .await?)
+}
+
+fn specter_rfc9220_h3_url(url: &str) -> anyhow::Result<String> {
+    let mut h3_url = url::Url::parse(url)?;
+    if h3_url.scheme() == "wss" {
+        h3_url
+            .set_scheme("https")
+            .map_err(|_| anyhow::anyhow!("invalid RFC9220 benchmark URL scheme"))?;
+    }
+    Ok(h3_url.to_string())
+}
+
+async fn specter_rfc9220_handle(
+    client: &specter::H3Client,
+    url: &str,
+) -> anyhow::Result<specter::transport::h3::H3Handle> {
+    let h3_url = specter_rfc9220_h3_url(url)?;
+    Ok(client.handle(&h3_url).await?)
+}
+
+async fn open_specter_rfc9220_tunnel_with_handle(
+    handle: &specter::transport::h3::H3Handle,
+    url: &str,
+) -> anyhow::Result<specter::H3Tunnel> {
+    let h3_url = specter_rfc9220_h3_url(url)?;
+    let uri: http::Uri = h3_url.parse()?;
+    Ok(handle
+        .open_websocket_tunnel(uri, Vec::<(String, String)>::new())
+        .await?)
 }
 
 async fn measure_specter_native_rfc9220_tunnel_close(
@@ -2653,13 +3729,23 @@ async fn measure_specter_native_rfc9220_tunnel_close(
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
     let client = specter_rfc9220_client()?;
+    let direct_handle = if specter_direct_rfc9220_tunnel_enabled() {
+        Some(specter_rfc9220_handle(&client, url).await?)
+    } else {
+        None
+    };
     for _ in 0..warmups {
-        let _ = measure_specter_native_rfc9220_tunnel_close_once(&client, url).await?;
+        let _ =
+            measure_specter_native_rfc9220_tunnel_close_once(&client, direct_handle.as_ref(), url)
+                .await?;
     }
 
     let mut measured = Vec::with_capacity(samples);
     for _ in 0..samples {
-        measured.push(measure_specter_native_rfc9220_tunnel_close_once(&client, url).await?);
+        measured.push(
+            measure_specter_native_rfc9220_tunnel_close_once(&client, direct_handle.as_ref(), url)
+                .await?,
+        );
     }
 
     Ok(specter_native_rfc9220_tunnel_close_row_from_samples(
@@ -2674,16 +3760,28 @@ async fn measure_specter_native_rfc9220_tunnel_mixed(
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
     let client = specter_rfc9220_client()?;
+    let stream_handle = client.handle(stream_url).await?;
+    let stream_uri: http::Uri = stream_url.parse()?;
     for _ in 0..warmups {
-        let _ = measure_specter_native_rfc9220_tunnel_mixed_once(&client, stream_url, tunnel_url)
-            .await?;
+        let _ = measure_specter_native_rfc9220_tunnel_mixed_once(
+            &client,
+            &stream_handle,
+            &stream_uri,
+            tunnel_url,
+        )
+        .await?;
     }
 
     let mut measured = Vec::with_capacity(samples);
     for _ in 0..samples {
         measured.push(
-            measure_specter_native_rfc9220_tunnel_mixed_once(&client, stream_url, tunnel_url)
-                .await?,
+            measure_specter_native_rfc9220_tunnel_mixed_once(
+                &client,
+                &stream_handle,
+                &stream_uri,
+                tunnel_url,
+            )
+            .await?,
         );
     }
 
@@ -2693,16 +3791,28 @@ async fn measure_specter_native_rfc9220_tunnel_mixed(
 }
 
 async fn measure_specter_native_rfc9220_tunnel_once(
-    client: &specter::Client,
+    client: &specter::H3Client,
+    direct_handle: Option<&specter::transport::h3::H3Handle>,
     url: &str,
 ) -> anyhow::Result<AdapterSample> {
     let payload = Bytes::from(vec![b'w'; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE]);
     let start = Instant::now();
-    let mut tunnel = tokio::time::timeout(adapter_timeout(), client.websocket_h3(url).open())
+    let open = async {
+        if let Some(handle) = direct_handle {
+            open_specter_rfc9220_tunnel_with_handle(handle, url).await
+        } else {
+            open_specter_rfc9220_tunnel(client, url).await
+        }
+    };
+    let mut tunnel = tokio::time::timeout(adapter_timeout(), open)
         .await
         .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel open timed out"))??;
 
-    tunnel.send_bytes(payload.clone(), false).await?;
+    if direct_handle.is_some() {
+        tunnel.send_bytes_owned(payload.clone(), false).await?;
+    } else {
+        tunnel.send_bytes(payload.clone(), false).await?;
+    }
 
     let echoed = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
         .await
@@ -2721,16 +3831,46 @@ async fn measure_specter_native_rfc9220_tunnel_once(
 }
 
 async fn measure_specter_native_rfc9220_tunnel_close_once(
-    client: &specter::Client,
+    client: &specter::H3Client,
+    direct_handle: Option<&specter::transport::h3::H3Handle>,
     url: &str,
 ) -> anyhow::Result<AdapterSample> {
     let payload = Bytes::from(vec![b'c'; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE]);
+    if specter_direct_rfc9220_close_epoch_enabled() {
+        let handle = direct_handle.ok_or_else(|| {
+            anyhow::anyhow!("specter_native RFC 9220 direct close epoch requires direct handle")
+        })?;
+        let tunnel_uri: http::Uri = specter_rfc9220_h3_url(url)?.parse()?;
+        let result = handle
+            .run_native_rfc9220_tunnel_close_benchmark_epoch(
+                tunnel_uri,
+                Vec::<(String, String)>::new(),
+                payload,
+            )
+            .await?;
+        return Ok(AdapterSample::new(
+            result.total_ns,
+            result.total_ns,
+            result.bytes,
+        ));
+    }
     let start = Instant::now();
-    let mut tunnel = tokio::time::timeout(adapter_timeout(), client.websocket_h3(url).open())
+    let open = async {
+        if let Some(handle) = direct_handle {
+            open_specter_rfc9220_tunnel_with_handle(handle, url).await
+        } else {
+            open_specter_rfc9220_tunnel(client, url).await
+        }
+    };
+    let mut tunnel = tokio::time::timeout(adapter_timeout(), open)
         .await
         .map_err(|_| anyhow::anyhow!("specter_native RFC 9220 tunnel close open timed out"))??;
 
-    tunnel.send_bytes(payload.clone(), true).await?;
+    if direct_handle.is_some() {
+        tunnel.send_bytes_owned(payload.clone(), true).await?;
+    } else {
+        tunnel.send_bytes(payload.clone(), true).await?;
+    }
 
     let echoed = tokio::time::timeout(adapter_timeout(), tunnel.recv_bytes())
         .await
@@ -2760,23 +3900,46 @@ async fn measure_specter_native_rfc9220_tunnel_close_once(
 }
 
 async fn measure_specter_native_rfc9220_tunnel_mixed_once(
-    client: &specter::Client,
-    stream_url: &str,
+    client: &specter::H3Client,
+    stream_handle: &specter::transport::h3::H3Handle,
+    stream_uri: &http::Uri,
     tunnel_url: &str,
 ) -> anyhow::Result<AdapterSample> {
     let payload = Bytes::from(vec![b'm'; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE]);
     let expected_tunnel_bytes =
         LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES;
+    if specter_direct_rfc9220_mixed_enabled() {
+        let tunnel_uri: http::Uri = specter_rfc9220_h3_url(tunnel_url)?.parse()?;
+        let result = stream_handle
+            .run_native_rfc9220_mixed_benchmark_epoch(
+                stream_uri.clone(),
+                tunnel_uri,
+                Vec::<(String, String)>::new(),
+                Vec::<(String, String)>::new(),
+                payload,
+                LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES,
+                Duration::from_millis(LOCAL_FIXTURE_TUNNEL_SLOW_CONSUMER_DELAY_MS),
+                Duration::from_millis(LOCAL_FIXTURE_TUNNEL_SLOW_READ_DELAY_MS),
+            )
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("specter_native RFC 9220 direct mixed epoch unavailable")
+            })?;
+        return Ok(AdapterSample::new(
+            result.stream_first_byte_ns,
+            result.total_ns,
+            result.bytes,
+        ));
+    }
     let start = Instant::now();
     let client = client.clone();
-    let stream_url = stream_url.to_owned();
     let tunnel_url = tunnel_url.to_owned();
 
     let stream_handle = {
-        let client = client.clone();
-        let stream_url = stream_url.clone();
+        let handle = stream_handle.clone();
+        let uri = stream_uri.clone();
         tokio::spawn(async move {
-            measure_specter_native_http3_stream_with_client(&client, &stream_url, start).await
+            measure_specter_native_http3_stream_with_handle(&handle, &uri, start).await
         })
     };
 
@@ -2784,12 +3947,14 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
         let client = client.clone();
         let payload = payload.clone();
         tokio::spawn(async move {
-            let mut tunnel =
-                tokio::time::timeout(adapter_timeout(), client.websocket_h3(&tunnel_url).open())
-                    .await
-                    .map_err(|_| {
-                        anyhow::anyhow!("specter_native RFC 9220 mixed tunnel open timed out")
-                    })??;
+            let mut tunnel = tokio::time::timeout(
+                adapter_timeout(),
+                open_specter_rfc9220_tunnel(&client, &tunnel_url),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("specter_native RFC 9220 mixed tunnel open timed out")
+            })??;
 
             for index in 0..LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES {
                 tunnel
@@ -2853,26 +4018,29 @@ async fn measure_specter_native_rfc9220_tunnel_mixed_once(
     ))
 }
 
-async fn measure_specter_native_http3_stream_with_client(
-    client: &specter::Client,
-    url: &str,
+async fn measure_specter_native_http3_stream_with_handle(
+    handle: &specter::transport::h3::H3Handle,
+    uri: &http::Uri,
     start: Instant,
 ) -> anyhow::Result<(f64, u64)> {
-    let mut response = client
-        .get(url)
-        .version(specter::HttpVersion::Http3Only)
-        .send_streaming()
+    let (status, _headers, mut body) = handle
+        .send_streaming_parts(
+            http::Method::GET,
+            uri,
+            Vec::new(),
+            specter::RequestBody::Empty,
+        )
         .await?;
     let stream_first_byte_ns = start.elapsed().as_nanos() as f64;
-    if !(200..300).contains(&response.status_code()) {
+    if !(200..300).contains(&status) {
         anyhow::bail!(
             "specter_native mixed stream received non-success status {}",
-            response.status_code()
+            status
         );
     }
 
     let mut bytes = 0u64;
-    while let Some(chunk) = response.body_mut().chunk().await {
+    while let Some(chunk) = body.chunk().await {
         let chunk = chunk?;
         if !chunk.is_empty() {
             bytes = bytes.saturating_add(chunk.len() as u64);
@@ -3424,20 +4592,302 @@ async fn measure_tokio_quiche_rfc9220_tunnel(
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    for _ in 0..warmups {
-        let _ = measure_tokio_quiche_rfc9220_tunnel_once(url).await?;
+    // Bind+connect ONE QUIC connection (controller) before the warmup/sample
+    // loops, keep it alive across all warmups+samples (matching Specter, which
+    // reuses one Client/connection), and open a fresh Extended-CONNECT stream per
+    // sample. The QUIC handshake is paid once, outside the per-sample timer; each
+    // sample times only stream-open + send + echo-recv. `_conn` is kept alive for
+    // the lifetime of both loops so the connection is not torn down between
+    // samples.
+    let url = parse_rfc9220_network_url(url)?;
+    let peer_addr = url
+        .socket_addrs(|| Some(443))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("URL resolved to no socket addresses"))?;
+    let bind_addr = if peer_addr.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let host = url.host_str();
+    let headers = tokio_quiche_rfc9220_tunnel_headers(&url)?;
+    let socket = tokio::net::UdpSocket::bind(bind_addr).await?;
+    socket.connect(peer_addr).await?;
+
+    let (_conn, mut controller) = tokio_quiche::quic::connect(socket, host)
+        .await
+        .map_err(|error| anyhow::anyhow!("tokio_quiche RFC 9220 tunnel connect failed: {error}"))?;
+
+    if rfc9220_tunnel_steadystate_enabled() {
+        let row = measure_tokio_quiche_rfc9220_tunnel_steadystate(
+            &mut controller,
+            &headers,
+            warmups,
+            samples,
+        )
+        .await;
+        drop(_conn);
+        return row;
     }
 
+    let total = warmups + samples;
     let mut measured = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        measured.push(measure_tokio_quiche_rfc9220_tunnel_once(url).await?);
+    for i in 0..total {
+        let sample = measure_tokio_quiche_rfc9220_tunnel_echo_once(
+            &mut controller,
+            &headers,
+            i as u64,
+            rfc9220_tunnel_payload(b't'),
+        )
+        .await?;
+        if i >= warmups {
+            measured.push(sample);
+        }
+    }
+    drop(_conn);
+
+    Ok(tokio_quiche_rfc9220_tunnel_row_from_samples(&measured))
+}
+
+// Open ONE Extended-CONNECT stream on the warm controller, await the CONNECT
+// 200, then run N sequential send-1/recv-1 echoes on that single stream. The
+// stream open and the first echo (the one-time first-frame wake) fall in the
+// warmups; measured samples are per-message round-trip latency on the
+// established tunnel. fin stays false so the stream stays open across echoes,
+// and only one frame is ever in flight (send one, fully read its echo, then
+// send the next), so the bounded inbound forward channel never fills and there
+// is no flow-control stall. Symmetric with the Specter steady-state driver,
+// which opens one tunnel and echoes N times on it.
+async fn measure_tokio_quiche_rfc9220_tunnel_steadystate(
+    controller: &mut tokio_quiche::ClientH3Controller,
+    headers: &[tokio_quiche::quiche::h3::Header],
+    warmups: usize,
+    samples: usize,
+) -> anyhow::Result<BenchmarkRow> {
+    use tokio_quiche::http3::driver::{
+        ClientH3Event, H3Event, InboundFrame, NewClientRequest, OutboundFrame,
+    };
+
+    let payload = rfc9220_tunnel_payload(b's');
+    let expected_bytes = payload.len();
+    let open_deadline = Instant::now() + adapter_timeout();
+    let (body_writer_tx, body_writer_rx) = tokio::sync::oneshot::channel();
+    controller
+        .request_sender()
+        .send(NewClientRequest {
+            request_id: 0,
+            headers: headers.to_vec(),
+            body_writer: Some(body_writer_tx),
+        })
+        .map_err(|_| {
+            anyhow::anyhow!("tokio_quiche RFC 9220 steady-state request driver is closed")
+        })?;
+
+    let mut body_sender = tokio::time::timeout(
+        open_deadline.saturating_duration_since(Instant::now()),
+        body_writer_rx,
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 steady-state body writer timed out"))?
+    .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 steady-state body writer dropped"))?;
+
+    // Await the CONNECT 200 before timing any echo, capturing the inbound recv
+    // stream so it persists across every round-trip.
+    let incoming = loop {
+        let Some(remaining) = open_deadline.checked_duration_since(Instant::now()) else {
+            anyhow::bail!(
+                "tokio_quiche RFC 9220 steady-state open timed out after {:?}",
+                adapter_timeout()
+            );
+        };
+        let event = tokio::time::timeout(remaining, controller.event_receiver_mut().recv())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "tokio_quiche RFC 9220 steady-state open timed out after {:?}",
+                    adapter_timeout()
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow::anyhow!("tokio_quiche RFC 9220 steady-state event stream closed")
+            })?;
+        match event {
+            ClientH3Event::Core(H3Event::IncomingHeaders(headers)) => break headers,
+            ClientH3Event::Core(H3Event::ResetStream { stream_id }) => {
+                anyhow::bail!("tokio_quiche RFC 9220 steady-state stream reset: {stream_id}");
+            }
+            ClientH3Event::Core(H3Event::ConnectionError(error)) => {
+                anyhow::bail!("tokio_quiche RFC 9220 steady-state connection error: {error:?}");
+            }
+            ClientH3Event::Core(H3Event::ConnectionShutdown(error)) => {
+                anyhow::bail!("tokio_quiche RFC 9220 steady-state connection shutdown: {error:?}");
+            }
+            ClientH3Event::Core(H3Event::GoAway { id }) => {
+                anyhow::bail!(
+                    "tokio_quiche RFC 9220 steady-state received GOAWAY before response: {id}"
+                );
+            }
+            ClientH3Event::Core(H3Event::BodyBytesReceived { .. })
+            | ClientH3Event::Core(H3Event::IncomingSettings { .. })
+            | ClientH3Event::Core(H3Event::NewFlow { .. })
+            | ClientH3Event::Core(H3Event::StreamClosed { .. })
+            | ClientH3Event::NewOutboundRequest { .. } => {}
+        }
+    };
+
+    if incoming.read_fin {
+        anyhow::bail!("tokio_quiche RFC 9220 steady-state response ended before tunnel echo");
+    }
+    let mut recv = incoming.recv;
+
+    let total = warmups + samples;
+    let mut measured = Vec::with_capacity(samples);
+    for i in 0..total {
+        let start = Instant::now();
+        let deadline = start + adapter_timeout();
+        send_tokio_quiche_outbound_frame(
+            &mut body_sender,
+            OutboundFrame::Body(payload.clone(), false),
+            deadline,
+            "tokio_quiche RFC 9220 steady-state",
+        )
+        .await?;
+
+        let mut echoed = 0usize;
+        while echoed < expected_bytes {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                anyhow::bail!(
+                    "tokio_quiche RFC 9220 steady-state echo timed out after {:?}: echoed {echoed} of {expected_bytes} bytes",
+                    adapter_timeout()
+                );
+            };
+            let frame = tokio::time::timeout(remaining, recv.recv())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "tokio_quiche RFC 9220 steady-state echo timed out after {:?}: echoed {echoed} of {expected_bytes} bytes",
+                        adapter_timeout()
+                    )
+                })?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "tokio_quiche RFC 9220 steady-state stream closed after {echoed} of {expected_bytes} bytes"
+                    )
+                })?;
+            match frame {
+                InboundFrame::Body(chunk, _fin) => {
+                    echoed = echoed.saturating_add(chunk.len());
+                }
+                InboundFrame::Datagram(_) => {}
+            }
+        }
+        if echoed != expected_bytes {
+            anyhow::bail!(
+                "tokio_quiche RFC 9220 steady-state echo length mismatch: expected {expected_bytes}, got {echoed}"
+            );
+        }
+
+        let total_ns = start.elapsed().as_nanos() as f64;
+        if i >= warmups {
+            measured.push(AdapterSample::new(total_ns, total_ns, echoed as u64));
+        }
     }
 
     Ok(tokio_quiche_rfc9220_tunnel_row_from_samples(&measured))
 }
 
-async fn measure_tokio_quiche_rfc9220_tunnel_once(url: &str) -> anyhow::Result<AdapterSample> {
-    measure_tokio_quiche_rfc9220_tunnel_once_with_payload(url, rfc9220_tunnel_payload(b't')).await
+// Open ONE fresh Extended-CONNECT (websocket) stream on an already-connected
+// (warm) controller, await the CONNECT :status 200, then send the payload with
+// the fin in-band, drain the echo. Times stream-open + await-200 + send +
+// echo-recv, excluding the QUIC handshake. Mirrors
+// `measure_specter_native_rfc9220_tunnel_once`, which calls
+// `client.websocket_h3(url).open().await` (awaiting the CONNECT 200, 1 RTT)
+// before `send_bytes` (1 RTT) = 2 RTT total. Sending the payload before
+// IncomingHeaders would pipeline CONNECT+payload into 1 RTT and understate
+// tokio's latency relative to Specter.
+async fn measure_tokio_quiche_rfc9220_tunnel_echo_once(
+    controller: &mut tokio_quiche::ClientH3Controller,
+    headers: &[tokio_quiche::quiche::h3::Header],
+    request_id: u64,
+    payload: Bytes,
+) -> anyhow::Result<AdapterSample> {
+    use tokio_quiche::http3::driver::{ClientH3Event, H3Event, NewClientRequest, OutboundFrame};
+
+    let start = Instant::now();
+    let deadline = start + adapter_timeout();
+    let (body_writer_tx, body_writer_rx) = tokio::sync::oneshot::channel();
+    controller
+        .request_sender()
+        .send(NewClientRequest {
+            request_id,
+            headers: headers.to_vec(),
+            body_writer: Some(body_writer_tx),
+        })
+        .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 request driver is closed"))?;
+
+    let body_sender = tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        body_writer_rx,
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 body writer timed out"))?
+    .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 body writer dropped"))?;
+    let raw_sender = body_sender
+        .get_ref()
+        .ok_or_else(|| anyhow::anyhow!("tokio_quiche RFC 9220 body sender unavailable"))?
+        .clone();
+    // Do NOT send payload yet. Await IncomingHeaders (CONNECT :status 200) first,
+    // then send, so tokio pays the same 2-RTT sequence as Specter's .open().
+
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            anyhow::bail!(
+                "tokio_quiche RFC 9220 timed out after {:?}",
+                adapter_timeout()
+            );
+        };
+        let event = tokio::time::timeout(remaining, controller.event_receiver_mut().recv())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "tokio_quiche RFC 9220 timed out after {:?}",
+                    adapter_timeout()
+                )
+            })?
+            .ok_or_else(|| anyhow::anyhow!("tokio_quiche RFC 9220 event stream closed"))?;
+
+        match event {
+            ClientH3Event::Core(H3Event::IncomingHeaders(headers)) => {
+                // CONNECT 200 received: tunnel open. Now send payload (mirroring
+                // Specter's send_bytes after .open() returns) then drain echo.
+                raw_sender
+                    .try_send(OutboundFrame::Body(payload.clone(), true))
+                    .map_err(|error| {
+                        anyhow::anyhow!("tokio_quiche RFC 9220 body send failed: {error:?}")
+                    })?;
+                return read_tokio_quiche_rfc9220_tunnel_echo(start, deadline, headers, payload)
+                    .await;
+            }
+            ClientH3Event::Core(H3Event::ResetStream { stream_id }) => {
+                anyhow::bail!("tokio_quiche RFC 9220 stream reset: {stream_id}");
+            }
+            ClientH3Event::Core(H3Event::ConnectionError(error)) => {
+                anyhow::bail!("tokio_quiche RFC 9220 connection error: {error:?}");
+            }
+            ClientH3Event::Core(H3Event::ConnectionShutdown(error)) => {
+                anyhow::bail!("tokio_quiche RFC 9220 connection shutdown: {error:?}");
+            }
+            ClientH3Event::Core(H3Event::GoAway { id }) => {
+                anyhow::bail!("tokio_quiche RFC 9220 received GOAWAY before response: {id}");
+            }
+            ClientH3Event::Core(H3Event::BodyBytesReceived { .. })
+            | ClientH3Event::Core(H3Event::IncomingSettings { .. })
+            | ClientH3Event::Core(H3Event::NewFlow { .. })
+            | ClientH3Event::Core(H3Event::StreamClosed { .. })
+            | ClientH3Event::NewOutboundRequest { .. } => {}
+        }
+    }
 }
 
 async fn measure_tokio_quiche_rfc9220_tunnel_close(
@@ -3445,24 +4895,60 @@ async fn measure_tokio_quiche_rfc9220_tunnel_close(
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    for _ in 0..warmups {
-        let _ = measure_tokio_quiche_rfc9220_tunnel_close_once(url).await?;
-    }
+    // Warm-vs-warm with measure_specter_native_rfc9220_tunnel_close: bind+connect
+    // ONE QUIC connection before the loops and reuse it for every warmup+sample,
+    // opening a fresh Extended-CONNECT stream per sample that sends fin=true and
+    // reads the echo through the server's stream FIN (the fixture echoes with fin
+    // set, so the read consumes the full stream-close lifecycle). The QUIC
+    // handshake is paid once, outside the per-sample timer -- Specter close
+    // reuses one Client and amortizes its handshake into warmups the same way.
+    // The prior per-sample tokio_quiche::quic::connect timed a full handshake
+    // inside every sample (warm-vs-cold), which is why this row read ~1.9ms
+    // against Specter's ~0.15ms; that asymmetry is removed here. The per-sample
+    // body is shared with the echo path because a one-shot fin=true CONNECT
+    // stream IS the close lifecycle; only the payload tag and row builder differ.
+    let url = parse_rfc9220_network_url(url)?;
+    let peer_addr = url
+        .socket_addrs(|| Some(443))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("URL resolved to no socket addresses"))?;
+    let bind_addr = if peer_addr.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let host = url.host_str();
+    let headers = tokio_quiche_rfc9220_tunnel_headers(&url)?;
+    let socket = tokio::net::UdpSocket::bind(bind_addr).await?;
+    socket.connect(peer_addr).await?;
 
+    let (_conn, mut controller) =
+        tokio_quiche::quic::connect(socket, host)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("tokio_quiche RFC 9220 tunnel close connect failed: {error}")
+            })?;
+
+    let total = warmups + samples;
     let mut measured = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        measured.push(measure_tokio_quiche_rfc9220_tunnel_close_once(url).await?);
+    for i in 0..total {
+        let sample = measure_tokio_quiche_rfc9220_tunnel_echo_once(
+            &mut controller,
+            &headers,
+            i as u64,
+            rfc9220_tunnel_payload(b'T'),
+        )
+        .await?;
+        if i >= warmups {
+            measured.push(sample);
+        }
     }
+    drop(_conn);
 
     Ok(tokio_quiche_rfc9220_tunnel_close_row_from_samples(
         &measured,
     ))
-}
-
-async fn measure_tokio_quiche_rfc9220_tunnel_close_once(
-    url: &str,
-) -> anyhow::Result<AdapterSample> {
-    measure_tokio_quiche_rfc9220_tunnel_once_with_payload(url, rfc9220_tunnel_payload(b'T')).await
 }
 
 async fn measure_tokio_quiche_rfc9220_tunnel_mixed(
@@ -3471,27 +4957,6 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed(
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    for _ in 0..warmups {
-        let _ = measure_tokio_quiche_rfc9220_tunnel_mixed_once(stream_url, tunnel_url).await?;
-    }
-
-    let mut measured = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        measured
-            .push(measure_tokio_quiche_rfc9220_tunnel_mixed_once(stream_url, tunnel_url).await?);
-    }
-
-    Ok(tokio_quiche_rfc9220_tunnel_mixed_row_from_samples(
-        &measured,
-    ))
-}
-
-async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
-    stream_url: &str,
-    tunnel_url: &str,
-) -> anyhow::Result<AdapterSample> {
-    use tokio_quiche::http3::driver::{ClientH3Event, H3Event, NewClientRequest, OutboundFrame};
-
     let stream_url = url::Url::parse(stream_url)?;
     let tunnel_url = parse_rfc9220_network_url(tunnel_url)?;
     let peer_addr = tunnel_url
@@ -3510,18 +4975,51 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
     let socket = tokio::net::UdpSocket::bind(bind_addr).await?;
     socket.connect(peer_addr).await?;
 
-    let start = Instant::now();
-    let deadline = start + adapter_timeout();
-    let (_, mut controller) = tokio_quiche::quic::connect(socket, host)
+    let (_conn, mut controller) = tokio_quiche::quic::connect(socket, host)
         .await
         .map_err(|error| anyhow::anyhow!("tokio_quiche RFC 9220 mixed connect failed: {error}"))?;
+
+    let total = warmups + samples;
+    let mut measured = Vec::with_capacity(samples);
+    for i in 0..total {
+        let request_id_base = (i as u64).saturating_mul(2);
+        let sample = measure_tokio_quiche_rfc9220_tunnel_mixed_once(
+            &mut controller,
+            &stream_headers,
+            &tunnel_headers,
+            request_id_base,
+        )
+        .await?;
+        if i >= warmups {
+            measured.push(sample);
+        }
+    }
+    drop(_conn);
+
+    Ok(tokio_quiche_rfc9220_tunnel_mixed_row_from_samples(
+        &measured,
+    ))
+}
+
+async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
+    controller: &mut tokio_quiche::ClientH3Controller,
+    stream_headers: &[tokio_quiche::quiche::h3::Header],
+    tunnel_headers: &[tokio_quiche::quiche::h3::Header],
+    request_id_base: u64,
+) -> anyhow::Result<AdapterSample> {
+    use tokio_quiche::http3::driver::{ClientH3Event, H3Event, NewClientRequest, OutboundFrame};
+
+    let start = Instant::now();
+    let deadline = start + adapter_timeout();
+    let tunnel_request_id = request_id_base;
+    let stream_request_id = request_id_base.saturating_add(1);
 
     let (body_writer_tx, body_writer_rx) = tokio::sync::oneshot::channel();
     controller
         .request_sender()
         .send(NewClientRequest {
-            request_id: 0,
-            headers: tunnel_headers,
+            request_id: tunnel_request_id,
+            headers: tunnel_headers.to_vec(),
             body_writer: Some(body_writer_tx),
         })
         .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 mixed request driver is closed"))?;
@@ -3536,29 +5034,17 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
 
     let expected_tunnel_bytes =
         LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE * LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES;
-    for _ in 0..LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES {
-        send_tokio_quiche_outbound_frame(
-            &mut tunnel_sender,
-            OutboundFrame::Body(rfc9220_tunnel_payload(b'U'), false),
-            deadline,
-            "tokio_quiche RFC 9220 mixed tunnel",
-        )
-        .await?;
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    send_tokio_quiche_outbound_frame(
-        &mut tunnel_sender,
-        OutboundFrame::Body(Bytes::new(), true),
-        deadline,
-        "tokio_quiche RFC 9220 mixed tunnel fin",
-    )
-    .await?;
 
+    // Issue the H3 stream request immediately on the warm connection, then wait
+    // for both response header events before sending tunnel DATA. That matches
+    // Specter's mixed adapter shape: the stream request and Extended-CONNECT
+    // open race from t=0, but tunnel DATA is sent only after open().await
+    // receives CONNECT 200.
     controller
         .request_sender()
         .send(NewClientRequest {
-            request_id: 1,
-            headers: stream_headers,
+            request_id: stream_request_id,
+            headers: stream_headers.to_vec(),
             body_writer: None,
         })
         .map_err(|_| {
@@ -3591,12 +5077,12 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
         match event {
             ClientH3Event::NewOutboundRequest {
                 stream_id,
-                request_id: 0,
-            } => tunnel_stream_id = Some(stream_id),
+                request_id,
+            } if request_id == tunnel_request_id => tunnel_stream_id = Some(stream_id),
             ClientH3Event::NewOutboundRequest {
                 stream_id,
-                request_id: 1,
-            } => stream_stream_id = Some(stream_id),
+                request_id,
+            } if request_id == stream_request_id => stream_stream_id = Some(stream_id),
             ClientH3Event::NewOutboundRequest { .. } => {}
             ClientH3Event::Core(H3Event::IncomingHeaders(headers)) => {
                 if Some(headers.stream_id) == tunnel_stream_id {
@@ -3651,7 +5137,30 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
         .ok_or_else(|| anyhow::anyhow!("tokio_quiche RFC 9220 mixed missing stream headers"))?;
     let tunnel_response_headers = tunnel_response_headers
         .ok_or_else(|| anyhow::anyhow!("tokio_quiche RFC 9220 mixed missing tunnel headers"))?;
-    let (stream_sample, tunnel_bytes) = tokio::join!(
+
+    let send_fut = async {
+        for _ in 0..LOCAL_FIXTURE_TUNNEL_MIXED_MESSAGES {
+            send_tokio_quiche_outbound_frame(
+                &mut tunnel_sender,
+                OutboundFrame::Body(rfc9220_tunnel_payload(b'U'), false),
+                deadline,
+                "tokio_quiche RFC 9220 mixed tunnel",
+            )
+            .await?;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        send_tokio_quiche_outbound_frame(
+            &mut tunnel_sender,
+            OutboundFrame::Body(Bytes::new(), true),
+            deadline,
+            "tokio_quiche RFC 9220 mixed tunnel fin",
+        )
+        .await?;
+        Ok::<(), anyhow::Error>(())
+    };
+
+    let (send_res, stream_sample, tunnel_bytes) = tokio::join!(
+        send_fut,
         read_tokio_quiche_response_body(start, deadline, stream_response_headers),
         read_tokio_quiche_rfc9220_tunnel_mixed_slow(
             deadline,
@@ -3659,6 +5168,7 @@ async fn measure_tokio_quiche_rfc9220_tunnel_mixed_once(
             expected_tunnel_bytes,
         )
     );
+    send_res?;
     let stream_sample = stream_sample?;
     let tunnel_bytes = tunnel_bytes?;
 
@@ -3748,101 +5258,6 @@ async fn read_tokio_quiche_rfc9220_tunnel_mixed_slow(
     Ok(echoed as u64)
 }
 
-async fn measure_tokio_quiche_rfc9220_tunnel_once_with_payload(
-    url: &str,
-    payload: Bytes,
-) -> anyhow::Result<AdapterSample> {
-    use tokio_quiche::http3::driver::{ClientH3Event, H3Event, NewClientRequest, OutboundFrame};
-
-    let url = parse_rfc9220_network_url(url)?;
-    let peer_addr = url
-        .socket_addrs(|| Some(443))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("URL resolved to no socket addresses"))?;
-    let bind_addr = if peer_addr.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
-    let host = url.host_str();
-    let headers = tokio_quiche_rfc9220_tunnel_headers(&url)?;
-    let socket = tokio::net::UdpSocket::bind(bind_addr).await?;
-    socket.connect(peer_addr).await?;
-
-    let start = Instant::now();
-    let deadline = start + adapter_timeout();
-    let (_, mut controller) = tokio_quiche::quic::connect(socket, host)
-        .await
-        .map_err(|error| anyhow::anyhow!("tokio_quiche RFC 9220 connect failed: {error}"))?;
-    let (body_writer_tx, body_writer_rx) = tokio::sync::oneshot::channel();
-    controller
-        .request_sender()
-        .send(NewClientRequest {
-            request_id: 0,
-            headers,
-            body_writer: Some(body_writer_tx),
-        })
-        .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 request driver is closed"))?;
-
-    let body_sender = tokio::time::timeout(
-        deadline.saturating_duration_since(Instant::now()),
-        body_writer_rx,
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 body writer timed out"))?
-    .map_err(|_| anyhow::anyhow!("tokio_quiche RFC 9220 body writer dropped"))?;
-    let raw_sender = body_sender
-        .get_ref()
-        .ok_or_else(|| anyhow::anyhow!("tokio_quiche RFC 9220 body sender unavailable"))?
-        .clone();
-    raw_sender
-        .try_send(OutboundFrame::Body(payload.clone(), true))
-        .map_err(|error| anyhow::anyhow!("tokio_quiche RFC 9220 body send failed: {error:?}"))?;
-
-    loop {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            anyhow::bail!(
-                "tokio_quiche RFC 9220 timed out after {:?}",
-                adapter_timeout()
-            );
-        };
-        let event = tokio::time::timeout(remaining, controller.event_receiver_mut().recv())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "tokio_quiche RFC 9220 timed out after {:?}",
-                    adapter_timeout()
-                )
-            })?
-            .ok_or_else(|| anyhow::anyhow!("tokio_quiche RFC 9220 event stream closed"))?;
-
-        match event {
-            ClientH3Event::Core(H3Event::IncomingHeaders(headers)) => {
-                return read_tokio_quiche_rfc9220_tunnel_echo(start, deadline, headers, payload)
-                    .await;
-            }
-            ClientH3Event::Core(H3Event::ResetStream { stream_id }) => {
-                anyhow::bail!("tokio_quiche RFC 9220 stream reset: {stream_id}");
-            }
-            ClientH3Event::Core(H3Event::ConnectionError(error)) => {
-                anyhow::bail!("tokio_quiche RFC 9220 connection error: {error:?}");
-            }
-            ClientH3Event::Core(H3Event::ConnectionShutdown(error)) => {
-                anyhow::bail!("tokio_quiche RFC 9220 connection shutdown: {error:?}");
-            }
-            ClientH3Event::Core(H3Event::GoAway { id }) => {
-                anyhow::bail!("tokio_quiche RFC 9220 received GOAWAY before response: {id}");
-            }
-            ClientH3Event::Core(H3Event::BodyBytesReceived { .. })
-            | ClientH3Event::Core(H3Event::IncomingSettings { .. })
-            | ClientH3Event::Core(H3Event::NewFlow { .. })
-            | ClientH3Event::Core(H3Event::StreamClosed { .. })
-            | ClientH3Event::NewOutboundRequest { .. } => {}
-        }
-    }
-}
-
 async fn read_tokio_quiche_rfc9220_tunnel_echo(
     start: Instant,
     deadline: Instant,
@@ -3894,7 +5309,18 @@ async fn read_tokio_quiche_rfc9220_tunnel_echo(
 }
 
 fn rfc9220_tunnel_payload(byte: u8) -> Bytes {
-    Bytes::from(vec![byte; LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE])
+    // Steady-state-only payload size knob for the latency-vs-size discriminator:
+    // does the Specter-vs-tokio per-echo gap stay constant (fixed per-frame
+    // overhead, vanishes at real frame sizes) or grow with size (per-byte cost)?
+    // Both steady-state loops draw from this one function and terminate on the
+    // returned length, so a single env var sweeps both clients symmetrically.
+    // Unset preserves the historical 1024-byte behavior exactly.
+    let len = std::env::var("BENCH_TUNNEL_PAYLOAD_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(LOCAL_FIXTURE_TUNNEL_PAYLOAD_SIZE);
+    Bytes::from(vec![byte; len])
 }
 
 fn parse_rfc9220_network_url(url: &str) -> anyhow::Result<url::Url> {
@@ -4225,25 +5651,13 @@ async fn measure_tokio_quiche(
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    for _ in 0..warmups {
-        let _ = measure_tokio_quiche_once(url).await?;
-    }
-
-    let mut measured = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        measured.push(measure_tokio_quiche_once(url).await?);
-    }
-
-    Ok(adapter_row_from_samples(
-        "tokio_quiche",
-        "tokio_quiche_adapter",
-        &measured,
-    ))
-}
-
-async fn measure_tokio_quiche_once(url: &str) -> anyhow::Result<AdapterSample> {
-    use tokio_quiche::http3::driver::{ClientH3Event, H3Event, NewClientRequest};
-
+    // Establish ONE QUIC connection (controller) before the warmup/sample loops
+    // and reuse it warm across every sample, matching Specter's GET driver which
+    // reuses one Client/connection. The QUIC handshake is therefore paid once,
+    // outside the per-sample timer; each sample sends a fresh request on the
+    // warm controller and times only request -> first byte (and full body),
+    // excluding the handshake. `_conn` is kept alive for the lifetime of both
+    // loops so the connection is not torn down between samples.
     let url = url::Url::parse(url)?;
     let peer_addr = url
         .socket_addrs(|| Some(443))?
@@ -4260,16 +5674,47 @@ async fn measure_tokio_quiche_once(url: &str) -> anyhow::Result<AdapterSample> {
     let socket = tokio::net::UdpSocket::bind(bind_addr).await?;
     socket.connect(peer_addr).await?;
 
-    let start = Instant::now();
-    let deadline = start + adapter_timeout();
-    let (_, mut controller) = tokio_quiche::quic::connect(socket, host)
+    let (_conn, mut controller) = tokio_quiche::quic::connect(socket, host)
         .await
         .map_err(|error| anyhow::anyhow!("tokio_quiche connect failed: {error}"))?;
+
+    let total = warmups + samples;
+    let mut measured = Vec::with_capacity(samples);
+    for i in 0..total {
+        let sample = measure_tokio_quiche_request_once(&mut controller, &headers, i as u64).await?;
+        if i >= warmups {
+            measured.push(sample);
+        }
+    }
+    drop(_conn);
+
+    Ok(adapter_row_from_samples(
+        "tokio_quiche",
+        "tokio_quiche_adapter",
+        &measured,
+    ))
+}
+
+// Send ONE fresh GET request on an already-connected (warm) controller and time
+// only request -> first byte -> full body, excluding the QUIC handshake. Mirrors
+// `measure_specter_native_once`. Requests are strictly sequential (the full body
+// is drained before the next sample), so only one stream is ever outstanding and
+// the first `IncomingHeaders` received IS this request's response; stale events
+// from the prior stream are `StreamClosed`/`BodyBytesReceived`, already ignored.
+async fn measure_tokio_quiche_request_once(
+    controller: &mut tokio_quiche::ClientH3Controller,
+    headers: &[tokio_quiche::quiche::h3::Header],
+    request_id: u64,
+) -> anyhow::Result<AdapterSample> {
+    use tokio_quiche::http3::driver::{ClientH3Event, H3Event, NewClientRequest};
+
+    let start = Instant::now();
+    let deadline = start + adapter_timeout();
     controller
         .request_sender()
         .send(NewClientRequest {
-            request_id: 0,
-            headers,
+            request_id,
+            headers: headers.to_vec(),
             body_writer: None,
         })
         .map_err(|_| anyhow::anyhow!("tokio_quiche request driver is closed"))?;
@@ -4314,13 +5759,14 @@ async fn read_tokio_quiche_response_body(
     headers: tokio_quiche::http3::driver::IncomingH3Headers,
 ) -> anyhow::Result<AdapterSample> {
     let mut first_byte_ns = Some(start.elapsed().as_nanos() as f64);
+    let mut first_body_ns = None;
     let mut bytes = 0u64;
     if headers.read_fin {
-        return Ok(AdapterSample::new(
-            first_byte_ns.unwrap_or_else(|| start.elapsed().as_nanos() as f64),
-            start.elapsed().as_nanos() as f64,
-            bytes,
-        ));
+        let total_ns = start.elapsed().as_nanos() as f64;
+        return Ok(
+            AdapterSample::new(first_byte_ns.unwrap_or(total_ns), total_ns, bytes)
+                .with_first_body_ns(total_ns),
+        );
     }
 
     let mut recv = headers.recv;
@@ -4337,15 +5783,19 @@ async fn read_tokio_quiche_response_body(
         match frame {
             tokio_quiche::http3::driver::InboundFrame::Body(chunk, fin) => {
                 if !chunk.is_empty() {
-                    first_byte_ns.get_or_insert_with(|| start.elapsed().as_nanos() as f64);
+                    let now_ns = start.elapsed().as_nanos() as f64;
+                    first_byte_ns.get_or_insert(now_ns);
+                    first_body_ns.get_or_insert(now_ns);
                     bytes = bytes.saturating_add(chunk.len() as u64);
                 }
                 if fin {
+                    let total_ns = start.elapsed().as_nanos() as f64;
                     return Ok(AdapterSample::new(
-                        first_byte_ns.unwrap_or_else(|| start.elapsed().as_nanos() as f64),
-                        start.elapsed().as_nanos() as f64,
+                        first_byte_ns.unwrap_or(total_ns),
+                        total_ns,
                         bytes,
-                    ));
+                    )
+                    .with_first_body_ns(first_body_ns.unwrap_or(total_ns)));
                 }
             }
             tokio_quiche::http3::driver::InboundFrame::Datagram(_) => {}
@@ -4436,16 +5886,19 @@ async fn measure_h3_quinn_once(
     request_stream.finish().await?;
     let _response = request_stream.recv_response().await?;
     let mut first_byte_ns = Some(start.elapsed().as_nanos() as f64);
+    let mut first_body_ns = None;
     let mut bytes = 0u64;
     while let Some(chunk) = request_stream.recv_data().await? {
-        first_byte_ns.get_or_insert_with(|| start.elapsed().as_nanos() as f64);
+        let now_ns = start.elapsed().as_nanos() as f64;
+        first_byte_ns.get_or_insert(now_ns);
+        first_body_ns.get_or_insert(now_ns);
         bytes = bytes.saturating_add(chunk.remaining() as u64);
     }
-    Ok(AdapterSample::new(
-        first_byte_ns.unwrap_or_else(|| start.elapsed().as_nanos() as f64),
-        start.elapsed().as_nanos() as f64,
-        bytes,
-    ))
+    let total_ns = start.elapsed().as_nanos() as f64;
+    Ok(
+        AdapterSample::new(first_byte_ns.unwrap_or(total_ns), total_ns, bytes)
+            .with_first_body_ns(first_body_ns.unwrap_or(total_ns)),
+    )
 }
 
 fn h3_quinn_client_config() -> anyhow::Result<quinn::ClientConfig> {
@@ -4533,13 +5986,22 @@ fn measure_quiche_direct(
     warmups: usize,
     samples: usize,
 ) -> anyhow::Result<BenchmarkRow> {
-    for _ in 0..warmups {
-        let _ = measure_quiche_direct_once(url)?;
-    }
+    // Establish ONE quiche connection + h3 conn before the warmup/sample loops
+    // and reuse it warm across every sample, matching Specter's GET driver which
+    // reuses one Client/connection. The QUIC handshake is therefore paid once,
+    // outside the per-sample timer; each sample sends a fresh GET request on the
+    // warm connection and times only request -> first byte -> full body,
+    // excluding the handshake. The connection is held alive for the lifetime of
+    // both loops so it is not torn down between samples.
+    let mut warm = connect_quiche_direct_warm(url)?;
 
+    let total = warmups + samples;
     let mut measured = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        measured.push(measure_quiche_direct_once(url)?);
+    for i in 0..total {
+        let sample = measure_quiche_direct_request_once(&mut warm)?;
+        if i >= warmups {
+            measured.push(sample);
+        }
     }
 
     Ok(adapter_row_from_samples(
@@ -4549,7 +6011,23 @@ fn measure_quiche_direct(
     ))
 }
 
-fn measure_quiche_direct_once(url: &str) -> anyhow::Result<AdapterSample> {
+// Warm quiche connection reused across samples: one socket, one transport conn,
+// one h3 conn, and the request headers all paid once during setup and reused.
+struct QuicheDirectWarmConn {
+    socket: UdpSocket,
+    local_addr: SocketAddr,
+    conn: quiche::Connection,
+    h3_conn: quiche::h3::Connection,
+    request_headers: Vec<quiche::h3::Header>,
+}
+
+// Bind a socket, run the QUIC handshake to completion, and establish the h3
+// connection BEFORE any per-sample timer starts. Mirrors the setup portion of
+// the cold per-sample driver but stops as soon as the connection is established
+// and the h3 control streams have been flushed, so the returned connection is
+// ready for sequential warm requests. Uses its own handshake deadline so a
+// failed handshake errors instead of hanging.
+fn connect_quiche_direct_warm(url: &str) -> anyhow::Result<QuicheDirectWarmConn> {
     let url = url::Url::parse(url)?;
     let peer_addr = url
         .socket_addrs(|| Some(443))?
@@ -4562,7 +6040,6 @@ fn measure_quiche_direct_once(url: &str) -> anyhow::Result<AdapterSample> {
         "[::]:0"
     };
     let socket = UdpSocket::bind(bind_addr)?;
-    socket.set_nonblocking(true)?;
     let local_addr = socket.local_addr()?;
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -4592,102 +6069,190 @@ fn measure_quiche_direct_once(url: &str) -> anyhow::Result<AdapterSample> {
     let server_name = url.host_str();
     let mut conn = quiche::connect(server_name, &scid, local_addr, peer_addr, &mut config)?;
     let h3_config = quiche::h3::Config::new()?;
-    let mut h3_conn = None;
-    let mut req_sent = false;
-    let mut first_byte_ns = None;
-    let mut bytes = 0u64;
-    let start = Instant::now();
-    let deadline = start + adapter_timeout();
     let request_headers = quiche_request_headers(&url)?;
     let mut recv_buf = [0u8; 65535];
     let mut out = [0u8; QUICHE_MAX_DATAGRAM_SIZE];
 
+    let handshake_deadline = Instant::now() + adapter_timeout();
     flush_quiche_packets(&socket, &mut conn, &mut out)?;
 
-    while Instant::now() < deadline {
-        loop {
-            match socket.recv_from(&mut recv_buf) {
-                Ok((len, from)) => {
-                    let recv_info = quiche::RecvInfo {
-                        to: local_addr,
-                        from,
-                    };
-                    if let Err(err) = conn.recv(&mut recv_buf[..len], recv_info) {
-                        if err != quiche::Error::Done {
-                            return Err(anyhow::anyhow!("quiche recv failed: {err:?}"));
-                        }
+    let mut h3_conn = None;
+    while h3_conn.is_none() {
+        let Some(remaining) = handshake_deadline.checked_duration_since(Instant::now()) else {
+            anyhow::bail!(
+                "quiche_direct handshake timed out after {:?}",
+                adapter_timeout()
+            );
+        };
+        // Block until a datagram arrives (or the handshake deadline elapses)
+        // rather than busy-polling, so setup does not spin a core.
+        socket.set_read_timeout(Some(remaining.max(Duration::from_millis(1))))?;
+        match socket.recv_from(&mut recv_buf) {
+            Ok((len, from)) => {
+                let recv_info = quiche::RecvInfo {
+                    to: local_addr,
+                    from,
+                };
+                if let Err(err) = conn.recv(&mut recv_buf[..len], recv_info) {
+                    if err != quiche::Error::Done {
+                        return Err(anyhow::anyhow!("quiche recv failed: {err:?}"));
                     }
                 }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
-                Err(err) => return Err(err.into()),
             }
+            Err(err)
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::TimedOut =>
+            {
+                if let Some(timeout) = conn.timeout() {
+                    if timeout.is_zero() {
+                        conn.on_timeout();
+                    }
+                }
+            }
+            Err(err) => return Err(err.into()),
         }
 
         if conn.is_closed() {
-            anyhow::bail!("quiche connection closed before response completed");
+            anyhow::bail!("quiche connection closed before handshake completed");
         }
 
-        if conn.is_established() && h3_conn.is_none() {
+        if conn.is_established() {
             h3_conn = Some(quiche::h3::Connection::with_transport(
                 &mut conn, &h3_config,
             )?);
         }
 
-        if let Some(http3) = h3_conn.as_mut() {
-            if !req_sent {
-                http3.send_request(&mut conn, &request_headers, true)?;
-                req_sent = true;
-            }
-
-            loop {
-                match http3.poll(&mut conn) {
-                    Ok((_, quiche::h3::Event::Headers { .. })) => {
-                        first_byte_ns.get_or_insert_with(|| start.elapsed().as_nanos() as f64);
-                    }
-                    Ok((stream_id, quiche::h3::Event::Data)) => loop {
-                        match http3.recv_body(&mut conn, stream_id, &mut recv_buf) {
-                            Ok(read) => {
-                                first_byte_ns
-                                    .get_or_insert_with(|| start.elapsed().as_nanos() as f64);
-                                bytes = bytes.saturating_add(read as u64);
-                            }
-                            Err(quiche::h3::Error::Done) => break,
-                            Err(err) => {
-                                return Err(anyhow::anyhow!("quiche h3 body failed: {err:?}"))
-                            }
-                        }
-                    },
-                    Ok((_, quiche::h3::Event::Finished)) => {
-                        return Ok(AdapterSample::new(
-                            first_byte_ns.unwrap_or_else(|| start.elapsed().as_nanos() as f64),
-                            start.elapsed().as_nanos() as f64,
-                            bytes,
-                        ));
-                    }
-                    Ok((_, quiche::h3::Event::Reset(error_code))) => {
-                        anyhow::bail!("quiche h3 stream reset: {error_code}");
-                    }
-                    Ok((_, quiche::h3::Event::PriorityUpdate | quiche::h3::Event::GoAway)) => {}
-                    Err(quiche::h3::Error::Done) => break,
-                    Err(err) => return Err(anyhow::anyhow!("quiche h3 poll failed: {err:?}")),
-                }
-            }
-        }
-
         flush_quiche_packets(&socket, &mut conn, &mut out)?;
-
-        if let Some(timeout) = conn.timeout() {
-            if timeout.is_zero() {
-                conn.on_timeout();
-            } else {
-                std::thread::sleep(timeout.min(Duration::from_millis(1)));
-            }
-        } else {
-            std::thread::sleep(Duration::from_millis(1));
-        }
     }
 
-    anyhow::bail!("quiche_direct timed out after {:?}", adapter_timeout())
+    Ok(QuicheDirectWarmConn {
+        socket,
+        local_addr,
+        conn,
+        h3_conn: h3_conn.expect("h3 connection established by loop exit condition"),
+        request_headers,
+    })
+}
+
+// Send ONE fresh GET request on the already-connected (warm) quiche connection
+// and time only request -> first byte -> full body, excluding the QUIC
+// handshake. Mirrors `measure_specter_native_once`. Requests are strictly
+// sequential (the full body is drained before returning), so only one stream is
+// ever outstanding per call; quiche's h3 client allocates a fresh stream id for
+// each `send_request`. Blocks on `recv_from` with the per-sample read deadline
+// so the timed path wakes on packet arrival instead of a fixed poll sleep.
+fn measure_quiche_direct_request_once(
+    warm: &mut QuicheDirectWarmConn,
+) -> anyhow::Result<AdapterSample> {
+    let mut first_byte_ns = None;
+    let mut first_body_ns = None;
+    let mut bytes = 0u64;
+    let start = Instant::now();
+    let trace_enabled = phase_trace_enabled();
+    let mut phase_trace = trace_enabled.then(PhaseTraceSample::default);
+    let deadline = start + adapter_timeout();
+    let mut recv_buf = [0u8; 65535];
+    let mut out = [0u8; QUICHE_MAX_DATAGRAM_SIZE];
+
+    warm.h3_conn
+        .send_request(&mut warm.conn, &warm.request_headers, true)?;
+    if let Some(trace) = phase_trace.as_mut() {
+        trace.request_sent_ns = Some(start.elapsed().as_nanos() as f64);
+    }
+    flush_quiche_packets(&warm.socket, &mut warm.conn, &mut out)?;
+    if let Some(trace) = phase_trace.as_mut() {
+        trace.flush_done_ns = Some(start.elapsed().as_nanos() as f64);
+    }
+
+    loop {
+        loop {
+            match warm.h3_conn.poll(&mut warm.conn) {
+                Ok((_, quiche::h3::Event::Headers { .. })) => {
+                    let now_ns = start.elapsed().as_nanos() as f64;
+                    first_byte_ns.get_or_insert(now_ns);
+                    if let Some(trace) = phase_trace.as_mut() {
+                        trace.headers_ready_ns.get_or_insert(now_ns);
+                    }
+                }
+                Ok((stream_id, quiche::h3::Event::Data)) => loop {
+                    match warm
+                        .h3_conn
+                        .recv_body(&mut warm.conn, stream_id, &mut recv_buf)
+                    {
+                        Ok(read) => {
+                            let now_ns = start.elapsed().as_nanos() as f64;
+                            first_byte_ns.get_or_insert(now_ns);
+                            if read > 0 {
+                                first_body_ns.get_or_insert(now_ns);
+                                if let Some(trace) = phase_trace.as_mut() {
+                                    trace.first_body_ns.get_or_insert(now_ns);
+                                }
+                            }
+                            bytes = bytes.saturating_add(read as u64);
+                        }
+                        Err(quiche::h3::Error::Done) => break,
+                        Err(err) => return Err(anyhow::anyhow!("quiche h3 body failed: {err:?}")),
+                    }
+                },
+                Ok((_, quiche::h3::Event::Finished)) => {
+                    flush_quiche_packets(&warm.socket, &mut warm.conn, &mut out)?;
+                    let total_ns = start.elapsed().as_nanos() as f64;
+                    if let Some(trace) = phase_trace.as_mut() {
+                        trace.done_ns = Some(total_ns);
+                    }
+                    return Ok(AdapterSample::new(
+                        first_byte_ns.unwrap_or(total_ns),
+                        total_ns,
+                        bytes,
+                    )
+                    .with_first_body_ns(first_body_ns.unwrap_or(total_ns))
+                    .with_phase_trace(phase_trace));
+                }
+                Ok((_, quiche::h3::Event::Reset(error_code))) => {
+                    anyhow::bail!("quiche h3 stream reset: {error_code}");
+                }
+                Ok((_, quiche::h3::Event::PriorityUpdate | quiche::h3::Event::GoAway)) => {}
+                Err(quiche::h3::Error::Done) => break,
+                Err(err) => return Err(anyhow::anyhow!("quiche h3 poll failed: {err:?}")),
+            }
+        }
+
+        flush_quiche_packets(&warm.socket, &mut warm.conn, &mut out)?;
+
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            anyhow::bail!("quiche_direct timed out after {:?}", adapter_timeout());
+        };
+        warm.socket
+            .set_read_timeout(Some(remaining.max(Duration::from_millis(1))))?;
+        match warm.socket.recv_from(&mut recv_buf) {
+            Ok((len, from)) => {
+                let recv_info = quiche::RecvInfo {
+                    to: warm.local_addr,
+                    from,
+                };
+                if let Err(err) = warm.conn.recv(&mut recv_buf[..len], recv_info) {
+                    if err != quiche::Error::Done {
+                        return Err(anyhow::anyhow!("quiche recv failed: {err:?}"));
+                    }
+                }
+            }
+            Err(err)
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::TimedOut =>
+            {
+                if let Some(timeout) = warm.conn.timeout() {
+                    if timeout.is_zero() {
+                        warm.conn.on_timeout();
+                    }
+                }
+            }
+            Err(err) => return Err(err.into()),
+        }
+
+        if warm.conn.is_closed() {
+            anyhow::bail!("quiche connection closed before response completed");
+        }
+    }
 }
 
 fn quiche_request_headers(url: &url::Url) -> anyhow::Result<Vec<quiche::h3::Header>> {
@@ -4768,18 +6333,23 @@ async fn measure_reqwest_h3(
             );
         }
         let mut first_chunk_ns = Some(start.elapsed().as_nanos() as f64);
+        let mut first_body_ns = None;
         let mut bytes = 0u64;
         while let Some(chunk) = response.chunk().await? {
-            if first_chunk_ns.is_none() {
-                first_chunk_ns = Some(start.elapsed().as_nanos() as f64);
+            if !chunk.is_empty() {
+                let now_ns = start.elapsed().as_nanos() as f64;
+                if first_chunk_ns.is_none() {
+                    first_chunk_ns = Some(now_ns);
+                }
+                first_body_ns.get_or_insert(now_ns);
             }
             bytes = bytes.saturating_add(chunk.len() as u64);
         }
-        measured.push(AdapterSample::new(
-            first_chunk_ns.unwrap_or_else(|| start.elapsed().as_nanos() as f64),
-            start.elapsed().as_nanos() as f64,
-            bytes,
-        ));
+        let total_ns = start.elapsed().as_nanos() as f64;
+        measured.push(
+            AdapterSample::new(first_chunk_ns.unwrap_or(total_ns), total_ns, bytes)
+                .with_first_body_ns(first_body_ns.unwrap_or(total_ns)),
+        );
     }
 
     Ok(adapter_row_from_samples(

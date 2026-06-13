@@ -267,17 +267,29 @@ See [`docs/benchmarks/2026-06-03-streaming/`](docs/benchmarks/2026-06-03-streami
 
 ### Local native HTTP/3 vs Rust H3 clients
 
-Specter's native HTTP/3 path also has a local same-fixture comparator matrix against `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest` HTTP/3. Re-measured on the same quiet Graviton4 host (commit `25395a8`, n=100), the artifacts [`2026-06-03-graviton4-suite-rep1.json`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-03-graviton4-suite-rep1.json) and [`rep2`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-03-graviton4-suite-rep2.json) each pass the H3 superiority gate with all required comparator rows present (table shows their median):
+Specter's native HTTP/3 path also has a local same-fixture comparator matrix against `quiche`, `tokio-quiche`, `h3-quinn`, and `reqwest` HTTP/3. The canonical evidence is the GET-only ledger repeat gate on the quiet AWS Graviton4 host: every client drives the same paced 80 KiB streaming-GET fixture at Specter's shipping Chrome ACK cadence with warm connection reuse, each client runs in its own process (4 fresh-process reps per client per gate, n=100 plus 10 warmups), the fixture process is pinned to core 2 and every client process identically to cores 4-11, and the gate fails closed on dirty trees, non-allowlisted environment, or missing fixture-ledger provenance. The comparison basis is deliberately conservative: Specter's worst rep must beat every comparator's per-metric best rep on p50/p95 TTFB, ledger-paced throughput, and the p50/p95 ledger-paced tail (per-sample client overhead beyond the fixture's own emission span). Two consecutive gates passed at `ba356d7` (artifacts [`2026-06-09-direct-get-clientpin-clean-gate/`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate/) and [`2026-06-09-direct-get-clientpin-clean-gate-r2/`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-clientpin-clean-gate-r2/)); gate 1:
 
-| Client | Role | p50 TTFB | p95 TTFB | Throughput |
-| --- | --- | ---: | ---: | ---: |
-| Specter native H3 | HTTP/3 client | 0.380 ms | 0.997 ms | 9.11 MiB/s |
-| reqwest_h3 | HTTP/3 client | 1.941 ms | 10.429 ms | 6.04 MiB/s |
-| h3-quinn | HTTP/3 client | 1.194 ms | 9.540 ms | 6.01 MiB/s |
-| quiche direct | HTTP/3 client | 3.392 ms | 3.409 ms | 6.59 MiB/s |
-| tokio-quiche | HTTP/3 client | 1.922 ms | 1.992 ms | 7.58 MiB/s |
+| Client | p50 TTFB | p95 TTFB | Ledger throughput | p50 ledger tail | p95 ledger tail |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Specter native H3 (worst rep) | 37.6 us | 45.3 us | 19.35 MiB/s | 1.0 us | 7.2 us |
+| tokio-quiche (per-metric best rep) | 39.6 us | 51.6 us | 19.29 MiB/s | 2.0 us | 9.0 us |
+| h3-quinn (per-metric best rep) | 44.6 us | 57.8 us | 19.27 MiB/s | 3.4 us | 14.1 us |
+| reqwest_h3 (per-metric best rep) | 47.9 us | 81.5 us | 19.23 MiB/s | 2.8 us | 13.0 us |
+| quiche direct (per-metric best rep) | 46.5 us | 80.4 us | 19.12 MiB/s | 16.0 us | 51.8 us |
 
-That gate is explicitly for HTTP/3 request/response workloads. `quinn_transport` and `s2n_quic_transport` are separate QUIC transport-only evidence and stay out of the H3 HTTP gate. Native QUIC recovery, fallback, browser ACK parity, capture presets, and capacity-policy hardening are tracked as closed regression guards in [`docs/specter-native-h3-remaining-seams.md`](docs/specter-native-h3-remaining-seams.md).
+The second gate reproduces the verdict: Specter worst rep 32.5 us p50 TTFB / 43.5 us p95 / 19.36 MiB/s with a 2.9 us p50 and 7.4 us p95 ledger tail, again ahead of every comparator's best rep on all six metrics. This supersedes the 2026-06-05 matrix in earlier revisions of this section, which had tokio-quiche leading loopback GET TTFB at millisecond scale; that matrix was a same-process all-client capture whose cross-client contention inflated every row, and it predates the direct-GET epoch receive loop, the deferred boundary-ACK send (`9aa436b`), the GET-burst drain ordering (`b23ef2c`), the single-copy 1-RTT datagram decode (`ff6f467`), and the harness placement control (`ba356d7`) that removed scheduler placement luck from both sides of the worst-vs-best comparison.
+
+`quinn_transport` and `s2n_quic_transport` are separate QUIC transport-only evidence and stay out of the H3 HTTP gate. Native QUIC recovery, fallback, browser ACK parity, capture presets, and capacity-policy hardening are tracked as closed regression guards in [`docs/specter-native-h3-remaining-seams.md`](docs/specter-native-h3-remaining-seams.md).
+
+Specter also runs the RFC 9220 (WebSocket-over-HTTP/3) tunnel as a fair warm-vs-warm comparator. With `BENCH_TUNNEL_STEADYSTATE=1` every client (Specter and comparators alike) opens one warm Extended-CONNECT tunnel and is timed on per-message round-trips, so there is no connection-reuse asymmetry (awsdev Graviton4, n=100). Against the fastest comparator, `tokio-quiche`, Specter holds the lower p95 round-trip tail on all three tunnel workloads (artifact [`2026-06-09-pmtu-probe-tunnel-defer/`](docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-pmtu-probe-tunnel-defer/)):
+
+| Tunnel workload | Specter p50 | Specter p95 | tokio-quiche p50 | tokio-quiche p95 | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| echo (1 KB single frame) | 32.9 us | 40.3 us | 32.4 us | 51.2 us | p95 win (non-overlapping); p50 / throughput parity |
+| client DATA+FIN (close) | 69.7 us | 80.1 us | 75.3 us | 101.9 us | win p50, p95, and throughput |
+| slow-consumer mixed | 37.1 us | 42.3 us | 63.6 us | 68.1 us | win p50 and p95 |
+
+`quiche_direct` runs ~3.3-3.4 ms on every tunnel workload, several-fold behind both. The echo p95 win is non-overlapping across 8 reps (Specter worst 43.3 us < tokio-quiche best 48.3 us); echo p50 and throughput (28.8 vs 28.4 MiB/s) are parity at the 1 KB single-frame payload, Specter's sub-MTU regime. The win came from deferring DPLPMTUD path-MTU probes off the tunnel's interactive recv->send turn (commit `5e0d429`), which removed two ~100 us per-run probe spikes inline on the proxied round-trip; the probe cadence and wire image are unchanged. The strict `rfc9220_full_suite_superiority_gate` still does not pass, because it demands a strict p50 AND p95 AND throughput win on every workload and echo p50/throughput are parity; the honest result is the p95-tail reversal, where Specter now leads on the echo and client-DATA+FIN tails that the 4.2.1 changelog had recorded as losses.
 
 ### Local WebSocket echo vs fastwebsockets and tokio-tungstenite
 

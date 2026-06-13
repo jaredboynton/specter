@@ -23,10 +23,17 @@ pub struct H3BodyTimeouts {
 }
 
 #[derive(Debug)]
-pub(crate) enum H3BodyPush {
+pub(crate) enum H3BodyDataPush {
     Accepted,
-    Full,
+    Full(Bytes),
     Closed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct H3BodyDrain {
+    pub accepted: usize,
+    pub finished: bool,
+    pub closed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -50,7 +57,6 @@ struct H3BodyState {
     ended: bool,
     closed: bool,
     consumer_waker: Option<Waker>,
-    transitions: VecDeque<&'static str>,
 }
 
 impl Default for H3BodyState {
@@ -70,7 +76,6 @@ impl H3BodyState {
             ended: false,
             closed: false,
             consumer_waker: None,
-            transitions: VecDeque::new(),
         }
     }
 }
@@ -107,55 +112,77 @@ impl H3BodyShared {
         })
     }
 
-    pub(crate) fn push(&self, item: std::result::Result<Bytes, Error>) -> H3BodyPush {
+    pub(crate) fn push_data(&self, bytes: Bytes) -> H3BodyDataPush {
         let mut state = self.state.lock().expect("h3 body state poisoned");
         if state.closed {
-            return H3BodyPush::Closed;
+            return H3BodyDataPush::Closed;
         }
         if state.slots.len() >= state.cap {
-            return H3BodyPush::Full;
+            return H3BodyDataPush::Full(bytes);
         }
-        if let Ok(bytes) = &item {
-            state.buffered_bytes = state.buffered_bytes.saturating_add(bytes.len());
-        }
-        state.transitions.push_back("driver_slot_fill");
-        state.slots.push_back(item);
+        state.buffered_bytes = state.buffered_bytes.saturating_add(bytes.len());
+        state.slots.push_back(Ok(bytes));
         if let Some(waker) = state.consumer_waker.take() {
             waker.wake();
         }
-        H3BodyPush::Accepted
+        H3BodyDataPush::Accepted
     }
 
-    pub(crate) fn finish(&self) {
-        let mut state = self.state.lock().expect("h3 body state poisoned");
-        state.ended = true;
-        state.transitions.push_back("driver_finish");
-        if let Some(waker) = state.consumer_waker.take() {
-            waker.wake();
-        }
-    }
-
-    pub(crate) fn fail(&self, error: Error) -> H3BodyPush {
+    pub(crate) fn push_pending_data(
+        &self,
+        pending: &mut VecDeque<Bytes>,
+        finish_when_drained: bool,
+    ) -> H3BodyDrain {
         let mut state = self.state.lock().expect("h3 body state poisoned");
         if state.closed {
-            return H3BodyPush::Closed;
+            return H3BodyDrain {
+                closed: true,
+                ..H3BodyDrain::default()
+            };
+        }
+
+        let mut drain = H3BodyDrain::default();
+        while state.slots.len() < state.cap {
+            let Some(bytes) = pending.pop_front() else {
+                break;
+            };
+            state.buffered_bytes = state.buffered_bytes.saturating_add(bytes.len());
+            state.slots.push_back(Ok(bytes));
+            drain.accepted += 1;
+        }
+
+        if finish_when_drained && pending.is_empty() && !state.ended {
+            state.ended = true;
+            drain.finished = true;
+        }
+
+        if drain.accepted > 0 || drain.finished {
+            if let Some(waker) = state.consumer_waker.take() {
+                waker.wake();
+            }
+        }
+
+        drain
+    }
+
+    pub(crate) fn fail(&self, error: Error) {
+        let mut state = self.state.lock().expect("h3 body state poisoned");
+        if state.closed {
+            return;
         }
         if state.slots.len() >= state.cap {
             if state.terminal_error.is_none() {
                 state.terminal_error = Some(error);
-                state.transitions.push_back("driver_terminal_error");
                 if let Some(waker) = state.consumer_waker.take() {
                     waker.wake();
                 }
             }
-            return H3BodyPush::Accepted;
+            return;
         }
         state.slots.push_back(Err(error));
-        state.transitions.push_back("driver_error");
         if let Some(waker) = state.consumer_waker.take() {
             waker.wake();
         }
-        H3BodyPush::Accepted
     }
 
     pub(crate) fn is_closed(&self) -> bool {
@@ -169,6 +196,26 @@ impl H3BodyShared {
 
     pub(crate) fn take_released_recv_bytes(&self) -> usize {
         self.released_recv_bytes.swap(0, Ordering::Relaxed)
+    }
+
+    pub(crate) fn drain_ready_items_for_direct(
+        &self,
+    ) -> VecDeque<std::result::Result<Bytes, Error>> {
+        let mut state = self.state.lock().expect("h3 body state poisoned");
+        let mut drained = VecDeque::with_capacity(state.slots.len());
+        while let Some(item) = state.slots.pop_front() {
+            if let Ok(bytes) = &item {
+                state.buffered_bytes = state.buffered_bytes.saturating_sub(bytes.len());
+            }
+            drained.push_back(item);
+        }
+        drained
+    }
+
+    pub(crate) fn release_direct_item_bytes(&self, len: usize) {
+        self.released_recv_bytes
+            .fetch_add(data_frame_encoded_len(len), Ordering::Relaxed);
+        self.driver_notify.notify_one();
     }
 
     pub(crate) fn capacity(&self) -> H3BodyCapacity {
@@ -187,7 +234,6 @@ impl H3BodyShared {
         let mut state = self.state.lock().expect("h3 body state poisoned");
         if !state.closed {
             state.closed = true;
-            state.transitions.push_back("consumer_closed");
             if let Some(waker) = state.consumer_waker.take() {
                 waker.wake();
             }
@@ -226,19 +272,21 @@ impl H3Body {
         self.shared.capacity()
     }
 
+    pub(crate) fn drain_ready_items_for_direct(
+        &mut self,
+    ) -> VecDeque<std::result::Result<Bytes, Error>> {
+        self.shared.drain_ready_items_for_direct()
+    }
+
+    pub(crate) fn record_direct_item_consumed(&mut self, len: usize) {
+        self.shared.release_direct_item_bytes(len);
+        self.reset_read_idle();
+    }
+
     fn reset_read_idle(&mut self) {
         if let Some(duration) = self.read_idle_timeout {
             self.read_idle_sleep = Some(Box::pin(sleep(duration)));
         }
-    }
-
-    fn close_with_error(
-        &mut self,
-        error: Error,
-    ) -> Poll<Option<std::result::Result<Frame<Bytes>, Error>>> {
-        self.terminal = true;
-        self.shared.close();
-        Poll::Ready(Some(Err(error)))
     }
 }
 
@@ -250,14 +298,11 @@ impl Drop for H3Body {
     }
 }
 
-impl HttpBody for H3Body {
-    type Data = Bytes;
-    type Error = Error;
-
-    fn poll_frame(
+impl H3Body {
+    pub(crate) fn poll_data(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+    ) -> Poll<Option<std::result::Result<Bytes, Error>>> {
         if self.terminal {
             return Poll::Ready(None);
         }
@@ -272,7 +317,6 @@ impl HttpBody for H3Body {
         let state_poll = {
             let mut state = self.shared.state.lock().expect("h3 body state poisoned");
             if let Some(item) = state.slots.pop_front() {
-                state.transitions.push_back("consumer_slot_take");
                 if let Ok(bytes) = &item {
                     state.buffered_bytes = state.buffered_bytes.saturating_sub(bytes.len());
                 }
@@ -297,6 +341,7 @@ impl HttpBody for H3Body {
             }
             StatePoll::End => {
                 self.terminal = true;
+                self.shared.driver_notify.notify_one();
                 return Poll::Ready(None);
             }
             StatePoll::Pending => {}
@@ -308,9 +353,9 @@ impl HttpBody for H3Body {
                     self.shared.driver_notify.notify_one();
                     self.reset_read_idle();
                     if bytes.is_empty() {
-                        return self.poll_frame(cx);
+                        return self.poll_data(cx);
                     }
-                    return Poll::Ready(Some(Ok(Frame::data(bytes))));
+                    return Poll::Ready(Some(Ok(bytes)));
                 }
                 Err(error) => {
                     self.terminal = true;
@@ -323,7 +368,9 @@ impl HttpBody for H3Body {
         if let Some(total_sleep) = self.total_sleep.as_mut() {
             if total_sleep.as_mut().poll(cx).is_ready() {
                 let duration = self.total_timeout.expect("total sleep without duration");
-                return self.close_with_error(Error::TotalTimeout(duration));
+                self.terminal = true;
+                self.shared.close();
+                return Poll::Ready(Some(Err(Error::TotalTimeout(duration))));
             }
         }
 
@@ -332,11 +379,30 @@ impl HttpBody for H3Body {
                 let duration = self
                     .read_idle_timeout
                     .expect("read-idle sleep without duration");
-                return self.close_with_error(Error::ReadIdleTimeout(duration));
+                self.terminal = true;
+                self.shared.close();
+                return Poll::Ready(Some(Err(Error::ReadIdleTimeout(duration))));
             }
         }
 
         Poll::Pending
+    }
+}
+
+impl HttpBody for H3Body {
+    type Data = Bytes;
+    type Error = Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+        match self.poll_data(cx) {
+            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
     fn is_end_stream(&self) -> bool {
@@ -357,16 +423,16 @@ mod tests {
         let shared = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 2);
 
         assert!(matches!(
-            shared.push(Ok(Bytes::from_static(b"one"))),
-            H3BodyPush::Accepted
+            shared.push_data(Bytes::from_static(b"one")),
+            H3BodyDataPush::Accepted
         ));
         assert!(matches!(
-            shared.push(Ok(Bytes::from_static(b"two"))),
-            H3BodyPush::Accepted
+            shared.push_data(Bytes::from_static(b"two")),
+            H3BodyDataPush::Accepted
         ));
         assert!(matches!(
-            shared.push(Ok(Bytes::from_static(b"three"))),
-            H3BodyPush::Full
+            shared.push_data(Bytes::from_static(b"three")),
+            H3BodyDataPush::Full(_)
         ));
     }
 
@@ -374,12 +440,12 @@ mod tests {
     fn h3_body_capacity_snapshot_reports_buffer_pressure() {
         let shared = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 3);
         assert!(matches!(
-            shared.push(Ok(Bytes::from_static(b"one"))),
-            H3BodyPush::Accepted
+            shared.push_data(Bytes::from_static(b"one")),
+            H3BodyDataPush::Accepted
         ));
         assert!(matches!(
-            shared.push(Ok(Bytes::from_static(b"two-two"))),
-            H3BodyPush::Accepted
+            shared.push_data(Bytes::from_static(b"two-two")),
+            H3BodyDataPush::Accepted
         ));
 
         let body = H3Body::new(shared.clone(), H3BodyTimeouts::default());
@@ -403,12 +469,12 @@ mod tests {
 
         let shared = H3BodyShared::new_with_capacity(Arc::new(Notify::new()), 2);
         assert!(matches!(
-            shared.push(Ok(Bytes::from(vec![0x41; 63]))),
-            H3BodyPush::Accepted
+            shared.push_data(Bytes::from(vec![0x41; 63])),
+            H3BodyDataPush::Accepted
         ));
         assert!(matches!(
-            shared.push(Ok(Bytes::from(vec![0x42; 64]))),
-            H3BodyPush::Accepted
+            shared.push_data(Bytes::from(vec![0x42; 64])),
+            H3BodyDataPush::Accepted
         ));
 
         let mut body = H3Body::new(shared.clone(), H3BodyTimeouts::default());

@@ -10,8 +10,7 @@ use specter::transport::h3::native::{
     H3UnidirectionalStream,
 };
 use specter::transport::h3::native_driver::{
-    NativeH3DriverState, NativeH3Event, NativeH3Response, NativeH3StreamingResponseEvent,
-    NativeH3TunnelEvent,
+    NativeH3DriverState, NativeH3Event, NativeH3Response, NativeH3TunnelEvent,
 };
 use specter::transport::h3::quic::{
     decode_frames, decode_long_header, derive_initial_key_material,
@@ -28,6 +27,10 @@ use specter::transport::h3::tls::{
     QuicTlsSecret,
 };
 use specter::{DnsConfig, H3Backend, H3Client};
+
+fn encoded_headers_len(headers: &[H3Header]) -> usize {
+    encode_h3_frame(&H3Frame::Headers(encode_header_block(headers))).len()
+}
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
@@ -1535,7 +1538,11 @@ fn native_h3_client_rejects_server_stream_over_receive_connection_window() {
         completed_native_server_handshake_with_fingerprints(client_fingerprint, server_fingerprint);
 
     let packet = server
-        .build_server_h3_raw_stream_packet(0, Bytes::from_static(b"four"), false)
+        .build_server_h3_raw_stream_packet_without_flow_control_for_test(
+            0,
+            Bytes::from_static(b"four"),
+            false,
+        )
         .expect("server send credit should not block this receive-side test");
     let error = client
         .open_server_application_packet(packet.packet.as_ref())
@@ -4554,6 +4561,84 @@ fn native_h3_handshake_reassembles_response_frames_across_stream_packets() {
 }
 
 #[test]
+fn native_h3_handshake_reassembles_response_frames_delivered_out_of_order() {
+    let read_secret = Bytes::from_static(&[0xbf; 32]);
+    let keys = derive_packet_key_material_from_secret(read_secret.clone()).unwrap();
+    let mut handshake = NativeQuicHandshake::client(
+        "example.com",
+        &Http3Fingerprint::chrome(),
+        ConnectionId::from_static(b"server-dcid"),
+        ConnectionId::from_static(b"client-scid"),
+    )
+    .unwrap();
+    handshake
+        .install_tls_secrets(&[QuicTlsSecret {
+            direction: QuicSecretDirection::Read,
+            level: QuicEncryptionLevel::Application,
+            secret: read_secret,
+        }])
+        .unwrap();
+    let headers = vec![H3Header::new(":status", "200")];
+    let mut response_stream = Vec::new();
+    response_stream.extend_from_slice(&encode_h3_frame(&H3Frame::Headers(encode_header_block(
+        &headers,
+    ))));
+    response_stream.extend_from_slice(&encode_h3_frame(&H3Frame::Data(Bytes::from_static(
+        b"reordered",
+    ))));
+    let split_at = 2;
+    let head_plaintext = encode_frame(&QuicFrame::Stream {
+        stream_id: 0,
+        offset: None,
+        fin: false,
+        data: Bytes::copy_from_slice(&response_stream[..split_at]),
+    });
+    let tail_plaintext = encode_frame(&QuicFrame::Stream {
+        stream_id: 0,
+        offset: Some(split_at as u64),
+        fin: true,
+        data: Bytes::copy_from_slice(&response_stream[split_at..]),
+    });
+    let head_packet = protect_short_header_packet(
+        &keys,
+        &ConnectionId::from_static(b"client-scid"),
+        0,
+        2,
+        false,
+        &head_plaintext,
+    )
+    .unwrap();
+    let tail_packet = protect_short_header_packet(
+        &keys,
+        &ConnectionId::from_static(b"client-scid"),
+        1,
+        2,
+        false,
+        &tail_plaintext,
+    )
+    .unwrap();
+
+    // The FIN-bearing tail packet arrives before the head. RFC 9000 Section
+    // 2.2 requires the receiver to buffer it and deliver the stream once the
+    // gap fills.
+    let tail_events = handshake
+        .open_server_h3_stream_packet(&tail_packet)
+        .unwrap();
+    let head_events = handshake
+        .open_server_h3_stream_packet(&head_packet)
+        .unwrap();
+
+    assert!(tail_events.is_empty());
+    assert_eq!(head_events.len(), 1);
+    assert!(head_events[0].fin);
+    assert_eq!(head_events[0].frames.len(), 2);
+    assert_eq!(
+        head_events[0].frames[1],
+        H3Frame::Data(Bytes::from_static(b"reordered"))
+    );
+}
+
+#[test]
 fn native_h3_handshake_decodes_sequential_response_frames_with_offsets() {
     let read_secret = Bytes::from_static(&[0xb1; 32]);
     let keys = derive_packet_key_material_from_secret(read_secret.clone()).unwrap();
@@ -4699,6 +4784,7 @@ fn native_h3_driver_state_maps_settings_headers_data_and_finished_events() {
         H3Header::new(":status", "200"),
         H3Header::new("content-type", "text/plain"),
     ];
+    let consumed_bytes = encoded_headers_len(&headers);
     let response_events = state
         .apply_stream_event(specter::transport::h3::handshake::ServerH3StreamEvent {
             stream_id: 0,
@@ -4717,6 +4803,7 @@ fn native_h3_driver_state_maps_settings_headers_data_and_finished_events() {
             NativeH3Event::Headers {
                 stream_id: 0,
                 headers,
+                encoded_len: consumed_bytes,
             },
             NativeH3Event::Data {
                 stream_id: 0,
@@ -4735,6 +4822,8 @@ fn native_h3_driver_state_assembles_tracked_response_across_events() {
         H3Header::new(":status", "200"),
         H3Header::new("content-type", "text/plain"),
     ];
+    let consumed_bytes = encoded_headers_len(&headers)
+        + encode_h3_frame(&H3Frame::Data(Bytes::from_static(b"hello"))).len();
 
     let first = state
         .apply_tracked_response_event(specter::transport::h3::handshake::ServerH3StreamEvent {
@@ -4760,64 +4849,9 @@ fn native_h3_driver_state_assembles_tracked_response_across_events() {
             status: 200,
             headers: vec![("content-type".into(), "text/plain".into())],
             body: Bytes::from_static(b"hello"),
+            consumed_bytes,
         })
     );
-}
-
-#[test]
-fn native_h3_driver_state_maps_streaming_response_incrementally() {
-    let mut state = NativeH3DriverState::default();
-    state.track_streaming_response_stream(0);
-    let headers = vec![
-        H3Header::new(":status", "200"),
-        H3Header::new("content-type", "text/plain"),
-    ];
-
-    let opened = state
-        .apply_tracked_streaming_response_event(
-            specter::transport::h3::handshake::ServerH3StreamEvent {
-                stream_id: 0,
-                stream_type: None,
-                fin: false,
-                frames: vec![H3Frame::Headers(encode_header_block(&headers))],
-            },
-        )
-        .unwrap();
-    let data = state
-        .apply_tracked_streaming_response_event(
-            specter::transport::h3::handshake::ServerH3StreamEvent {
-                stream_id: 0,
-                stream_type: None,
-                fin: false,
-                frames: vec![H3Frame::Data(Bytes::from_static(b"chunk"))],
-            },
-        )
-        .unwrap();
-    let finished = state
-        .apply_tracked_streaming_response_event(
-            specter::transport::h3::handshake::ServerH3StreamEvent {
-                stream_id: 0,
-                stream_type: None,
-                fin: true,
-                frames: Vec::new(),
-            },
-        )
-        .unwrap();
-
-    assert_eq!(
-        opened,
-        vec![NativeH3StreamingResponseEvent::Headers {
-            status: 200,
-            headers: vec![("content-type".into(), "text/plain".into())],
-        }]
-    );
-    assert_eq!(
-        data,
-        vec![NativeH3StreamingResponseEvent::Data(Bytes::from_static(
-            b"chunk"
-        ))]
-    );
-    assert_eq!(finished, vec![NativeH3StreamingResponseEvent::Finished]);
 }
 
 #[test]
@@ -4828,6 +4862,7 @@ fn native_h3_driver_state_maps_successful_tunnel_lifecycle() {
         H3Header::new(":status", "200"),
         H3Header::new("sec-websocket-protocol", "chat"),
     ];
+    let consumed_bytes = encoded_headers_len(&headers);
 
     let opened = state
         .apply_tracked_tunnel_event(specter::transport::h3::handshake::ServerH3StreamEvent {
@@ -4859,6 +4894,7 @@ fn native_h3_driver_state_maps_successful_tunnel_lifecycle() {
         vec![NativeH3TunnelEvent::Open {
             status: 200,
             headers: vec![("sec-websocket-protocol".into(), "chat".into())],
+            consumed_bytes,
         }]
     );
     assert_eq!(

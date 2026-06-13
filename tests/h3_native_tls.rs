@@ -318,8 +318,10 @@ fn native_tls_server_accepts_client_initial_crypto_and_emits_server_flight() {
 
 #[test]
 fn native_tls_session_applies_tls_fingerprint_curve_policy() {
-    let mut tls_fingerprint = TlsFingerprint::default();
-    tls_fingerprint.curves = vec!["not-a-real-group"];
+    let tls_fingerprint = TlsFingerprint {
+        curves: vec!["not-a-real-group"],
+        ..Default::default()
+    };
 
     let err = match NativeQuicTlsSession::client_with_tls_fingerprint(
         "example.com",

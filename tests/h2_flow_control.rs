@@ -57,12 +57,10 @@ async fn connection_window_update_refresh_uses_advertised_increment() {
             let (_, frame_type, flags, stream_id, _) = conn.read_frame().await.unwrap();
             match frame_type {
                 0x01 => break stream_id,
-                0x04 if flags & 0x01 == 0 => {
-                    if !sent_settings {
-                        conn.send_settings(&[]).await.unwrap();
-                        conn.send_settings_ack().await.unwrap();
-                        sent_settings = true;
-                    }
+                0x04 if flags & 0x01 == 0 && !sent_settings => {
+                    conn.send_settings(&[]).await.unwrap();
+                    conn.send_settings_ack().await.unwrap();
+                    sent_settings = true;
                 }
                 0x08 if stream_id == 0 => {
                     saw_initial_connection_window_update = true;

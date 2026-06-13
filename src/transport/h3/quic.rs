@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
+use std::ptr::NonNull;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use boring::hash::hmac_sha256;
@@ -30,6 +32,7 @@ const RETRY_INTEGRITY_NONCE_V1: [u8; AES_128_GCM_IV_LEN] = [
 const HEADER_PROTECTION_SAMPLE_LEN: usize = 16;
 const HEADER_PROTECTION_MASK_LEN: usize = 5;
 const MAX_PACKET_NUMBER: u64 = (1u64 << 62) - 1;
+const MAX_ACK_TRACKED_PACKETS: usize = 512;
 const HEADER_FORM_LONG: u8 = 0x80;
 const FIXED_BIT: u8 = 0x40;
 const LONG_PACKET_TYPE_MASK: u8 = 0x30;
@@ -678,7 +681,8 @@ impl QuicCryptoAssembler {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct QuicAckTracker {
     received: BTreeSet<u64>,
-    received_at: BTreeMap<u64, Instant>,
+    largest_acknowledged_received_at: Option<(u64, Instant)>,
+    largest_observed: Option<u64>,
     pending_ack: bool,
     pending_ack_count: usize,
     first_pending_ack_at: Option<Instant>,
@@ -711,8 +715,30 @@ impl QuicAckTracker {
     }
 
     fn observe_new_at(&mut self, packet_number: u64, now: Instant) -> bool {
-        if packet_number <= MAX_PACKET_NUMBER && self.received.insert(packet_number) {
-            self.received_at.insert(packet_number, now);
+        if packet_number > MAX_PACKET_NUMBER {
+            return false;
+        }
+
+        let largest_observed = self
+            .largest_observed
+            .map(|current| current.max(packet_number))
+            .unwrap_or(packet_number);
+        self.largest_observed = Some(largest_observed);
+        let oldest_tracked =
+            largest_observed.saturating_sub((MAX_ACK_TRACKED_PACKETS as u64).saturating_sub(1));
+        if packet_number < oldest_tracked {
+            return false;
+        }
+
+        if self.received.insert(packet_number) {
+            let should_update_largest_received_at = self
+                .largest_acknowledged_received_at
+                .map(|(largest, _)| packet_number > largest)
+                .unwrap_or(true);
+            if should_update_largest_received_at {
+                self.largest_acknowledged_received_at = Some((packet_number, now));
+            }
+            self.prune_ack_history();
             if !self.pending_ack {
                 self.first_pending_ack_at = Some(now);
             }
@@ -723,12 +749,30 @@ impl QuicAckTracker {
         false
     }
 
+    fn prune_ack_history(&mut self) {
+        let Some(largest_observed) = self.largest_observed else {
+            return;
+        };
+        let oldest_tracked =
+            largest_observed.saturating_sub((MAX_ACK_TRACKED_PACKETS as u64).saturating_sub(1));
+        while let Some(packet_number) = self.received.iter().next().copied() {
+            if packet_number >= oldest_tracked {
+                break;
+            }
+            self.received.remove(&packet_number);
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         !self.pending_ack
     }
 
     pub fn should_ack_after(&self, threshold: usize) -> bool {
         self.pending_ack && self.pending_ack_count >= threshold.max(1)
+    }
+
+    pub fn pending_ack_count(&self) -> usize {
+        self.pending_ack_count
     }
 
     pub fn should_ack_after_or_delay(
@@ -808,11 +852,13 @@ impl QuicAckTracker {
             ));
         };
         let delay = self
-            .received_at
-            .get(&largest_acknowledged)
+            .largest_acknowledged_received_at
+            .and_then(|(packet_number, received_at)| {
+                (packet_number == largest_acknowledged).then_some(received_at)
+            })
             .map(|received_at| {
                 encode_ack_delay(
-                    now.saturating_duration_since(*received_at),
+                    now.saturating_duration_since(received_at),
                     ack_delay_exponent,
                 )
             })
@@ -1008,6 +1054,7 @@ impl QuicLossDetector {
 
     pub fn on_ack_received(&mut self, packet_number: u64) {
         if self.sent.contains(&packet_number) {
+            self.sent.remove(&packet_number);
             self.acked.insert(packet_number);
             self.sent_at.remove(&packet_number);
         }
@@ -1216,20 +1263,13 @@ impl QuicLossDetector {
             return Vec::new();
         };
 
-        self.sent
-            .iter()
-            .copied()
-            .filter(|packet_number| {
-                *packet_number <= loss_cutoff && !self.acked.contains(packet_number)
-            })
-            .collect()
+        self.sent.range(..=loss_cutoff).copied().collect()
     }
 
     pub fn pto_expired_packets(&self, now: Instant, pto: Duration) -> Vec<u64> {
         self.sent
             .iter()
             .copied()
-            .filter(|packet_number| !self.acked.contains(packet_number))
             .filter(|packet_number| {
                 self.sent_at
                     .get(packet_number)
@@ -1266,11 +1306,11 @@ impl QuicLossDetector {
             .ok_or_else(|| {
                 Error::HttpProtocol("QUIC ACK range exceeded largest packet number".into())
             })?;
-        for packet_number in smallest_acknowledged..=largest_acknowledged {
-            if self.sent.contains(&packet_number) {
-                acked_packets.push(packet_number);
-            }
-        }
+        acked_packets.extend(
+            self.sent
+                .range(smallest_acknowledged..=largest_acknowledged)
+                .copied(),
+        );
         decoded_ranges.push((largest_acknowledged, ack_range_length));
         Ok(smallest_acknowledged)
     }
@@ -1281,7 +1321,12 @@ impl QuicLossDetector {
             .ok_or_else(|| {
                 Error::HttpProtocol("QUIC ACK range exceeded largest packet number".into())
             })?;
-        for packet_number in smallest_acknowledged..=largest_acknowledged {
+        let acked_packets = self
+            .sent
+            .range(smallest_acknowledged..=largest_acknowledged)
+            .copied()
+            .collect::<Vec<_>>();
+        for packet_number in acked_packets {
             self.on_ack_received(packet_number);
         }
         Ok(())
@@ -1488,12 +1533,173 @@ pub struct QuicInitialKeyMaterial {
     pub server: QuicPacketKeyMaterial,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A 1-RTT AEAD-open context whose AES key schedule and GHASH H-table are
+/// computed exactly once per key epoch, then reused for every datagram open.
+///
+/// The hot receive path previously rebuilt an `EVP_CIPHER_CTX` (via
+/// `boring::symm::Crypter::new`) on every datagram, redoing the AES-128 key
+/// expansion and the PMULL GHASH H-table precompute for a key that is constant
+/// across the whole epoch. On Graviton4 that per-packet setup is ~0.4-0.5us of
+/// the measured ~0.83us/datagram open; reusing one `EVP_AEAD_CTX` (the API
+/// designed for exactly this) drops the per-packet cost to the GCM pass itself.
+/// This is pure client-side CPU; nothing on the wire changes.
+struct AeadCtx {
+    ctx: NonNull<boring_sys::EVP_AEAD_CTX>,
+}
+
+// The context is immutable after `EVP_AEAD_CTX_new`; neither `EVP_AEAD_CTX_open`
+// nor `EVP_AEAD_CTX_seal` mutates it. A connection touches its keys from a single
+// task at a time (across tokio await points), never concurrently, so sharing the
+// pointer is sound. One context per key-material epoch serves whichever direction
+// that material is keyed for (read keys -> open, write keys -> seal).
+unsafe impl Send for AeadCtx {}
+unsafe impl Sync for AeadCtx {}
+
+impl std::fmt::Debug for AeadCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AeadCtx(aes-128-gcm)")
+    }
+}
+
+impl Drop for AeadCtx {
+    fn drop(&mut self) {
+        // SAFETY: `ctx` came from `EVP_AEAD_CTX_new` and is freed exactly once.
+        unsafe { boring_sys::EVP_AEAD_CTX_free(self.ctx.as_ptr()) }
+    }
+}
+
+impl AeadCtx {
+    fn new(key: &[u8]) -> Result<Self> {
+        // SAFETY: `EVP_aead_aes_128_gcm` returns a static AEAD; `key` is a valid
+        // slice of `key.len()` bytes; tag length is the QUIC 16-byte GCM tag.
+        let ctx = unsafe {
+            boring_sys::EVP_AEAD_CTX_new(
+                boring_sys::EVP_aead_aes_128_gcm(),
+                key.as_ptr(),
+                key.len(),
+                AES_GCM_TAG_LEN,
+            )
+        };
+        let ctx =
+            NonNull::new(ctx).ok_or_else(|| Error::Quic("QUIC AEAD context init failed".into()))?;
+        Ok(Self { ctx })
+    }
+
+    fn open(
+        &self,
+        nonce: &[u8],
+        aad: &[u8],
+        ciphertext_and_tag: &[u8],
+        pt_out: &mut Vec<u8>,
+    ) -> Result<usize> {
+        // Reserve plaintext capacity without zero-filling it: `EVP_AEAD_CTX_open`
+        // writes exactly `out_len` bytes into the spare capacity and we expose only
+        // those via `set_len`. Avoids a ~1.2KiB memset per datagram.
+        let max_out = ciphertext_and_tag.len();
+        pt_out.clear();
+        pt_out.reserve(max_out);
+        let mut out_len: usize = 0;
+        // SAFETY: `pt_out` has at least `max_out` bytes of (possibly uninitialized)
+        // capacity >= plaintext length; `EVP_AEAD_CTX_open` initializes the first
+        // `out_len` bytes before we expose them with `set_len`. All pointers
+        // reference live regions of the stated lengths; the context is valid for
+        // the lifetime of `self`.
+        let ok = unsafe {
+            boring_sys::EVP_AEAD_CTX_open(
+                self.ctx.as_ptr(),
+                pt_out.as_mut_ptr(),
+                &mut out_len,
+                max_out,
+                nonce.as_ptr(),
+                nonce.len(),
+                ciphertext_and_tag.as_ptr(),
+                ciphertext_and_tag.len(),
+                aad.as_ptr(),
+                aad.len(),
+            )
+        };
+        if ok != 1 {
+            return Err(Error::Quic("QUIC packet open failed".into()));
+        }
+        debug_assert!(out_len <= max_out);
+        // SAFETY: `EVP_AEAD_CTX_open` returned success, initializing `out_len`
+        // (<= max_out) bytes of the reserved capacity.
+        unsafe { pt_out.set_len(out_len) };
+        Ok(out_len)
+    }
+
+    /// Seal `plaintext` into `out` (which must hold `plaintext.len() +
+    /// AES_GCM_TAG_LEN` bytes) using the cached context. Mirrors `open`: the
+    /// AES-128 key schedule and PMULL GHASH H-table are built once per epoch in
+    /// `new`, not rebuilt per packet as a fresh `boring::symm::Crypter` would.
+    /// `aad` and `out` may be disjoint slices of the same packet buffer; they
+    /// must not overlap (BoringSSL requires `out` not alias `ad`).
+    fn seal(&self, nonce: &[u8], aad: &[u8], plaintext: &[u8], out: &mut [u8]) -> Result<usize> {
+        debug_assert!(out.len() >= plaintext.len() + AES_GCM_TAG_LEN);
+        let mut out_len: usize = 0;
+        // SAFETY: `out` has at least `plaintext.len() + tag` bytes of live capacity;
+        // `EVP_AEAD_CTX_seal` writes exactly `out_len` (ciphertext||tag) bytes into
+        // it. `nonce`/`plaintext`/`aad` are live slices of their stated lengths and
+        // do not overlap `out`; the context is valid for the lifetime of `self`.
+        let ok = unsafe {
+            boring_sys::EVP_AEAD_CTX_seal(
+                self.ctx.as_ptr(),
+                out.as_mut_ptr(),
+                &mut out_len,
+                out.len(),
+                nonce.as_ptr(),
+                nonce.len(),
+                plaintext.as_ptr(),
+                plaintext.len(),
+                aad.as_ptr(),
+                aad.len(),
+            )
+        };
+        if ok != 1 {
+            return Err(Error::Quic("QUIC packet seal failed".into()));
+        }
+        debug_assert_eq!(out_len, plaintext.len() + AES_GCM_TAG_LEN);
+        Ok(out_len)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct QuicPacketKeyMaterial {
     pub secret: Bytes,
     pub packet_key: Bytes,
     pub iv: Bytes,
     pub header_protection_key: Bytes,
+    // Lazily built once per epoch from `packet_key`, then reused for every
+    // datagram open. `Arc` so a clone of the key material shares the same
+    // context; `OnceLock` for thread-safe one-time init. Excluded from equality
+    // (it is a pure function of `packet_key`).
+    aead_ctx: Arc<OnceLock<AeadCtx>>,
+}
+
+impl PartialEq for QuicPacketKeyMaterial {
+    fn eq(&self, other: &Self) -> bool {
+        self.secret == other.secret
+            && self.packet_key == other.packet_key
+            && self.iv == other.iv
+            && self.header_protection_key == other.header_protection_key
+    }
+}
+
+impl Eq for QuicPacketKeyMaterial {}
+
+impl QuicPacketKeyMaterial {
+    fn aead_ctx(&self) -> Result<&AeadCtx> {
+        if let Some(ctx) = self.aead_ctx.get() {
+            return Ok(ctx);
+        }
+        let ctx = AeadCtx::new(&self.packet_key)?;
+        // If a concurrent caller won the race, `set` errors and we read theirs.
+        let _ = self.aead_ctx.set(ctx);
+        Ok(self
+            .aead_ctx
+            .get()
+            .expect("AEAD context is populated after set"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1531,6 +1737,7 @@ pub fn derive_packet_key_material_from_secret(secret: Bytes) -> Result<QuicPacke
         iv: hkdf_expand_label_sha256(&secret, b"quic iv", AES_128_GCM_IV_LEN)?,
         header_protection_key: hkdf_expand_label_sha256(&secret, b"quic hp", AES_128_GCM_KEY_LEN)?,
         secret,
+        aead_ctx: Arc::new(OnceLock::new()),
     })
 }
 
@@ -1555,6 +1762,7 @@ pub fn derive_next_packet_key_material(
         iv: hkdf_expand_label_sha256(&next_secret, b"quic iv", AES_128_GCM_IV_LEN)?,
         header_protection_key: current.header_protection_key.clone(),
         secret: next_secret,
+        aead_ctx: Arc::new(OnceLock::new()),
     })
 }
 
@@ -1577,6 +1785,35 @@ pub fn seal_packet_payload(
     .map_err(|err| Error::Quic(format!("QUIC packet seal failed: {err}")))?;
     ciphertext.extend_from_slice(&tag);
     Ok(Bytes::from(ciphertext))
+}
+
+fn seal_packet_payload_into(
+    keys: &QuicPacketKeyMaterial,
+    packet_number: u64,
+    aad_len: usize,
+    plaintext: &[u8],
+    packet: &mut Vec<u8>,
+) -> Result<()> {
+    if packet.len() < aad_len {
+        return Err(Error::HttpProtocol(
+            "QUIC packet AAD length exceeds packet".into(),
+        ));
+    }
+
+    let nonce = packet_nonce(&keys.iv, packet_number)?;
+    let payload_offset = packet.len();
+    // `EVP_AEAD_CTX_seal` writes ciphertext||tag in one pass; grow the buffer to
+    // hold it, then hand the cached per-epoch context disjoint slices for the AAD
+    // (the header, already in `packet`) and the output region. This replaces the
+    // per-packet `Crypter::new` (AES key schedule + GHASH H-table rebuild) with a
+    // context built once per write-key epoch.
+    packet.resize(payload_offset + plaintext.len() + AES_GCM_TAG_LEN, 0);
+    let (head, out) = packet.split_at_mut(payload_offset);
+    let sealed_len = keys
+        .aead_ctx()?
+        .seal(&nonce, &head[..aad_len], plaintext, out)?;
+    packet.truncate(payload_offset + sealed_len);
+    Ok(())
 }
 
 pub fn open_packet_payload(
@@ -1749,22 +1986,24 @@ pub fn protect_short_header_packet(
     key_phase: bool,
     plaintext: &[u8],
 ) -> Result<Bytes> {
-    let header = encode_short_header(&ShortHeaderPacket {
-        destination_cid: destination_cid.clone(),
-        packet_number,
-        packet_number_len,
-        key_phase,
-    })?;
+    validate_packet_number_len(packet_number_len)?;
+    validate_cid(destination_cid)?;
     let packet_number_offset = 1 + destination_cid.len();
-    let sealed = seal_packet_payload(keys, packet_number, &header, plaintext)?;
-    let mut packet = Vec::with_capacity(header.len() + sealed.len());
-    packet.extend_from_slice(&header);
-    packet.extend_from_slice(&sealed);
+    let header_len = packet_number_offset + packet_number_len;
+    let mut packet = Vec::with_capacity(header_len + plaintext.len() + AES_GCM_TAG_LEN);
+    let mut first = FIXED_BIT | ((packet_number_len as u8 - 1) & PACKET_NUMBER_LEN_MASK);
+    if key_phase {
+        first |= SHORT_KEY_PHASE_BIT;
+    }
+    packet.push(first);
+    packet.extend_from_slice(destination_cid.as_bytes());
+    put_packet_number_vec(&mut packet, packet_number, packet_number_len)?;
+    seal_packet_payload_into(keys, packet_number, header_len, plaintext, &mut packet)?;
 
     let sample = header_protection_sample(&packet, packet_number_offset)?;
     let mask = header_protection_mask(keys, sample)?;
     protect_short_header(
-        &mut packet[..header.len()],
+        &mut packet[..header_len],
         packet_number_offset,
         packet_number_len,
         mask,
@@ -1899,6 +2138,37 @@ pub fn open_short_header_packet(
     destination_cid_len: usize,
     expected_packet_number: u64,
 ) -> Result<OpenedShortHeaderPacket> {
+    let mut scratch = Vec::new();
+    let mut pt_out = Vec::new();
+    open_short_header_packet_into(
+        keys,
+        packet,
+        destination_cid_len,
+        expected_packet_number,
+        &mut scratch,
+        &mut pt_out,
+    )
+}
+
+/// Open a 1-RTT short-header packet, reusing `scratch` as the unmask + in-place
+/// decrypt buffer instead of allocating a fresh datagram copy per call.
+///
+/// `scratch` is refilled from `packet` (`clear` + `extend_from_slice`) at the
+/// very top of every call, so it is safe to reuse the same buffer across the
+/// 1-3 key attempts in `try_open_one_rtt_packet`: a failed attempt that
+/// partially mutated `scratch` (header unmasking) is fully overwritten before
+/// the next attempt re-unmasks from the pristine `packet`. The payload is
+/// decrypted via `open_in_place` into the disjoint reused `pt_out` buffer.
+/// The header-protection / sample / packet-number logic is identical to the
+/// allocating path; only the buffer source and the payload decrypt differ.
+pub fn open_short_header_packet_into(
+    keys: &QuicPacketKeyMaterial,
+    packet: &[u8],
+    destination_cid_len: usize,
+    expected_packet_number: u64,
+    scratch: &mut Vec<u8>,
+    pt_out: &mut Vec<u8>,
+) -> Result<OpenedShortHeaderPacket> {
     if destination_cid_len > MAX_CID_LEN {
         return Err(Error::HttpProtocol(
             "QUIC connection id length exceeds 20 bytes".into(),
@@ -1912,9 +2182,18 @@ pub fn open_short_header_packet(
     }
 
     let packet_number_offset = 1 + destination_cid_len;
+    // Sample reads the original (still header-protected) packet bytes.
     let sample = header_protection_sample(packet, packet_number_offset)?;
     let mask = header_protection_mask(keys, sample)?;
-    let mut opened = packet.to_vec();
+
+    // Header protection only touches byte 0 and the up-to-4 packet-number
+    // bytes; copy just that prefix into the reusable buffer for unmasking and
+    // leave the ciphertext payload in the original datagram buffer (the AEAD
+    // reads it in place). Refilling per attempt keeps key attempts isolated.
+    let unmask_len = packet.len().min(packet_number_offset + 4);
+    scratch.clear();
+    scratch.extend_from_slice(&packet[..unmask_len]);
+    let opened = &mut scratch[..];
 
     opened[0] ^= mask[0] & 0x1f;
     if opened[0] & FIXED_BIT == 0 {
@@ -1939,10 +2218,25 @@ pub fn open_short_header_packet(
     let truncated = read_packet_number(&opened[packet_number_offset..packet_number_end]);
     let packet_number =
         recover_packet_number(truncated, packet_number_len, expected_packet_number)?;
+    // Materialize the unmasked header and CID as owned bytes before taking a
+    // mutable borrow of the payload region. The header is the exact AAD passed
+    // to the AEAD, identical to the allocating path.
     let header = Bytes::copy_from_slice(&opened[..packet_number_end]);
     let destination_cid =
         ConnectionId::from_bytes(Bytes::copy_from_slice(&opened[1..1 + destination_cid_len]))?;
-    let payload = open_packet_payload(keys, packet_number, &header, &opened[packet_number_end..])?;
+
+    let nonce = packet_nonce(&keys.iv, packet_number)?;
+    // Decrypt the payload into the disjoint reused `pt_out` buffer (cipher input
+    // and output never alias). The plaintext lands at the start of `pt_out`.
+    let payload_region = &packet[packet_number_end..];
+    let plaintext_len = open_in_place(
+        keys.aead_ctx()?,
+        &nonce,
+        header.as_ref(),
+        payload_region,
+        pt_out,
+    )?;
+    let payload = Bytes::copy_from_slice(&pt_out[..plaintext_len]);
 
     Ok(OpenedShortHeaderPacket {
         packet_number,
@@ -2458,7 +2752,12 @@ pub fn decode_frame(bytes: &[u8]) -> Result<QuicFrame> {
 }
 
 pub fn decode_frames(bytes: &[u8]) -> Result<Vec<QuicFrame>> {
-    let mut input = Bytes::copy_from_slice(bytes);
+    decode_frames_bytes(Bytes::copy_from_slice(bytes))
+}
+
+/// Decode frames from an owned payload without re-copying it: STREAM and
+/// CRYPTO data become refcounted slices of the input allocation.
+pub fn decode_frames_bytes(mut input: Bytes) -> Result<Vec<QuicFrame>> {
     let mut frames = Vec::new();
     while input.has_remaining() {
         frames.push(decode_frame_from(&mut input)?);
@@ -2930,6 +3229,35 @@ fn hkdf_expand_sha256(prk: &[u8], info: &[u8], len: usize) -> Result<Bytes> {
     Ok(Bytes::from(okm))
 }
 
+/// Open `ciphertext_and_tag` (AES-128-GCM) with `aad`, decrypting into the
+/// disjoint, reused `pt_out` buffer. On success returns the plaintext length;
+/// the trailing tag bytes are not part of the plaintext. On tag mismatch returns
+/// `Err` (fail-closed) and `pt_out`'s contents are meaningless.
+///
+/// `ciphertext_and_tag` is read-only (`&[u8]`); the plaintext is written to a
+/// separate caller-owned `Vec<u8>` so the cipher input and output never alias
+/// (no raw-pointer alias, no Rust-level aliasing). Replicates
+/// `boring::symm::decrypt_aead`'s
+/// `Crypter` call order (`aad_update -> update -> set_tag -> finalize`).
+/// `set_tag` is called before `finalize`; `finalize` is GCM's tag-verification
+/// point and its `Err` is propagated.
+fn open_in_place(
+    aead_ctx: &AeadCtx,
+    nonce: &[u8; AES_128_GCM_IV_LEN],
+    aad: &[u8],
+    ciphertext_and_tag: &[u8],
+    pt_out: &mut Vec<u8>,
+) -> Result<usize> {
+    if ciphertext_and_tag.len() < AES_GCM_TAG_LEN {
+        return Err(Error::HttpProtocol("truncated QUIC packet tag".into()));
+    }
+    // One `EVP_AEAD_CTX_open` against the per-epoch context: the AES key schedule
+    // and GHASH H-table were built once at key-derivation time, so this is the GCM
+    // pass plus tag verification, not per-packet cipher setup. Output is the
+    // reused `pt_out`, disjoint from the input -> no aliasing.
+    aead_ctx.open(nonce, aad, ciphertext_and_tag, pt_out)
+}
+
 fn packet_nonce(iv: &[u8], packet_number: u64) -> Result<[u8; AES_128_GCM_IV_LEN]> {
     if iv.len() != AES_128_GCM_IV_LEN {
         return Err(Error::HttpProtocol("invalid QUIC packet IV length".into()));
@@ -3324,6 +3652,14 @@ fn put_packet_number(out: &mut BytesMut, packet_number: u64, len: usize) -> Resu
     validate_packet_number_len(len)?;
     for shift in (0..len).rev().map(|index| index * 8) {
         out.put_u8((packet_number >> shift) as u8);
+    }
+    Ok(())
+}
+
+fn put_packet_number_vec(out: &mut Vec<u8>, packet_number: u64, len: usize) -> Result<()> {
+    validate_packet_number_len(len)?;
+    for shift in (0..len).rev().map(|index| index * 8) {
+        out.push((packet_number >> shift) as u8);
     }
     Ok(())
 }

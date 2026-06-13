@@ -10,6 +10,202 @@ fn native_h3_driver_schedules_receive_flow_control_updates() {
 }
 
 #[test]
+fn native_h3_streaming_response_dispatch_avoids_vec_replay_layer() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let streaming_response_dispatch = driver
+        .split("fn apply_streaming_response_stream_event")
+        .nth(1)
+        .expect("driver must apply streaming response frames directly")
+        .split("fn apply_reset_event")
+        .next()
+        .expect("streaming response direct dispatch section");
+    let streaming_branch = driver
+        .split("if self.pending_streaming_responses.contains_key(&stream_id)")
+        .nth(1)
+        .expect("driver must route tracked streaming response streams")
+        .split("if let Some(response)")
+        .next()
+        .expect("streaming response branch");
+
+    assert!(
+        !streaming_response_dispatch.contains("Vec<NativeH3StreamingResponseEvent>"),
+        "streaming response dispatch should not allocate a temporary Vec before delivering headers"
+    );
+    assert!(
+        !streaming_response_dispatch.contains("let mut streaming_events = Vec::new()"),
+        "streaming response dispatch should use direct visitor delivery, not a heap-backed event buffer"
+    );
+    assert!(
+        !streaming_response_dispatch.contains("NativeH3StreamingResponseEvent::Headers"),
+        "streaming HEADERS delivery should be inlined instead of wrapped and re-matched"
+    );
+    assert!(
+        !streaming_branch.contains("for event in events"),
+        "hot streaming response branch should not replay an intermediate event vector"
+    );
+    assert!(
+        !driver.contains("streaming_response_streams"),
+        "streaming responses should use pending_streaming_responses as the single tracked state map"
+    );
+    assert!(
+        !driver.contains("apply_tracked_streaming_response_event"),
+        "driver should apply streaming response frames directly without a duplicate state-map visitor"
+    );
+}
+
+#[test]
+fn native_h3_direct_idle_get_is_env_gated_and_body_owned() {
+    let h3_mod = std::fs::read_to_string("src/transport/h3/mod.rs").expect("h3 client source");
+    let handle = std::fs::read_to_string("src/transport/h3/handle.rs").expect("h3 handle source");
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let response = std::fs::read_to_string("src/response.rs").expect("response body source");
+
+    assert!(
+        h3_mod.contains("SPECTER_NATIVE_H3_DIRECT_IDLE_GET")
+            && h3_mod.contains("connect_direct_start")
+            && h3_mod.contains("into_direct_handle"),
+        "direct idle GET scout must use the production direct-start hook, env-gated"
+    );
+    let direct_branch = handle
+        .split("SPECTER_NATIVE_H3_DIRECT_IDLE_GET")
+        .nth(1)
+        .expect("handle must try the direct path before command enqueue")
+        .split("self.send_command(DriverCommand::SendStreamingRequest")
+        .next()
+        .expect("direct path must be before command enqueue fallback");
+    for required in [
+        "method == http::Method::GET",
+        "body.is_empty()",
+        "slot.take()",
+        "send_direct_streaming_parts",
+        "Body::from_h3_direct",
+    ] {
+        assert!(
+            direct_branch.contains(required),
+            "direct idle GET branch must guard and own driver/body before actor fallback: {required}"
+        );
+    }
+    for required in [
+        "pub(crate) struct NativeH3DirectBody",
+        "drive_direct_body_until_progress",
+        "release_driver_if_idle",
+        "is_direct_idle",
+        "pending_tunnels.is_empty()",
+        "pending_streaming_responses.is_empty()",
+        "pending_responses.is_empty()",
+    ] {
+        assert!(
+            driver.contains(required),
+            "direct H3 body must own and safely return the native driver: {required}"
+        );
+    }
+    assert!(
+        response.contains("BodyInner::H3Direct")
+            && response.contains("from_h3_direct")
+            && response.contains("BodyCapacityProtocol::H3Direct"),
+        "public Body must preserve direct-owned H3 body behavior"
+    );
+}
+
+#[test]
+fn native_h3_driver_catches_idle_commands_before_parking_select() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let drive_loop = driver
+        .split("async fn drive_loop")
+        .nth(1)
+        .expect("driver must define drive_loop")
+        .split("fn has_pending_work")
+        .next()
+        .expect("drive_loop section");
+    let helper = driver
+        .split("async fn try_recv_idle_command_before_park")
+        .nth(1)
+        .expect("driver must define idle command catch helper")
+        .split("fn has_pending_work")
+        .next()
+        .expect("idle command catch helper section");
+
+    let pending_idx = drive_loop
+        .find("let has_pending_work = self.has_pending_work()")
+        .expect("drive_loop must compute pending work before parking");
+    let catch_idx = drive_loop
+        .find("self.try_recv_idle_command_before_park().await?")
+        .expect("drive_loop must poll command_rx briefly before select parking");
+    let select_idx = drive_loop
+        .find("tokio::select!")
+        .expect("drive_loop must still use select for normal multiplexing");
+    assert!(
+        pending_idx < catch_idx && catch_idx < select_idx,
+        "idle command catch must run after pending-work/deadline checks but before the driver parks in select"
+    );
+    assert!(
+        drive_loop.contains("!has_pending_work"),
+        "idle catch must only run when the driver has no outstanding protocol work"
+    );
+    assert!(
+        helper.contains("self.command_rx.try_recv()")
+            && helper.contains("std::hint::spin_loop()")
+            && helper.contains("H3_IDLE_COMMAND_SPIN_BUDGET"),
+        "idle catch must use a bounded try_recv spin, not a blocking receive or caller-side socket ownership"
+    );
+    assert!(
+        !driver.contains("Arc<tokio::sync::Mutex<NativeH3Driver")
+            && !driver.contains("Arc<Mutex<NativeH3Driver"),
+        "direct warm-GET work must stay driver-owned unless the whole driver core is explicitly leased"
+    );
+}
+
+#[test]
+fn native_h3_header_waiter_ready_datagram_uses_nonblocking_ecn_probe() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let udp_ecn = std::fs::read_to_string("src/transport/h3/udp_ecn.rs").expect("udp ecn source");
+    let ready_probe = driver
+        .split("async fn try_process_ready_datagram")
+        .nth(1)
+        .expect("driver must define header-waiter ready datagram probe")
+        .split("async fn process_received_datagram")
+        .next()
+        .expect("ready datagram probe section");
+    let drive_loop = driver
+        .split("async fn drive_loop")
+        .nth(1)
+        .expect("driver must define drive_loop")
+        .split("fn has_pending_work")
+        .next()
+        .expect("drive_loop section");
+
+    assert!(
+        driver.contains("try_recv_from_with_ecn"),
+        "native driver must import/use the nonblocking ECN-aware receive probe"
+    );
+    assert!(
+        udp_ecn.contains("pub(crate) fn try_recv_from_with_ecn"),
+        "udp ECN helper must expose a nonblocking receive probe"
+    );
+    assert!(
+        udp_ecn.contains("try_io(tokio::io::Interest::READABLE")
+            || udp_ecn.contains("try_io(Interest::READABLE"),
+        "unix nonblocking probe must use UdpSocket::try_io so it never parks the driver"
+    );
+    assert!(
+        ready_probe.contains("try_recv_from_with_ecn(&self.socket, buf)"),
+        "header-waiter ready probe must attempt exactly one nonblocking ECN-aware recv"
+    );
+    assert!(
+        !ready_probe.contains("tokio::select!") && !ready_probe.contains("std::future::ready"),
+        "ready probe must not emulate nonblocking recv with a select against an immediately-ready future"
+    );
+    assert!(
+        drive_loop.contains("recv_from_with_ecn(&self.socket, &mut buf)"),
+        "normal parked receive path must keep the awaited ECN-aware receive helper"
+    );
+}
+
+#[test]
 fn native_h3_driver_defers_receive_credit_while_streaming_bodies_are_backpressured() {
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
@@ -35,15 +231,18 @@ fn native_h3_driver_defers_receive_credit_while_streaming_bodies_are_backpressur
         process_datagram.contains("!self.receive_backpressured()"),
         "native H3 driver must not advertise more receive credit while streaming bodies or tunnels are backpressured"
     );
+    let drive_loop_body_progress = driver
+        .split("async fn drive_loop")
+        .nth(1)
+        .expect("driver must have drive_loop")
+        .split("_ = self.body_progress_notify.notified() =>")
+        .nth(1)
+        .expect("drive_loop body progress branch")
+        .split("fn try_recv_idle_command_before_park")
+        .next()
+        .expect("drive_loop body progress branch body");
     assert!(
-        driver
-            .split("_ = self.body_progress_notify.notified() =>")
-            .nth(1)
-            .expect("body progress branch")
-            .split('}')
-            .next()
-            .expect("body progress branch body")
-            .contains("send_receive_flow_control_updates().await?"),
+        drive_loop_body_progress.contains("send_receive_flow_control_updates().await?"),
         "body progress must retry deferred receive-credit updates when user reads open body capacity"
     );
 }
@@ -95,9 +294,9 @@ fn native_h3_receive_backpressure_waits_for_all_active_receive_classes() {
         "native H3 receive should pause only when every active response/tunnel receive class is backpressured"
     );
     assert!(
-        !receive_backpressure
-            .trim()
-            .contains("self.streaming_response_body_backpressured() || self.tunnel_inbound_backpressured()"),
+        !receive_backpressure.trim().contains(
+            "self.streaming_response_body_backpressured() || self.tunnel_inbound_backpressured()"
+        ),
         "one blocked receive class must not pause socket reads while another active class still has capacity"
     );
 }
@@ -107,12 +306,15 @@ fn native_h3_driver_flushes_receive_credit_from_consumed_body_bytes() {
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
     let body_progress = driver
+        .split("async fn drive_loop")
+        .nth(1)
+        .expect("driver must have drive_loop")
         .split("_ = self.body_progress_notify.notified() =>")
         .nth(1)
-        .expect("body progress branch")
-        .split("}")
+        .expect("drive_loop body progress branch")
+        .split("fn try_recv_idle_command_before_park")
         .next()
-        .expect("body progress branch body");
+        .expect("drive_loop body progress branch body");
     let released_body_credits = driver
         .split("async fn apply_released_body_credits")
         .nth(1)
@@ -152,24 +354,55 @@ fn native_h3_driver_flushes_receive_credit_from_consumed_body_bytes() {
 }
 
 #[test]
+fn native_h3_driver_counts_response_headers_as_consumed_receive_credit() {
+    let driver =
+        std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
+    let codec = std::fs::read_to_string("src/transport/h3/native.rs").expect("native codec source");
+
+    assert!(
+        codec.contains("headers_frame_encoded_len"),
+        "native H3 codec must expose the exact HEADERS frame byte length for receive-credit accounting"
+    );
+    assert!(
+        driver.contains("encoded_len: usize"),
+        "parsed native H3 HEADERS events must carry their encoded byte length"
+    );
+    assert!(
+        driver.contains("headers_frame_encoded_len(block.len())"),
+        "native H3 driver must account for the whole HEADERS frame, not just decoded header values"
+    );
+    assert!(
+        driver.contains("record_client_stream_consumed(stream_id, consumed_bytes as u64)"),
+        "streaming/tunnel response headers must release QUIC receive credit when handed to the public API"
+    );
+}
+
+#[test]
 fn native_h3_connect_wires_client_initial_pto_retransmission() {
     let connection = std::fs::read_to_string("src/transport/h3/connection.rs")
         .expect("native H3 connection source");
-    let connect_native = connection
-        .split("async fn connect_native")
+    let connect_native_start = connection
+        .split("async fn connect_native_start")
         .nth(1)
-        .expect("native H3 connection must have connect_native")
+        .expect("native H3 connection must have connect_native_start")
+        .split("async fn finish_native_start")
+        .next()
+        .expect("connect_native_start section");
+    let loss_timeout = connection
+        .split("async fn handle_client_loss_detection_timeout")
+        .nth(1)
+        .expect("native H3 connection must have loss-detection timeout handling")
         .split("fn random_connection_id")
         .next()
-        .expect("connect_native section");
+        .expect("loss-detection timeout section");
 
     assert!(
-        connect_native.contains("record_client_initial_sent_at"),
-        "connect_native must record Initial sends so client Initial PTO can arm"
+        connect_native_start.contains("record_client_initial_sent_at"),
+        "connect_native_start must record Initial sends so client Initial PTO can arm"
     );
     assert!(
-        connect_native.contains("on_loss_detection_timeout")
-            && connect_native.contains("retransmit_pto_client_initial_crypto_packets"),
+        loss_timeout.contains("on_loss_detection_timeout")
+            && loss_timeout.contains("retransmit_pto_client_initial_crypto_packets"),
         "connect_native must retransmit client Initial CRYPTO when the loss-detection timer fires"
     );
 }
@@ -247,7 +480,10 @@ fn native_h3_driver_retains_connection_close_for_draining_replay() {
         "draining native H3 driver must replay CONNECTION_CLOSE on inbound peer packets instead of processing them"
     );
     assert!(
-        drive_loop.matches("run_close_window(&mut buf).await?").count() >= 2,
+        drive_loop
+            .matches("run_close_window(&mut buf).await?")
+            .count()
+            >= 2,
         "local idle/client-shutdown closes must remain in a bounded drain window and replay CONNECTION_CLOSE before driver exit"
     );
 }
@@ -325,14 +561,17 @@ fn native_h3_driver_keeps_tunnel_data_off_control_command_queue() {
     let command = std::fs::read_to_string("src/transport/h3/command.rs").expect("command source");
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
-    let spawn = driver
-        .split("pub fn spawn_native_h3_driver")
+    let build = driver
+        .split("pub(crate) fn build_native_h3_driver")
         .nth(1)
-        .expect("native H3 driver spawn")
+        .expect("native H3 driver builder")
         .split("struct NativeH3Driver")
         .next()
-        .expect("native H3 driver spawn section");
+        .expect("native H3 driver build section");
     let select_loop = driver
+        .split("async fn drive_loop")
+        .nth(1)
+        .expect("driver must have drive_loop")
         .split("tokio::select!")
         .nth(1)
         .expect("native H3 driver select loop")
@@ -343,7 +582,7 @@ fn native_h3_driver_keeps_tunnel_data_off_control_command_queue() {
         .split("fn apply_tunnel_event")
         .nth(1)
         .expect("native H3 driver tunnel event path")
-        .split("fn apply_reset_event")
+        .split("fn push_streaming_body")
         .next()
         .expect("native H3 tunnel event section");
     let handle_command = driver
@@ -359,7 +598,7 @@ fn native_h3_driver_keeps_tunnel_data_off_control_command_queue() {
         "RFC 9220 tunnel DATA must not be a DriverCommand variant"
     );
     assert!(
-        spawn.contains("mpsc::channel::<(u64, H3TunnelOutbound)>(32)"),
+        build.contains("mpsc::channel::<(u64, H3TunnelOutbound)>(32)"),
         "native H3 driver must allocate a dedicated tunnel outbound channel"
     );
     assert!(
@@ -368,13 +607,21 @@ fn native_h3_driver_keeps_tunnel_data_off_control_command_queue() {
         "driver select loop must drain tunnel DATA from the dedicated channel"
     );
     assert!(
-        tunnel_event.contains(".send((stream_id, outbound))"),
-        "public tunnel writer must forward DATA through the dedicated tunnel outbound channel"
+        tunnel_event.contains("H3Tunnel::new_direct_with_credit")
+            && tunnel_event.contains("self.tunnel_outbound_tx.clone()"),
+        "public tunnel writer must hand the dedicated tunnel outbound channel to the H3Tunnel handle"
     );
     assert!(
-        handle_command.contains("pending_control_packets")
-            && handle_command.contains("push_back((packet.stream_id, packet.packet))"),
-        "fresh request and tunnel-open packets must enqueue on the strict-priority control queue"
+        handle_command.contains("queue_or_send_control_packet")
+            && handle_command.contains("allow_immediate_control"),
+        "fresh request and tunnel-open packets must route through the strict-priority control helper"
+    );
+    assert!(
+        driver.contains("allow_immediate_control && self.pending_control_packets.is_empty()")
+            && driver.contains("self.send_packet_to_peer(packet.as_ref()).await?")
+            && driver.contains("self.pending_control_packets.push_back((stream_id, packet))")
+            && driver.contains("self.handle_command(command, false).await?"),
+        "live commands may emit immediately only with an empty control backlog; requeued commands must keep using the control queue"
     );
 }
 
@@ -457,28 +704,35 @@ fn native_h3_driver_serves_control_frames_ahead_of_in_flight_tunnel_data() {
             "DriverCommand::SendStreamingRequest",
         ),
         (
-            "DriverCommand::SendStreamingRequest",
-            "DriverCommand::OpenWebSocketTunnel",
-        ),
-        (
             "DriverCommand::OpenWebSocketTunnel",
             "\n        }\n        Ok(())",
         ),
     ] {
         let arm_section = handle_command
-            .splitn(2, command)
-            .nth(1)
+            .split_once(command)
+            .map(|x| x.1)
             .unwrap_or_else(|| panic!("handle_command must include arm for {command}"))
             .split(next_delim)
             .next()
             .expect("command arm section");
         assert!(
-            arm_section.contains("pending_control_packets")
-                && arm_section.contains("push_back((packet.stream_id, packet.packet))"),
-            "{command} arm must queue its HEADERS packet on pending_control_packets instead of \
-             sending synchronously"
+            arm_section.contains("queue_or_send_control_packet")
+                && arm_section.contains("allow_immediate_control"),
+            "{command} arm must route its HEADERS packet through queue_or_send_control_packet +             so live commands can send immediately while requeued commands preserve control ordering"
         );
     }
+    let streaming_helper = driver
+        .split("async fn handle_send_streaming_request")
+        .nth(1)
+        .expect("native H3 driver must delegate streaming request setup to a helper")
+        .split("async fn queue_or_send_control_packet")
+        .next()
+        .expect("streaming request helper section");
+    assert!(
+        streaming_helper.contains("queue_or_send_control_packet")
+            && streaming_helper.contains("allow_immediate_control"),
+        "handle_send_streaming_request must route its HEADERS packet through +         queue_or_send_control_packet so live commands can send immediately while requeued +         commands preserve control ordering"
+    );
 }
 
 #[test]
@@ -513,10 +767,13 @@ fn native_h3_driver_routes_tunnel_outbound_off_command_channel() {
     let tunnel_idx = after_select
         .find("self.tunnel_outbound_rx.recv()")
         .expect("drive_loop must poll tunnel_outbound_rx in its select");
+    let recv_idx = after_select
+        .find("recv_from_with_ecn(&self.socket")
+        .expect("drive_loop must poll UDP receive in its select");
     assert!(
-        biased_idx < command_idx && command_idx < tunnel_idx,
-        "biased select must place command_rx ahead of tunnel_outbound_rx so a streaming-request \
-         command is dequeued before any further tunnel DATA"
+        biased_idx < command_idx && command_idx < recv_idx && recv_idx < tunnel_idx,
+        "biased select must place command_rx first, then ready UDP receive ahead of tunnel_outbound_rx \
+         so response HEADERS are admitted before additional tunnel DATA"
     );
 
     let apply_tunnel = driver
@@ -527,8 +784,9 @@ fn native_h3_driver_routes_tunnel_outbound_off_command_channel() {
         .next()
         .expect("apply_tunnel_event section");
     assert!(
-        apply_tunnel.contains(".send((stream_id, outbound))"),
-        "per-tunnel forwarder must push outbound DATA onto tunnel_outbound_tx, not command_tx"
+        apply_tunnel.contains("H3Tunnel::new_direct_with_credit")
+            && apply_tunnel.contains("self.tunnel_outbound_tx.clone()"),
+        "per-tunnel forwarder must hand outbound DATA to the H3Tunnel handle via tunnel_outbound_tx, not command_tx"
     );
     assert!(
         !apply_tunnel.contains("DriverCommand::SendTunnelData"),
@@ -773,24 +1031,24 @@ fn native_h3_driver_schedules_pmtu_probes_after_handshake() {
 fn native_h3_driver_propagates_tls_handshake_status_to_handle() {
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
-    let spawn_driver = driver
-        .split("pub fn spawn_native_h3_driver")
+    let build_driver = driver
+        .split("pub(crate) fn build_native_h3_driver")
         .nth(1)
-        .expect("driver must have spawn_native_h3_driver")
+        .expect("driver must have build_native_h3_driver")
         .split("struct NativeH3Driver")
         .next()
-        .expect("spawn_native_h3_driver section");
+        .expect("build_native_h3_driver section");
 
     assert!(
-        spawn_driver.contains("handshake.handshake_status()"),
+        build_driver.contains("handshake.handshake_status()"),
         "native H3 must snapshot TLS resumption / 0-RTT status before moving the handshake into the driver"
     );
     assert!(
-        spawn_driver.contains("NativeH3HandshakeReport"),
+        build_driver.contains("NativeH3HandshakeReport"),
         "native H3 handle must receive a structured handshake report for caller replay policy"
     );
     assert!(
-        spawn_driver.contains("new_with_transport_config_and_native_handshake_report"),
+        build_driver.contains("new_with_transport_config_and_native_handshake_report"),
         "native H3 driver must attach the handshake report to the returned H3Handle"
     );
 }
@@ -848,20 +1106,20 @@ fn native_h3_connection_replays_rejected_zero_rtt_once() {
 fn native_h3_zero_rtt_acceptance_propagates_with_pending_response() {
     let driver =
         std::fs::read_to_string("src/transport/h3/native_driver.rs").expect("native driver source");
-    let spawn_driver = driver
-        .split("pub fn spawn_native_h3_driver")
+    let build_driver = driver
+        .split("pub(crate) fn build_native_h3_driver")
         .nth(1)
-        .expect("driver must have spawn_native_h3_driver")
+        .expect("driver must have build_native_h3_driver")
         .split("struct NativeH3Driver")
         .next()
-        .expect("spawn_native_h3_driver section");
+        .expect("build_native_h3_driver section");
 
     assert!(
-        spawn_driver.contains("pending_zero_rtt_response"),
+        build_driver.contains("pending_zero_rtt_response"),
         "driver spawn must inherit the response waiter for a request sent during the handshake"
     );
     assert!(
-        spawn_driver.contains("native_handshake_report"),
+        build_driver.contains("native_handshake_report"),
         "driver spawn must preserve the EarlyAccepted/EarlyRejected status for H3Handle and H3Client"
     );
 }

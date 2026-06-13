@@ -7,7 +7,7 @@ use specter::transport::h3::native::{
     decode_header_block, decode_unidirectional_stream, encode_client_preface_streams,
     encode_fingerprint_settings_payload, encode_frame, encode_header_block, encode_request_stream,
     encode_request_stream_with_fingerprint, encode_settings_payload, encode_unidirectional_stream,
-    H3Frame, H3Header, H3Setting, H3StreamType, H3UnidirectionalStream,
+    h3_frame_block_is_complete, H3Frame, H3Header, H3Setting, H3StreamType, H3UnidirectionalStream,
 };
 
 #[test]
@@ -20,6 +20,32 @@ fn native_h3_codec_round_trips_data_headers_and_goaway_frames() {
 
     let goaway = H3Frame::GoAway { id: 4 };
     assert_eq!(decode_frame(&encode_frame(&goaway)).unwrap(), goaway);
+}
+
+#[test]
+fn native_h3_codec_detects_complete_frame_blocks_without_decoding_payloads() {
+    let two_byte_type = encode_frame(&H3Frame::Unknown {
+        frame_type: 0x40,
+        payload: Bytes::new(),
+    });
+    assert!(!h3_frame_block_is_complete(&two_byte_type[..1]).unwrap());
+
+    let two_byte_length = encode_frame(&H3Frame::Data(Bytes::from(vec![0xaa; 64])));
+    assert!(!h3_frame_block_is_complete(&two_byte_length[..2]).unwrap());
+
+    let data = encode_frame(&H3Frame::Data(Bytes::from_static(b"hello")));
+    assert!(!h3_frame_block_is_complete(&data[..data.len() - 1]).unwrap());
+
+    let mut frames = Vec::new();
+    frames.extend_from_slice(&encode_frame(&H3Frame::Headers(Bytes::from_static(
+        b"\x00\xd9",
+    ))));
+    frames.extend_from_slice(&data);
+    frames.extend_from_slice(&encode_frame(&H3Frame::Unknown {
+        frame_type: 0x21,
+        payload: Bytes::new(),
+    }));
+    assert!(h3_frame_block_is_complete(&frames).unwrap());
 }
 
 #[test]
@@ -258,6 +284,77 @@ fn native_qpack_decodes_content_type_text_plain_static_index() {
     let headers = decode_header_block(&[0x00, 0x00, 0xf5]).unwrap();
 
     assert_eq!(headers, vec![H3Header::new("content-type", "text/plain")]);
+}
+
+#[test]
+fn native_qpack_response_decoder_checks_exact_templates_first() {
+    let native =
+        std::fs::read_to_string("src/transport/h3/native.rs").expect("native h3 codec source");
+    let decoder = native
+        .split("pub(crate) fn decode_response_headers")
+        .nth(1)
+        .expect("response header decoder")
+        .split("fn push_response_header_to_builder")
+        .next()
+        .expect("response header decoder section");
+    let fast_path = decoder
+        .find("try_decode_response_headers_template(&input)")
+        .expect("response decoder should check exact template headers first");
+    let generic_prefix = decoder
+        .find("let first = get_byte(&mut input)?")
+        .expect("response decoder should retain the generic QPACK path");
+
+    assert!(
+        fast_path < generic_prefix,
+        "exact response-header templates must be checked before the generic QPACK loop"
+    );
+    assert!(
+        native.contains("static H3_RESPONSE_OCTET_STREAM_HEADERS")
+            && native.contains("static H3_RESPONSE_TEXT_PLAIN_HEADERS"),
+        "template fast path should return cached Headers values instead of rebuilding per sample"
+    );
+}
+
+#[test]
+fn native_qpack_response_template_bytes_match_existing_encoder() {
+    let octet_stream = vec![
+        H3Header::new(":status", "200"),
+        H3Header::new("content-type", "application/octet-stream"),
+    ];
+    let text_plain = vec![
+        H3Header::new(":status", "200"),
+        H3Header::new("content-type", "text/plain"),
+    ];
+
+    let octet_stream_block = encode_header_block(&octet_stream);
+    let text_plain_block = encode_header_block(&text_plain);
+
+    assert_eq!(
+        octet_stream_block.as_ref(),
+        b"\x00\x00\xd9\x27\x05content-type\x18application/octet-stream"
+    );
+    assert_eq!(text_plain_block.as_ref(), b"\x00\x00\xd9\xf5");
+    assert_eq!(
+        decode_header_block(&octet_stream_block).unwrap(),
+        octet_stream
+    );
+    assert_eq!(decode_header_block(&text_plain_block).unwrap(), text_plain);
+}
+
+#[test]
+fn native_qpack_response_near_miss_remains_normal_qpack() {
+    let application_json = vec![
+        H3Header::new(":status", "200"),
+        H3Header::new("content-type", "application/json"),
+    ];
+    let block = encode_header_block(&application_json);
+
+    assert_ne!(
+        block.as_ref(),
+        b"\x00\x00\xd9\x27\x05content-type\x18application/octet-stream"
+    );
+    assert_ne!(block.as_ref(), b"\x00\x00\xd9\xf5");
+    assert_eq!(decode_header_block(&block).unwrap(), application_json);
 }
 
 #[test]

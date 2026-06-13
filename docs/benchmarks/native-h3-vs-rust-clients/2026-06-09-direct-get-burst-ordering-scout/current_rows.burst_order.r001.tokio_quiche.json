@@ -1,0 +1,1145 @@
+{
+  "benchmark": "native_h3_vs_rust_clients",
+  "benchmark_version": "matrix-1",
+  "audited_at": "2026-05-25",
+  "run_provenance": {
+    "manifest_path": "docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-burst-ordering-scout/current_rows.burst_order.r001.manifest.json",
+    "manifest_sha256": "6593ad275e96f91b41786b8451978b998581cade4fb39106bfbae9ada381f16e",
+    "binary_path": "./target/release/specter-native-h3-vs-rust-clients",
+    "binary_sha256": "a0a3fa25b84ff5596746536d93fa00baf447b6687a4a299d201cf589f3119769",
+    "git_head": "e6dab16ced2113ec5ec834cb1380f46cdad99ba5",
+    "git_dirty": true,
+    "target": "aarch64-unknown-linux-gnu",
+    "profile": "release",
+    "features": "reqwest-h3",
+    "samples": 100,
+    "warmups": 10,
+    "selected_client": "tokio_quiche",
+    "selected_clients_sha256": "e025d16a71b1a2aa3449048e7b59be65596cb13bfd067a6a6e9f149e69b935df",
+    "scout_gate": false,
+    "get_only_gate": true,
+    "publication_eligible": false,
+    "runtime_profile": "direct-get-io-epoch-rfc9220-fused-echo-close-epoch-mixed",
+    "runtime_env_sha256": "953b879603490f45741a269f1256500e06627641ea23d37f27c2fc88ce918cb5",
+    "run_order": [
+      "specter_native",
+      "quiche_direct",
+      "tokio_quiche",
+      "h3_quinn",
+      "reqwest_h3"
+    ],
+    "run_order_sha256": "e025d16a71b1a2aa3449048e7b59be65596cb13bfd067a6a6e9f149e69b935df",
+    "run_sequence_index": 3,
+    "run_started_at_unix_ns": 1781034144714019335,
+    "run_finished_at_unix_ns": 1781034145419150664
+  },
+  "competitors": [
+    {
+      "id": "specter_native",
+      "crate_name": "specters",
+      "version": "4.2.2",
+      "role": "candidate",
+      "required_for_superiority": true,
+      "invocation_notes": "Specter native H3 backend; no quiche in the package graph."
+    },
+    {
+      "id": "specter_native_rfc9220_tunnel",
+      "crate_name": "specters",
+      "version": "4.2.2",
+      "role": "h3_tunnel_workload",
+      "required_for_superiority": false,
+      "invocation_notes": "Specter native RFC 9220 WebSocket-over-H3 tunnel echo workload."
+    },
+    {
+      "id": "specter_native_rfc9220_tunnel_close",
+      "crate_name": "specters",
+      "version": "4.2.2",
+      "role": "h3_tunnel_workload",
+      "required_for_superiority": false,
+      "invocation_notes": "Specter native RFC 9220 tunnel echo with client FIN and server FIN timing."
+    },
+    {
+      "id": "specter_native_rfc9220_tunnel_mixed",
+      "crate_name": "specters",
+      "version": "4.2.2",
+      "role": "h3_tunnel_workload",
+      "required_for_superiority": false,
+      "invocation_notes": "Specter native RFC 9220 slow-consumer tunnel plus concurrent H3 streaming workload."
+    },
+    {
+      "id": "quiche_direct_rfc9220_tunnel",
+      "crate_name": "quiche",
+      "version": "0.29.0",
+      "role": "h3_tunnel_comparator",
+      "required_for_superiority": false,
+      "invocation_notes": "Low-level quiche Extended CONNECT/WebSocket-over-H3 tunnel comparator adapter."
+    },
+    {
+      "id": "tokio_quiche_rfc9220_tunnel",
+      "crate_name": "tokio-quiche",
+      "version": "0.19.0",
+      "role": "h3_tunnel_comparator",
+      "required_for_superiority": false,
+      "invocation_notes": "tokio-quiche Extended CONNECT/WebSocket-over-H3 tunnel comparator adapter."
+    },
+    {
+      "id": "quiche_direct_rfc9220_tunnel_close",
+      "crate_name": "quiche",
+      "version": "0.29.0",
+      "role": "h3_tunnel_comparator",
+      "required_for_superiority": false,
+      "invocation_notes": "Low-level quiche RFC 9220 tunnel comparator for client DATA+FIN and server FIN timing."
+    },
+    {
+      "id": "tokio_quiche_rfc9220_tunnel_close",
+      "crate_name": "tokio-quiche",
+      "version": "0.19.0",
+      "role": "h3_tunnel_comparator",
+      "required_for_superiority": false,
+      "invocation_notes": "tokio-quiche RFC 9220 tunnel comparator for client DATA+FIN and server FIN timing."
+    },
+    {
+      "id": "quiche_direct_rfc9220_tunnel_mixed",
+      "crate_name": "quiche",
+      "version": "0.29.0",
+      "role": "h3_tunnel_comparator",
+      "required_for_superiority": false,
+      "invocation_notes": "Low-level quiche RFC 9220 slow-consumer tunnel plus concurrent H3 streaming comparator."
+    },
+    {
+      "id": "tokio_quiche_rfc9220_tunnel_mixed",
+      "crate_name": "tokio-quiche",
+      "version": "0.19.0",
+      "role": "h3_tunnel_comparator",
+      "required_for_superiority": false,
+      "invocation_notes": "tokio-quiche RFC 9220 slow-consumer tunnel plus concurrent H3 streaming comparator."
+    },
+    {
+      "id": "h3_quinn_rfc9220_tunnel",
+      "crate_name": "h3+h3-quinn",
+      "version": "h3 0.0.8 / h3-quinn 0.0.10",
+      "role": "unsupported_h3_tunnel_comparator",
+      "required_for_superiority": false,
+      "invocation_notes": "Unsupported in this harness: h3 0.0.8 has no WebSocket protocol surface for RFC 9220."
+    },
+    {
+      "id": "reqwest_h3_rfc9220_tunnel",
+      "crate_name": "reqwest",
+      "version": "0.13.3",
+      "role": "unsupported_h3_tunnel_comparator",
+      "required_for_superiority": false,
+      "invocation_notes": "Unsupported in this harness: reqwest H3 exposes request/response APIs, not an RFC 9220 tunnel API."
+    },
+    {
+      "id": "quiche_direct",
+      "crate_name": "quiche",
+      "version": "0.29.0",
+      "role": "h3_client",
+      "required_for_superiority": true,
+      "invocation_notes": "Direct Cloudflare quiche H3 client adapter."
+    },
+    {
+      "id": "tokio_quiche",
+      "crate_name": "tokio-quiche",
+      "version": "0.19.0",
+      "role": "h3_client",
+      "required_for_superiority": true,
+      "invocation_notes": "Async Cloudflare quiche wrapper adapter."
+    },
+    {
+      "id": "h3_quinn",
+      "crate_name": "h3+h3-quinn",
+      "version": "h3 0.0.8 / h3-quinn 0.0.10",
+      "role": "h3_client",
+      "required_for_superiority": true,
+      "invocation_notes": "hyperium h3 client over Quinn."
+    },
+    {
+      "id": "reqwest_h3",
+      "crate_name": "reqwest",
+      "version": "0.13.3",
+      "role": "h3_client",
+      "required_for_superiority": true,
+      "invocation_notes": "Run with --features reqwest-h3 and RUSTFLAGS='--cfg reqwest_unstable'."
+    },
+    {
+      "id": "tokio_tungstenite_rfc9220",
+      "crate_name": "tokio-tungstenite",
+      "version": "0.24.0",
+      "role": "unsupported_h3_websocket_client",
+      "required_for_superiority": false,
+      "invocation_notes": "RFC 6455-over-H1 WebSocket client; no RFC 9220/H3 transport in this harness."
+    },
+    {
+      "id": "reqwest_rfc9220",
+      "crate_name": "reqwest",
+      "version": "0.13.3",
+      "role": "unsupported_h3_websocket_client",
+      "required_for_superiority": false,
+      "invocation_notes": "HTTP client with H3 support; no native WebSocket/RFC 9220 API."
+    },
+    {
+      "id": "quinn_transport",
+      "crate_name": "quinn",
+      "version": "0.11.9",
+      "role": "quic_transport_baseline",
+      "required_for_superiority": false,
+      "invocation_notes": "QUIC transport-only baseline, not an H3 superiority gate member."
+    },
+    {
+      "id": "s2n_quic_transport",
+      "crate_name": "s2n-quic",
+      "version": "1.80.0",
+      "role": "quic_transport_baseline",
+      "required_for_superiority": false,
+      "invocation_notes": "Optional QUIC transport-only baseline via --features s2n-quic-transport."
+    }
+  ],
+  "rows": [
+    {
+      "competitor_id": "specter_native",
+      "status": "pending_measurement",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3",
+      "workload": "http3_streaming_get",
+      "payload_bytes": 81920
+    },
+    {
+      "competitor_id": "specter_native_rfc9220_tunnel",
+      "status": "pending_adapter",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3_rfc9220",
+      "workload": "websocket_over_h3_raw_tunnel_echo",
+      "payload_bytes": 1024,
+      "notes": "Measured Specter raw byte tunnel over RFC9220 Extended CONNECT; not RFC6455 frame parsing."
+    },
+    {
+      "competitor_id": "specter_native_rfc9220_tunnel_close",
+      "status": "pending_adapter",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3_rfc9220",
+      "workload": "websocket_over_h3_raw_tunnel_close_fin",
+      "payload_bytes": 1024,
+      "notes": "Measures client DATA+FIN through echoed DATA and server FIN delivery on an RFC9220 tunnel."
+    },
+    {
+      "competitor_id": "specter_native_rfc9220_tunnel_mixed",
+      "status": "pending_adapter",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3_rfc9220",
+      "workload": "slow_consumer_tunnel_plus_http3_streaming",
+      "payload_bytes": 122880,
+      "notes": "Measures a delayed-reader RFC9220 tunnel while a same-origin H3 streaming response completes. TTFB is captured when send_streaming() resolves on response HEADERS, matching quiche's H3 Headers event recording."
+    },
+    {
+      "competitor_id": "quiche_direct_rfc9220_tunnel",
+      "status": "pending_measurement",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3_rfc9220",
+      "workload": "websocket_over_h3_raw_tunnel_echo",
+      "payload_bytes": 1024,
+      "notes": "RFC9220 comparator adapter for raw byte echo over WebSocket Extended CONNECT; excluded from the HTTP/3 superiority gate."
+    },
+    {
+      "competitor_id": "tokio_quiche_rfc9220_tunnel",
+      "status": "pending_measurement",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3_rfc9220",
+      "workload": "websocket_over_h3_raw_tunnel_echo",
+      "payload_bytes": 1024,
+      "notes": "RFC9220 comparator adapter for raw byte echo over WebSocket Extended CONNECT; excluded from the HTTP/3 superiority gate."
+    },
+    {
+      "competitor_id": "quiche_direct_rfc9220_tunnel_close",
+      "status": "pending_measurement",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3_rfc9220",
+      "workload": "websocket_over_h3_raw_tunnel_close_fin",
+      "payload_bytes": 1024,
+      "notes": "RFC9220 comparator adapter measuring client DATA+FIN through echoed DATA and server FIN delivery."
+    },
+    {
+      "competitor_id": "tokio_quiche_rfc9220_tunnel_close",
+      "status": "pending_measurement",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3_rfc9220",
+      "workload": "websocket_over_h3_raw_tunnel_close_fin",
+      "payload_bytes": 1024,
+      "notes": "RFC9220 comparator adapter measuring client DATA+FIN through echoed DATA and server FIN delivery."
+    },
+    {
+      "competitor_id": "quiche_direct_rfc9220_tunnel_mixed",
+      "status": "pending_measurement",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3_rfc9220",
+      "workload": "slow_consumer_tunnel_plus_http3_streaming",
+      "payload_bytes": 122880,
+      "notes": "RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes. TTFB is captured on the H3 Headers event so suite gate is metric-symmetric with specter_native_rfc9220_tunnel_mixed."
+    },
+    {
+      "competitor_id": "tokio_quiche_rfc9220_tunnel_mixed",
+      "status": "pending_measurement",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3_rfc9220",
+      "workload": "slow_consumer_tunnel_plus_http3_streaming",
+      "payload_bytes": 122880,
+      "notes": "RFC9220 comparator adapter measuring delayed tunnel reads while a same-origin H3 streaming response completes. TTFB is captured on the H3 Headers event so suite gate is metric-symmetric with specter_native_rfc9220_tunnel_mixed."
+    },
+    {
+      "competitor_id": "h3_quinn_rfc9220_tunnel",
+      "status": "unsupported_by_client",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "capability_audit",
+      "protocol": "h3_rfc9220",
+      "workload": "websocket_over_h3_raw_tunnel_echo",
+      "payload_bytes": 1024,
+      "notes": "h3/h3-quinn is tracked as unsupported for RFC9220 WebSocket tunnels until its public protocol surface exposes websocket Extended CONNECT."
+    },
+    {
+      "competitor_id": "reqwest_h3_rfc9220_tunnel",
+      "status": "unsupported_by_client",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "capability_audit",
+      "protocol": "h3_rfc9220",
+      "workload": "websocket_over_h3_raw_tunnel_echo",
+      "payload_bytes": 1024,
+      "notes": "reqwest_h3 is tracked as unsupported for RFC9220 WebSocket tunnels because reqwest does not expose a bidirectional H3 tunnel API."
+    },
+    {
+      "competitor_id": "quiche_direct",
+      "status": "pending_adapter",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3",
+      "workload": "http3_streaming_get",
+      "payload_bytes": 81920
+    },
+    {
+      "competitor_id": "tokio_quiche",
+      "status": "measured_pass",
+      "p50_ttfb_ns": 39213.0,
+      "p95_ttfb_ns": 51243.0,
+      "bytes_per_sec": 17900493.50777813,
+      "p50_paced_body_overhead_ns": 445751.0,
+      "p95_paced_body_overhead_ns": 647886.0,
+      "p50_paced_tail_overhead_ns": 469332.0,
+      "p95_paced_tail_overhead_ns": 671966.0,
+      "p50_ledger_paced_tail_overhead_ns": 10863.0,
+      "p95_ledger_paced_tail_overhead_ns": 17860.0,
+      "p50_fixture_emission_span_ns": 4457748.0,
+      "p95_fixture_emission_span_ns": 4673526.0,
+      "ledger_paced_bytes_per_sec": 20221779.303598356,
+      "fixture_ledger_path": "docs/benchmarks/native-h3-vs-rust-clients/2026-06-09-direct-get-burst-ordering-scout/current_rows.burst_order.r001.fixture-ledgers/fixture-ledger.tokio_quiche.jsonl",
+      "fixture_ledger_sha256": "35ad6cb75c2c5660218e3ecd7ed2c5b7cd748cf9cbb1f58ae99abb1dd11f38d5",
+      "fixture_ledger_response_count": 110,
+      "fixture_ledger_required_response_count": 110,
+      "fixture_ledger_sample_offset": 10,
+      "fixture_pace_span_ns": 4000000.0,
+      "source": "tokio_quiche_adapter",
+      "protocol": "h3",
+      "workload": "http3_streaming_get",
+      "payload_bytes": 81920,
+      "sample_count": 100,
+      "requested_samples": 100,
+      "completed_samples": 100,
+      "requested_warmups": 10,
+      "completed_warmups": 10,
+      "raw_samples": [
+        {
+          "ttfb_ns": 53754.0,
+          "total_ns": 4514858.0,
+          "bytes": 81920,
+          "first_body_ns": 79510.0
+        },
+        {
+          "ttfb_ns": 48245.0,
+          "total_ns": 5647762.0,
+          "bytes": 81920,
+          "first_body_ns": 72428.0
+        },
+        {
+          "ttfb_ns": 39100.0,
+          "total_ns": 4442983.0,
+          "bytes": 81920,
+          "first_body_ns": 65955.0
+        },
+        {
+          "ttfb_ns": 41401.0,
+          "total_ns": 4507024.0,
+          "bytes": 81920,
+          "first_body_ns": 66504.0
+        },
+        {
+          "ttfb_ns": 42672.0,
+          "total_ns": 4495210.0,
+          "bytes": 81920,
+          "first_body_ns": 65597.0
+        },
+        {
+          "ttfb_ns": 42925.0,
+          "total_ns": 4527289.0,
+          "bytes": 81920,
+          "first_body_ns": 65457.0
+        },
+        {
+          "ttfb_ns": 50517.0,
+          "total_ns": 4597937.0,
+          "bytes": 81920,
+          "first_body_ns": 70581.0
+        },
+        {
+          "ttfb_ns": 37186.0,
+          "total_ns": 4580184.0,
+          "bytes": 81920,
+          "first_body_ns": 57131.0
+        },
+        {
+          "ttfb_ns": 41344.0,
+          "total_ns": 4660324.0,
+          "bytes": 81920,
+          "first_body_ns": 63516.0
+        },
+        {
+          "ttfb_ns": 39738.0,
+          "total_ns": 4526040.0,
+          "bytes": 81920,
+          "first_body_ns": 66251.0
+        },
+        {
+          "ttfb_ns": 40186.0,
+          "total_ns": 4495574.0,
+          "bytes": 81920,
+          "first_body_ns": 64672.0
+        },
+        {
+          "ttfb_ns": 40635.0,
+          "total_ns": 4462086.0,
+          "bytes": 81920,
+          "first_body_ns": 64769.0
+        },
+        {
+          "ttfb_ns": 46889.0,
+          "total_ns": 4478828.0,
+          "bytes": 81920,
+          "first_body_ns": 72465.0
+        },
+        {
+          "ttfb_ns": 36604.0,
+          "total_ns": 4576792.0,
+          "bytes": 81920,
+          "first_body_ns": 58065.0
+        },
+        {
+          "ttfb_ns": 38319.0,
+          "total_ns": 4532323.0,
+          "bytes": 81920,
+          "first_body_ns": 64193.0
+        },
+        {
+          "ttfb_ns": 41154.0,
+          "total_ns": 4495152.0,
+          "bytes": 81920,
+          "first_body_ns": 67566.0
+        },
+        {
+          "ttfb_ns": 42404.0,
+          "total_ns": 4507236.0,
+          "bytes": 81920,
+          "first_body_ns": 67481.0
+        },
+        {
+          "ttfb_ns": 38932.0,
+          "total_ns": 4474970.0,
+          "bytes": 81920,
+          "first_body_ns": 60535.0
+        },
+        {
+          "ttfb_ns": 38752.0,
+          "total_ns": 4506943.0,
+          "bytes": 81920,
+          "first_body_ns": 61241.0
+        },
+        {
+          "ttfb_ns": 41630.0,
+          "total_ns": 4484443.0,
+          "bytes": 81920,
+          "first_body_ns": 64777.0
+        },
+        {
+          "ttfb_ns": 41404.0,
+          "total_ns": 5574764.0,
+          "bytes": 81920,
+          "first_body_ns": 68665.0
+        },
+        {
+          "ttfb_ns": 48003.0,
+          "total_ns": 4465160.0,
+          "bytes": 81920,
+          "first_body_ns": 73096.0
+        },
+        {
+          "ttfb_ns": 34767.0,
+          "total_ns": 4489216.0,
+          "bytes": 81920,
+          "first_body_ns": 66880.0
+        },
+        {
+          "ttfb_ns": 39084.0,
+          "total_ns": 4484182.0,
+          "bytes": 81920,
+          "first_body_ns": 59839.0
+        },
+        {
+          "ttfb_ns": 38756.0,
+          "total_ns": 4504462.0,
+          "bytes": 81920,
+          "first_body_ns": 61221.0
+        },
+        {
+          "ttfb_ns": 38965.0,
+          "total_ns": 4580821.0,
+          "bytes": 81920,
+          "first_body_ns": 64258.0
+        },
+        {
+          "ttfb_ns": 35821.0,
+          "total_ns": 4505688.0,
+          "bytes": 81920,
+          "first_body_ns": 59937.0
+        },
+        {
+          "ttfb_ns": 37395.0,
+          "total_ns": 4479627.0,
+          "bytes": 81920,
+          "first_body_ns": 60111.0
+        },
+        {
+          "ttfb_ns": 41164.0,
+          "total_ns": 4468519.0,
+          "bytes": 81920,
+          "first_body_ns": 63577.0
+        },
+        {
+          "ttfb_ns": 42926.0,
+          "total_ns": 4509825.0,
+          "bytes": 81920,
+          "first_body_ns": 66196.0
+        },
+        {
+          "ttfb_ns": 41327.0,
+          "total_ns": 4481579.0,
+          "bytes": 81920,
+          "first_body_ns": 69236.0
+        },
+        {
+          "ttfb_ns": 37097.0,
+          "total_ns": 4483106.0,
+          "bytes": 81920,
+          "first_body_ns": 58242.0
+        },
+        {
+          "ttfb_ns": 45656.0,
+          "total_ns": 4539601.0,
+          "bytes": 81920,
+          "first_body_ns": 72757.0
+        },
+        {
+          "ttfb_ns": 38492.0,
+          "total_ns": 4480902.0,
+          "bytes": 81920,
+          "first_body_ns": 62739.0
+        },
+        {
+          "ttfb_ns": 37650.0,
+          "total_ns": 4461269.0,
+          "bytes": 81920,
+          "first_body_ns": 62604.0
+        },
+        {
+          "ttfb_ns": 34638.0,
+          "total_ns": 4451862.0,
+          "bytes": 81920,
+          "first_body_ns": 54298.0
+        },
+        {
+          "ttfb_ns": 42771.0,
+          "total_ns": 4531747.0,
+          "bytes": 81920,
+          "first_body_ns": 75542.0
+        },
+        {
+          "ttfb_ns": 39161.0,
+          "total_ns": 4521553.0,
+          "bytes": 81920,
+          "first_body_ns": 62068.0
+        },
+        {
+          "ttfb_ns": 38275.0,
+          "total_ns": 4540279.0,
+          "bytes": 81920,
+          "first_body_ns": 69578.0
+        },
+        {
+          "ttfb_ns": 38848.0,
+          "total_ns": 4636323.0,
+          "bytes": 81920,
+          "first_body_ns": 61751.0
+        },
+        {
+          "ttfb_ns": 36855.0,
+          "total_ns": 4477513.0,
+          "bytes": 81920,
+          "first_body_ns": 59274.0
+        },
+        {
+          "ttfb_ns": 41394.0,
+          "total_ns": 4598359.0,
+          "bytes": 81920,
+          "first_body_ns": 66327.0
+        },
+        {
+          "ttfb_ns": 38242.0,
+          "total_ns": 4443880.0,
+          "bytes": 81920,
+          "first_body_ns": 62746.0
+        },
+        {
+          "ttfb_ns": 39416.0,
+          "total_ns": 4572126.0,
+          "bytes": 81920,
+          "first_body_ns": 61466.0
+        },
+        {
+          "ttfb_ns": 39282.0,
+          "total_ns": 4459484.0,
+          "bytes": 81920,
+          "first_body_ns": 61977.0
+        },
+        {
+          "ttfb_ns": 41407.0,
+          "total_ns": 4569400.0,
+          "bytes": 81920,
+          "first_body_ns": 62714.0
+        },
+        {
+          "ttfb_ns": 36532.0,
+          "total_ns": 4524616.0,
+          "bytes": 81920,
+          "first_body_ns": 58317.0
+        },
+        {
+          "ttfb_ns": 35769.0,
+          "total_ns": 4661277.0,
+          "bytes": 81920,
+          "first_body_ns": 61912.0
+        },
+        {
+          "ttfb_ns": 37541.0,
+          "total_ns": 4502098.0,
+          "bytes": 81920,
+          "first_body_ns": 60748.0
+        },
+        {
+          "ttfb_ns": 38665.0,
+          "total_ns": 4573736.0,
+          "bytes": 81920,
+          "first_body_ns": 63345.0
+        },
+        {
+          "ttfb_ns": 39101.0,
+          "total_ns": 4593296.0,
+          "bytes": 81920,
+          "first_body_ns": 60459.0
+        },
+        {
+          "ttfb_ns": 37294.0,
+          "total_ns": 4468325.0,
+          "bytes": 81920,
+          "first_body_ns": 67702.0
+        },
+        {
+          "ttfb_ns": 40483.0,
+          "total_ns": 4608418.0,
+          "bytes": 81920,
+          "first_body_ns": 62613.0
+        },
+        {
+          "ttfb_ns": 40346.0,
+          "total_ns": 4451416.0,
+          "bytes": 81920,
+          "first_body_ns": 61895.0
+        },
+        {
+          "ttfb_ns": 40006.0,
+          "total_ns": 4566979.0,
+          "bytes": 81920,
+          "first_body_ns": 65393.0
+        },
+        {
+          "ttfb_ns": 37925.0,
+          "total_ns": 4557128.0,
+          "bytes": 81920,
+          "first_body_ns": 60402.0
+        },
+        {
+          "ttfb_ns": 36331.0,
+          "total_ns": 4673971.0,
+          "bytes": 81920,
+          "first_body_ns": 63763.0
+        },
+        {
+          "ttfb_ns": 41996.0,
+          "total_ns": 4468047.0,
+          "bytes": 81920,
+          "first_body_ns": 63622.0
+        },
+        {
+          "ttfb_ns": 39947.0,
+          "total_ns": 4480350.0,
+          "bytes": 81920,
+          "first_body_ns": 64931.0
+        },
+        {
+          "ttfb_ns": 37512.0,
+          "total_ns": 4491817.0,
+          "bytes": 81920,
+          "first_body_ns": 59095.0
+        },
+        {
+          "ttfb_ns": 38129.0,
+          "total_ns": 4470509.0,
+          "bytes": 81920,
+          "first_body_ns": 63754.0
+        },
+        {
+          "ttfb_ns": 39212.0,
+          "total_ns": 4546726.0,
+          "bytes": 81920,
+          "first_body_ns": 66253.0
+        },
+        {
+          "ttfb_ns": 35422.0,
+          "total_ns": 4592599.0,
+          "bytes": 81920,
+          "first_body_ns": 57802.0
+        },
+        {
+          "ttfb_ns": 57984.0,
+          "total_ns": 4592261.0,
+          "bytes": 81920,
+          "first_body_ns": 80252.0
+        },
+        {
+          "ttfb_ns": 38141.0,
+          "total_ns": 4454315.0,
+          "bytes": 81920,
+          "first_body_ns": 63998.0
+        },
+        {
+          "ttfb_ns": 37790.0,
+          "total_ns": 4562925.0,
+          "bytes": 81920,
+          "first_body_ns": 60420.0
+        },
+        {
+          "ttfb_ns": 37265.0,
+          "total_ns": 4467795.0,
+          "bytes": 81920,
+          "first_body_ns": 67901.0
+        },
+        {
+          "ttfb_ns": 40535.0,
+          "total_ns": 4593021.0,
+          "bytes": 81920,
+          "first_body_ns": 64048.0
+        },
+        {
+          "ttfb_ns": 37553.0,
+          "total_ns": 4500876.0,
+          "bytes": 81920,
+          "first_body_ns": 62402.0
+        },
+        {
+          "ttfb_ns": 41038.0,
+          "total_ns": 4586997.0,
+          "bytes": 81920,
+          "first_body_ns": 63312.0
+        },
+        {
+          "ttfb_ns": 39459.0,
+          "total_ns": 4460438.0,
+          "bytes": 81920,
+          "first_body_ns": 61141.0
+        },
+        {
+          "ttfb_ns": 39402.0,
+          "total_ns": 4645652.0,
+          "bytes": 81920,
+          "first_body_ns": 70341.0
+        },
+        {
+          "ttfb_ns": 34446.0,
+          "total_ns": 4467896.0,
+          "bytes": 81920,
+          "first_body_ns": 62699.0
+        },
+        {
+          "ttfb_ns": 40040.0,
+          "total_ns": 5620064.0,
+          "bytes": 81920,
+          "first_body_ns": 61635.0
+        },
+        {
+          "ttfb_ns": 56318.0,
+          "total_ns": 4488915.0,
+          "bytes": 81920,
+          "first_body_ns": 82839.0
+        },
+        {
+          "ttfb_ns": 37979.0,
+          "total_ns": 4468718.0,
+          "bytes": 81920,
+          "first_body_ns": 61681.0
+        },
+        {
+          "ttfb_ns": 35845.0,
+          "total_ns": 4489810.0,
+          "bytes": 81920,
+          "first_body_ns": 62963.0
+        },
+        {
+          "ttfb_ns": 39252.0,
+          "total_ns": 4451042.0,
+          "bytes": 81920,
+          "first_body_ns": 61552.0
+        },
+        {
+          "ttfb_ns": 34896.0,
+          "total_ns": 4474505.0,
+          "bytes": 81920,
+          "first_body_ns": 58250.0
+        },
+        {
+          "ttfb_ns": 45382.0,
+          "total_ns": 5683692.0,
+          "bytes": 81920,
+          "first_body_ns": 68718.0
+        },
+        {
+          "ttfb_ns": 51243.0,
+          "total_ns": 4632691.0,
+          "bytes": 81920,
+          "first_body_ns": 74493.0
+        },
+        {
+          "ttfb_ns": 43656.0,
+          "total_ns": 4544938.0,
+          "bytes": 81920,
+          "first_body_ns": 66492.0
+        },
+        {
+          "ttfb_ns": 53245.0,
+          "total_ns": 4774048.0,
+          "bytes": 81920,
+          "first_body_ns": 77047.0
+        },
+        {
+          "ttfb_ns": 33042.0,
+          "total_ns": 4498114.0,
+          "bytes": 81920,
+          "first_body_ns": 59137.0
+        },
+        {
+          "ttfb_ns": 40658.0,
+          "total_ns": 4566042.0,
+          "bytes": 81920,
+          "first_body_ns": 62558.0
+        },
+        {
+          "ttfb_ns": 42913.0,
+          "total_ns": 4644702.0,
+          "bytes": 81920,
+          "first_body_ns": 66253.0
+        },
+        {
+          "ttfb_ns": 37952.0,
+          "total_ns": 4507284.0,
+          "bytes": 81920,
+          "first_body_ns": 59510.0
+        },
+        {
+          "ttfb_ns": 41138.0,
+          "total_ns": 4701738.0,
+          "bytes": 81920,
+          "first_body_ns": 62077.0
+        },
+        {
+          "ttfb_ns": 42494.0,
+          "total_ns": 4525569.0,
+          "bytes": 81920,
+          "first_body_ns": 64778.0
+        },
+        {
+          "ttfb_ns": 38479.0,
+          "total_ns": 4554983.0,
+          "bytes": 81920,
+          "first_body_ns": 66390.0
+        },
+        {
+          "ttfb_ns": 41810.0,
+          "total_ns": 4622394.0,
+          "bytes": 81920,
+          "first_body_ns": 70478.0
+        },
+        {
+          "ttfb_ns": 35499.0,
+          "total_ns": 4569997.0,
+          "bytes": 81920,
+          "first_body_ns": 63977.0
+        },
+        {
+          "ttfb_ns": 44598.0,
+          "total_ns": 4716564.0,
+          "bytes": 81920,
+          "first_body_ns": 68678.0
+        },
+        {
+          "ttfb_ns": 39311.0,
+          "total_ns": 4491896.0,
+          "bytes": 81920,
+          "first_body_ns": 65335.0
+        },
+        {
+          "ttfb_ns": 36439.0,
+          "total_ns": 4596056.0,
+          "bytes": 81920,
+          "first_body_ns": 58246.0
+        },
+        {
+          "ttfb_ns": 55880.0,
+          "total_ns": 4500535.0,
+          "bytes": 81920,
+          "first_body_ns": 79196.0
+        },
+        {
+          "ttfb_ns": 38548.0,
+          "total_ns": 4463197.0,
+          "bytes": 81920,
+          "first_body_ns": 63225.0
+        },
+        {
+          "ttfb_ns": 39213.0,
+          "total_ns": 4560134.0,
+          "bytes": 81920,
+          "first_body_ns": 61890.0
+        },
+        {
+          "ttfb_ns": 36146.0,
+          "total_ns": 4501231.0,
+          "bytes": 81920,
+          "first_body_ns": 67351.0
+        },
+        {
+          "ttfb_ns": 36113.0,
+          "total_ns": 4603466.0,
+          "bytes": 81920,
+          "first_body_ns": 61891.0
+        }
+      ]
+    },
+    {
+      "competitor_id": "h3_quinn",
+      "status": "pending_adapter",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3",
+      "workload": "http3_streaming_get",
+      "payload_bytes": 81920
+    },
+    {
+      "competitor_id": "reqwest_h3",
+      "status": "pending_adapter",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "h3",
+      "workload": "http3_streaming_get",
+      "payload_bytes": 81920
+    },
+    {
+      "competitor_id": "tokio_tungstenite_rfc9220",
+      "status": "unsupported_by_client",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "capability_audit",
+      "protocol": "h3_rfc9220",
+      "workload": "websocket_over_h3_raw_tunnel_echo",
+      "payload_bytes": 1024,
+      "notes": "tokio-tungstenite is an RFC6455-over-H1 client and has no RFC9220/H3 transport here; not a throughput comparator."
+    },
+    {
+      "competitor_id": "reqwest_rfc9220",
+      "status": "unsupported_by_client",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "capability_audit",
+      "protocol": "h3_rfc9220",
+      "workload": "websocket_over_h3_raw_tunnel_echo",
+      "payload_bytes": 1024,
+      "notes": "reqwest can measure H3 HTTP rows but does not expose a native WebSocket/RFC9220 API; not a throughput comparator."
+    },
+    {
+      "competitor_id": "quinn_transport",
+      "status": "pending_adapter",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "quic",
+      "workload": "bidirectional_echo_transport",
+      "payload_bytes": 1024,
+      "notes": "QUIC transport-only echo baseline; not an H3 HTTP or RFC9220 comparator."
+    },
+    {
+      "competitor_id": "s2n_quic_transport",
+      "status": "pending_adapter",
+      "p50_ttfb_ns": null,
+      "p95_ttfb_ns": null,
+      "bytes_per_sec": null,
+      "source": "native_h3_vs_rust_clients_harness",
+      "protocol": "quic",
+      "workload": "bidirectional_echo_transport",
+      "payload_bytes": 1024,
+      "notes": "QUIC transport-only echo baseline; not an H3 HTTP or RFC9220 comparator."
+    }
+  ],
+  "fixture_events": [],
+  "superiority_gate": {
+    "status": "incomplete",
+    "pass": false,
+    "reason": "no_h3_superiority_claim_without_all_required_rows",
+    "fastest_non_specter_h3_client": "tokio_quiche",
+    "no_h3_superiority_claim_without_all_required_rows": true,
+    "required_h3_clients": [
+      "quiche_direct",
+      "tokio_quiche",
+      "h3_quinn",
+      "reqwest_h3"
+    ],
+    "missing_required_rows": [
+      "specter_native",
+      "quiche_direct",
+      "h3_quinn",
+      "reqwest_h3"
+    ],
+    "invalid_required_rows": [],
+    "duplicate_required_rows": []
+  },
+  "rfc9220_full_suite_superiority_gate": {
+    "status": "incomplete",
+    "pass": false,
+    "reason": "no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows",
+    "fastest_non_specter_rfc9220_tunnel_client": null,
+    "no_rfc9220_tunnel_superiority_claim_without_all_required_n100_rows": true,
+    "minimum_sample_count": 100,
+    "required_rfc9220_tunnel_clients": [
+      "specter_native_rfc9220_tunnel",
+      "quiche_direct_rfc9220_tunnel",
+      "tokio_quiche_rfc9220_tunnel",
+      "specter_native_rfc9220_tunnel_close",
+      "quiche_direct_rfc9220_tunnel_close",
+      "tokio_quiche_rfc9220_tunnel_close",
+      "specter_native_rfc9220_tunnel_mixed",
+      "quiche_direct_rfc9220_tunnel_mixed",
+      "tokio_quiche_rfc9220_tunnel_mixed"
+    ],
+    "missing_required_rfc9220_tunnel_rows": [
+      "specter_native_rfc9220_tunnel",
+      "quiche_direct_rfc9220_tunnel",
+      "tokio_quiche_rfc9220_tunnel",
+      "specter_native_rfc9220_tunnel_close",
+      "quiche_direct_rfc9220_tunnel_close",
+      "tokio_quiche_rfc9220_tunnel_close",
+      "specter_native_rfc9220_tunnel_mixed",
+      "quiche_direct_rfc9220_tunnel_mixed",
+      "tokio_quiche_rfc9220_tunnel_mixed"
+    ],
+    "under_sampled_required_rfc9220_tunnel_rows": [],
+    "missing_required_rfc9220_tunnel_metrics": [],
+    "invalid_required_rfc9220_tunnel_rows": [],
+    "duplicate_required_rfc9220_tunnel_rows": [],
+    "workload_sub_gates": [
+      {
+        "workload": "echo",
+        "specter_id": "specter_native_rfc9220_tunnel",
+        "pass": false,
+        "reason": "missing_specter_workload_metrics",
+        "failing_comparators": [
+          "quiche_direct_rfc9220_tunnel",
+          "tokio_quiche_rfc9220_tunnel"
+        ]
+      },
+      {
+        "workload": "close_fin",
+        "specter_id": "specter_native_rfc9220_tunnel_close",
+        "pass": false,
+        "reason": "missing_specter_workload_metrics",
+        "failing_comparators": [
+          "quiche_direct_rfc9220_tunnel_close",
+          "tokio_quiche_rfc9220_tunnel_close"
+        ]
+      },
+      {
+        "workload": "mixed",
+        "specter_id": "specter_native_rfc9220_tunnel_mixed",
+        "pass": false,
+        "reason": "missing_specter_workload_metrics",
+        "failing_comparators": [
+          "quiche_direct_rfc9220_tunnel_mixed",
+          "tokio_quiche_rfc9220_tunnel_mixed"
+        ]
+      }
+    ]
+  }
+}
