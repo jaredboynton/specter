@@ -93,23 +93,27 @@ if has_libs "$TARGET_BUILD_DIR"; then
     BORING_LINK_DIR="$TARGET_BUILD_DIR"
 elif has_libs "$TARGET_LIB_DIR"; then
     BORING_LINK_DIR="$TARGET_LIB_DIR"
+elif [[ -x "$PROJECT_ROOT/scripts/install-boringssl-prebuilt.sh" ]]; then
+    echo "Installing external BoringSSL prebuilt for $TARGET" >&2
+    "$PROJECT_ROOT/scripts/install-boringssl-prebuilt.sh" --manifest-path Cargo.toml "$TARGET" || {
+        echo "Install with: ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml $TARGET" >&2
+        return 1 2>/dev/null || exit 1
+    }
+    if has_libs "$TARGET_BUILD_DIR"; then
+        BORING_LINK_DIR="$TARGET_BUILD_DIR"
+    else
+        echo "Install completed but no libraries were found under $TARGET_BUILD_DIR" >&2
+        return 1 2>/dev/null || exit 1
+    fi
 else
     echo "Warning: No prebuilt BoringSSL for $TARGET" >&2
-    echo "Available targets:" >&2
-    for d in "$LIB_DIR"/*/; do
-        [[ "$(basename "$d")" == "include" ]] && continue
-        if has_libs "$d/build" || has_libs "$d"; then
-            echo "  $(basename "$d")" >&2
-        fi
-    done
-    echo "" >&2
-    echo "Build with: ./scripts/build-boringssl.sh $TARGET" >&2
+    echo "Install with: ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml $TARGET" >&2
     return 1 2>/dev/null || exit 1
 fi
 
 if [[ ! -d "$INCLUDE_DIR" ]]; then
     echo "Warning: No BoringSSL headers found at $INCLUDE_DIR" >&2
-    echo "Run: ./scripts/build-boringssl.sh to build headers" >&2
+    echo "Run: ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml $TARGET" >&2
     return 1 2>/dev/null || exit 1
 fi
 

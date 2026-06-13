@@ -15,9 +15,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${REPO_ROOT}/target/validation/integration"
 mkdir -p "${OUT_DIR}"
 
-: "${BORING_BSSL_PATH:=/Users/jaredboynton/boringssl/aarch64-apple-darwin/build}"
-: "${BORING_BSSL_INCLUDE_PATH:=/Users/jaredboynton/boringssl/include}"
-export BORING_BSSL_PATH BORING_BSSL_INCLUDE_PATH
+TARGET="$("${REPO_ROOT}/scripts/native-rust-target.sh")"
+. "${REPO_ROOT}/scripts/lib-bssl-env.sh" "$TARGET"
 
 run_smoke() {
     local label="$1"; shift

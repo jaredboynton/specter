@@ -1,8 +1,10 @@
 #!/bin/bash
-# Pre-build BoringSSL for multiple targets using boring-sys's vendored source
+# Maintainer helper: build BoringSSL from boring-sys's vendored source.
 #
 # This script builds BoringSSL static libraries compatible with boring-sys.
 # It uses the EXACT BoringSSL source that boring-sys bundles to ensure ABI compatibility.
+# Normal Warpsock builds should use scripts/install-boringssl-prebuilt.sh, which
+# installs packages published by https://github.com/jaredboynton/bssl-prebuild.
 #
 # Structure created:
 #   lib/boringssl/
@@ -18,7 +20,7 @@
 #
 # Usage:
 #   ./scripts/build-boringssl.sh [target...]
-#   ./scripts/build-boringssl.sh                    # Build all targets
+#   ./scripts/build-boringssl.sh                    # Build all targets from source
 #   ./scripts/build-boringssl.sh aarch64-apple-darwin
 #
 # Prerequisites:
@@ -373,6 +375,8 @@ print_usage() {
 Usage: ./scripts/build-boringssl.sh [OPTIONS] [TARGET...]
 
 Build BoringSSL static libraries from boring-sys's vendored source.
+Normal Warpsock development should install external prebuilts instead:
+    ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml <target>
 
 OPTIONS:
     --help          Show this help

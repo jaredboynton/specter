@@ -1,6 +1,7 @@
 # Build artifacts
 target/
 .boringssl-build/
+lib/boringssl/
 *.egg-info/
 .boringssl-src/
 __pycache__/

@@ -384,12 +384,28 @@ Warpsock is validated against production fingerprinting services:
 
 Local/CI checks:
 
-- `cargo test -p warpsock` exercises the cookie jar, header filtering, and transport layers.
-- In a repository checkout, `cargo run --example fingerprint_validation` hits ScrapFly, BrowserLeaks, tls.peet.ws, and Cloudflare to confirm TLS/HTTP/2/HTTP/3 fingerprints.
-- In a repository checkout, `cargo run --example protocol_test -- --verbose` walks through HTTP/1.1 preference, HTTP/2 pooling, HTTP/3 only, and connection header filtering. Pass `--target example.com` to test a custom origin.
-- `cargo clippy -p warpsock -- -D warnings` stays clean to make CI fail-fast on regressions.
+- `just check-lib` type-checks the library and uses the repo BoringSSL prebuild resolver.
+- `just test-one <binary>` runs one integration-test binary without compiling the full test matrix.
+- `just test` runs the full test suite.
+- `scripts/run-public-endpoint-compatibility.sh` hits ScrapFly, BrowserLeaks, tls.peet.ws, Cloudflare, and nghttp2 for live compatibility smoke checks. Network outages are recorded as compatibility skips, not benchmark input.
 
 ## Development
+
+### BoringSSL Prebuilds
+
+Warpsock uses BoringSSL, but the compiled BoringSSL artifacts are not tracked in this repository. The build and test scripts resolve BoringSSL from:
+
+- `BORING_BSSL_PATH` / `BORING_BSSL_INCLUDE_PATH`, if already exported.
+- `${BORING_BSSL_PREBUILT_ROOT:-$HOME/boringssl}`, for a user-wide cache.
+- `lib/boringssl/`, an ignored repo-local cache populated from external packages.
+
+The repo-local cache is installed from [jaredboynton/bssl-prebuild](https://github.com/jaredboynton/bssl-prebuild), usually via npm packages named `@jaredboynton/bssl-prebuild-<target>`. Install the native target explicitly with:
+
+```bash
+./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml "$(./scripts/native-rust-target.sh)"
+```
+
+The version is resolved from `boring-sys` in `Cargo.lock` and maps to a `bssl-prebuild` release tag such as `v4.22.0`. Set `BORING_BSSL_AUTO_INSTALL=0` if you want scripts to warn instead of installing the missing prebuild automatically.
 
 ### Pre-commit Hooks
 

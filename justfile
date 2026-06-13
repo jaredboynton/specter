@@ -61,7 +61,7 @@ zigbuild target="aarch64-unknown-linux-gnu":
         exit 1
     fi
 
-    # Resolve prebuilt BoringSSL: env var -> ~/boringssl -> lib/boringssl -> from-source.
+    # Resolve external BoringSSL prebuilds into the ignored lib/boringssl cache.
     # Shared helper covers all four cargo recipes; see scripts/lib-bssl-env.sh.
     . "$(pwd)/scripts/lib-bssl-env.sh" "$TARGET"
 
@@ -78,7 +78,7 @@ zigbuild target="aarch64-unknown-linux-gnu":
 
     echo "Cross-compiling for $TARGET with cargo-zigbuild..."
     echo "  CC=$CC"
-    echo "  BORING_BSSL_PATH=${BORING_BSSL_PATH:-<not set, building from source>}"
+    echo "  BORING_BSSL_PATH=${BORING_BSSL_PATH:-<not set; will fall back to boring-sys source build>}"
     
     cargo zigbuild --locked --release --target "$TARGET" --lib
 
@@ -139,10 +139,20 @@ setup-zigbuild:
     echo "  just zigbuild                           # Linux ARM64"
     echo "  just zigbuild x86_64-unknown-linux-gnu  # Linux x86_64"
 
-# Build prebuilt BoringSSL libraries for all targets (or the listed targets).
+# Install external BoringSSL prebuilds for the native target or listed targets.
 [group('setup')]
 build-boringssl *TARGETS:
-    ./scripts/build-boringssl.sh {{ TARGETS }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    targets=( {{ TARGETS }} )
+    if [[ "${#targets[@]}" -eq 0 ]]; then
+        targets=("$(./scripts/native-rust-target.sh)")
+    fi
+
+    for target in "${targets[@]}"; do
+        ./scripts/install-boringssl-prebuilt.sh --manifest-path Cargo.toml "$target"
+    done
 
 # Fast incremental lib check (avoids 70+ integration-test crates)
 [group('build')]
@@ -341,7 +351,7 @@ check:
 # If disk pressure becomes real, use the targeted recipe below or remove
 # `target/debug/incremental` directly.
 
-# Clean BoringSSL build cache (not prebuilt libs in lib/boringssl/)
+# Clean source-build scratch cache. Prebuilts live in ignored lib/boringssl/.
 [group('cleanup')]
 clean-boringssl-cache:
     rm -rf .boringssl-build
