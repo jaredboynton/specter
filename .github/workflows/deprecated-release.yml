@@ -145,7 +145,22 @@ jobs:
           set -euo pipefail
           npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN"
           message="Renamed to Warpsock. Install warpsock instead."
-          npm deprecate 'specters@*' "$message"
+          deprecate_package() {
+            local package="$1"
+            local log
+            log="$(mktemp)"
+            if npm deprecate "$package@*" "$message" 2>&1 | tee "$log"; then
+              return 0
+            fi
+            if [[ "$(npm view "$package" deprecated --json 2>/dev/null)" == "\"$message\"" ]]; then
+              echo "$package is already deprecated with the expected message; treating as success"
+              return 0
+            fi
+            cat "$log" >&2
+            return 1
+          }
+
+          deprecate_package specters
           for package in specters-darwin-arm64 specters-darwin-x64 specters-linux-arm64-gnu specters-linux-x64-gnu; do
-            npm deprecate "$package@*" "$message"
+            deprecate_package "$package"
           done
