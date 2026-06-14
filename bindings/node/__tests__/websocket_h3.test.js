@@ -20,6 +20,7 @@ describe('WebSocketH3Builder', () => {
     const builder = client.websocketH3('wss://example.test/tunnel');
 
     expect(builder.header('x-trace-id', 'abc')).toBe(builder);
+    expect(builder.header('Sec-WebSocket-Extensions', 'permessage-deflate')).toBe(builder);
     expect(builder.headers([['x-mode', 'raw']])).toBe(builder);
     expect(builder.subprotocol('graphql-transport-ws')).toBe(builder);
     expect(builder.connectTimeout(1.5)).toBe(builder);
@@ -34,7 +35,6 @@ describe('WebSocketH3Builder', () => {
     'Host',
     'Sec-WebSocket-Key',
     'Sec-WebSocket-Accept',
-    'Sec-WebSocket-Extensions',
   ])('rejects RFC 9220 forbidden header %s', (headerName) => {
     const builder = client.websocketH3('wss://example.test/tunnel');
 
@@ -55,6 +55,7 @@ describe('WebSocketH3Builder', () => {
 
     expect(builder.header('Sec-WebSocket-Protocol', 'graphql-transport-ws')).toBe(builder);
     expect(builder.header('Sec-WebSocket-Version', '13')).toBe(builder);
+    expect(builder.header('Sec-WebSocket-Extensions', 'permessage-deflate')).toBe(builder);
   });
 
   test('does not expose RFC 6455 framed message methods', () => {

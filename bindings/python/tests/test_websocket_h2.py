@@ -9,7 +9,6 @@ import warpsock
 H1_WEBSOCKET_ONLY_HEADERS = [
     "Sec-WebSocket-Key",
     "Sec-WebSocket-Accept",
-    "Sec-WebSocket-Extensions",
     "Sec-WebSocket-Version",
     "Connection",
     "Upgrade",
@@ -29,6 +28,7 @@ class TestWebSocketH2Api:
         builder = client.websocket_h2("wss://example.test/tunnel")
 
         assert builder.header("Origin", "https://example.test") is None
+        assert builder.header("Sec-WebSocket-Extensions", "permessage-deflate") is None
         assert builder.headers([("X-Test", "1")]) is None
 
     @pytest.mark.asyncio

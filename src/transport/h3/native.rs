@@ -437,12 +437,7 @@ pub fn build_websocket_connect_headers(
 
         if matches!(
             lower.as_str(),
-            "connection"
-                | "upgrade"
-                | "host"
-                | "sec-websocket-key"
-                | "sec-websocket-accept"
-                | "sec-websocket-extensions"
+            "connection" | "upgrade" | "host" | "sec-websocket-key" | "sec-websocket-accept"
         ) {
             return Err(Error::WebSocketUnsupported(format!(
                 "header {name} is not allowed on RFC 9220 WebSocket over HTTP/3"

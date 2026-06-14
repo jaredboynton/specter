@@ -1,6 +1,7 @@
 use bytes::{Buf, Bytes, BytesMut};
 
 use crate::websocket::error::{WebSocketError, WebSocketResult};
+use crate::websocket::extension::{PermessageDeflateDecoder, WebSocketExtensions};
 use crate::websocket::message::{CloseFrame, Message};
 
 /// CSPRNG-backed source of WebSocket masking keys.
@@ -100,19 +101,29 @@ impl OpCode {
 #[derive(Debug, Clone)]
 pub(crate) struct Frame {
     pub fin: bool,
+    pub rsv1: bool,
     pub opcode: OpCode,
     pub payload: Bytes,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct FrameDecoder {
     fragments: BytesMut,
     fragmented_opcode: Option<OpCode>,
+    fragmented_compressed: bool,
+    permessage_deflate: Option<PermessageDeflateDecoder>,
 }
 
 impl FrameDecoder {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn with_extensions(extensions: WebSocketExtensions) -> Self {
+        Self {
+            fragments: BytesMut::new(),
+            fragmented_opcode: None,
+            fragmented_compressed: false,
+            permessage_deflate: extensions
+                .permessage_deflate
+                .map(PermessageDeflateDecoder::new),
+        }
     }
 
     #[inline]
@@ -131,13 +142,21 @@ impl FrameDecoder {
                     ));
                 }
                 if frame.fin {
-                    return self.data_message(url, frame.opcode, frame.payload, config);
+                    let payload = self.maybe_decompress(url, frame.rsv1, frame.payload)?;
+                    return self.data_message(url, frame.opcode, payload, config);
                 }
                 self.fragmented_opcode = Some(frame.opcode);
+                self.fragmented_compressed = frame.rsv1;
                 self.push_fragment(url, frame.payload, config)?;
                 Ok(None)
             }
             OpCode::Continuation => {
+                if frame.rsv1 {
+                    return Err(WebSocketError::protocol(
+                        url,
+                        "continuation frame must not set RSV1 for permessage-deflate",
+                    ));
+                }
                 let opcode = self.fragmented_opcode.ok_or_else(|| {
                     WebSocketError::protocol(url, "continuation without active fragmented message")
                 })?;
@@ -146,16 +165,45 @@ impl FrameDecoder {
                     return Ok(None);
                 }
                 self.fragmented_opcode = None;
+                let compressed = std::mem::take(&mut self.fragmented_compressed);
                 let payload = self.fragments.split().freeze();
+                let payload = self.maybe_decompress(url, compressed, payload)?;
                 self.data_message(url, opcode, payload, config)
             }
-            OpCode::Close => Ok(Some(Message::Close(CloseFrame::decode(
-                url,
-                &frame.payload,
-            )?))),
-            OpCode::Ping => Ok(Some(Message::Ping(frame.payload))),
-            OpCode::Pong => Ok(Some(Message::Pong(frame.payload))),
+            OpCode::Close => {
+                reject_control_rsv1(url, frame.rsv1)?;
+                Ok(Some(Message::Close(CloseFrame::decode(
+                    url,
+                    &frame.payload,
+                )?)))
+            }
+            OpCode::Ping => {
+                reject_control_rsv1(url, frame.rsv1)?;
+                Ok(Some(Message::Ping(frame.payload)))
+            }
+            OpCode::Pong => {
+                reject_control_rsv1(url, frame.rsv1)?;
+                Ok(Some(Message::Pong(frame.payload)))
+            }
         }
+    }
+
+    fn maybe_decompress(
+        &mut self,
+        url: &crate::url::Url,
+        compressed: bool,
+        payload: Bytes,
+    ) -> WebSocketResult<Bytes> {
+        if !compressed {
+            return Ok(payload);
+        }
+        let Some(decoder) = self.permessage_deflate.as_mut() else {
+            return Err(WebSocketError::protocol(
+                url,
+                "RSV1 is set but permessage-deflate was not negotiated",
+            ));
+        };
+        Ok(Bytes::from(decoder.decompress(url, &payload)?))
     }
 
     fn push_fragment(
@@ -212,6 +260,17 @@ pub(crate) fn encode_frame_into(
     encode_frame_append(opcode, payload, mask_rng, out);
 }
 
+#[inline]
+pub(crate) fn encode_frame_into_with_rsv1(
+    opcode: OpCode,
+    payload: &[u8],
+    mask_rng: &mut MaskRng,
+    out: &mut BytesMut,
+) {
+    out.clear();
+    encode_frame_append_with_rsv1(opcode, payload, mask_rng, out);
+}
+
 /// Append a masked frame to the existing contents of `out` without clearing
 /// it first. Lets a batched-send path encode multiple frames into a single
 /// contiguous buffer and issue one `write_all`, saving the per-frame memcpy
@@ -223,8 +282,29 @@ pub(crate) fn encode_frame_append(
     mask_rng: &mut MaskRng,
     out: &mut BytesMut,
 ) {
+    encode_frame_append_inner(opcode, payload, false, mask_rng, out);
+}
+
+#[inline]
+pub(crate) fn encode_frame_append_with_rsv1(
+    opcode: OpCode,
+    payload: &[u8],
+    mask_rng: &mut MaskRng,
+    out: &mut BytesMut,
+) {
+    encode_frame_append_inner(opcode, payload, true, mask_rng, out);
+}
+
+#[inline]
+fn encode_frame_append_inner(
+    opcode: OpCode,
+    payload: &[u8],
+    rsv1: bool,
+    mask_rng: &mut MaskRng,
+    out: &mut BytesMut,
+) {
     out.reserve(14 + payload.len());
-    out.extend_from_slice(&[0x80 | opcode as u8]);
+    out.extend_from_slice(&[0x80 | if rsv1 { 0x40 } else { 0 } | opcode as u8]);
 
     // Client frames are always masked per RFC 6455 §5.3.
     let mask_bit = 0x80_u8;
@@ -277,6 +357,7 @@ pub(crate) fn decode_frame(
     url: &crate::url::Url,
     buffer: &mut BytesMut,
     config: FrameConfig,
+    extensions: WebSocketExtensions,
 ) -> WebSocketResult<Option<Frame>> {
     if buffer.len() < 2 {
         return Ok(None);
@@ -284,17 +365,32 @@ pub(crate) fn decode_frame(
 
     let b0 = buffer[0];
     let b1 = buffer[1];
-    if b0 & 0x70 != 0 {
+    if b0 & 0x30 != 0 {
         return Err(WebSocketError::protocol(
             url,
-            "RSV bits are set but no extensions are negotiated",
+            "RSV2/RSV3 bits are set but no extensions are negotiated",
         ));
     }
 
     let fin = b0 & 0x80 != 0;
+    let rsv1 = b0 & 0x40 != 0;
     let opcode = OpCode::from_u8(b0 & 0x0f).ok_or_else(|| {
         WebSocketError::protocol(url, format!("unsupported opcode {}", b0 & 0x0f))
     })?;
+    if rsv1 {
+        if !extensions.has_permessage_deflate() {
+            return Err(WebSocketError::protocol(
+                url,
+                "RSV bits are set but no extensions are negotiated",
+            ));
+        }
+        if opcode.is_control() || matches!(opcode, OpCode::Continuation) {
+            return Err(WebSocketError::protocol(
+                url,
+                "RSV1 is only valid on the first data frame for permessage-deflate",
+            ));
+        }
+    }
     let masked = b1 & 0x80 != 0;
     if masked {
         return Err(WebSocketError::protocol(
@@ -373,7 +469,18 @@ pub(crate) fn decode_frame(
     let payload = buffer.split_to(payload_len_usize).freeze();
     Ok(Some(Frame {
         fin,
+        rsv1,
         opcode,
         payload,
     }))
+}
+
+fn reject_control_rsv1(url: &crate::url::Url, rsv1: bool) -> WebSocketResult<()> {
+    if rsv1 {
+        return Err(WebSocketError::protocol(
+            url,
+            "control frame must not set RSV1",
+        ));
+    }
+    Ok(())
 }

@@ -20,6 +20,7 @@ describe('WebSocketH2Builder', () => {
     const builder = client.websocketH2('wss://example.test/tunnel');
 
     expect(builder.header('x-trace-id', 'abc')).toBe(builder);
+    expect(builder.header('Sec-WebSocket-Extensions', 'permessage-deflate')).toBe(builder);
     expect(builder.headers([['x-mode', 'raw']])).toBe(builder);
     expect(builder.subprotocol('graphql-transport-ws')).toBe(builder);
     expect(builder.connectTimeout(1.5)).toBe(builder);
@@ -30,7 +31,6 @@ describe('WebSocketH2Builder', () => {
   test.each([
     'Sec-WebSocket-Key',
     'Sec-WebSocket-Accept',
-    'Sec-WebSocket-Extensions',
     'Sec-WebSocket-Version',
     'Connection',
     'Upgrade',

@@ -35,6 +35,7 @@ impl WsRequest {
 #[derive(Debug, Clone)]
 pub struct CapturedFrame {
     pub fin: bool,
+    pub rsv1: bool,
     pub opcode: u8,
     pub masked: bool,
     pub payload: Vec<u8>,
@@ -279,6 +280,7 @@ where
     stream.read_exact(&mut header).await?;
 
     let fin = header[0] & 0x80 != 0;
+    let rsv1 = header[0] & 0x40 != 0;
     let opcode = header[0] & 0x0f;
     let masked = header[1] & 0x80 != 0;
     let mut len = (header[1] & 0x7f) as u64;
@@ -312,6 +314,7 @@ where
 
     Ok(CapturedFrame {
         fin,
+        rsv1,
         opcode,
         masked,
         payload,

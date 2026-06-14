@@ -36,6 +36,7 @@ impl WebSocketBuilder {
                 subprotocols: Vec::new(),
                 max_message_size: None,
                 max_frame_size: None,
+                permessage_deflate: false,
                 connect_timeout: None,
                 handshake_timeout: None,
                 read_timeout: None,
@@ -77,6 +78,13 @@ impl WebSocketBuilder {
     #[napi]
     pub fn subprotocols(&mut self, values: Vec<String>) -> Result<&Self> {
         self.state_mut()?.subprotocols.extend(values);
+        Ok(self)
+    }
+
+    /// Offer permessage-deflate compression in the opening handshake.
+    #[napi(js_name = "permessageDeflate")]
+    pub fn permessage_deflate(&mut self) -> Result<&Self> {
+        self.state_mut()?.permessage_deflate = true;
         Ok(self)
     }
 
@@ -162,6 +170,7 @@ struct WebSocketBuilderState {
     subprotocols: Vec<String>,
     max_message_size: Option<usize>,
     max_frame_size: Option<usize>,
+    permessage_deflate: bool,
     connect_timeout: Option<Duration>,
     handshake_timeout: Option<Duration>,
     read_timeout: Option<Duration>,
@@ -176,6 +185,9 @@ impl WebSocketBuilderState {
         }
         if !self.subprotocols.is_empty() {
             builder = builder.subprotocols(self.subprotocols);
+        }
+        if self.permessage_deflate {
+            builder = builder.permessage_deflate();
         }
         if let Some(bytes) = self.max_message_size {
             builder = builder.max_message_size(bytes);

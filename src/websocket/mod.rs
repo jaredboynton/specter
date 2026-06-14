@@ -3,6 +3,7 @@
 mod client;
 mod connection;
 mod error;
+mod extension;
 mod frame;
 mod handshake;
 mod message;

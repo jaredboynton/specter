@@ -90,9 +90,9 @@ fn rfc8441_extended_connect_rejects_user_pseudo_headers() {
 }
 
 #[test]
-fn rfc8441_extended_connect_rejects_extensions_until_shared_codec_supports_them() {
+fn rfc8441_extended_connect_allows_websocket_extensions_lowercased() {
     let mut encoder = HpackEncoder::chrome();
-    let err = encoder
+    let block = encoder
         .encode_extended_connect_websocket(
             "example.com",
             "https",
@@ -102,9 +102,13 @@ fn rfc8441_extended_connect_rejects_extensions_until_shared_codec_supports_them(
                 "permessage-deflate".to_string(),
             )],
         )
-        .expect_err("extensions require shared RFC 6455 extension support");
+        .expect("RFC 8441 can carry WebSocket extension negotiation metadata");
 
-    assert!(err.contains("sec-websocket-extensions"));
+    let headers = decode(&block);
+    assert!(headers.contains(&(
+        "sec-websocket-extensions".to_string(),
+        "permessage-deflate".to_string()
+    )));
 }
 
 #[test]

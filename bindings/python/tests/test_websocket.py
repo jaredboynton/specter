@@ -44,6 +44,7 @@ async def test_websocket_round_trip_and_controlled_headers():
         assert builder.subprotocol("fallback.v1") is None
         assert builder.max_message_size(1024) is None
         assert builder.max_frame_size(1024) is None
+        assert builder.permessage_deflate() is None
         assert builder.connect_timeout(5.0) is None
         assert builder.handshake_timeout(5.0) is None
         assert builder.read_timeout(5.0) is None

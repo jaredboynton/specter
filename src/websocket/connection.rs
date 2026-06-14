@@ -8,9 +8,10 @@ use tokio::time::timeout as tokio_timeout;
 
 use crate::transport::connector::MaybeHttpsStream;
 use crate::websocket::error::{WebSocketError, WebSocketResult};
+use crate::websocket::extension::{PermessageDeflateEncoder, WebSocketExtensions};
 use crate::websocket::frame::{
-    decode_frame, encode_frame_append, encode_frame_into, Frame, FrameConfig, FrameDecoder,
-    MaskRng, OpCode,
+    decode_frame, encode_frame_append, encode_frame_append_with_rsv1, encode_frame_into,
+    encode_frame_into_with_rsv1, Frame, FrameConfig, FrameDecoder, MaskRng, OpCode,
 };
 use crate::websocket::message::{CloseFrame, Message, PreparedMessage};
 use crate::websocket::WebSocketConfig;
@@ -66,9 +67,11 @@ pub struct WebSocket {
     read_buffer: BytesMut,
     write_buffer: BytesMut,
     frame_config: FrameConfig,
+    extensions: WebSocketExtensions,
     read_timeout: Option<Duration>,
     write_timeout: Option<Duration>,
     decoder: FrameDecoder,
+    deflate_encoder: Option<PermessageDeflateEncoder>,
     mask_rng: MaskRng,
     close_sent: bool,
     close_received: bool,
@@ -80,6 +83,7 @@ pub struct WebSocketReader {
     url: Url,
     read_buffer: BytesMut,
     frame_config: FrameConfig,
+    extensions: WebSocketExtensions,
     read_timeout: Option<Duration>,
     decoder: FrameDecoder,
     close_received: bool,
@@ -92,6 +96,7 @@ pub struct WebSocketWriter {
     write_buffer: BytesMut,
     frame_config: FrameConfig,
     write_timeout: Option<Duration>,
+    deflate_encoder: Option<PermessageDeflateEncoder>,
     mask_rng: MaskRng,
     close_sent: bool,
 }
@@ -103,6 +108,7 @@ impl WebSocket {
         protocol: Option<String>,
         config: WebSocketConfig,
         initial_read_buffer: Bytes,
+        extensions: WebSocketExtensions,
     ) -> Self {
         // Pre-allocate the read buffer so the first frame doesn't pay the
         // grow-from-zero cost. Carries over any bytes left in the handshake
@@ -117,9 +123,13 @@ impl WebSocket {
             read_buffer,
             write_buffer: BytesMut::with_capacity(READ_CHUNK_SIZE),
             frame_config: FrameConfig::new(config.max_frame_size, config.max_message_size),
+            extensions,
             read_timeout: config.read_timeout,
             write_timeout: config.write_timeout,
-            decoder: FrameDecoder::new(),
+            decoder: FrameDecoder::with_extensions(extensions),
+            deflate_encoder: extensions
+                .permessage_deflate
+                .map(PermessageDeflateEncoder::new),
             mask_rng: MaskRng::new(),
             close_sent: false,
             close_received: false,
@@ -141,6 +151,7 @@ impl WebSocket {
             url: self.url.clone(),
             read_buffer: self.read_buffer,
             frame_config: self.frame_config,
+            extensions: self.extensions,
             read_timeout: self.read_timeout,
             decoder: self.decoder,
             close_received: self.close_received,
@@ -151,6 +162,7 @@ impl WebSocket {
             write_buffer: self.write_buffer,
             frame_config: self.frame_config,
             write_timeout: self.write_timeout,
+            deflate_encoder: self.deflate_encoder,
             mask_rng: self.mask_rng,
             close_sent: self.close_sent,
         };
@@ -203,13 +215,19 @@ impl WebSocket {
             &mut self.stream,
             &mut self.read_buffer,
             self.frame_config,
+            self.extensions,
         )
         .await
     }
 
     pub async fn next(&mut self) -> WebSocketResult<Option<Message>> {
         loop {
-            let frame = match decode_frame(&self.url, &mut self.read_buffer, self.frame_config) {
+            let frame = match decode_frame(
+                &self.url,
+                &mut self.read_buffer,
+                self.frame_config,
+                self.extensions,
+            ) {
                 Ok(frame) => frame,
                 Err(error) => return Err(self.best_effort_close_for_error(error).await),
             };
@@ -268,8 +286,18 @@ impl WebSocket {
     }
 
     async fn write_frame(&mut self, opcode: OpCode, payload: &[u8]) -> WebSocketResult<()> {
-        validate_outbound_payload(&self.url, self.frame_config, opcode, payload)?;
-        encode_frame_into(opcode, payload, &mut self.mask_rng, &mut self.write_buffer);
+        encode_outbound_frame(
+            OutboundFrameEncoder {
+                url: &self.url,
+                frame_config: self.frame_config,
+                deflate_encoder: &mut self.deflate_encoder,
+                mask_rng: &mut self.mask_rng,
+                out: &mut self.write_buffer,
+            },
+            opcode,
+            payload,
+            true,
+        )?;
         Self::io_with_timeout(
             &self.url,
             self.write_timeout,
@@ -294,8 +322,18 @@ impl WebSocket {
                 PreparedMessage::Text(bytes) => (OpCode::Text, bytes.as_ref()),
                 PreparedMessage::Binary(bytes) => (OpCode::Binary, bytes.as_ref()),
             };
-            validate_outbound_payload(&self.url, self.frame_config, opcode, payload)?;
-            encode_frame_append(opcode, payload, &mut self.mask_rng, &mut self.write_buffer);
+            encode_outbound_frame(
+                OutboundFrameEncoder {
+                    url: &self.url,
+                    frame_config: self.frame_config,
+                    deflate_encoder: &mut self.deflate_encoder,
+                    mask_rng: &mut self.mask_rng,
+                    out: &mut self.write_buffer,
+                },
+                opcode,
+                payload,
+                false,
+            )?;
         }
         if self.write_buffer.is_empty() {
             return Ok(());
@@ -373,12 +411,13 @@ impl WebSocket {
         stream: &mut S,
         read_buffer: &mut BytesMut,
         frame_config: FrameConfig,
+        extensions: WebSocketExtensions,
     ) -> WebSocketResult<Option<WebSocketFrame>>
     where
         S: tokio::io::AsyncRead + Unpin,
     {
         loop {
-            if let Some(frame) = decode_frame(url, read_buffer, frame_config)? {
+            if let Some(frame) = decode_frame(url, read_buffer, frame_config, extensions)? {
                 return Ok(Some(WebSocketFrame {
                     fin: frame.fin,
                     opcode: frame.opcode.into(),
@@ -403,13 +442,19 @@ impl WebSocketReader {
             &mut self.stream,
             &mut self.read_buffer,
             self.frame_config,
+            self.extensions,
         )
         .await
     }
 
     pub async fn next(&mut self) -> WebSocketResult<Option<Message>> {
         loop {
-            let frame = decode_frame(&self.url, &mut self.read_buffer, self.frame_config)?;
+            let frame = decode_frame(
+                &self.url,
+                &mut self.read_buffer,
+                self.frame_config,
+                self.extensions,
+            )?;
             if let Some(frame) = frame {
                 let message = self
                     .decoder
@@ -499,8 +544,18 @@ impl WebSocketWriter {
     }
 
     async fn write_frame(&mut self, opcode: OpCode, payload: &[u8]) -> WebSocketResult<()> {
-        validate_outbound_payload(&self.url, self.frame_config, opcode, payload)?;
-        encode_frame_into(opcode, payload, &mut self.mask_rng, &mut self.write_buffer);
+        encode_outbound_frame(
+            OutboundFrameEncoder {
+                url: &self.url,
+                frame_config: self.frame_config,
+                deflate_encoder: &mut self.deflate_encoder,
+                mask_rng: &mut self.mask_rng,
+                out: &mut self.write_buffer,
+            },
+            opcode,
+            payload,
+            true,
+        )?;
         WebSocket::io_with_timeout(
             &self.url,
             self.write_timeout,
@@ -524,8 +579,18 @@ impl WebSocketWriter {
                 PreparedMessage::Text(bytes) => (OpCode::Text, bytes.as_ref()),
                 PreparedMessage::Binary(bytes) => (OpCode::Binary, bytes.as_ref()),
             };
-            validate_outbound_payload(&self.url, self.frame_config, opcode, payload)?;
-            encode_frame_append(opcode, payload, &mut self.mask_rng, &mut self.write_buffer);
+            encode_outbound_frame(
+                OutboundFrameEncoder {
+                    url: &self.url,
+                    frame_config: self.frame_config,
+                    deflate_encoder: &mut self.deflate_encoder,
+                    mask_rng: &mut self.mask_rng,
+                    out: &mut self.write_buffer,
+                },
+                opcode,
+                payload,
+                false,
+            )?;
         }
         if self.write_buffer.is_empty() {
             return Ok(());
@@ -560,6 +625,58 @@ impl WebSocketWriter {
         self.close_sent = true;
         Ok(())
     }
+}
+
+struct OutboundFrameEncoder<'a> {
+    url: &'a Url,
+    frame_config: FrameConfig,
+    deflate_encoder: &'a mut Option<PermessageDeflateEncoder>,
+    mask_rng: &'a mut MaskRng,
+    out: &'a mut BytesMut,
+}
+
+fn encode_outbound_frame(
+    encoder: OutboundFrameEncoder<'_>,
+    opcode: OpCode,
+    payload: &[u8],
+    clear: bool,
+) -> WebSocketResult<()> {
+    validate_outbound_payload(encoder.url, encoder.frame_config, opcode, payload)?;
+
+    let compressed;
+    let (wire_payload, rsv1) = if matches!(opcode, OpCode::Text | OpCode::Binary) {
+        match encoder.deflate_encoder.as_mut() {
+            Some(deflater) => {
+                compressed = deflater.compress(encoder.url, payload)?;
+                (compressed.as_slice(), true)
+            }
+            None => (payload, false),
+        }
+    } else {
+        (payload, false)
+    };
+
+    if wire_payload.len() > encoder.frame_config.max_frame_size {
+        return Err(WebSocketError::limit_exceeded(
+            encoder.url,
+            format!(
+                "frame exceeds {} bytes",
+                encoder.frame_config.max_frame_size
+            ),
+        ));
+    }
+
+    match (clear, rsv1) {
+        (true, true) => {
+            encode_frame_into_with_rsv1(opcode, wire_payload, encoder.mask_rng, encoder.out)
+        }
+        (true, false) => encode_frame_into(opcode, wire_payload, encoder.mask_rng, encoder.out),
+        (false, true) => {
+            encode_frame_append_with_rsv1(opcode, wire_payload, encoder.mask_rng, encoder.out)
+        }
+        (false, false) => encode_frame_append(opcode, wire_payload, encoder.mask_rng, encoder.out),
+    }
+    Ok(())
 }
 
 fn validate_outbound_payload(

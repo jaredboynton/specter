@@ -11,7 +11,6 @@ use ::warpsock::{Client as RustClient, Error as RustError};
 const H1_WEBSOCKET_ONLY_HEADERS: &[&str] = &[
     "sec-websocket-key",
     "sec-websocket-accept",
-    "sec-websocket-extensions",
     "sec-websocket-version",
     "connection",
     "upgrade",

@@ -17,6 +17,7 @@ pub struct WebSocketBuilder {
     subprotocols: Vec<String>,
     max_message_size: Option<usize>,
     max_frame_size: Option<usize>,
+    permessage_deflate: bool,
     connect_timeout: Option<f64>,
     handshake_timeout: Option<f64>,
     read_timeout: Option<f64>,
@@ -39,6 +40,7 @@ impl WebSocketBuilder {
             subprotocols: Vec::new(),
             max_message_size: None,
             max_frame_size: None,
+            permessage_deflate: false,
             connect_timeout: None,
             handshake_timeout: None,
             read_timeout: None,
@@ -66,6 +68,11 @@ impl WebSocketBuilder {
 
     fn subprotocols(&mut self, values: Vec<String>) -> PyResult<()> {
         self.subprotocols.extend(values);
+        Ok(())
+    }
+
+    fn permessage_deflate(&mut self) -> PyResult<()> {
+        self.permessage_deflate = true;
         Ok(())
     }
 
@@ -106,6 +113,7 @@ impl WebSocketBuilder {
         let subprotocols = self.subprotocols.clone();
         let max_message_size = self.max_message_size;
         let max_frame_size = self.max_frame_size;
+        let permessage_deflate = self.permessage_deflate;
         let connect_timeout = self.connect_timeout;
         let handshake_timeout = self.handshake_timeout;
         let read_timeout = self.read_timeout;
@@ -118,6 +126,9 @@ impl WebSocketBuilder {
             }
             if !subprotocols.is_empty() {
                 builder = builder.subprotocols(subprotocols);
+            }
+            if permessage_deflate {
+                builder = builder.permessage_deflate();
             }
             if let Some(bytes) = max_message_size {
                 builder = builder.max_message_size(bytes);

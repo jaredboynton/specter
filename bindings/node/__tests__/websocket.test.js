@@ -19,6 +19,7 @@ describe('WebSocket RFC 6455 binding', () => {
     expect(builder.subprotocols(['chat.v2'])).toBe(builder);
     expect(builder.maxMessageSize(1024)).toBe(builder);
     expect(builder.maxFrameSize(1024)).toBe(builder);
+    expect(builder.permessageDeflate()).toBe(builder);
     expect(builder.connectTimeout(1)).toBe(builder);
     expect(builder.handshakeTimeout(1)).toBe(builder);
     expect(builder.readTimeout(1)).toBe(builder);

@@ -11,7 +11,7 @@ use pyo3::types::{PyDict, PyList};
 use pyo3_async_runtimes::tokio::{future_into_py, into_future};
 use std::pin::Pin;
 use std::result::Result as StdResult;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{mpsc as std_mpsc, Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::runtime::Runtime;
@@ -60,7 +60,7 @@ pub struct RequestBuilder {
 pub struct Response {
     status: u16,
     headers: Vec<(String, String)>,
-    body: Arc<StdMutex<RustBody>>,
+    body: ResponseBodySource,
     raw_body: Option<Bytes>,
     text_body: Option<StdResult<String, String>>,
     http_version: String,
@@ -106,6 +106,18 @@ enum RequestBodyKind {
 enum SyncRequestBodyKind {
     Buffered(Vec<u8>),
     Stream(Py<PyAny>),
+}
+
+#[derive(Clone)]
+enum ResponseBodySource {
+    Rust(Arc<StdMutex<RustBody>>),
+    Pumped(Arc<StdMutex<std_mpsc::Receiver<PumpedBodyItem>>>),
+}
+
+enum PumpedBodyItem {
+    Data(Bytes),
+    Error(String),
+    End,
 }
 
 struct PythonBodyStream {
@@ -156,7 +168,7 @@ impl Stream for PythonSyncBodyStream {
 
 #[pyclass]
 pub struct ResponseBody {
-    body: Arc<StdMutex<RustBody>>,
+    source: ResponseBodySource,
 }
 
 fn to_rust_http_version(version: HttpVersion) -> RustHttpVersion {
@@ -831,60 +843,86 @@ impl RequestBuilder {
             };
             let (tx, rx) = oneshot::channel();
             std::thread::spawn(move || {
-                let result = tokio::runtime::Builder::new_current_thread()
+                let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(|err| PyRuntimeError::new_err(err.to_string()))
-                    .and_then(|runtime| {
-                        runtime.block_on(async move {
-                            let mut req_builder = match method.as_str() {
-                                "GET" => client.get(url.as_str()),
-                                "POST" => client.post(url.as_str()),
-                                "PUT" => client.put(url.as_str()),
-                                "DELETE" => client.delete(url.as_str()),
-                                "PATCH" => client.request(::http::Method::PATCH, url.as_str()),
-                                "HEAD" => client.request(::http::Method::HEAD, url.as_str()),
-                                "OPTIONS" => client.request(::http::Method::OPTIONS, url.as_str()),
-                                _ => client.request(
-                                    ::http::Method::from_bytes(method.as_bytes()).map_err(|e| {
-                                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                            "Invalid method: {}",
-                                            e
-                                        ))
-                                    })?,
-                                    url.as_str(),
-                                ),
-                            };
+                {
+                    Ok(runtime) => runtime,
+                    Err(err) => {
+                        let _ = tx.send(Err(err));
+                        return;
+                    }
+                };
 
-                            if let Some(version) = version {
-                                req_builder = req_builder.version(version);
+                let result = runtime.block_on(async move {
+                    let mut req_builder = match method.as_str() {
+                        "GET" => client.get(url.as_str()),
+                        "POST" => client.post(url.as_str()),
+                        "PUT" => client.put(url.as_str()),
+                        "DELETE" => client.delete(url.as_str()),
+                        "PATCH" => client.request(::http::Method::PATCH, url.as_str()),
+                        "HEAD" => client.request(::http::Method::HEAD, url.as_str()),
+                        "OPTIONS" => client.request(::http::Method::OPTIONS, url.as_str()),
+                        _ => client.request(
+                            ::http::Method::from_bytes(method.as_bytes()).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "Invalid method: {}",
+                                    e
+                                ))
+                            })?,
+                            url.as_str(),
+                        ),
+                    };
+
+                    if let Some(version) = version {
+                        req_builder = req_builder.version(version);
+                    }
+
+                    for (key, value) in headers {
+                        req_builder = req_builder.header(key, value);
+                    }
+
+                    if let Some(stream_rx) = stream_rx {
+                        req_builder = req_builder.body_stream(PythonBodyStream { rx: stream_rx });
+                    } else if let Some(body_data) = body {
+                        match body_data {
+                            RequestBodyKind::Buffered(bytes) => {
+                                req_builder = req_builder.body(bytes);
                             }
+                            RequestBodyKind::Stream(_) => unreachable!(),
+                        }
+                    }
 
-                            for (key, value) in headers {
-                                req_builder = req_builder.header(key, value);
-                            }
+                    if streaming {
+                        req_builder
+                            .send_streaming()
+                            .await
+                            .map(|resp| (resp, true))
+                            .map_err(to_py_err)
+                    } else {
+                        req_builder
+                            .send()
+                            .await
+                            .map(|resp| (resp, false))
+                            .map_err(to_py_err)
+                    }
+                });
 
-                            if let Some(stream_rx) = stream_rx {
-                                req_builder =
-                                    req_builder.body_stream(PythonBodyStream { rx: stream_rx });
-                            } else if let Some(body_data) = body {
-                                match body_data {
-                                    RequestBodyKind::Buffered(bytes) => {
-                                        req_builder = req_builder.body(bytes);
-                                    }
-                                    RequestBodyKind::Stream(_) => unreachable!(),
-                                }
-                            }
-
-                            let resp = if streaming {
-                                req_builder.send_streaming().await.map_err(to_py_err)?
-                            } else {
-                                req_builder.send().await.map_err(to_py_err)?
-                            };
-                            Ok(Response::from_rust(resp))
-                        })
-                    });
-                let _ = tx.send(result);
+                match result {
+                    Ok((resp, true)) => {
+                        let (response, body, body_tx) = Response::from_rust_with_pumped_body(resp);
+                        if tx.send(Ok(response)).is_ok() {
+                            runtime.block_on(pump_streaming_response_body(body, body_tx));
+                        }
+                    }
+                    Ok((resp, false)) => {
+                        let _ = tx.send(Ok(Response::from_rust(resp)));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Err(err));
+                    }
+                }
             });
 
             if let (Some(iterable), Some(tx)) = (stream_iterable, stream_tx) {
@@ -1327,6 +1365,26 @@ async fn buffer_response_body(mut resp: RustResponse) -> PyResult<RustResponse> 
     Ok(buffered)
 }
 
+async fn pump_streaming_response_body(mut body: RustBody, tx: std_mpsc::Sender<PumpedBodyItem>) {
+    while let Some(frame) = body.frame().await {
+        match frame {
+            Ok(frame) => {
+                if let Ok(data) = frame.into_data() {
+                    if tx.send(PumpedBodyItem::Data(data)).is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(err) => {
+                let _ = tx.send(PumpedBodyItem::Error(err.to_string()));
+                return;
+            }
+        }
+    }
+
+    let _ = tx.send(PumpedBodyItem::End);
+}
+
 async fn pump_python_async_iterable(
     async_iterable: Py<PyAny>,
     tx: mpsc::Sender<StdResult<Bytes, RustError>>,
@@ -1387,12 +1445,41 @@ impl Response {
         Self {
             status,
             headers,
-            body: Arc::new(StdMutex::new(body)),
+            body: ResponseBodySource::Rust(Arc::new(StdMutex::new(body))),
             raw_body,
             text_body,
             http_version,
             effective_url,
         }
+    }
+
+    fn from_rust_with_pumped_body(
+        resp: RustResponse,
+    ) -> (Self, RustBody, std_mpsc::Sender<PumpedBodyItem>) {
+        let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        let http_version = resp.http_version().to_string();
+        let effective_url = resp.url().map(|url| url.to_string());
+        let body = resp.into_body();
+        let (tx, rx) = std_mpsc::channel();
+
+        (
+            Self {
+                status,
+                headers,
+                body: ResponseBodySource::Pumped(Arc::new(StdMutex::new(rx))),
+                raw_body: None,
+                text_body: None,
+                http_version,
+                effective_url,
+            },
+            body,
+            tx,
+        )
     }
 }
 
@@ -1481,7 +1568,7 @@ impl Response {
     #[getter]
     fn body(&self) -> ResponseBody {
         ResponseBody {
-            body: self.body.clone(),
+            source: self.body.clone(),
         }
     }
 
@@ -1492,7 +1579,9 @@ impl Response {
     /// clean end or when trailers were not requested. Raises on a stream reset.
     #[allow(clippy::await_holding_lock)]
     fn trailers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let body = self.body.clone();
+        let ResponseBodySource::Rust(body) = self.body.clone() else {
+            return future_into_py(py, async { Ok(None::<Py<PyAny>>) });
+        };
         future_into_py(py, async move {
             let (tx, rx) = oneshot::channel();
             std::thread::spawn(move || {
@@ -1671,39 +1760,64 @@ impl ResponseBody {
 
     #[allow(clippy::await_holding_lock)]
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let body = self.body.clone();
+        let source = self.source.clone();
         future_into_py(py, async move {
-            let (tx, rx) = oneshot::channel();
-            std::thread::spawn(move || {
-                let result = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|err| PyRuntimeError::new_err(err.to_string()))
-                    .and_then(|runtime| {
-                        runtime.block_on(async move {
-                            let mut body = body.lock().map_err(|_| {
-                                PyRuntimeError::new_err("response body lock poisoned")
-                            })?;
-                            while let Some(frame) = body.frame().await {
-                                let frame = frame.map_err(to_py_err)?;
-                                if let Ok(data) = frame.into_data() {
-                                    return Ok(Some(data));
-                                }
-                            }
-                            Ok(None)
-                        })
+            match source {
+                ResponseBodySource::Rust(body) => {
+                    let (tx, rx) = oneshot::channel();
+                    std::thread::spawn(move || {
+                        let result = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|err| PyRuntimeError::new_err(err.to_string()))
+                            .and_then(|runtime| {
+                                runtime.block_on(async move {
+                                    let mut body = body.lock().map_err(|_| {
+                                        PyRuntimeError::new_err("response body lock poisoned")
+                                    })?;
+                                    while let Some(frame) = body.frame().await {
+                                        let frame = frame.map_err(to_py_err)?;
+                                        if let Ok(data) = frame.into_data() {
+                                            return Ok(Some(data));
+                                        }
+                                    }
+                                    Ok(None)
+                                })
+                            });
+                        let _ = tx.send(result);
                     });
-                let _ = tx.send(result);
-            });
 
-            match rx
-                .await
-                .map_err(|_| PyRuntimeError::new_err("response body worker thread exited"))??
-            {
-                Some(data) => Python::with_gil(|py| {
-                    Ok(PyBytesWrapper(data).into_pyobject(py)?.into_any().unbind())
-                }),
-                None => Err(PyStopAsyncIteration::new_err(())),
+                    match rx.await.map_err(|_| {
+                        PyRuntimeError::new_err("response body worker thread exited")
+                    })?? {
+                        Some(data) => Python::with_gil(|py| {
+                            Ok(PyBytesWrapper(data).into_pyobject(py)?.into_any().unbind())
+                        }),
+                        None => Err(PyStopAsyncIteration::new_err(())),
+                    }
+                }
+                ResponseBodySource::Pumped(rx) => {
+                    let (tx, done_rx) = oneshot::channel();
+                    std::thread::spawn(move || {
+                        let result = rx
+                            .lock()
+                            .map_err(|_| PyRuntimeError::new_err("response body lock poisoned"))
+                            .and_then(|rx| {
+                                rx.recv().map_err(|_| PyStopAsyncIteration::new_err(()))
+                            });
+                        let _ = tx.send(result);
+                    });
+
+                    match done_rx.await.map_err(|_| {
+                        PyRuntimeError::new_err("response body worker thread exited")
+                    })?? {
+                        PumpedBodyItem::Data(data) => Python::with_gil(|py| {
+                            Ok(PyBytesWrapper(data).into_pyobject(py)?.into_any().unbind())
+                        }),
+                        PumpedBodyItem::Error(err) => Err(PyRuntimeError::new_err(err)),
+                        PumpedBodyItem::End => Err(PyStopAsyncIteration::new_err(())),
+                    }
+                }
             }
         })
     }

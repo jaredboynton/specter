@@ -13,7 +13,6 @@ H3_FORBIDDEN_HEADERS = [
     "Host",
     "Sec-WebSocket-Key",
     "Sec-WebSocket-Accept",
-    "Sec-WebSocket-Extensions",
 ]
 
 
@@ -32,6 +31,7 @@ class TestWebSocketH3Api:
         assert builder.header("Origin", "https://example.test") is None
         assert builder.header("Sec-WebSocket-Protocol", "graphql-transport-ws") is None
         assert builder.header("Sec-WebSocket-Version", "13") is None
+        assert builder.header("Sec-WebSocket-Extensions", "permessage-deflate") is None
         assert builder.headers([("X-Test", "1")]) is None
 
     @pytest.mark.asyncio

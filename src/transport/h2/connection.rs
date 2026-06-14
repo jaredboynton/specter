@@ -549,7 +549,6 @@ where
                     | b"host"
                     | b"sec-websocket-key"
                     | b"sec-websocket-accept"
-                    | b"sec-websocket-extensions"
             ) {
                 return Err(Error::HttpProtocol(format!(
                     "PROTOCOL_ERROR: forbidden RFC 8441 header {}",

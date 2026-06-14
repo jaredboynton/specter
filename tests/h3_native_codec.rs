@@ -145,12 +145,29 @@ fn native_h3_rfc9220_header_builder_rejects_h1_websocket_bootstrap() {
         "Host",
         "Sec-WebSocket-Key",
         "Sec-WebSocket-Accept",
-        "Sec-WebSocket-Extensions",
     ] {
         let err = build_websocket_connect_headers(&uri, &[(name.into(), "x".into())])
             .expect_err("forbidden H1 websocket header must fail");
         assert!(err.to_string().contains("not allowed"));
     }
+}
+
+#[test]
+fn native_h3_rfc9220_header_builder_allows_websocket_extensions() {
+    let uri: http::Uri = "https://example.test/chat".parse().unwrap();
+    let headers = build_websocket_connect_headers(
+        &uri,
+        &[(
+            "Sec-WebSocket-Extensions".into(),
+            "permessage-deflate".into(),
+        )],
+    )
+    .expect("RFC 9220 can carry WebSocket extension negotiation metadata");
+
+    assert!(headers
+        .iter()
+        .any(|header| header.name() == "sec-websocket-extensions"
+            && header.value() == "permessage-deflate"));
 }
 
 #[test]

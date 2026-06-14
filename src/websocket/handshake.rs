@@ -9,6 +9,9 @@ use tokio::time::timeout as tokio_timeout;
 use crate::headers::Headers;
 use crate::transport::connector::MaybeHttpsStream;
 
+use super::extension::{
+    parse_permessage_deflate_response, PermessageDeflateConfig, WebSocketExtensions,
+};
 use super::{WebSocketError, WebSocketResult};
 
 const ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -37,6 +40,7 @@ pub(crate) struct HandshakeResponse {
     pub(crate) headers: Headers,
     pub(crate) buffered: Bytes,
     pub(crate) protocol: Option<String>,
+    pub(crate) extensions: WebSocketExtensions,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,6 +95,7 @@ pub(crate) fn build_handshake_request(
     default_headers: &Headers,
     user_headers: &Headers,
     subprotocols: &[String],
+    offered_extensions: WebSocketExtensions,
     cookie_header: Option<String>,
 ) -> WebSocketResult<HandshakeRequest> {
     let protocols = validate_subprotocols(&url.original, subprotocols)?;
@@ -124,6 +129,12 @@ pub(crate) fn build_handshake_request(
     if !protocols.is_empty() {
         headers.insert("Sec-WebSocket-Protocol", protocols.join(", "));
     }
+    if offered_extensions.has_permessage_deflate() {
+        headers.insert(
+            "Sec-WebSocket-Extensions",
+            PermessageDeflateConfig::OFFER_HEADER,
+        );
+    }
 
     Ok(HandshakeRequest { url, headers, key })
 }
@@ -132,6 +143,7 @@ pub(crate) async fn perform_handshake(
     mut stream: MaybeHttpsStream,
     request: &HandshakeRequest,
     offered_protocols: &[String],
+    offered_extensions: WebSocketExtensions,
     timeout: Option<Duration>,
 ) -> WebSocketResult<HandshakeResponse> {
     let request_bytes = serialize_request(request);
@@ -146,11 +158,12 @@ pub(crate) async fn perform_handshake(
             .map_err(|err| WebSocketError::io(&request.url.original, err))?;
 
         let (headers, buffered) = read_response_headers(&request.url.original, &mut stream).await?;
-        validate_response(
+        let extensions = validate_response(
             &request.url.original,
             &headers,
             &request.key,
             offered_protocols,
+            offered_extensions,
         )?;
         let protocol = headers
             .get("sec-websocket-protocol")
@@ -161,6 +174,7 @@ pub(crate) async fn perform_handshake(
             headers,
             buffered,
             protocol,
+            extensions,
         })
     };
 
@@ -269,7 +283,8 @@ fn validate_response(
     headers: &Headers,
     key: &str,
     offered_protocols: &[String],
-) -> WebSocketResult<()> {
+    offered_extensions: WebSocketExtensions,
+) -> WebSocketResult<WebSocketExtensions> {
     let upgrade = headers
         .get("upgrade")
         .ok_or_else(|| WebSocketError::protocol(url, "missing Upgrade header"))?;
@@ -299,11 +314,7 @@ fn validate_response(
         });
     }
 
-    if headers.contains("sec-websocket-extensions") {
-        return Err(WebSocketError::UnexpectedExtension {
-            url: url.to_string(),
-        });
-    }
+    let extensions = validate_extensions(url, headers, offered_extensions)?;
 
     if let Some(protocol) = headers.get("sec-websocket-protocol") {
         let protocol = protocol.trim();
@@ -314,7 +325,32 @@ fn validate_response(
         }
     }
 
-    Ok(())
+    Ok(extensions)
+}
+
+fn validate_extensions(
+    url: &Url,
+    headers: &Headers,
+    offered_extensions: WebSocketExtensions,
+) -> WebSocketResult<WebSocketExtensions> {
+    let values = headers.get_all("sec-websocket-extensions");
+    if values.is_empty() {
+        return Ok(WebSocketExtensions::none());
+    }
+
+    if !offered_extensions.has_permessage_deflate() {
+        return Err(WebSocketError::UnexpectedExtension {
+            url: url.to_string(),
+        });
+    }
+
+    let joined = values.join(",");
+    match parse_permessage_deflate_response(url, &joined)? {
+        Some(config) => Ok(WebSocketExtensions::permessage_deflate(config)),
+        None => Err(WebSocketError::UnexpectedExtension {
+            url: url.to_string(),
+        }),
+    }
 }
 
 fn validate_subprotocols(url: &Url, values: &[String]) -> WebSocketResult<Vec<String>> {

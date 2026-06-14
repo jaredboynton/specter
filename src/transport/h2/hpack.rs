@@ -233,7 +233,6 @@ impl HpackEncoder {
                     | b"host"
                     | b"sec-websocket-key"
                     | b"sec-websocket-accept"
-                    | b"sec-websocket-extensions"
                     | b"keep-alive"
                     | b"proxy-connection"
                     | b"transfer-encoding"

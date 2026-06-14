@@ -16,7 +16,6 @@ const FORBIDDEN_H3_TUNNEL_HEADERS: &[&str] = &[
     "host",
     "sec-websocket-key",
     "sec-websocket-accept",
-    "sec-websocket-extensions",
 ];
 
 #[napi(object)]

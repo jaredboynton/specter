@@ -12,6 +12,7 @@ use crate::timeouts::Timeouts;
 use crate::transport::connector::{AlpnProtocol, BoringConnector};
 use crate::transport::h1_h2::Client;
 
+use super::extension::{PermessageDeflateConfig, WebSocketExtensions};
 use super::handshake::{
     build_handshake_request, map_websocket_url, perform_handshake, HandshakeTimeouts,
 };
@@ -22,6 +23,7 @@ pub struct WebSocketBuilder<'a> {
     url: Option<Url>,
     headers: Headers,
     subprotocols: Vec<String>,
+    extensions: WebSocketExtensions,
     config: WebSocketConfig,
     timeouts: HandshakeTimeouts,
     error: Option<WebSocketError>,
@@ -59,6 +61,7 @@ impl<'a> WebSocketBuilder<'a> {
             url,
             headers: Headers::new(),
             subprotocols: Vec::new(),
+            extensions: WebSocketExtensions::none(),
             config: WebSocketConfig::default(),
             error,
         }
@@ -85,6 +88,14 @@ impl<'a> WebSocketBuilder<'a> {
         S: Into<String>,
     {
         self.subprotocols.extend(values.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn permessage_deflate(mut self) -> Self {
+        self.extensions = WebSocketExtensions::permessage_deflate(PermessageDeflateConfig {
+            client_no_context_takeover: true,
+            server_no_context_takeover: true,
+        });
         self
     }
 
@@ -138,6 +149,7 @@ impl<'a> WebSocketBuilder<'a> {
             parts.default_headers,
             &self.headers,
             &self.subprotocols,
+            self.extensions,
             cookie_header,
         )?;
 
@@ -176,6 +188,7 @@ impl<'a> WebSocketBuilder<'a> {
             stream,
             &request,
             &self.subprotocols,
+            self.extensions,
             self.timeouts.handshake,
         )
         .await?;
@@ -193,6 +206,7 @@ impl<'a> WebSocketBuilder<'a> {
             response.protocol,
             self.config,
             response.buffered,
+            response.extensions,
         ))
     }
 }

@@ -194,7 +194,7 @@ async fn rfc8441_101_switching_protocols_fails_without_open_tunnel() {
 }
 
 #[tokio::test]
-async fn rfc8441_rejects_extensions_without_shared_codec_before_wire_write() {
+async fn rfc8441_writes_extensions_when_requested() {
     let (client, mut server) = duplex(8192);
     let client_task = tokio::spawn(async move {
         let mut conn =
@@ -215,18 +215,15 @@ async fn rfc8441_rejects_extensions_without_shared_codec_before_wire_write() {
     read_client_preface_and_settings(&mut server).await;
     write_settings(&mut server, &[(0x8, 1)]).await;
 
-    let err = client_task.await.unwrap().unwrap_err().to_string();
-    assert!(err.contains("sec-websocket-extensions"));
-    assert!(
-        timeout(
-            Duration::from_millis(100),
-            maybe_read_headers_frame(&mut server)
-        )
-        .await
-        .map(|frame| frame.is_none())
-        .unwrap_or(true),
-        "extensions must be rejected before RFC 8441 CONNECT HEADERS are written"
-    );
+    let (header, payload) = read_headers_frame(&mut server).await;
+    let decoded = HpackDecoder::new().decode(&payload).unwrap();
+    assert!(decoded.contains(&(
+        "sec-websocket-extensions".to_string(),
+        "permessage-deflate".to_string()
+    )));
+    write_headers(&mut server, header.stream_id, &hpack_status("200")).await;
+    let stream_id = client_task.await.unwrap().unwrap();
+    assert_eq!(stream_id, header.stream_id);
 }
 
 #[tokio::test]

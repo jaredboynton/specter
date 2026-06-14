@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use boring::ssl::{select_next_proto, AlpnError, SslAcceptor};
+use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
 use tokio::sync::RwLock;
 use warpsock::{Client, CookieJar, Message};
 
@@ -11,6 +12,42 @@ mod tls;
 
 use mock_ws_server::{server_text_frame, AcceptMode, MockWsServer, WsResponse};
 use tls::generate_cert_bundle;
+
+fn deflate_message(payload: &[u8]) -> Vec<u8> {
+    let mut encoder = Compress::new(Compression::fast(), false);
+    let mut out = Vec::with_capacity(payload.len().saturating_mul(2).max(32));
+    encoder
+        .compress_vec(payload, &mut out, FlushCompress::Sync)
+        .unwrap();
+    if out.ends_with(&[0x00, 0x00, 0xff, 0xff]) {
+        out.truncate(out.len() - 4);
+    }
+    out
+}
+
+fn inflate_message(payload: &[u8]) -> Vec<u8> {
+    let mut compressed = payload.to_vec();
+    compressed.extend_from_slice(&[0x00, 0x00, 0xff, 0xff]);
+    let mut decoder = Decompress::new(false);
+    let mut out = Vec::with_capacity(payload.len().saturating_mul(2).max(32));
+    decoder
+        .decompress_vec(&compressed, &mut out, FlushDecompress::Sync)
+        .unwrap();
+    out
+}
+
+fn server_compressed_text_frame(text: &str) -> Vec<u8> {
+    let payload = deflate_message(text.as_bytes());
+    assert!(
+        payload.len() <= 125,
+        "test helper only supports small frames"
+    );
+    let mut frame = Vec::with_capacity(2 + payload.len());
+    frame.push(0xc1);
+    frame.push(payload.len() as u8);
+    frame.extend_from_slice(&payload);
+    frame
+}
 
 #[tokio::test]
 async fn valid_ws_handshake_sends_required_headers_and_16_byte_key() {
@@ -127,6 +164,80 @@ async fn unexpected_extension_header_fails_the_handshake() {
 }
 
 #[tokio::test]
+async fn permessage_deflate_decodes_negotiated_rsv1_text_frame() {
+    let server = MockWsServer::new().await.unwrap();
+    let url = server.ws_url("/deflate-inbound");
+    let handle = server.start_once(WsResponse {
+        headers: vec![(
+            "Sec-WebSocket-Extensions".to_string(),
+            "permessage-deflate; server_no_context_takeover; client_no_context_takeover"
+                .to_string(),
+        )],
+        first_frame: Some(server_compressed_text_frame("ready")),
+        ..WsResponse::default()
+    });
+
+    let mut ws = Client::new()
+        .unwrap()
+        .websocket(url)
+        .permessage_deflate()
+        .connect()
+        .await
+        .expect("negotiated permessage-deflate handshake should succeed");
+
+    let message = ws
+        .next()
+        .await
+        .expect("read compressed frame")
+        .expect("message available");
+    assert!(
+        matches!(message, Message::Text(ref text) if text == "ready"),
+        "unexpected message: {message:?}"
+    );
+
+    let exchange = handle.await.unwrap();
+    assert_eq!(
+        exchange.request.header("Sec-WebSocket-Extensions"),
+        Some("permessage-deflate; client_no_context_takeover; server_no_context_takeover")
+    );
+}
+
+#[tokio::test]
+async fn permessage_deflate_compresses_outbound_text_with_rsv1() {
+    let server = MockWsServer::new().await.unwrap();
+    let url = server.ws_url("/deflate-outbound");
+    let handle = server.start_once(WsResponse {
+        headers: vec![(
+            "Sec-WebSocket-Extensions".to_string(),
+            "permessage-deflate; server_no_context_takeover; client_no_context_takeover"
+                .to_string(),
+        )],
+        expected_client_frames: 1,
+        ..WsResponse::default()
+    });
+
+    let mut ws = Client::new()
+        .unwrap()
+        .websocket(url)
+        .permessage_deflate()
+        .connect()
+        .await
+        .expect("negotiated permessage-deflate handshake should succeed");
+
+    ws.send_text("hello compressed")
+        .await
+        .expect("compressed text send succeeds");
+
+    let exchange = handle.await.unwrap();
+    let frame = exchange.client_frame.expect("server captured one frame");
+    assert!(frame.fin);
+    assert!(frame.rsv1);
+    assert_eq!(frame.opcode, 0x1);
+    assert_ne!(frame.payload, b"hello compressed");
+    assert_eq!(inflate_message(&frame.payload), b"hello compressed");
+}
+
+#[tokio::test]
 async fn unexpected_subprotocol_header_fails_when_none_was_offered() {
     let server = MockWsServer::new().await.unwrap();
     let url = server.ws_url("/subprotocol");
@@ -197,7 +308,7 @@ async fn first_frame_sent_with_101_is_available_to_next() {
         .await
         .expect("read first frame")
         .expect("message available");
-    assert!(matches!(message, Message::Text(text) if text == "ready"));
+    assert_eq!(message, Message::Text("ready".to_string()));
 
     let _ = handle.await.unwrap();
 }

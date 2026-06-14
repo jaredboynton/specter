@@ -40,6 +40,10 @@ async fn rfc9220_extended_connect_sends_required_pseudo_headers_in_order() {
             );
             assert!(headers.contains(&("origin".into(), "https://app.example".into())));
             assert!(headers.contains(&("sec-websocket-protocol".into(), "chat".into())));
+            assert!(headers.contains(&(
+                "sec-websocket-extensions".into(),
+                "permessage-deflate".into()
+            )));
             conn.send_response_headers(stream_id, vec![(":status", "200")], false)
                 .await;
         }
@@ -56,6 +60,7 @@ async fn rfc9220_extended_connect_sends_required_pseudo_headers_in_order() {
             .websocket_h3(&url)
             .header("Origin", "https://app.example")
             .header("Sec-WebSocket-Protocol", "chat")
+            .header("Sec-WebSocket-Extensions", "permessage-deflate")
             .open(),
     )
     .await
@@ -87,7 +92,6 @@ async fn rfc9220_rejects_h1_websocket_bootstrap_headers() {
         "Host",
         "Sec-WebSocket-Key",
         "Sec-WebSocket-Accept",
-        "Sec-WebSocket-Extensions",
     ] {
         let err = client
             .websocket_h3(&url)

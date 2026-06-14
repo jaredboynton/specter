@@ -133,6 +133,9 @@ export class Client {
   options(url: string): RequestBuilder;
   request(method: string, url: string): RequestBuilder;
   grpcRequest(url: string, encoding: GrpcEncoding): RequestBuilder;
+  websocket(url: string): WebSocketBuilder;
+  websocketH2(url: string): WebSocketH2Builder;
+  websocketH3(url: string): WebSocketH3Builder;
 }
 
 export class RequestBuilder {
@@ -165,6 +168,85 @@ export class Response {
   json(): string;
   nextBodyChunk(): Promise<Buffer | null>;
   trailers(): Promise<Record<string, string> | null>;
+}
+
+export interface WebSocketCloseFrame {
+  code: number;
+  reason?: string;
+}
+
+export type WebSocketMessage =
+  | { type: 'text'; text: string }
+  | { type: 'binary'; data: Buffer | Uint8Array }
+  | { type: 'ping'; data?: Buffer | Uint8Array }
+  | { type: 'pong'; data?: Buffer | Uint8Array }
+  | { type: 'close'; code?: number; reason?: string };
+
+export class WebSocketBuilder {
+  header(key: string, value: string): WebSocketBuilder;
+  headers(headers: Record<string, string>): WebSocketBuilder;
+  subprotocol(protocol: string): WebSocketBuilder;
+  subprotocols(protocols: string[]): WebSocketBuilder;
+  permessageDeflate(): WebSocketBuilder;
+  maxMessageSize(bytes: number): WebSocketBuilder;
+  maxFrameSize(bytes: number): WebSocketBuilder;
+  connectTimeout(timeoutSecs: number): WebSocketBuilder;
+  handshakeTimeout(timeoutSecs: number): WebSocketBuilder;
+  readTimeout(timeoutSecs: number): WebSocketBuilder;
+  writeTimeout(timeoutSecs: number): WebSocketBuilder;
+  connect(): Promise<WebSocket>;
+}
+
+export class WebSocket {
+  readonly url: string;
+  readonly protocol: string | null;
+  send(message: WebSocketMessage): Promise<void>;
+  sendText(text: string): Promise<void>;
+  sendBinary(data: Buffer | Uint8Array): Promise<void>;
+  sendPing(data?: Buffer | Uint8Array): Promise<void>;
+  sendPong(data?: Buffer | Uint8Array): Promise<void>;
+  next(): Promise<WebSocketMessage>;
+  close(frame?: WebSocketCloseFrame): Promise<void>;
+}
+
+export interface H2TunnelEvent {
+  readonly kind: 'data' | 'end_stream' | 'reset' | 'goaway' | 'error';
+  readonly data?: Buffer | null;
+  readonly error?: string | null;
+  readonly lastStreamId?: number | null;
+}
+
+export class WebSocketH2Builder {
+  header(key: string, value: string): WebSocketH2Builder;
+  headers(headers: string[][]): WebSocketH2Builder;
+  connect(): Promise<WebSocketH2Tunnel>;
+}
+
+export class WebSocketH2Tunnel {
+  sendBytes(data: Buffer | Uint8Array, endStream?: boolean): Promise<void>;
+  recvBytes(): Promise<Buffer | null>;
+  recvEvent(): Promise<H2TunnelEvent | null>;
+  closeSend(): Promise<void>;
+}
+
+export interface H3TunnelEvent {
+  readonly kind: 'data' | 'end_stream' | 'reset' | 'goaway' | 'error';
+  readonly data?: Buffer | null;
+  readonly error?: string | null;
+  readonly lastStreamId?: number | null;
+}
+
+export class WebSocketH3Builder {
+  header(key: string, value: string): WebSocketH3Builder;
+  headers(headers: string[][]): WebSocketH3Builder;
+  connect(): Promise<WebSocketH3Tunnel>;
+}
+
+export class WebSocketH3Tunnel {
+  sendBytes(data: Buffer | Uint8Array, endStream?: boolean): Promise<void>;
+  recvBytes(): Promise<Buffer | null>;
+  recvEvent(): Promise<H3TunnelEvent | null>;
+  closeSend(): Promise<void>;
 }
 
 /**

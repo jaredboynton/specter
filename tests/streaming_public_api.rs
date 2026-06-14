@@ -1023,10 +1023,12 @@ fn python_async_body_stream_send_preserves_streaming_response() {
     .unwrap();
 
     assert!(
-        source.contains(
-            "let resp = if streaming {\n                                req_builder.send_streaming().await.map_err(to_py_err)?\n                            } else {"
-        ),
-        "Python async body_stream send must return the streaming Rust response after headers"
+        source.contains("Response::from_rust_with_pumped_body(resp)"),
+        "Python async body_stream send must convert streaming responses into pumped bodies"
+    );
+    assert!(
+        source.contains("runtime.block_on(pump_streaming_response_body(body, body_tx));"),
+        "Python async body_stream send must keep the request runtime alive while response body frames are pumped"
     );
     assert!(
         !source.contains(
@@ -1034,4 +1036,57 @@ fn python_async_body_stream_send_preserves_streaming_response() {
         ),
         "Python async body_stream send must not eagerly buffer the streaming response"
     );
+}
+
+#[test]
+fn node_python_h2_h3_bindings_allow_websocket_extension_headers() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "bindings/node/src/websocket_h2.rs",
+        "bindings/node/src/websocket_h3.rs",
+        "bindings/python/src/websocket_h2.rs",
+        "bindings/python/src/websocket_h3.rs",
+    ] {
+        let source = fs::read_to_string(manifest.join(relative)).unwrap();
+        assert!(
+            !source.contains("sec-websocket-extensions"),
+            "{relative} must pass permessage-deflate negotiation headers through to RFC 8441/9220"
+        );
+    }
+}
+
+#[test]
+fn node_python_h1_bindings_publish_permessage_deflate_builder() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let node_source = fs::read_to_string(manifest.join("bindings/node/src/websocket.rs")).unwrap();
+    let node_types = fs::read_to_string(manifest.join("bindings/node/index.d.ts")).unwrap();
+    assert!(
+        node_source.contains("permessage_deflate") || node_source.contains("permessageDeflate"),
+        "Node runtime WebSocketBuilder must expose Rust permessage-deflate negotiation"
+    );
+    assert!(
+        node_types.contains("permessageDeflate(): WebSocketBuilder;"),
+        "Node declarations must publish WebSocketBuilder.permessageDeflate()"
+    );
+    assert!(
+        node_types.contains("websocketH2(url: string): WebSocketH2Builder;")
+            && node_types.contains("websocketH3(url: string): WebSocketH3Builder;")
+            && node_types.contains("class WebSocketH2Tunnel")
+            && node_types.contains("class WebSocketH3Tunnel"),
+        "Node declarations must publish the RFC 8441/9220 tunnel builders and tunnels"
+    );
+
+    for relative in [
+        "bindings/python/src/websocket.rs",
+        "bindings/python/warpsock.pyi",
+        "bindings/python/python/warpsock/__init__.pyi",
+        "bindings/python/python/warpsock/warpsock.pyi",
+    ] {
+        let source = fs::read_to_string(manifest.join(relative)).unwrap();
+        assert!(
+            source.contains("permessage_deflate"),
+            "{relative} must expose Rust permessage-deflate negotiation"
+        );
+    }
 }

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.7] - 2026-06-13
+
+### Added
+
+- HTTP/1 WebSocket builders support opt-in `permessage-deflate` negotiation through `.permessage_deflate()`, including RSV1 compression and decompression for negotiated data messages. Node exposes this as `WebSocketBuilder.permessageDeflate()`, and Python exposes it as `WebSocketBuilder.permessage_deflate()`.
+
+### Fixed
+
+- RFC 8441 and RFC 9220 raw WebSocket CONNECT builders allow `Sec-WebSocket-Extensions` negotiation metadata for caller-managed tunnel frame extensions.
+- Python async `RequestBuilder.body_stream().send()` keeps the Rust response-body driver alive after headers return by pumping streaming body frames into a Python-owned channel, preventing Linux wheel smoke failures when iterating `response.body`.
+
 ## [4.2.6] - 2026-06-13
 
 ### Added

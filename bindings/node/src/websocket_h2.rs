@@ -13,7 +13,6 @@ use crate::Client;
 const FORBIDDEN_H2_TUNNEL_HEADERS: &[&str] = &[
     "sec-websocket-key",
     "sec-websocket-accept",
-    "sec-websocket-extensions",
     "sec-websocket-version",
     "connection",
     "upgrade",
